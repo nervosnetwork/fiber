@@ -50,6 +50,46 @@ impl Default for Network {
     }
 }
 
+#[derive(Debug, PartialEq, Copy, Clone, Default)]
+pub struct AnnouncedNodeName(pub [u8; 32]);
+
+fn parse_announced_node_name(value: &str) -> Result<[u8; 32], String> {
+    let str_bytes = value.as_bytes();
+    if str_bytes.len() > 32 {
+        return Err("Node Alias can not be longer than 32 bytes".to_string());
+    }
+    let mut bytes = [0; 32];
+    bytes[..str_bytes.len()].copy_from_slice(str_bytes);
+    Ok(bytes)
+}
+
+impl<'s> From<&'s str> for AnnouncedNodeName {
+    fn from(value: &'s str) -> Self {
+        Self(parse_announced_node_name(value).expect("Valid announced node name"))
+    }
+}
+
+impl serde::Serialize for AnnouncedNodeName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(std::str::from_utf8(&self.0).expect("valid utf8 string"))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        parse_announced_node_name(&s)
+            .map_err(serde::de::Error::custom)
+            .map(Self)
+    }
+}
+
 #[derive(ClapSerde)]
 pub struct LdkConfig {
     #[arg(long, env)]
@@ -68,20 +108,6 @@ pub struct LdkConfig {
     pub(crate) ldk_peer_listening_port: u16,
     #[arg(long, env)]
     pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
-    #[arg(long, env, value_parser = parse_announced_node_name)]
-    pub(crate) ldk_announced_node_name: [u8; 32],
-}
-
-fn parse_announced_node_name(value: &str) -> Result<[u8; 32], String> {
-    let str_bytes = value.as_bytes();
-    if str_bytes.len() > 32 {
-        return Err("Node Alias can not be longer than 32 bytes".to_string());
-    }
-    let mut bytes = [0; 32];
-    bytes[..str_bytes.len()].copy_from_slice(str_bytes);
-    Ok(bytes)
-}
-
-impl LdkConfig {
-    fn check() {}
+    #[arg(long, env)]
+    pub(crate) ldk_announced_node_name: AnnouncedNodeName,
 }

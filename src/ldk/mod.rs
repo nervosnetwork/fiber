@@ -1119,7 +1119,7 @@ async fn start_ldk(args: LdkConfig) {
             if chan_man.list_channels().iter().any(|chan| chan.is_public) {
                 peer_man.broadcast_node_announcement(
                     [0; 3],
-                    args.ldk_announced_node_name,
+                    args.ldk_announced_node_name.0,
                     args.ldk_announced_listen_addr
                         .iter()
                         .map(|x| x.0.clone())
