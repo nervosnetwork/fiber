@@ -45,7 +45,7 @@ pub struct CkbConfig {
     pub age: u8,
 }
 
-pub fn print_help_and_exit(code: i32) {
+pub(crate) fn print_help_and_exit(code: i32) {
     if atty::is(atty::Stream::Stdin) {
         let mut cmd = Args::command();
         cmd.print_help().expect("print help");

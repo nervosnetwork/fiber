@@ -1,21 +1,35 @@
-use ckb_pcn_node::{print_help_and_exit, Config};
+use ckb_pcn_node::{start_ldk, Config};
 
-fn main() {
-    let config = Config::parse();
-    start_program(config);
-}
+#[tokio::main]
+pub async fn main() {
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Catch Ctrl-C with a dummy signal handler.
+        unsafe {
+            let mut new_action: libc::sigaction = core::mem::zeroed();
+            let mut old_action: libc::sigaction = core::mem::zeroed();
 
-fn start_program(config: Config) {
-    let ckb_config = config.ckb;
-    println!("Hello, {}!", ckb_config.name);
+            extern "C" fn dummy_handler(
+                _: libc::c_int,
+                _: *const libc::siginfo_t,
+                _: *const libc::c_void,
+            ) {
+            }
 
-    println!("Your age is {}!", ckb_config.age);
-    if ckb_config.age == 0 {
-        println!("Age must not be 0");
-        print_help_and_exit(1);
+            new_action.sa_sigaction = dummy_handler as libc::sighandler_t;
+            new_action.sa_flags = libc::SA_SIGINFO;
+
+            libc::sigaction(
+                libc::SIGINT,
+                &new_action as *const libc::sigaction,
+                &mut old_action as *mut libc::sigaction,
+            );
+        }
     }
 
-    println!("Executing the rest of the program logic");
-    // Rest of the program logic goes here
-    // ...
+    println!("Parsing config");
+    let config = Config::parse();
+
+    println!("Starting ldk");
+    start_ldk(config.ldk).await;
 }
