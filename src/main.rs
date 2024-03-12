@@ -6,10 +6,11 @@ fn main() {
 }
 
 fn start_program(config: Config) {
-    println!("Hello, {}!", config.name);
+    let ckb_config = config.ckb;
+    println!("Hello, {}!", ckb_config.name);
 
-    println!("Your age is {}!", config.age);
-    if config.age == 0 {
+    println!("Your age is {}!", ckb_config.age);
+    if ckb_config.age == 0 {
         println!("Age must not be 0");
         print_help_and_exit(1);
     }

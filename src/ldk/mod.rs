@@ -7,10 +7,12 @@ mod disk;
 mod hex_utils;
 mod sweep;
 
+use config::Network;
+use config::SocketAddress;
 
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
-use bitcoin::network::constants::Network;
+use bitcoin::network::constants::Network as BitcoinNetwork;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use bitcoind_client::BitcoindClient;
@@ -185,7 +187,7 @@ async fn handle_ldk_events(
     inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>,
     fs_store: Arc<FilesystemStore>,
-    network: Network,
+    network: BitcoinNetwork,
     event: Event,
 ) {
     match event {
@@ -201,10 +203,10 @@ async fn handle_ldk_events(
             let addr = WitnessProgram::from_scriptpubkey(
                 &output_script.as_bytes(),
                 match network {
-                    Network::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
-                    Network::Regtest => bitcoin_bech32::constants::Network::Regtest,
-                    Network::Signet => bitcoin_bech32::constants::Network::Signet,
-                    Network::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
+                    BitcoinNetwork::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
+                    BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
+                    BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
+                    BitcoinNetwork::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
                 },
             )
             .expect("Lightning funding tx should always be to a SegWit output")
@@ -590,12 +592,7 @@ async fn handle_ldk_events(
     }
 }
 
-async fn start_ldk() {
-    let args = match args::parse_startup_args() {
-        Ok(user_args) => user_args,
-        Err(()) => return,
-    };
-
+async fn start_ldk(args: LdkConfig) {
     // Initialize the LDK data directory if necessary.
     let ldk_data_dir = format!("{}/.ldk", args.ldk_storage_dir_path);
     fs::create_dir_all(ldk_data_dir.clone()).unwrap();
@@ -610,7 +607,7 @@ async fn start_ldk() {
         args.bitcoind_rpc_port,
         args.bitcoind_rpc_username.clone(),
         args.bitcoind_rpc_password.clone(),
-        args.network,
+        args.bitcoin_network.0,
         tokio::runtime::Handle::current(),
         Arc::clone(&logger),
     )
@@ -626,7 +623,7 @@ async fn start_ldk() {
     // Check that the bitcoind we've connected to is running the network we expect
     let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
     if bitcoind_chain
-        != match args.network {
+        != match args.bitcoin_network.0 {
             bitcoin::Network::Bitcoin => "main",
             bitcoin::Network::Regtest => "regtest",
             bitcoin::Network::Signet => "signet",
@@ -635,7 +632,7 @@ async fn start_ldk() {
     {
         println!(
             "Chain argument ({}) didn't match bitcoind chain ({})",
-            args.network, bitcoind_chain
+            args.bitcoin_network.0, bitcoind_chain
         );
         return;
     }
@@ -737,7 +734,7 @@ async fn start_ldk() {
     let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
     let network_graph = Arc::new(disk::read_network(
         Path::new(&network_graph_path),
-        args.network,
+        args.bitcoin_network.0,
         logger.clone(),
     ));
 
@@ -794,7 +791,7 @@ async fn start_ldk() {
             let polled_best_block = polled_chain_tip.to_best_block();
             let polled_best_block_hash = polled_best_block.block_hash();
             let chain_params = ChainParameters {
-                network: args.network,
+                network: args.bitcoin_network.0,
                 best_block: polled_best_block,
             };
             let fresh_channel_manager = channelmanager::ChannelManager::new(
@@ -846,7 +843,7 @@ async fn start_ldk() {
 
         init::synchronize_listeners(
             bitcoind_client.as_ref(),
-            args.network,
+            args.bitcoin_network.0,
             &mut cache,
             chain_listeners,
         )
@@ -943,7 +940,7 @@ async fn start_ldk() {
     let channel_manager_listener = channel_manager.clone();
     let chain_monitor_listener = chain_monitor.clone();
     let bitcoind_block_source = bitcoind_client.clone();
-    let network = args.network;
+    let network = args.bitcoin_network.0;
     tokio::spawn(async move {
         let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
         let chain_listener = (chain_monitor_listener, channel_manager_listener);
@@ -999,7 +996,7 @@ async fn start_ldk() {
     let outbound_payments_event_listener = Arc::clone(&outbound_payments);
     let fs_store_event_listener = Arc::clone(&fs_store);
     let peer_manager_event_listener = Arc::clone(&peer_manager);
-    let network = args.network;
+    let network = args.bitcoin_network.0;
     let event_handler = move |event: Event| {
         let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
         let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
@@ -1107,7 +1104,7 @@ async fn start_ldk() {
     // some public channels.
     let peer_man = Arc::clone(&peer_manager);
     let chan_man = Arc::clone(&channel_manager);
-    let network = args.network;
+    let network = args.bitcoin_network.0;
     tokio::spawn(async move {
         // First wait a minute until we have some peers and maybe have opened a channel.
         tokio::time::sleep(Duration::from_secs(60)).await;
@@ -1123,7 +1120,10 @@ async fn start_ldk() {
                 peer_man.broadcast_node_announcement(
                     [0; 3],
                     args.ldk_announced_node_name,
-                    args.ldk_announced_listen_addr.clone(),
+                    args.ldk_announced_listen_addr
+                        .iter()
+                        .map(|x| x.0.clone())
+                        .collect(),
                 );
             }
         }
@@ -1201,34 +1201,4 @@ async fn start_ldk() {
         bp_exit.send(()).unwrap();
         background_processor.await.unwrap().unwrap();
     }
-}
-
-#[tokio::main]
-pub async fn main() {
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Catch Ctrl-C with a dummy signal handler.
-        unsafe {
-            let mut new_action: libc::sigaction = core::mem::zeroed();
-            let mut old_action: libc::sigaction = core::mem::zeroed();
-
-            extern "C" fn dummy_handler(
-                _: libc::c_int,
-                _: *const libc::siginfo_t,
-                _: *const libc::c_void,
-            ) {
-            }
-
-            new_action.sa_sigaction = dummy_handler as libc::sighandler_t;
-            new_action.sa_flags = libc::SA_SIGINFO;
-
-            libc::sigaction(
-                libc::SIGINT,
-                &new_action as *const libc::sigaction,
-                &mut old_action as *mut libc::sigaction,
-            );
-        }
-    }
-
-    start_ldk().await;
 }

@@ -52,24 +52,34 @@ impl Default for Network {
 
 #[derive(ClapSerde)]
 pub struct LdkConfig {
-    #[arg(long, env = "BITCOIND_RPC_USERNAME")]
-    pub(crate) bitcoind_rpc_username: String,
-    #[arg(long, env = "BITCOIND_RPC_PASSWORD")]
-    pub(crate) bitcoind_rpc_password: String,
-    #[arg(long, env = "BITCOIND_RPC_PORT")]
-    pub(crate) bitcoind_rpc_port: u16,
-    #[arg(long, env = "BITCOIND_RPC_HOST")]
-    pub(crate) bitcoind_rpc_host: String,
-    #[arg(long, env = "LDK_STORAGE_DIR_PATH")]
-    pub(crate) ldk_storage_dir_path: String,
-    #[arg(long, env = "LDK_PEER_LISTENING_PORT")]
-    pub(crate) ldk_peer_listening_port: u16,
-    #[arg(long, env = "LDK_ANNOUNCED_LISTEN_ADDR")]
-    pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
-    // #[arg(long, env = "LDK_ANNOUNCED_NODE_NAME")]
-    // pub(crate) ldk_announced_node_name: [u8; 32],
-    #[arg(long, env = "BITCOIN_NETWORK")]
+    #[arg(long, env)]
     pub(crate) bitcoin_network: Network,
+    #[arg(long, env)]
+    pub(crate) bitcoind_rpc_username: String,
+    #[arg(long, env)]
+    pub(crate) bitcoind_rpc_password: String,
+    #[arg(long, env)]
+    pub(crate) bitcoind_rpc_port: u16,
+    #[arg(long, env)]
+    pub(crate) bitcoind_rpc_host: String,
+    #[arg(long, env)]
+    pub(crate) ldk_storage_dir_path: String,
+    #[arg(long, env)]
+    pub(crate) ldk_peer_listening_port: u16,
+    #[arg(long, env)]
+    pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
+    #[arg(long, env, value_parser = parse_announced_node_name)]
+    pub(crate) ldk_announced_node_name: [u8; 32],
+}
+
+fn parse_announced_node_name(value: &str) -> Result<[u8; 32], String> {
+    let str_bytes = value.as_bytes();
+    if str_bytes.len() > 32 {
+        return Err("Node Alias can not be longer than 32 bytes".to_string());
+    }
+    let mut bytes = [0; 32];
+    bytes[..str_bytes.len()].copy_from_slice(str_bytes);
+    Ok(bytes)
 }
 
 impl LdkConfig {

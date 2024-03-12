@@ -1,4 +1,4 @@
-use super::cli::LdkUserInfo;
+use super::LdkConfig;
 use bitcoin::network::constants::Network;
 use lightning::ln::msgs::SocketAddress;
 use std::collections::HashMap;
@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
+pub(crate) fn parse_startup_args() -> Result<LdkConfig, ()> {
 	if env::args().len() < 3 {
 		println!("ldk-tutorial-node requires at least 2 arguments: `cargo run [<bitcoind-rpc-username>:<bitcoind-rpc-password>@]<bitcoind-rpc-host>:<bitcoind-rpc-port> ldk_storage_directory_path [<ldk-incoming-peer-listening-port>] [bitcoin-network] [announced-node-name announced-listen-addr*]`");
 		return Err(());
@@ -87,7 +87,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		match env::args().skip(arg_idx + 1).next().as_ref() {
 			Some(s) => match SocketAddress::from_str(s) {
 				Ok(sa) => {
-					ldk_announced_listen_addr.push(sa);
+					ldk_announced_listen_addr.push(super::SocketAddress(sa));
 					arg_idx += 1;
 				}
 				Err(_) => panic!("Failed to parse announced-listen-addr into a socket address"),
@@ -96,7 +96,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		}
 	}
 
-	Ok(LdkUserInfo {
+	Ok(LdkConfig {
 		bitcoind_rpc_username,
 		bitcoind_rpc_password,
 		bitcoind_rpc_host,
@@ -105,7 +105,7 @@ pub(crate) fn parse_startup_args() -> Result<LdkUserInfo, ()> {
 		ldk_peer_listening_port,
 		ldk_announced_listen_addr,
 		ldk_announced_node_name,
-		network,
+		bitcoin_network: super::Network(network),
 	})
 }
 

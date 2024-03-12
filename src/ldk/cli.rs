@@ -33,18 +33,6 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub(crate) struct LdkUserInfo {
-	pub(crate) bitcoind_rpc_username: String,
-	pub(crate) bitcoind_rpc_password: String,
-	pub(crate) bitcoind_rpc_port: u16,
-	pub(crate) bitcoind_rpc_host: String,
-	pub(crate) ldk_storage_dir_path: String,
-	pub(crate) ldk_peer_listening_port: u16,
-	pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
-	pub(crate) ldk_announced_node_name: [u8; 32],
-	pub(crate) network: Network,
-}
-
 #[derive(Debug)]
 struct UserOnionMessageContents {
 	tlv_type: u64,
