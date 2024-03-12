@@ -6,6 +6,8 @@ use clap_serde_derive::{
     ClapSerde,
 };
 
+use crate::LdkConfig;
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {
@@ -16,6 +18,10 @@ struct Args {
     /// Rest of arguments
     #[command(flatten)]
     pub config: <Config as ClapSerde>::Opt,
+
+    /// Rest of arguments
+    #[command(flatten)]
+    pub ldk_config: <LdkConfig as ClapSerde>::Opt,
 }
 
 #[derive(ClapSerde)]

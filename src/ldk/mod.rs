@@ -1,10 +1,12 @@
 mod args;
 pub mod bitcoind_client;
 mod cli;
+mod config;
 mod convert;
 mod disk;
 mod hex_utils;
 mod sweep;
+
 
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
@@ -12,6 +14,7 @@ use bitcoin::network::constants::Network;
 use bitcoin::BlockHash;
 use bitcoin_bech32::WitnessProgram;
 use bitcoind_client::BitcoindClient;
+pub use config::LdkConfig;
 use disk::FilesystemLogger;
 use disk::{INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus};
