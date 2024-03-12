@@ -16,10 +16,10 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
 use rand::{thread_rng, Rng};
 
-use crate::hex_utils;
-use crate::BitcoindClient;
-use crate::ChannelManager;
-use crate::FilesystemLogger;
+use super::hex_utils;
+use super::BitcoindClient;
+use super::ChannelManager;
+use super::FilesystemLogger;
 
 /// If we have any pending claimable outputs, we should slowly sweep them to our Bitcoin Core
 /// wallet. We technically don't need to do this - they're ours to spend when we want and can just
@@ -38,7 +38,7 @@ pub(crate) async fn periodic_sweep(
 	// Note that if you more tightly integrate your wallet with LDK you may not need to do this -
 	// these outputs can just be treated as normal outputs during coin selection.
 	let pending_spendables_dir =
-		format!("{}/{}", ldk_data_dir, crate::PENDING_SPENDABLE_OUTPUT_DIR);
+		format!("{}/{}", ldk_data_dir, super::PENDING_SPENDABLE_OUTPUT_DIR);
 	let processing_spendables_dir = format!("{}/processing_spendable_outputs", ldk_data_dir);
 	let spendables_dir = format!("{}/spendable_outputs", ldk_data_dir);
 

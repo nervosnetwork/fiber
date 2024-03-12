@@ -1,6 +1,6 @@
-use crate::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
-use crate::hex_utils;
-use crate::{
+use super::disk::{self, INBOUND_PAYMENTS_FNAME, OUTBOUND_PAYMENTS_FNAME};
+use super::hex_utils;
+use super::{
 	ChannelManager, HTLCStatus, InboundPaymentInfoStorage, MillisatAmount, NetworkGraph,
 	OnionMessenger, OutboundPaymentInfoStorage, PaymentInfo, PeerManager,
 };

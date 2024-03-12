@@ -6,8 +6,8 @@ mod disk;
 mod hex_utils;
 mod sweep;
 
-use crate::bitcoind_client::BitcoindClient;
-use crate::disk::FilesystemLogger;
+use super::bitcoind_client::BitcoindClient;
+use super::disk::FilesystemLogger;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
 use bitcoin::network::constants::Network;
