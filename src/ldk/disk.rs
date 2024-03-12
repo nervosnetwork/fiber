@@ -10,18 +10,18 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) const INBOUND_PAYMENTS_FNAME: &str = "inbound_payments";
 pub(crate) const OUTBOUND_PAYMENTS_FNAME: &str = "outbound_payments";
 
 pub(crate) struct FilesystemLogger {
-    data_dir: String,
+    data_dir: PathBuf,
 }
 impl FilesystemLogger {
-    pub(crate) fn new(data_dir: String) -> Self {
-        let logs_path = format!("{}/logs", data_dir);
+    pub(crate) fn new(data_dir: &PathBuf) -> Self {
+        let logs_path = data_dir.join("logs");
         fs::create_dir_all(logs_path.clone()).unwrap();
         Self {
             data_dir: logs_path,
@@ -42,7 +42,7 @@ impl Logger for FilesystemLogger {
             record.line,
             raw_log
         );
-        let logs_file_path = format!("{}/logs.txt", self.data_dir.clone());
+        let logs_file_path = self.data_dir.join("logs.txt");
         fs::OpenOptions::new()
             .create(true)
             .append(true)

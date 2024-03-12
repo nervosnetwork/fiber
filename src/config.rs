@@ -1,20 +1,42 @@
-use std::{fs::File, io::BufReader, process::exit};
+use std::{fs::File, io::BufReader, path::PathBuf, process::exit};
 
 use clap::CommandFactory;
 use clap_serde_derive::{
     clap::{self, Parser},
     ClapSerde,
 };
+use home::home_dir;
 use serde::Deserialize;
 
 use crate::LdkConfig;
+
+fn get_base_dir() -> PathBuf {
+    let mut path = home_dir().expect("get home directory");
+    path.push(".ckb-pcn-node");
+    path
+}
+
+fn get_default_config_file() -> PathBuf {
+    let mut path = get_base_dir();
+    path.push("config.yml");
+    path
+}
+
+pub fn get_default_ldk_dir() -> PathBuf {
+    let mut path = get_base_dir();
+    path.push("ldk");
+    path
+}
 
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {
     /// Config file
-    #[arg(short, long = "config", default_value = "config.yml")]
+    #[arg(short, long = "config", default_value=get_default_config_file().into_os_string())]
     config_path: std::path::PathBuf,
+
+    #[arg(short, long = "dir", default_value=get_base_dir().into_os_string())]
+    base_dir: std::path::PathBuf,
 
     /// Rest of arguments
     #[command(flatten)]
@@ -31,12 +53,13 @@ struct SerializedConfig {
     ldk: Option<<LdkConfig as ClapSerde>::Opt>,
 }
 
+#[derive(Debug)]
 pub struct Config {
     pub ckb: CkbConfig,
     pub ldk: LdkConfig,
 }
 
-#[derive(ClapSerde)]
+#[derive(ClapSerde, Debug)]
 pub struct CkbConfig {
     #[arg(short, long, env = "NAME", help = "Your name")]
     pub name: String,

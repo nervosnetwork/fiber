@@ -30,7 +30,7 @@ use super::FilesystemLogger;
 /// an associated secret key we could simply import into Bitcoin Core's wallet, but for consistency
 /// we don't do that here either.
 pub(crate) async fn periodic_sweep(
-    ldk_data_dir: String,
+    ldk_data_dir: PathBuf,
     keys_manager: Arc<KeysManager>,
     logger: Arc<FilesystemLogger>,
     persister: Arc<FilesystemStore>,
@@ -40,10 +40,9 @@ pub(crate) async fn periodic_sweep(
     // Regularly claim outputs which are exclusively spendable by us and send them to Bitcoin Core.
     // Note that if you more tightly integrate your wallet with LDK you may not need to do this -
     // these outputs can just be treated as normal outputs during coin selection.
-    let pending_spendables_dir =
-        format!("{}/{}", ldk_data_dir, super::PENDING_SPENDABLE_OUTPUT_DIR);
-    let processing_spendables_dir = format!("{}/processing_spendable_outputs", ldk_data_dir);
-    let spendables_dir = format!("{}/spendable_outputs", ldk_data_dir);
+    let pending_spendables_dir = ldk_data_dir.join(super::PENDING_SPENDABLE_OUTPUT_DIR);
+    let processing_spendables_dir = ldk_data_dir.join("processing_spendable_outputs");
+    let spendables_dir = ldk_data_dir.join("spendable_outputs");
 
     // We batch together claims of all spendable outputs generated each day, however only after
     // batching any claims of spendable outputs which were generated prior to restart. On a mobile

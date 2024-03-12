@@ -590,20 +590,20 @@ async fn handle_ldk_events(
 
 pub async fn start_ldk(args: LdkConfig) {
     // Initialize the LDK data directory if necessary.
-    let ldk_data_dir = format!("{}/.ldk", args.ldk_storage_dir_path);
+    let ldk_data_dir = args.ldk_storage_dir_path.join("data");
     fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
     // ## Setup
     // Step 1: Initialize the Logger
-    let logger = Arc::new(FilesystemLogger::new(ldk_data_dir.clone()));
+    let logger = Arc::new(FilesystemLogger::new(&ldk_data_dir));
 
     // Initialize our bitcoind client.
     let bitcoind_client = match BitcoindClient::new(
-        args.bitcoind_rpc_host.clone(),
-        args.bitcoind_rpc_port,
-        args.bitcoind_rpc_username.clone(),
-        args.bitcoind_rpc_password.clone(),
-        args.bitcoin_network.0,
+        args.ldk_bitcoin_rpc_host.clone(),
+        args.ldk_bitcoin_rpc_port,
+        args.ldk_bitcoin_rpc_username.clone(),
+        args.ldk_bitcoin_rpc_password.clone(),
+        args.ldk_bitcoin_network.0,
         tokio::runtime::Handle::current(),
         Arc::clone(&logger),
     )
@@ -619,7 +619,7 @@ pub async fn start_ldk(args: LdkConfig) {
     // Check that the bitcoind we've connected to is running the network we expect
     let bitcoind_chain = bitcoind_client.get_blockchain_info().await.chain;
     if bitcoind_chain
-        != match args.bitcoin_network.0 {
+        != match args.ldk_bitcoin_network.0 {
             bitcoin::Network::Bitcoin => "main",
             bitcoin::Network::Regtest => "regtest",
             bitcoin::Network::Signet => "signet",
@@ -628,7 +628,7 @@ pub async fn start_ldk(args: LdkConfig) {
     {
         println!(
             "Chain argument ({}) didn't match bitcoind chain ({})",
-            args.bitcoin_network.0, bitcoind_chain
+            args.ldk_bitcoin_network.0, bitcoind_chain
         );
         return;
     }
@@ -648,7 +648,7 @@ pub async fn start_ldk(args: LdkConfig) {
 
     // The key seed that we use to derive the node privkey (that corresponds to the node pubkey) and
     // other secret key material.
-    let keys_seed_path = format!("{}/keys_seed", ldk_data_dir.clone());
+    let keys_seed_path = ldk_data_dir.join("keys_seed");
     let keys_seed = if let Ok(seed) = fs::read(keys_seed_path.clone()) {
         assert_eq!(seed.len(), 32);
         let mut key = [0; 32];
@@ -664,7 +664,7 @@ pub async fn start_ldk(args: LdkConfig) {
             }
             Err(e) => {
                 println!(
-                    "ERROR: Unable to create keys seed file {}: {}",
+                    "ERROR: Unable to create keys seed file {:?}: {}",
                     keys_seed_path, e
                 );
                 return;
@@ -727,14 +727,14 @@ pub async fn start_ldk(args: LdkConfig) {
         .expect("Failed to fetch best block header and best block");
 
     // Step 9: Initialize routing ProbabilisticScorer
-    let network_graph_path = format!("{}/network_graph", ldk_data_dir.clone());
+    let network_graph_path = ldk_data_dir.join("network_graph");
     let network_graph = Arc::new(disk::read_network(
         Path::new(&network_graph_path),
-        args.bitcoin_network.0,
+        args.ldk_bitcoin_network.0,
         logger.clone(),
     ));
 
-    let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
+    let scorer_path = ldk_data_dir.join("scorer");
     let scorer = Arc::new(RwLock::new(disk::read_scorer(
         Path::new(&scorer_path),
         Arc::clone(&network_graph),
@@ -762,7 +762,7 @@ pub async fn start_ldk(args: LdkConfig) {
     user_config.manually_accept_inbound_channels = true;
     let mut restarting_node = true;
     let (channel_manager_blockhash, channel_manager) = {
-        if let Ok(mut f) = fs::File::open(format!("{}/manager", ldk_data_dir.clone())) {
+        if let Ok(mut f) = fs::File::open(ldk_data_dir.join("manager")) {
             let mut channel_monitor_mut_references = Vec::new();
             for (_, channel_monitor) in channelmonitors.iter_mut() {
                 channel_monitor_mut_references.push(channel_monitor);
@@ -787,7 +787,7 @@ pub async fn start_ldk(args: LdkConfig) {
             let polled_best_block = polled_chain_tip.to_best_block();
             let polled_best_block_hash = polled_best_block.block_hash();
             let chain_params = ChainParameters {
-                network: args.bitcoin_network.0,
+                network: args.ldk_bitcoin_network.0,
                 best_block: polled_best_block,
             };
             let fresh_channel_manager = channelmanager::ChannelManager::new(
@@ -839,7 +839,7 @@ pub async fn start_ldk(args: LdkConfig) {
 
         init::synchronize_listeners(
             bitcoind_client.as_ref(),
-            args.bitcoin_network.0,
+            args.ldk_bitcoin_network.0,
             &mut cache,
             chain_listeners,
         )
@@ -936,7 +936,7 @@ pub async fn start_ldk(args: LdkConfig) {
     let channel_manager_listener = channel_manager.clone();
     let chain_monitor_listener = chain_monitor.clone();
     let bitcoind_block_source = bitcoind_client.clone();
-    let network = args.bitcoin_network.0;
+    let network = args.ldk_bitcoin_network.0;
     tokio::spawn(async move {
         let chain_poller = poll::ChainPoller::new(bitcoind_block_source.as_ref(), network);
         let chain_listener = (chain_monitor_listener, channel_manager_listener);
@@ -947,12 +947,12 @@ pub async fn start_ldk(args: LdkConfig) {
         }
     });
 
-    let inbound_payments = Arc::new(Mutex::new(disk::read_inbound_payment_info(Path::new(
-        &format!("{}/{}", ldk_data_dir, INBOUND_PAYMENTS_FNAME),
-    ))));
-    let outbound_payments = Arc::new(Mutex::new(disk::read_outbound_payment_info(Path::new(
-        &format!("{}/{}", ldk_data_dir, OUTBOUND_PAYMENTS_FNAME),
-    ))));
+    let inbound_payments = Arc::new(Mutex::new(disk::read_inbound_payment_info(
+        &ldk_data_dir.join(INBOUND_PAYMENTS_FNAME),
+    )));
+    let outbound_payments = Arc::new(Mutex::new(disk::read_outbound_payment_info(
+        &ldk_data_dir.join(OUTBOUND_PAYMENTS_FNAME),
+    )));
     let recent_payments_payment_ids = channel_manager
         .list_recent_payments()
         .into_iter()
@@ -992,7 +992,7 @@ pub async fn start_ldk(args: LdkConfig) {
     let outbound_payments_event_listener = Arc::clone(&outbound_payments);
     let fs_store_event_listener = Arc::clone(&fs_store);
     let peer_manager_event_listener = Arc::clone(&peer_manager);
-    let network = args.bitcoin_network.0;
+    let network = args.ldk_bitcoin_network.0;
     let event_handler = move |event: Event| {
         let channel_manager_event_listener = Arc::clone(&channel_manager_event_listener);
         let bitcoind_client_event_listener = Arc::clone(&bitcoind_client_event_listener);
@@ -1057,7 +1057,7 @@ pub async fn start_ldk(args: LdkConfig) {
     // Regularly reconnect to channel peers.
     let connect_cm = Arc::clone(&channel_manager);
     let connect_pm = Arc::clone(&peer_manager);
-    let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir);
+    let peer_data_path = ldk_data_dir.join("channel_peer_data");
     let stop_connect = Arc::clone(&stop_listen_connect);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -1100,7 +1100,7 @@ pub async fn start_ldk(args: LdkConfig) {
     // some public channels.
     let peer_man = Arc::clone(&peer_manager);
     let chan_man = Arc::clone(&channel_manager);
-    let network = args.bitcoin_network.0;
+    let network = args.ldk_bitcoin_network.0;
     tokio::spawn(async move {
         // First wait a minute until we have some peers and maybe have opened a channel.
         tokio::time::sleep(Duration::from_secs(60)).await;

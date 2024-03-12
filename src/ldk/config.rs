@@ -1,5 +1,8 @@
 use clap_serde_derive::ClapSerde;
+use std::path::PathBuf;
 use std::str::FromStr;
+
+use crate::config::get_default_ldk_dir;
 
 use serde::{Deserialize, Serialize};
 
@@ -90,20 +93,22 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
-#[derive(ClapSerde)]
+// The prefix `ldk_` is somewhat redundant here. It serves as some kind of namespace.
+// [derive feature: an attribute to add a prefix to all arg names in a struct, for use with flatten · Issue #3513 · clap-rs/clap](https://github.com/clap-rs/clap/issues/3513)
+#[derive(ClapSerde, Debug)]
 pub struct LdkConfig {
     #[arg(long, env)]
-    pub(crate) bitcoin_network: Network,
+    pub(crate) ldk_bitcoin_network: Network,
     #[arg(long, env)]
-    pub(crate) bitcoind_rpc_username: String,
+    pub(crate) ldk_bitcoin_rpc_username: String,
     #[arg(long, env)]
-    pub(crate) bitcoind_rpc_password: String,
+    pub(crate) ldk_bitcoin_rpc_password: String,
     #[arg(long, env)]
-    pub(crate) bitcoind_rpc_port: u16,
+    pub(crate) ldk_bitcoin_rpc_port: u16,
     #[arg(long, env)]
-    pub(crate) bitcoind_rpc_host: String,
-    #[arg(long, env)]
-    pub(crate) ldk_storage_dir_path: String,
+    pub(crate) ldk_bitcoin_rpc_host: String,
+    #[arg(long, env, default_value=get_default_ldk_dir().into_os_string())]
+    pub(crate) ldk_storage_dir_path: PathBuf,
     #[arg(long, env)]
     pub(crate) ldk_peer_listening_port: u16,
     #[arg(long, env)]

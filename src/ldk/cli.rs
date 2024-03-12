@@ -6,8 +6,8 @@ use super::{
 };
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use bitcoin::network::constants::Network;
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::Network;
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage};
@@ -28,7 +28,7 @@ use std::env;
 use std::io;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -59,7 +59,7 @@ pub(crate) fn poll_for_user_input(
     onion_messenger: Arc<OnionMessenger>,
     inbound_payments: Arc<Mutex<InboundPaymentInfoStorage>>,
     outbound_payments: Arc<Mutex<OutboundPaymentInfoStorage>>,
-    ldk_data_dir: String,
+    ldk_data_dir: PathBuf,
     network: Network,
     logger: Arc<disk::FilesystemLogger>,
     fs_store: Arc<FilesystemStore>,
@@ -143,7 +143,7 @@ pub(crate) fn poll_for_user_input(
                     )
                     .is_ok()
                     {
-                        let peer_data_path = format!("{}/channel_peer_data", ldk_data_dir.clone());
+                        let peer_data_path = ldk_data_dir.join("channel_peer_data");
                         let _ = disk::persist_channel_peer(
                             Path::new(&peer_data_path),
                             peer_pubkey_and_ip_addr,
