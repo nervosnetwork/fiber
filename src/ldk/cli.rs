@@ -67,7 +67,7 @@ pub(crate) fn poll_for_user_input(
     println!(
         "LDK startup successful. Enter \"help\" to view available commands. Press Ctrl-D to quit."
     );
-    println!("LDK logs are available at <your-supplied-ldk-data-dir-path>/.ldk/logs");
+    println!("LDK logs are available at {:?}", ldk_data_dir.join("logs"));
     println!("Local Node ID is {}.", channel_manager.get_our_node_id());
     'read_command: loop {
         print!("> ");

@@ -31,5 +31,6 @@ pub async fn main() {
     let config = Config::parse();
 
     println!("Starting ldk");
+    dbg!(&config);
     start_ldk(config.ldk).await;
 }

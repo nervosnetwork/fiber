@@ -4,12 +4,10 @@ use std::str::FromStr;
 
 use crate::config::get_default_ldk_dir;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct SocketAddress(pub lightning::ln::msgs::SocketAddress);
-
-use serde::{Deserializer, Serializer};
 
 impl<'s> From<&'s str> for SocketAddress {
     fn from(value: &'s str) -> Self {
@@ -97,22 +95,22 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
 // [derive feature: an attribute to add a prefix to all arg names in a struct, for use with flatten · Issue #3513 · clap-rs/clap](https://github.com/clap-rs/clap/issues/3513)
 #[derive(ClapSerde, Debug)]
 pub struct LdkConfig {
-    #[arg(long, env)]
-    pub(crate) ldk_bitcoin_network: Network,
-    #[arg(long, env)]
-    pub(crate) ldk_bitcoin_rpc_username: String,
-    #[arg(long, env)]
-    pub(crate) ldk_bitcoin_rpc_password: String,
-    #[arg(long, env)]
-    pub(crate) ldk_bitcoin_rpc_port: u16,
-    #[arg(long, env)]
-    pub(crate) ldk_bitcoin_rpc_host: String,
-    #[arg(long, env, default_value=get_default_ldk_dir().into_os_string())]
-    pub(crate) ldk_storage_dir_path: PathBuf,
-    #[arg(long, env)]
-    pub(crate) ldk_peer_listening_port: u16,
-    #[arg(long, env)]
-    pub(crate) ldk_announced_listen_addr: Vec<SocketAddress>,
-    #[arg(long, env)]
-    pub(crate) ldk_announced_node_name: AnnouncedNodeName,
+    #[arg(long = "ldk-bitcoin-network", env, default_value="testnet")]
+    pub(crate) bitcoin_network: Network,
+    #[arg(long = "bitcoin-rpc-username", env)]
+    pub(crate) bitcoin_rpc_username: String,
+    #[arg(long = "ldk-bitcoin-rpc-password", env)]
+    pub(crate) bitcoin_rpc_password: String,
+    #[arg(long = "bitcoin-rpc-port", env, default_value="18332")]
+    pub(crate) bitcoin_rpc_port: u16,
+    #[arg(long = "ldk-bitcoin-rpc-host", env, default_value="127.0.0.1")]
+    pub(crate) bitcoin_rpc_host: String,
+    #[arg(long="storage-dir-path", env, default_value=get_default_ldk_dir().into_os_string())]
+    pub(crate) storage_dir_path: PathBuf,
+    #[arg(long = "ldk-peer-listening-port", env)]
+    pub(crate) peer_listening_port: u16,
+    #[arg(long = "ldk-announced-listen-addr", env)]
+    pub(crate) announced_listen_addr: Vec<SocketAddress>,
+    #[arg(long = "ldk-announced-node-name", env)]
+    pub(crate) announced_node_name: AnnouncedNodeName,
 }
