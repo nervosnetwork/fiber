@@ -1,4 +1,3 @@
-mod args;
 pub mod bitcoind_client;
 mod cli;
 mod config;
@@ -6,9 +5,6 @@ mod convert;
 mod disk;
 mod hex_utils;
 mod sweep;
-
-use config::Network;
-use config::SocketAddress;
 
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
