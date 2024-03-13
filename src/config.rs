@@ -8,7 +8,7 @@ use clap_serde_derive::{
 use home::home_dir;
 use serde::Deserialize;
 
-use crate::LdkConfig;
+use crate::{CkbConfig, LdkConfig};
 
 fn get_base_dir() -> PathBuf {
     let mut path = home_dir().expect("get home directory");
@@ -57,15 +57,6 @@ struct SerializedConfig {
 pub struct Config {
     pub ckb: CkbConfig,
     pub ldk: LdkConfig,
-}
-
-#[derive(ClapSerde, Debug)]
-pub struct CkbConfig {
-    #[arg(short, long, env = "NAME", help = "Your name")]
-    pub name: String,
-
-    #[arg(short, long)]
-    pub age: u8,
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
