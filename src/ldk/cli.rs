@@ -77,7 +77,7 @@ pub(crate) fn poll_for_user_input(
             break println!("ERROR: {}", e);
         }
 
-        if line.len() == 0 {
+        if line.is_empty() {
             // We hit EOF / Ctrl-D
             break;
         }
@@ -121,7 +121,7 @@ pub(crate) fn poll_for_user_input(
                     };
 
                     let (mut announce_channel, mut with_anchors) = (false, false);
-                    while let Some(word) = words.next() {
+                    for word in words.by_ref() {
                         match word {
                             "--public" | "--public=true" => announce_channel = true,
                             "--public=false" => announce_channel = false,
@@ -194,15 +194,15 @@ pub(crate) fn poll_for_user_input(
                                 break 'read_command;
                             }
 
-                            if line.len() == 0 {
+                            if line.is_empty() {
                                 // We hit EOF / Ctrl-D
                                 break 'read_command;
                             }
 
-                            if line.starts_with("Y") {
+                            if line.starts_with('Y') {
                                 break;
                             }
-                            if line.starts_with("N") {
+                            if line.starts_with('N') {
                                 continue 'read_command;
                             }
                         }
@@ -385,7 +385,7 @@ pub(crate) fn poll_for_user_input(
                         match bitcoin::secp256k1::PublicKey::from_str(peer_pubkey.unwrap()) {
                             Ok(pubkey) => pubkey,
                             Err(e) => {
-                                println!("ERROR: {}", e.to_string());
+                                println!("ERROR: {}", e);
                                 continue;
                             }
                         };
@@ -503,7 +503,7 @@ pub(crate) fn poll_for_user_input(
                     }
                     let mut intermediate_nodes = Vec::new();
                     let mut errored = false;
-                    for pk_str in path_pks_str.unwrap().split(",") {
+                    for pk_str in path_pks_str.unwrap().split(',') {
                         let node_pubkey_vec = match hex_utils::to_vec(pk_str) {
                             Some(peer_pubkey_vec) => peer_pubkey_vec,
                             None => {
@@ -532,7 +532,7 @@ pub(crate) fn poll_for_user_input(
                             continue;
                         }
                     };
-                    let data = match words.next().map(|s| hex_utils::to_vec(s)) {
+                    let data = match words.next().map(hex_utils::to_vec) {
                         Some(Some(data)) => data,
                         _ => {
                             println!("Need a hex data string");
@@ -621,7 +621,7 @@ fn list_peers(peer_manager: Arc<PeerManager>) {
 fn list_channels(channel_manager: &Arc<ChannelManager>, network_graph: &Arc<NetworkGraph>) {
     print!("[");
     for chan_info in channel_manager.list_channels() {
-        println!("");
+        println!();
         println!("\t{{");
         println!("\t\tchannel_id: {},", chan_info.channel_id);
         if let Some(funding_txo) = chan_info.funding_txo {
@@ -677,7 +677,7 @@ fn list_payments(
 ) {
     print!("[");
     for (payment_hash, payment_info) in &inbound_payments.payments {
-        println!("");
+        println!();
         println!("\t{{");
         println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
         println!("\t\tpayment_hash: {},", payment_hash);
@@ -695,7 +695,7 @@ fn list_payments(
     }
 
     for (payment_hash, payment_info) in &outbound_payments.payments {
-        println!("");
+        println!();
         println!("\t{{");
         println!("\t\tamount_millisatoshis: {},", payment_info.amt_msat);
         println!("\t\tpayment_hash: {},", payment_hash);
@@ -748,8 +748,7 @@ pub(crate) async fn do_connect_peer(
                 if peer_manager
                     .get_peer_node_ids()
                     .iter()
-                    .find(|(id, _)| *id == pubkey)
-                    .is_some()
+                    .any(|(id, _)| *id == pubkey)
                 {
                     return Ok(());
                 }
@@ -807,11 +806,11 @@ fn open_channel(
     match channel_manager.create_channel(peer_pubkey, channel_amt_sat, 0, 0, None, Some(config)) {
         Ok(_) => {
             println!("EVENT: initiated channel with peer {}. ", peer_pubkey);
-            return Ok(());
+            Ok(())
         }
         Err(e) => {
             println!("ERROR: failed to open channel: {:?}", e);
-            return Err(());
+            Err(())
         }
     }
 }
@@ -995,7 +994,7 @@ fn get_invoice(
         payment_hash,
         PaymentInfo {
             preimage: None,
-            secret: Some(invoice.payment_secret().clone()),
+            secret: Some(*invoice.payment_secret()),
             status: HTLCStatus::Pending,
             amt_msat: MillisatAmount(Some(amt_msat)),
         },
@@ -1029,7 +1028,7 @@ fn force_close_channel(
 pub(crate) fn parse_peer_info(
     peer_pubkey_and_ip_addr: String,
 ) -> Result<(PublicKey, SocketAddr), std::io::Error> {
-    let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split("@");
+    let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split('@');
     let pubkey = pubkey_and_addr.next();
     let peer_addr_str = pubkey_and_addr.next();
     if peer_addr_str.is_none() {

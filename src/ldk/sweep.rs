@@ -110,12 +110,12 @@ pub(crate) async fn periodic_sweep(
                             file.seek(SeekFrom::Current(-1)).unwrap();
                         }
                         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                        Err(e) => Err(e).unwrap(),
+                        Err(e) => panic!("{:?}", e),
                     }
                     outputs.push(Readable::read(&mut file).unwrap());
                 }
                 let destination_address = bitcoind_client.get_new_address().await;
-                let output_descriptors = &outputs.iter().map(|a| a).collect::<Vec<_>>();
+                let output_descriptors = &outputs.iter().collect::<Vec<_>>();
                 let tx_feerate = bitcoind_client
                     .get_est_sat_per_1000_weight(ConfirmationTarget::ChannelCloseMinimum);
 
@@ -134,7 +134,7 @@ pub(crate) async fn periodic_sweep(
                 }
 
                 let locktime =
-                    LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l.into());
+                    LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l);
 
                 if let Ok(spending_tx) = keys_manager.spend_spendable_outputs(
                     output_descriptors,

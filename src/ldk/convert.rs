@@ -61,15 +61,7 @@ impl TryInto<FeeResponse> for JsonResponse {
         let errored = !self.0["errors"].is_null();
         Ok(FeeResponse {
             errored,
-            feerate_sat_per_kw: match self.0["feerate"].as_f64() {
-                // Bitcoin Core gives us a feerate in BTC/KvB, which we need to convert to
-                // satoshis/KW. Thus, we first multiply by 10^8 to get satoshis, then divide by 4
-                // to convert virtual-bytes into weight units.
-                Some(feerate_btc_per_kvbyte) => {
-                    Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
-                }
-                None => None,
-            },
+            feerate_sat_per_kw: self.0["feerate"].as_f64().map(|feerate_btc_per_kvbyte| (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32),
         })
     }
 }
@@ -86,15 +78,7 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
         assert_eq!(self.0["maxmempool"].as_u64(), Some(300000000));
         Ok(MempoolMinFeeResponse {
             errored,
-            feerate_sat_per_kw: match self.0["mempoolminfee"].as_f64() {
-                // Bitcoin Core gives us a feerate in BTC/KvB, which we need to convert to
-                // satoshis/KW. Thus, we first multiply by 10^8 to get satoshis, then divide by 4
-                // to convert virtual-bytes into weight units.
-                Some(feerate_btc_per_kvbyte) => {
-                    Some((feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32)
-                }
-                None => None,
-            },
+            feerate_sat_per_kw: self.0["mempoolminfee"].as_f64().map(|feerate_btc_per_kvbyte| (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32),
         })
     }
 }
@@ -135,12 +119,12 @@ impl TryInto<ListUnspentResponse> for JsonResponse {
             .unwrap()
             .iter()
             .map(|utxo| ListUnspentUtxo {
-                txid: Txid::from_str(&utxo["txid"].as_str().unwrap().to_string()).unwrap(),
+                txid: Txid::from_str(utxo["txid"].as_str().unwrap()).unwrap(),
                 vout: utxo["vout"].as_u64().unwrap() as u32,
                 amount: bitcoin::Amount::from_btc(utxo["amount"].as_f64().unwrap())
                     .unwrap()
                     .to_sat(),
-                address: Address::from_str(&utxo["address"].as_str().unwrap().to_string())
+                address: Address::from_str(utxo["address"].as_str().unwrap())
                     .unwrap()
                     .assume_checked(), // the expected network is not known at this point
             })

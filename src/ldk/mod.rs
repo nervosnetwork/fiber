@@ -58,7 +58,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &'static str = "pending_spendable_outputs";
+pub(crate) const PENDING_SPENDABLE_OUTPUT_DIR: &str = "pending_spendable_outputs";
 
 #[derive(Copy, Clone)]
 pub(crate) enum HTLCStatus {
@@ -197,7 +197,7 @@ async fn handle_ldk_events(
             // Construct the raw transaction with one output, that is paid the amount of the
             // channel.
             let addr = WitnessProgram::from_scriptpubkey(
-                &output_script.as_bytes(),
+                output_script.as_bytes(),
                 match network {
                     BitcoinNetwork::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
                     BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
@@ -219,7 +219,7 @@ async fn handle_ldk_events(
             let signed_tx = bitcoind_client
                 .sign_raw_transaction_with_wallet(funded_tx.hex)
                 .await;
-            assert_eq!(signed_tx.complete, true);
+            assert!(signed_tx.complete);
             let final_tx: Transaction =
                 encode::deserialize(&hex_utils::to_vec(&signed_tx.hex).unwrap()).unwrap();
             // Give the funding transaction back to LDK for opening the channel.
@@ -692,7 +692,7 @@ pub async fn start_ldk(args: LdkConfig) {
     ));
 
     // Step 5: Initialize Persistence
-    let fs_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+    let fs_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone()));
     let persister = Arc::new(MonitorUpdatingPersister::new(
         Arc::clone(&fs_store),
         Arc::clone(&logger),
@@ -1022,7 +1022,7 @@ pub async fn start_ldk(args: LdkConfig) {
     };
 
     // Step 19: Persist ChannelManager and NetworkGraph
-    let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone().into()));
+    let persister = Arc::new(FilesystemStore::new(ldk_data_dir.clone()));
 
     // Step 20: Background Processing
     let (bp_exit, bp_exit_check) = tokio::sync::watch::channel(());
@@ -1080,7 +1080,7 @@ pub async fn start_ldk(args: LdkConfig) {
                             if *pubkey == node_id {
                                 let _ = cli::do_connect_peer(
                                     *pubkey,
-                                    peer_addr.clone(),
+                                    *peer_addr,
                                     Arc::clone(&connect_pm),
                                 )
                                 .await;
@@ -1171,14 +1171,12 @@ pub async fn start_ldk(args: LdkConfig) {
     peer_manager.disconnect_all_peers();
 
     if let Err(e) = bg_res {
-        let persist_res = persister
-            .write(
-                persist::CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-                persist::CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-                persist::CHANNEL_MANAGER_PERSISTENCE_KEY,
-                &channel_manager.encode(),
-            )
-            .unwrap();
+        let persist_res = persister.write(
+            persist::CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+            persist::CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+            persist::CHANNEL_MANAGER_PERSISTENCE_KEY,
+            &channel_manager.encode(),
+        );
         use lightning::util::logger::Logger;
         lightning::log_error!(
             &*logger,

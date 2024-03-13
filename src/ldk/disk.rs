@@ -20,7 +20,7 @@ pub(crate) struct FilesystemLogger {
     data_dir: PathBuf,
 }
 impl FilesystemLogger {
-    pub(crate) fn new(data_dir: &PathBuf) -> Self {
+    pub(crate) fn new(data_dir: &Path) -> Self {
         let logs_path = data_dir.join("logs");
         fs::create_dir_all(logs_path.clone()).unwrap();
         Self {
@@ -122,7 +122,7 @@ pub(crate) fn read_scorer(
 ) -> ProbabilisticScorer<Arc<NetworkGraph>, Arc<FilesystemLogger>> {
     let params = ProbabilisticScoringDecayParameters::default();
     if let Ok(file) = File::open(path) {
-        let args = (params.clone(), Arc::clone(&graph), Arc::clone(&logger));
+        let args = (params, Arc::clone(&graph), Arc::clone(&logger));
         if let Ok(scorer) = ProbabilisticScorer::read(&mut BufReader::new(file), args) {
             return scorer;
         }
