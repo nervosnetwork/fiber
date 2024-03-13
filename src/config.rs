@@ -60,11 +60,12 @@ pub struct Config {
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
-    if atty::is(atty::Stream::Stdin) {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
         let mut cmd = Args::command();
         cmd.print_help().expect("print help");
-        exit(code);
     }
+    exit(code);
 }
 
 impl Config {
