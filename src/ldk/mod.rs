@@ -590,7 +590,7 @@ async fn handle_ldk_events(
 
 pub async fn start_ldk(args: LdkConfig) {
     // Initialize the LDK data directory if necessary.
-    let ldk_data_dir = args.storage_dir_path.join("data");
+    let ldk_data_dir = args.storage_dir.join("data");
     fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
     // ## Setup

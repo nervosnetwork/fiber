@@ -97,7 +97,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
 pub struct LdkConfig {
     #[arg(long = "ldk-bitcoin-network", env, default_value="testnet")]
     pub(crate) bitcoin_network: Network,
-    #[arg(long = "bitcoin-rpc-username", env)]
+    #[arg(long = "ldk-bitcoin-rpc-username", env)]
     pub(crate) bitcoin_rpc_username: String,
     #[arg(long = "ldk-bitcoin-rpc-password", env)]
     pub(crate) bitcoin_rpc_password: String,
@@ -105,8 +105,8 @@ pub struct LdkConfig {
     pub(crate) bitcoin_rpc_port: u16,
     #[arg(long = "ldk-bitcoin-rpc-host", env, default_value="127.0.0.1")]
     pub(crate) bitcoin_rpc_host: String,
-    #[arg(long="storage-dir-path", env, default_value=get_default_ldk_dir().into_os_string())]
-    pub(crate) storage_dir_path: PathBuf,
+    #[arg(long="ldk-storage-dir", env, default_value=get_default_ldk_dir().into_os_string())]
+    pub(crate) storage_dir: PathBuf,
     #[arg(long = "ldk-peer-listening-port", env)]
     pub(crate) peer_listening_port: u16,
     #[arg(long = "ldk-announced-listen-addr", env)]
