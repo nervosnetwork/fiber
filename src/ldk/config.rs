@@ -96,7 +96,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
 // Both name and long options are required as both of them need to be unique across the same clap `Command`.
 // We have to do so manually as upstream does not support such automatically adding prefix feature.
 // [derive feature: an attribute to add a prefix to all arg names in a struct, for use with flatten · Issue #3513 · clap-rs/clap](https://github.com/clap-rs/clap/issues/3513)
-#[derive(ClapSerde, Debug)]
+#[derive(ClapSerde, Debug, Clone)]
 pub struct LdkConfig {
     #[arg(name = "LDK_BITCOIN_NETWORK", long = "ldk-bitcoin-network", env, default_value = "testnet")]
     pub(crate) bitcoin_network: Network,

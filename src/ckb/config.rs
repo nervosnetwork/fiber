@@ -9,7 +9,7 @@ use crate::config::get_default_ckb_dir;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
-#[derive(ClapSerde, Debug)]
+#[derive(ClapSerde, Debug, Clone)]
 pub struct CkbConfig {
     #[arg(name = "CKB_STORAGE_DIR", long = "ckb-storage-dir", env, default_value = get_default_ckb_dir().into_os_string())]
     pub(crate) storage_dir: PathBuf,

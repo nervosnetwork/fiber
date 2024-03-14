@@ -1,4 +1,3 @@
-use env_logger;
 use futures::{
     channel::oneshot::{channel, Sender},
     future::select,
@@ -20,6 +19,8 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
+
+use crate::CkbConfig;
 
 // Any protocol will be abstracted into a ProtocolMeta structure.
 // From an implementation point of view, tentacle treats any protocol equally
@@ -165,77 +166,24 @@ impl ServiceHandle for SHandle {
     }
 }
 
-fn main() {
-    env_logger::init();
-
-    if std::env::args().nth(1) == Some("server".to_string()) {
-        info!("Starting server ......");
-        server();
-    } else {
-        info!("Starting client ......");
-        client();
-    }
-}
-
-// A p2p application is a service. During the construction process,
-// all protocols supported by the application need to be registered in the way of meta.
-// There are many other options in service builder, which are not used here, please refer to the documentation for details
-//
-// For the foreseeable future, there is no idea of dynamic addition and deletion agreements
-fn create_server() -> Service<SHandle> {
-    ServiceBuilder::default()
-        .insert_protocol(create_meta(0.into()))
-        .insert_protocol(create_meta(1.into()))
-        .key_pair(SecioKeyPair::secp256k1_generated())
-        .build(SHandle)
-}
-
-/// Proto 0 open success
-/// Proto 1 open success
-/// Proto 2 open failure
-///
-/// Because server only supports 0,1
-fn create_client() -> Service<SHandle> {
-    ServiceBuilder::default()
-        .insert_protocol(create_meta(0.into()))
-        .insert_protocol(create_meta(1.into()))
-        .insert_protocol(create_meta(2.into()))
-        .key_pair(SecioKeyPair::secp256k1_generated())
-        .build(SHandle)
-}
-
-fn server() {
-    // Although Tentacle currently abstracts runtime dependencies and supports multiple runtimes,
-    // as the author, I personally recommend tokio as the asynchronous runtime
+pub fn start_ckb(config: CkbConfig) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    rt.block_on(async {
-        let mut service = create_server();
-        service
-            .listen("/ip4/127.0.0.1/tcp/1337".parse().unwrap())
-            .await
-            .unwrap();
-        #[cfg(feature = "ws")]
-        service
-            .listen("/ip4/127.0.0.1/tcp/1338/ws".parse().unwrap())
-            .await
-            .unwrap();
-        service.run().await
-    });
-}
-
-fn client() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
-    rt.block_on(async {
-        let mut service = create_client();
-        service
-            .dial(
-                "/ip4/127.0.0.1/tcp/1337".parse().unwrap(),
-                TargetProtocol::All,
+    rt.spawn(async move {
+        let mut service = ServiceBuilder::default()
+            .insert_protocol(create_meta(0.into()))
+            .insert_protocol(create_meta(1.into()))
+            .key_pair(SecioKeyPair::secp256k1_generated())
+            .build(SHandle);
+        let listen_addr = service
+            .listen(
+                format!("/ip4/127.0.0.1/tcp/{}", config.peer_listening_port)
+                    .parse()
+                    .expect("valid tentacle address"),
             )
             .await
-            .unwrap();
+            .expect("listen tentacle");
+        info!("Started listening tentacle on {}", listen_addr);
         service.run().await
     });
 }

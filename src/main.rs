@@ -1,7 +1,9 @@
-use ckb_pcn_node::{start_ldk, Config};
+use ckb_pcn_node::{start_ckb, start_ldk, Config};
 
 #[tokio::main]
 pub async fn main() {
+    env_logger::init();
+
     #[cfg(not(target_os = "windows"))]
     {
         // Catch Ctrl-C with a dummy signal handler.
@@ -32,5 +34,14 @@ pub async fn main() {
 
     println!("Starting ldk");
     dbg!(&config);
-    start_ldk(config.ldk).await;
+    match config {
+        Config { ckb, ldk } => {
+            if let Some(ldk_config) = ldk {
+                start_ldk(ldk_config).await;
+            }
+            if let Some(ckb_config) = ckb {
+                start_ckb(ckb_config);
+            }
+        }
+    }
 }
