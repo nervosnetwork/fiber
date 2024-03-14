@@ -19,8 +19,7 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
-use tokio::task;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::CkbConfig;
 
@@ -137,7 +136,7 @@ impl ServiceProtocol for PHandle {
     }
 }
 
-struct SHandle;
+pub struct SHandle;
 
 #[async_trait]
 impl ServiceHandle for SHandle {
@@ -168,7 +167,7 @@ impl ServiceHandle for SHandle {
     }
 }
 
-pub async fn start_ckb(config: CkbConfig, token: CancellationToken) {
+pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: TaskTracker) {
     let mut service = ServiceBuilder::default()
         .insert_protocol(create_meta(0.into()))
         .insert_protocol(create_meta(1.into()))
@@ -186,14 +185,14 @@ pub async fn start_ckb(config: CkbConfig, token: CancellationToken) {
     info!("Started listening tentacle on {}", listen_addr);
     let controller = service.control().to_owned();
 
-    task::spawn(async move {
+    tracker.spawn(async move {
         service.run().await;
+        debug!("Tentacle service shutdown");
     });
 
-    task::spawn(async move {
+    tracker.spawn(async move {
         let _ = token.cancelled().await;
-        debug!("Receive exit signal, shutting down tentacle");
+        debug!("Cancellation received, shutting down tentacle service");
         let _ = controller.shutdown().await;
-        debug!("Tentacle shut down");
     });
 }
