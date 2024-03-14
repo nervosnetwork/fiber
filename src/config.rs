@@ -28,6 +28,12 @@ pub fn get_default_ldk_dir() -> PathBuf {
     path
 }
 
+pub fn get_default_ckb_dir() -> PathBuf {
+    let mut path = get_base_dir();
+    path.push("ckb");
+    path
+}
+
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {

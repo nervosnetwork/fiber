@@ -91,26 +91,29 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
-// The prefix `ldk_` is somewhat redundant here. It serves as some kind of namespace.
+// The prefix `ldk-`/`LDK_` is somewhat redundant here. It serves as some kind of namespace.
+// as we cram ckb and ldk config into the same clap `Command` argument space with `flatten`.
+// Both name and long options are required as both of them need to be unique across the same clap `Command`.
+// We have to do so manually as upstream does not support such automatically adding prefix feature.
 // [derive feature: an attribute to add a prefix to all arg names in a struct, for use with flatten · Issue #3513 · clap-rs/clap](https://github.com/clap-rs/clap/issues/3513)
 #[derive(ClapSerde, Debug)]
 pub struct LdkConfig {
-    #[arg(long = "ldk-bitcoin-network", env, default_value="testnet")]
+    #[arg(name = "LDK_BITCOIN_NETWORK", long = "ldk-bitcoin-network", env, default_value = "testnet")]
     pub(crate) bitcoin_network: Network,
-    #[arg(long = "ldk-bitcoin-rpc-username", env)]
+    #[arg(name = "LDK_BITCOIN_RPC_USERNAME", long = "ldk-bitcoin-rpc-username", env)]
     pub(crate) bitcoin_rpc_username: String,
-    #[arg(long = "ldk-bitcoin-rpc-password", env)]
+    #[arg(name = "LDK_BITCOIN_RPC_PASSWORD", long = "ldk-bitcoin-rpc-password", env)]
     pub(crate) bitcoin_rpc_password: String,
-    #[arg(long = "bitcoin-rpc-port", env, default_value="18332")]
+    #[arg(name =  "LDK_BITCOIN_RPC_PORT", long = "ldk-bitcoin-rpc-port", env, default_value = "18332")]
     pub(crate) bitcoin_rpc_port: u16,
-    #[arg(long = "ldk-bitcoin-rpc-host", env, default_value="127.0.0.1")]
+    #[arg(name =  "LDK_BITCOIN_RPC_HOST", long = "ldk-bitcoin-rpc-host", env, default_value = "127.0.0.1")]
     pub(crate) bitcoin_rpc_host: String,
-    #[arg(long="ldk-storage-dir", env, default_value=get_default_ldk_dir().into_os_string())]
+    #[arg(name = "LDK_STORAGE_DIR", long="ldk-storage-dir", env, default_value = get_default_ldk_dir().into_os_string())]
     pub(crate) storage_dir: PathBuf,
-    #[arg(long = "ldk-peer-listening-port", env)]
+    #[arg(name =  "LDK_PEER_LISTENING_PORT", long = "ldk-peer-listening-port", env)]
     pub(crate) peer_listening_port: u16,
-    #[arg(long = "ldk-announced-listen-addr", env)]
+    #[arg(name =  "LDK_ANNOUNCED_LISTEN_ADDR", long = "ldk-announced-listen-addr", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_listen_addr: Vec<SocketAddress>,
-    #[arg(long = "ldk-announced-node-name", env)]
+    #[arg(name =  "LDK_ANNOUNCED_NODE_NAME", long = "ldk-announced-node-name", env)]
     pub(crate) announced_node_name: AnnouncedNodeName,
 }
