@@ -128,13 +128,12 @@ pub(crate) async fn periodic_sweep(
                 let mut cur_height = channel_manager.current_best_block().height();
 
                 // 10% of the time
-                if thread_rng().gen_range(0, 10) == 0 {
+                if thread_rng().gen_range(0..10) == 0 {
                     // subtract random number between 0 and 100
-                    cur_height = cur_height.saturating_sub(thread_rng().gen_range(0, 100));
+                    cur_height = cur_height.saturating_sub(thread_rng().gen_range(0..100));
                 }
 
-                let locktime =
-                    LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l);
+                let locktime = LockTime::from_height(cur_height).map_or(LockTime::ZERO, |l| l);
 
                 if let Ok(spending_tx) = keys_manager.spend_spendable_outputs(
                     output_descriptors,

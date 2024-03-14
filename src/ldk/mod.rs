@@ -43,7 +43,7 @@ use lightning_block_sync::SpvClient;
 use lightning_block_sync::UnboundedCache;
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, RngCore, Rng};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -489,7 +489,7 @@ async fn handle_ldk_events(
             let forwarding_channel_manager = channel_manager.clone();
             let min = time_forwardable.as_millis() as u64;
             tokio::spawn(async move {
-                let millis_to_sleep = thread_rng().gen_range(min, min * 5) as u64;
+                let millis_to_sleep = thread_rng().gen_range(min..min * 5) as u64;
                 tokio::time::sleep(Duration::from_millis(millis_to_sleep)).await;
                 forwarding_channel_manager.process_pending_htlc_forwards();
             });
@@ -1118,10 +1118,7 @@ pub async fn start_ldk(config: LdkConfig) {
                 peer_man.broadcast_node_announcement(
                     [0; 3],
                     announced_node_name,
-                    announced_listen_addr
-                        .iter()
-                        .map(|x| x.0.clone())
-                        .collect(),
+                    announced_listen_addr.iter().map(|x| x.0.clone()).collect(),
                 );
             }
         }
