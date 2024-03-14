@@ -41,9 +41,6 @@ struct Args {
     #[arg(short, long = "config", default_value=get_default_config_file().into_os_string())]
     config_path: std::path::PathBuf,
 
-    #[arg(short, long = "dir", default_value=get_base_dir().into_os_string())]
-    base_dir: std::path::PathBuf,
-
     /// Rest of arguments
     #[command(flatten)]
     pub ckb: <CkbConfig as ClapSerde>::Opt,

@@ -5,3 +5,6 @@ pub mod ldk;
 pub use ldk::{start_ldk, LdkConfig};
 pub mod ckb;
 pub use ckb::CkbConfig;
+
+mod errros;
+pub use errros::{Error, Result};
