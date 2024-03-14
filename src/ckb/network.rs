@@ -6,12 +6,11 @@ use futures::{
 use log::{debug, info};
 use std::collections::HashMap;
 use std::{str, time::Duration};
-use tentacle::bytes::Bytes;
+use tentacle::{bytes::Bytes, secio::PeerId};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
-    secio::SecioKeyPair,
     service::{
         ProtocolHandle, ProtocolMeta, Service, ServiceError, ServiceEvent, TargetProtocol,
         TargetSession,
@@ -168,10 +167,14 @@ impl ServiceHandle for SHandle {
 }
 
 pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: TaskTracker) {
+    let kp = config
+        .read_or_generate_secret_key()
+        .expect("read or generate secret key");
+    let pk = kp.public_key();
     let mut service = ServiceBuilder::default()
         .insert_protocol(create_meta(0.into()))
         .insert_protocol(create_meta(1.into()))
-        .key_pair(SecioKeyPair::secp256k1_generated())
+        .key_pair(kp)
         .build(SHandle);
     let listen_addr = service
         .listen(
@@ -182,7 +185,12 @@ pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: Tas
         .await
         .expect("listen tentacle");
 
-    info!("Started listening tentacle on {}", listen_addr);
+    info!(
+        "Started listening tentacle on {}/p2p/{}",
+        listen_addr,
+        PeerId::from(pk).to_base58()
+    );
+
     let controller = service.control().to_owned();
 
     tracker.spawn(async move {
