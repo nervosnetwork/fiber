@@ -29,16 +29,18 @@ fn get_default_config_file() -> PathBuf {
 
 #[derive(Serialize, Deserialize, Parser, Copy, Clone, Debug, PartialEq)]
 enum Service {
+    #[serde(alias = "ckb", alias = "CKB")]
     CKB,
+    #[serde(alias = "ldk", alias = "ldk")]
     LDK,
 }
 
 impl FromStr for Service {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "ckb" => Ok(Self::CKB),
-            "ldk" => Ok(Self::LDK),
+        match s {
+            "ckb" | "CKB" => Ok(Self::CKB),
+            "ldk" | "LDK" => Ok(Self::LDK),
             _ => Err(format!("invalid service {}", s)),
         }
     }
@@ -73,6 +75,7 @@ struct Args {
 
 #[derive(Deserialize)]
 struct SerializedConfig {
+    services: Option<Vec<Service>>,
     ckb: Option<<CkbConfig as ClapSerde>::Opt>,
     ldk: Option<<LdkConfig as ClapSerde>::Opt>,
 }
@@ -97,11 +100,6 @@ impl Config {
         // Parse whole args with clap
         let mut args = Args::parse();
 
-        if args.services.is_empty() {
-            error!("Must run at least one service");
-            print_help_and_exit(1)
-        }
-
         let base_dir = args.base_dir.clone().unwrap_or(get_base_dir());
 
         let config_file = args
@@ -113,12 +111,30 @@ impl Config {
             serde_yaml::from_reader::<_, SerializedConfig>(f).expect("valid config file format")
         });
 
+        let services = if args.services.is_empty() {
+            config_from_file
+                .as_ref()
+                .ok()
+                .and_then(|x| x.services.clone())
+                .unwrap_or(vec![])
+        } else {
+            args.services
+        };
+        if services.is_empty() {
+            error!("Must run at least one service");
+            print_help_and_exit(1)
+        };
+
         args.ckb.base_dir = Some(Some(base_dir.join(DEFAULT_CKB_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
 
         let (ckb, ldk) = match config_from_file
             .map(|x| match x {
-                SerializedConfig { ckb, ldk } => (
+                SerializedConfig {
+                    services: _,
+                    ckb,
+                    ldk,
+                } => (
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                     ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
                 ),
@@ -130,12 +146,12 @@ impl Config {
                 ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
             ),
         };
-        let ckb = if args.services.contains(&Service::CKB) {
+        let ckb = if services.contains(&Service::CKB) {
             Some(ckb)
         } else {
             None
         };
-        let ldk = if args.services.contains(&Service::LDK) {
+        let ldk = if services.contains(&Service::LDK) {
             Some(ldk)
         } else {
             None
