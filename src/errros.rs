@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("Mongodb error: {0}")]
+    #[error("IO error: {0}")]
     IO(#[from] std::io::Error),
 }
 
