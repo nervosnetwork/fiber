@@ -3,7 +3,7 @@ use futures::{
     future::select,
     prelude::*,
 };
-use log::info;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::{str, time::Duration};
 use tentacle::bytes::Bytes;
@@ -19,6 +19,8 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
+use tokio::task;
+use tokio_util::sync::CancellationToken;
 
 use crate::CkbConfig;
 
@@ -166,24 +168,32 @@ impl ServiceHandle for SHandle {
     }
 }
 
-pub fn start_ckb(config: CkbConfig) {
-    let rt = tokio::runtime::Runtime::new().unwrap();
+pub async fn start_ckb(config: CkbConfig, token: CancellationToken) {
+    let mut service = ServiceBuilder::default()
+        .insert_protocol(create_meta(0.into()))
+        .insert_protocol(create_meta(1.into()))
+        .key_pair(SecioKeyPair::secp256k1_generated())
+        .build(SHandle);
+    let listen_addr = service
+        .listen(
+            format!("/ip4/127.0.0.1/tcp/{}", config.peer_listening_port)
+                .parse()
+                .expect("valid tentacle address"),
+        )
+        .await
+        .expect("listen tentacle");
 
-    rt.spawn(async move {
-        let mut service = ServiceBuilder::default()
-            .insert_protocol(create_meta(0.into()))
-            .insert_protocol(create_meta(1.into()))
-            .key_pair(SecioKeyPair::secp256k1_generated())
-            .build(SHandle);
-        let listen_addr = service
-            .listen(
-                format!("/ip4/127.0.0.1/tcp/{}", config.peer_listening_port)
-                    .parse()
-                    .expect("valid tentacle address"),
-            )
-            .await
-            .expect("listen tentacle");
-        info!("Started listening tentacle on {}", listen_addr);
-        service.run().await
+    info!("Started listening tentacle on {}", listen_addr);
+    let controller = service.control().to_owned();
+
+    task::spawn(async move {
+        service.run().await;
+    });
+
+    task::spawn(async move {
+        let _ = token.cancelled().await;
+        debug!("Receive exit signal, shutting down tentacle");
+        let _ = controller.shutdown().await;
+        debug!("Tentacle shut down");
     });
 }

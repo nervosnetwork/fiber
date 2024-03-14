@@ -30,7 +30,7 @@ libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rand = "0.4"
 serde_json = { version = "1.0" }
-tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "rt", "rt-multi-thread", "sync", "net", "time", "signal"] }
 home = "0.5.9"
 ckb-sdk = "3.1.0"
 thiserror = "1.0.58"
@@ -38,6 +38,8 @@ env_logger = "0.11.3"
 tentacle = "0.4.2"
 log = "0.4.21"
 futures = "0.3.30"
+once_cell = "1.19.0"
+tokio-util = "0.7.10"
 
 [profile.release]
 panic = "abort"
