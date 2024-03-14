@@ -5,23 +5,30 @@ use clap_serde_derive::{
     ClapSerde,
 };
 
-use crate::config::get_default_ckb_dir;
 use crate::Result;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
 pub struct CkbConfig {
-    #[arg(name = "CKB_STORAGE_DIR", long = "ckb-storage-dir", env, default_value = get_default_ckb_dir().into_os_string())]
-    pub(crate) storage_dir: PathBuf,
+    /// ckb base directory
     #[arg(
-        name = "CKB_PEER_LISTENING_PORT",
-        long = "ckb-peer-listening-port",
-        env
+        name = "CKB_BASE_DIR",
+        long = "ckb-base-dir",
+        env,
+        help = "base directory for ckb [default: $BASE_DIR/ckb]"
     )]
-    pub(crate) peer_listening_port: u16,
+    pub(crate) base_dir: Option<PathBuf>,
+
+    /// listening port for ckb payment channel network
+    #[arg(name = "CKB_LISTENING_PORT", long = "ckb-listening-port", env)]
+    pub(crate) listening_port: u16,
+
+    /// addresses to be announced to payment channel network (separated by `,`)
     #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDR", long = "ckb-announced-listen-addr", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_listen_addr: Vec<String>,
+
+    /// node name to be announced to lightning network
     #[arg(
         name = "CKB_ANNOUNCED_NODE_NAME",
         long = "ckb-announced-node-name",
@@ -31,16 +38,20 @@ pub struct CkbConfig {
 }
 
 impl CkbConfig {
-    pub fn create_storage_dir(&self) -> Result<()> {
-        if !self.storage_dir.exists() {
-            fs::create_dir(&self.storage_dir).map_err(Into::into)
+    pub fn base_dir(&self) -> &PathBuf {
+        self.base_dir.as_ref().expect("have set base dir")
+    }
+
+    pub fn create_base_dir(&self) -> Result<()> {
+        if !self.base_dir().exists() {
+            fs::create_dir_all(&self.base_dir()).map_err(Into::into)
         } else {
             Ok(())
         }
     }
 
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
-        self.create_storage_dir()?;
-        super::key::read_or_generate_private_key(&self.storage_dir.join("sk")).map_err(Into::into)
+        self.create_base_dir()?;
+        super::key::read_or_generate_private_key(&self.base_dir().join("sk")).map_err(Into::into)
     }
 }

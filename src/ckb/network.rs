@@ -178,7 +178,7 @@ pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: Tas
         .build(SHandle);
     let listen_addr = service
         .listen(
-            format!("/ip4/127.0.0.1/tcp/{}", config.peer_listening_port)
+            format!("/ip4/127.0.0.1/tcp/{}", config.listening_port)
                 .parse()
                 .expect("valid tentacle address"),
         )

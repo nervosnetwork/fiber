@@ -590,7 +590,7 @@ async fn handle_ldk_events(
 
 pub async fn start_ldk(config: LdkConfig) {
     // Initialize the LDK data directory if necessary.
-    let ldk_data_dir = config.storage_dir.join("data");
+    let ldk_data_dir = config.base_dir().join("data");
     fs::create_dir_all(ldk_data_dir.clone()).unwrap();
 
     // ## Setup
@@ -909,7 +909,7 @@ pub async fn start_ldk(config: LdkConfig) {
     // Step 16: Initialize networking
 
     let peer_manager_connection_handler = peer_manager.clone();
-    let listening_port = config.peer_listening_port;
+    let listening_port = config.listening_port;
     let stop_listen_connect = Arc::new(AtomicBool::new(false));
     let stop_listen = Arc::clone(&stop_listen_connect);
     tokio::spawn(async move {

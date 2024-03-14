@@ -2,8 +2,6 @@ use clap_serde_derive::ClapSerde;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::config::get_default_ldk_dir;
-
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -98,22 +96,77 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
 // [derive feature: an attribute to add a prefix to all arg names in a struct, for use with flatten · Issue #3513 · clap-rs/clap](https://github.com/clap-rs/clap/issues/3513)
 #[derive(ClapSerde, Debug, Clone)]
 pub struct LdkConfig {
-    #[arg(name = "LDK_BITCOIN_NETWORK", long = "ldk-bitcoin-network", env, default_value = "testnet")]
+    /// bitcoin network
+    #[arg(
+        name = "LDK_BITCOIN_NETWORK",
+        long = "ldk-bitcoin-network",
+        env,
+        default_value = "testnet"
+    )]
     pub(crate) bitcoin_network: Network,
-    #[arg(name = "LDK_BITCOIN_RPC_USERNAME", long = "ldk-bitcoin-rpc-username", env)]
+
+    /// bitcoin rpc username
+    #[arg(
+        name = "LDK_BITCOIN_RPC_USERNAME",
+        long = "ldk-bitcoin-rpc-username",
+        env
+    )]
     pub(crate) bitcoin_rpc_username: String,
-    #[arg(name = "LDK_BITCOIN_RPC_PASSWORD", long = "ldk-bitcoin-rpc-password", env)]
+
+    /// bitcoin rpc password
+    #[arg(
+        name = "LDK_BITCOIN_RPC_PASSWORD",
+        long = "ldk-bitcoin-rpc-password",
+        env
+    )]
     pub(crate) bitcoin_rpc_password: String,
-    #[arg(name =  "LDK_BITCOIN_RPC_PORT", long = "ldk-bitcoin-rpc-port", env, default_value = "18332")]
+
+    /// bitcoin rpc service port
+    #[arg(
+        name = "LDK_BITCOIN_RPC_PORT",
+        long = "ldk-bitcoin-rpc-port",
+        env,
+        default_value = "18332"
+    )]
     pub(crate) bitcoin_rpc_port: u16,
-    #[arg(name =  "LDK_BITCOIN_RPC_HOST", long = "ldk-bitcoin-rpc-host", env, default_value = "127.0.0.1")]
+
+    /// bitcoin rpc service hostname
+    #[arg(
+        name = "LDK_BITCOIN_RPC_HOST",
+        long = "ldk-bitcoin-rpc-host",
+        env,
+        default_value = "127.0.0.1"
+    )]
     pub(crate) bitcoin_rpc_host: String,
-    #[arg(name = "LDK_STORAGE_DIR", long="ldk-storage-dir", env, default_value = get_default_ldk_dir().into_os_string())]
-    pub(crate) storage_dir: PathBuf,
-    #[arg(name =  "LDK_PEER_LISTENING_PORT", long = "ldk-peer-listening-port", env)]
-    pub(crate) peer_listening_port: u16,
+
+    /// ldk base directory
+    #[arg(
+        name = "LDK_BASE_DIR",
+        long = "ldk-base-dir",
+        env,
+        help = "base directory for ldk [default: $BASE_DIR/ldk]"
+    )]
+    pub(crate) base_dir: Option<PathBuf>,
+
+    /// listening port of bitcoin lightning network
+    #[arg(name = "LDK_LISTENING_PORT", long = "ldk-listening-port", env)]
+    pub(crate) listening_port: u16,
+
+    /// addresses to be announced to lightning network (separated by `,`)
     #[arg(name =  "LDK_ANNOUNCED_LISTEN_ADDR", long = "ldk-announced-listen-addr", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_listen_addr: Vec<SocketAddress>,
-    #[arg(name =  "LDK_ANNOUNCED_NODE_NAME", long = "ldk-announced-node-name", env)]
+
+    /// node name to be announced to lightning network
+    #[arg(
+        name = "LDK_ANNOUNCED_NODE_NAME",
+        long = "ldk-announced-node-name",
+        env
+    )]
     pub(crate) announced_node_name: AnnouncedNodeName,
+}
+
+impl LdkConfig {
+    pub fn base_dir(&self) -> &PathBuf {
+        self.base_dir.as_ref().expect("have set base dir")
+    }
 }
