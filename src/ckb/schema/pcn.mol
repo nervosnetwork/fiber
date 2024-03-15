@@ -1,6 +1,29 @@
-array Byte32 [byte; 32];
+import blockchain;
+
+array Byte64 [byte; 64];
 array Byte33 [byte; 33];
-array Uint64 [byte; 8];
+vector Byte64Vec <Byte64>;
+
+table OpenChannel {
+    chain_hash:                  Byte32,
+    channel_id:                  Byte32,
+    funding_type_script:         ScriptOpt,
+    funding_amount:              Uint64,
+    funding_fee_rate:            Uint64,
+    commitment_fee_rate:         Uint64,
+    max_tlc_value_in_flight:     Uint64,
+    max_accept_tlcs:             Uint64,
+    min_tlc_value:               Uint64,
+    to_self_delay:               Uint64,
+    funding_pubkey:              Byte33,
+    revocation_basepoint:        Byte33,
+    payment_basepoint:           Byte33,
+    delayed_payment_basepoint:   Byte33,
+    tlc_basepoint:               Byte33,
+    first_per_commitment_point:  Byte33,
+    second_per_commitment_point: Byte33,
+    channel_flags:               byte,
+}
 
 table AcceptChannel {
     channel_id:                  Byte32,
@@ -16,4 +39,97 @@ table AcceptChannel {
     tlc_basepoint:               Byte33,
     first_per_commitment_point:  Byte33,
     second_per_commitment_point: Byte33,
+}
+
+table CommitmentSigned {
+    channel_id:     Byte32,
+    signature:      Byte64,
+}
+
+table TxSignatures {
+    channel_id: Byte32,
+    tx_hash:    Byte32,
+    witnesses:  BytesVec,
+}
+
+table ChannelReady {
+    channel_id: Byte32,
+}
+
+table TxAdd {
+    channel_id: Byte32,
+    tx:         Transaction,
+}
+
+table TxRemove {
+    channel_id: Byte32,
+    tx:         Transaction,
+}
+
+table TxComplete {
+    channel_id: Byte32,
+}
+
+table TxAbort {
+    channel_id: Byte32,
+    message:    Bytes,
+}
+
+table TxInitRBF {
+    channel_id: Byte32,
+    fee_rate:   Uint64,
+}
+
+table TxAckRBF {
+    channel_id: Byte32,
+}
+
+table Shutdown {
+    channel_id: Byte32,
+    close_script: Script,
+}
+
+table ClosingSigned {
+    channel_id: Byte32,
+    fee:        Uint64,
+    signature:  Byte64,
+}
+
+table AddTlc {
+    channel_id:     Byte32,
+    tlc_id:         Uint64,
+    amount:         Uint64,
+    payment_hash:   Byte32,
+    expiry:         Uint64,
+}
+
+table TlcsSigned {
+    channel_id:     Byte32,
+    signature:      Byte64,
+    tlc_signatures: Byte64Vec,
+}
+
+table RevokeAndAck {
+    channel_id:                 Byte32,
+    per_commitment_secret:      Byte32,
+    next_per_commitment_point:  Byte33,
+}
+
+struct RemoveTlcFulfill {
+    payment_preimage:   Byte32,
+}
+
+struct RemoveTlcFail {
+    error_code:         Uint32,
+}
+
+union RemoveTlcReason {
+    RemoveTlcFulfill,
+    RemoveTlcFail,
+}
+
+table RemoveTlc {
+    channel_id:         Byte32,
+    tlc_id:             Uint64,
+    reason:             RemoveTlcReason,
 }
