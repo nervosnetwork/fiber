@@ -49,6 +49,8 @@ log = "0.4.21"
 futures = "0.3.30"
 once_cell = "1.19.0"
 tokio-util = { version = "0.7.10", features = ["rt"] }
+molecule = { version = "0.7.5", default-features = false }
+ckb-gen-types = "0.114.0"
 
 [profile.release]
 panic = "abort"

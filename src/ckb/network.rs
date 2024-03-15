@@ -6,7 +6,6 @@ use futures::{
 use log::{debug, info};
 use std::collections::HashMap;
 use std::{str, time::Duration};
-use tentacle::{bytes::Bytes, secio::PeerId};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -18,6 +17,7 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
+use tentacle::{bytes::Bytes, secio::PeerId};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::CkbConfig;
