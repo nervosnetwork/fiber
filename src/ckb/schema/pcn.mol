@@ -1,0 +1,19 @@
+array Byte32 [byte; 32];
+array Byte33 [byte; 33];
+array Uint64 [byte; 8];
+
+table AcceptChannel {
+    channel_id:                  Byte32,
+    funding_amount:              Uint64,
+    max_tlc_value_in_flight:     Uint64,
+    max_accept_tlcs:             Uint64,
+    min_tlc_value:               Uint64,
+    to_self_delay:               Uint64,
+    funding_pubkey:              Byte33,
+    revocation_basepoint:        Byte33,
+    payment_basepoint:           Byte33,
+    delayed_payment_basepoint:   Byte33,
+    tlc_basepoint:               Byte33,
+    first_per_commitment_point:  Byte33,
+    second_per_commitment_point: Byte33,
+}
