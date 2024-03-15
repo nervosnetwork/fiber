@@ -1,1 +1,5 @@
 /target
+
+# direnv related temp files/directories
+.direnv
+/result*
