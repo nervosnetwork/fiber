@@ -61,7 +61,9 @@ impl TryInto<FeeResponse> for JsonResponse {
         let errored = !self.0["errors"].is_null();
         Ok(FeeResponse {
             errored,
-            feerate_sat_per_kw: self.0["feerate"].as_f64().map(|feerate_btc_per_kvbyte| (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32),
+            feerate_sat_per_kw: self.0["feerate"].as_f64().map(|feerate_btc_per_kvbyte| {
+                (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32
+            }),
         })
     }
 }
@@ -78,7 +80,11 @@ impl TryInto<MempoolMinFeeResponse> for JsonResponse {
         assert_eq!(self.0["maxmempool"].as_u64(), Some(300000000));
         Ok(MempoolMinFeeResponse {
             errored,
-            feerate_sat_per_kw: self.0["mempoolminfee"].as_f64().map(|feerate_btc_per_kvbyte| (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32),
+            feerate_sat_per_kw: self.0["mempoolminfee"]
+                .as_f64()
+                .map(|feerate_btc_per_kvbyte| {
+                    (feerate_btc_per_kvbyte * 100_000_000.0 / 4.0).round() as u32
+                }),
         })
     }
 }

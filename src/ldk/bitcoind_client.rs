@@ -363,26 +363,26 @@ impl WalletSource for BitcoindClient {
                     vout: utxo.vout,
                 };
                 match utxo.address.payload.clone() {
-					Payload::WitnessProgram(wp) => match wp.version() {
-						WitnessVersion::V0 => WPubkeyHash::from_slice(wp.program().as_bytes())
-							.map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
-							.ok(),
-						// TODO: Add `Utxo::new_v1_p2tr` upstream.
-						WitnessVersion::V1 => XOnlyPublicKey::from_slice(wp.program().as_bytes())
-							.map(|_| Utxo {
-								outpoint,
-								output: TxOut {
-									value: utxo.amount,
-									script_pubkey: ScriptBuf::new_witness_program(&wp),
-								},
-								satisfaction_weight: WITNESS_SCALE_FACTOR as u64 +
+                    Payload::WitnessProgram(wp) => match wp.version() {
+                        WitnessVersion::V0 => WPubkeyHash::from_slice(wp.program().as_bytes())
+                            .map(|wpkh| Utxo::new_v0_p2wpkh(outpoint, utxo.amount, &wpkh))
+                            .ok(),
+                        // TODO: Add `Utxo::new_v1_p2tr` upstream.
+                        WitnessVersion::V1 => XOnlyPublicKey::from_slice(wp.program().as_bytes())
+                            .map(|_| Utxo {
+                                outpoint,
+                                output: TxOut {
+                                    value: utxo.amount,
+                                    script_pubkey: ScriptBuf::new_witness_program(&wp),
+                                },
+                                satisfaction_weight: WITNESS_SCALE_FACTOR as u64 +
 									1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
-							})
-							.ok(),
-						_ => None,
-					},
-					_ => None,
-				}
+                            })
+                            .ok(),
+                        _ => None,
+                    },
+                    _ => None,
+                }
             })
             .collect())
     }

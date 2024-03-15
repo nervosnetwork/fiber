@@ -29,7 +29,7 @@ pub async fn main() {
         }
     }
 
-    let _ = signal::ctrl_c().await.expect("Failed to listen for event");
+    signal::ctrl_c().await.expect("Failed to listen for event");
     TOKIO_TASK_TRACKER_WITH_CANCELLATION.close().await;
 }
 
