@@ -6,3 +6,5 @@ pub use network::start_ckb;
 
 mod key;
 pub use key::KeyPair;
+
+mod gen;
