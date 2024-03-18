@@ -7,7 +7,7 @@ pub use network::start_ckb;
 mod key;
 pub use key::KeyPair;
 
-mod gen;
+pub mod gen;
 
 mod command;
 pub use command::Command;

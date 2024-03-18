@@ -1,4 +1,4 @@
-mod pcn;
+pub mod pcn;
 
 // pcn module requires types from blockchain.
 // We need to re-export these types.
