@@ -25,8 +25,12 @@ pub struct CkbConfig {
     pub(crate) listening_port: u16,
 
     /// addresses to be announced to payment channel network (separated by `,`)
-    #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDR", long = "ckb-announced-listen-addr", env, value_parser, num_args = 0.., value_delimiter = ',')]
-    pub(crate) announced_listen_addr: Vec<String>,
+    #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDRS", long = "ckb-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    pub(crate) announced_listen_addrs: Vec<String>,
+
+    /// bootstrap node addresses to be connected at startup (separated by `,`)
+    #[arg(name = "CKB_BOOTNODES_ADDRS", long = "ckb-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    pub bootnode_addrs: Vec<String>,
 
     /// node name to be announced to lightning network
     #[arg(

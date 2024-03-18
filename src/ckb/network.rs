@@ -3,7 +3,7 @@ use futures::{
     future::select,
     prelude::*,
 };
-use log::{debug, info};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::{str, time::Duration};
 use tentacle::{
@@ -11,8 +11,8 @@ use tentacle::{
     builder::{MetaBuilder, ServiceBuilder},
     context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
     service::{
-        ProtocolHandle, ProtocolMeta, Service, ServiceAsyncControl, ServiceControl, ServiceError,
-        ServiceEvent, TargetProtocol, TargetSession,
+        ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
+        TargetProtocol, TargetSession,
     },
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
@@ -23,8 +23,10 @@ use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::CkbConfig;
-
 use super::Command;
+
+const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(1);
+const PCN_TARGET_PROTOCOL: TargetProtocol = TargetProtocol::Single(PCN_PROTOCOL_ID);
 
 // Any protocol will be abstracted into a ProtocolMeta structure.
 // From an implementation point of view, tentacle treats any protocol equally
@@ -170,7 +172,21 @@ impl ServiceHandle for SHandle {
     }
 }
 
-pub async fn process_command(_control: &ServiceAsyncControl, _command: Command) {}
+pub async fn process_command(control: &ServiceAsyncControl, command: Command) {
+    debug!("Processing command {:?}", command);
+    match command {
+        Command::Connect(addr) => {
+            // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
+            // e.g. whether the peer support some specific feature.
+            // TODO: If we are already connected to the peer, skip connecting.
+            debug!("Dialing {}", &addr);
+            let result = control.dial(addr.clone(), PCN_TARGET_PROTOCOL).await;
+            if let Err(err) = result {
+                error!("Dialing {} failed: {}", &addr, err);
+            }
+        }
+    }
+}
 
 pub async fn start_ckb(
     config: CkbConfig,
@@ -202,7 +218,7 @@ pub async fn start_ckb(
         PeerId::from(pk).to_base58()
     );
 
-    let mut control = service.control().to_owned();
+    let control = service.control().to_owned();
 
     tracker.spawn(async move {
         service.run().await;
