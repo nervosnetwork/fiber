@@ -1,10 +1,8 @@
-use futures::{
-    channel::oneshot::{channel, Sender},
-    future::select,
-    prelude::*,
+use log::{debug, error, info, warn};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
 };
-use log::{debug, error, info};
-use std::collections::HashMap;
 use std::{str, time::Duration};
 use tentacle::{
     async_trait,
@@ -18,119 +16,107 @@ use tentacle::{
     ProtocolId, SessionId,
 };
 use tentacle::{bytes::Bytes, secio::PeerId};
-use tokio::select as tselect;
+use tokio::select;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::types::{PCNMessage, TestMessage};
+use super::types::PCNMessage;
 use super::Command;
 use crate::CkbConfig;
 
-const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(1);
+const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 const PCN_TARGET_PROTOCOL: TargetProtocol = TargetProtocol::Single(PCN_PROTOCOL_ID);
-
-// Any protocol will be abstracted into a ProtocolMeta structure.
-// From an implementation point of view, tentacle treats any protocol equally
-fn create_meta(id: ProtocolId) -> ProtocolMeta {
-    MetaBuilder::new()
-        .id(id)
-        .service_handle(move || {
-            // All protocol use the same handle.
-            // This is just an example. In the actual environment, this should be a different handle.
-            let handle = Box::new(PHandle {
-                count: 0,
-                connected_session_ids: Vec::new(),
-                clear_handle: HashMap::new(),
-            });
-            ProtocolHandle::Callback(handle)
-        })
-        .build()
-}
 
 #[derive(Default)]
 struct PHandle {
-    count: usize,
-    connected_session_ids: Vec<SessionId>,
-    clear_handle: HashMap<SessionId, Sender<()>>,
+    peer_state: PeerState,
+}
+
+impl PHandle {
+    fn new(state: PeerState) -> Self {
+        Self { peer_state: state }
+    }
+
+    fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
+        MetaBuilder::new()
+            .id(id)
+            .service_handle(move || {
+                let handle = Box::new(self);
+                ProtocolHandle::Callback(handle)
+            })
+            .build()
+    }
 }
 
 #[async_trait]
 impl ServiceProtocol for PHandle {
-    async fn init(&mut self, context: &mut ProtocolContext) {
-        if context.proto_id == 0.into() {
-            let _ = context
-                .set_service_notify(0.into(), Duration::from_secs(5), 3)
-                .await;
-        }
-    }
+    async fn init(&mut self, _context: &mut ProtocolContext) {}
 
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, version: &str) {
         let session = context.session;
-        self.connected_session_ids.push(session.id);
         info!(
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
             context.proto_id, session.id, session.address, session.ty, version
         );
-        info!("connected sessions are: {:?}", self.connected_session_ids);
 
-        if context.proto_id != 1.into() {
-            return;
-        }
-
-        // Register a scheduled task to send data to the remote peer.
-        // Clear the task via channel when disconnected
-        let (sender, receiver) = channel();
-        self.clear_handle.insert(session.id, sender);
-        let session_id = session.id;
-        let interval_sender = context.control().clone();
-
-        let interval_send_task = async move {
-            let mut interval =
-                tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let msg = PCNMessage::TestMessage(TestMessage {
-                    bytes: "Just a simple test message".into(),
-                });
-                let _ = interval_sender
-                    .send_message_to(session_id, 1.into(), msg.to_molecule_bytes())
-                    .await;
+        let peer_id = context.session.remote_pubkey.clone().map(Into::into);
+        match peer_id {
+            Some(peer_id) => {
+                let mut peer_state = self.peer_state.lock().unwrap();
+                debug!("Trying to save session of peer {:?}", peer_id);
+                let peer = peer_state.entry(peer_id).or_default();
+                peer.sessions.insert(context.session.id);
             }
-        };
-
-        let task = select(receiver, interval_send_task.boxed());
-
-        let _ = context
-            .future_task(async move {
-                task.await;
-            })
-            .await;
+            _ => {
+                warn!("Connected to a peer without public key");
+                return;
+            }
+        }
     }
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
-        let new_list = self
-            .connected_session_ids
-            .iter()
-            .filter(|&id| id != &context.session.id)
-            .cloned()
-            .collect();
-        self.connected_session_ids = new_list;
-
-        if let Some(handle) = self.clear_handle.remove(&context.session.id) {
-            let _ = handle.send(());
-        }
-
         info!(
             "proto id [{}] close on session [{}]",
             context.proto_id, context.session.id
         );
+        let peer_id = context.session.remote_pubkey.clone().map(Into::into);
+        match peer_id.as_ref() {
+            Some(peer_id) => {
+                let mut peer_state = self.peer_state.lock().unwrap();
+                debug!("Trying to save session of peer {:?}", peer_id);
+                let peer = peer_state.get_mut(peer_id);
+                match peer {
+                    Some(peer) => {
+                        peer.sessions.remove(&context.session.id);
+                        if peer.sessions.is_empty() {
+                            debug!(
+                                "Peer {:?} disconnected, the last session was {}",
+                                peer_id, context.session.id
+                            );
+                            peer_state.remove(peer_id);
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "Trying to reomve a peer not recorded in peer state {:?}",
+                            peer_id
+                        )
+                    }
+                }
+            }
+            _ => {
+                warn!("Disconnected from a peer without public key");
+                return;
+            }
+        }
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        self.count += 1;
         info!(
-            "received from [{}]: proto [{}] data {:?}, message count: {}",
-            context.session.id, context.proto_id, &data, self.count
+            "received from [{}]: proto [{}] data {:?}",
+            context.session.id,
+            context.proto_id,
+            hex::encode(data.as_ref()),
         );
 
         macro_rules! unwrap_or_return {
@@ -159,12 +145,7 @@ impl ServiceProtocol for PHandle {
         }
     }
 
-    async fn notify(&mut self, context: &mut ProtocolContext, token: u64) {
-        info!(
-            "proto [{}] received notify token: {}",
-            context.proto_id, token
-        );
-    }
+    async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
 
 pub struct SHandle;
@@ -198,25 +179,83 @@ impl ServiceHandle for SHandle {
     }
 }
 
-pub async fn process_command(control: &ServiceAsyncControl, command: Command) {
-    debug!("Processing command {:?}", command);
-    match command {
-        Command::Connect(addr) => {
-            // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
-            // e.g. whether the peer support some specific feature.
-            // TODO: If we are already connected to the peer, skip connecting.
-            debug!("Dialing {}", &addr);
-            let result = control.dial(addr.clone(), PCN_TARGET_PROTOCOL).await;
-            if let Err(err) = result {
-                error!("Dialing {} failed: {}", &addr, err);
+type PeerState = Arc<Mutex<HashMap<PeerId, PeerInfo>>>;
+
+fn new_peer_state() -> PeerState {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+struct NetworkState {
+    control: ServiceAsyncControl,
+    peer_state: PeerState,
+    token: CancellationToken,
+    command_receiver: mpsc::Receiver<Command>,
+}
+
+impl NetworkState {
+    fn new(
+        control: ServiceAsyncControl,
+        peer_state: PeerState,
+        token: CancellationToken,
+        command_receiver: mpsc::Receiver<Command>,
+    ) -> Self {
+        Self {
+            control,
+            peer_state,
+            token,
+            command_receiver,
+        }
+    }
+
+    async fn process_command(&self, command: Command) {
+        debug!("Processing command {:?}", command);
+        match command {
+            Command::Connect(addr) => {
+                // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
+                // e.g. whether the peer support some specific feature.
+                // TODO: If we are already connected to the peer, skip connecting.
+                debug!("Dialing {}", &addr);
+                let result = self.control.dial(addr.clone(), PCN_TARGET_PROTOCOL).await;
+                if let Err(err) = result {
+                    error!("Dialing {} failed: {}", &addr, err);
+                }
+            }
+        }
+    }
+
+    async fn run(mut self) {
+        loop {
+            select! {
+                _ = self.token.cancelled() => {
+                    debug!("Cancellation received, shutting down tentacle service");
+                    let _ = self.control.shutdown().await;
+                    break;
+                }
+                command = self.command_receiver.recv() => {
+                    match command {
+                        None => {
+                            debug!("Command receiver completed, shutting down tentacle service");
+                            let _ = self.control.shutdown().await;
+                            break;
+                        }
+                        Some(command) => {
+                            self.process_command(command).await;
+                        }
+                    }
+                }
             }
         }
     }
 }
 
+#[derive(Debug, Default)]
+struct PeerInfo {
+    sessions: HashSet<SessionId>,
+}
+
 pub async fn start_ckb(
     config: CkbConfig,
-    mut command_receiver: mpsc::Receiver<Command>,
+    command_receiver: mpsc::Receiver<Command>,
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
@@ -224,9 +263,9 @@ pub async fn start_ckb(
         .read_or_generate_secret_key()
         .expect("read or generate secret key");
     let pk = kp.public_key();
+    let peer_state = new_peer_state();
     let mut service = ServiceBuilder::default()
-        .insert_protocol(create_meta(0.into()))
-        .insert_protocol(create_meta(1.into()))
+        .insert_protocol(PHandle::new(peer_state.clone()).create_meta(PCN_PROTOCOL_ID))
         .key_pair(kp)
         .build(SHandle);
     let listen_addr = service
@@ -252,26 +291,8 @@ pub async fn start_ckb(
     });
 
     tracker.spawn(async move {
-        loop {
-            tselect! {
-                _ = token.cancelled() => {
-                    debug!("Cancellation received, shutting down tentacle service");
-                    let _ = control.shutdown().await;
-                    break;
-                }
-                command = command_receiver.recv() => {
-                    match command {
-                        None => {
-                            debug!("Command receiver completed, shutting down tentacle service");
-                            let _ = control.shutdown().await;
-                            break;
-                        }
-                        Some(command) => {
-                            process_command(&control, command).await;
-                        }
-                    }
-                }
-            }
-        }
+        NetworkState::new(control, peer_state, token, command_receiver)
+            .run()
+            .await;
     });
 }
