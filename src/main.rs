@@ -1,6 +1,7 @@
 use ckb_pcn_node::{start_ckb, start_ldk, Config};
 use log::{debug, info};
-use tokio::signal;
+use tokio::sync::mpsc;
+use tokio::{select, signal};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTracker;
 
@@ -18,9 +19,26 @@ pub async fn main() {
                 start_ldk(ldk_config).await;
             }
             if let Some(ckb_config) = ckb {
+                let (command_sender, command_receiver) = mpsc::channel(1000);
                 info!("Starting ckb");
+
+                new_tokio_task_tracker().spawn(async move {
+                    let token = new_tokio_cancellation_token();
+                    let _command_sender = command_sender;
+                    loop {
+                        select! {
+                            _ = token.cancelled() => {
+                                debug!("Dropping command sender as tokio cancelled");
+                                break;
+                            }
+                            // TODO: Do some work related to command sender here,
+                        }
+                    }
+                });
+
                 start_ckb(
                     ckb_config,
+                    command_receiver,
                     new_tokio_cancellation_token(),
                     new_tokio_task_tracker(),
                 )

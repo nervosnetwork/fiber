@@ -8,3 +8,6 @@ mod key;
 pub use key::KeyPair;
 
 mod gen;
+
+mod command;
+pub use command::Command;

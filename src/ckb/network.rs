@@ -11,16 +11,20 @@ use tentacle::{
     builder::{MetaBuilder, ServiceBuilder},
     context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
     service::{
-        ProtocolHandle, ProtocolMeta, Service, ServiceError, ServiceEvent, TargetProtocol,
-        TargetSession,
+        ProtocolHandle, ProtocolMeta, Service, ServiceAsyncControl, ServiceControl, ServiceError,
+        ServiceEvent, TargetProtocol, TargetSession,
     },
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
 use tentacle::{bytes::Bytes, secio::PeerId};
+use tokio::select as tselect;
+use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::CkbConfig;
+
+use super::Command;
 
 // Any protocol will be abstracted into a ProtocolMeta structure.
 // From an implementation point of view, tentacle treats any protocol equally
@@ -166,7 +170,14 @@ impl ServiceHandle for SHandle {
     }
 }
 
-pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: TaskTracker) {
+pub async fn process_command(_control: &ServiceAsyncControl, _command: Command) {}
+
+pub async fn start_ckb(
+    config: CkbConfig,
+    mut command_receiver: mpsc::Receiver<Command>,
+    token: CancellationToken,
+    tracker: TaskTracker,
+) {
     let kp = config
         .read_or_generate_secret_key()
         .expect("read or generate secret key");
@@ -191,7 +202,7 @@ pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: Tas
         PeerId::from(pk).to_base58()
     );
 
-    let controller = service.control().to_owned();
+    let mut control = service.control().to_owned();
 
     tracker.spawn(async move {
         service.run().await;
@@ -199,8 +210,26 @@ pub async fn start_ckb(config: CkbConfig, token: CancellationToken, tracker: Tas
     });
 
     tracker.spawn(async move {
-        let _ = token.cancelled().await;
-        debug!("Cancellation received, shutting down tentacle service");
-        let _ = controller.shutdown().await;
+        loop {
+            tselect! {
+                _ = token.cancelled() => {
+                    debug!("Cancellation received, shutting down tentacle service");
+                    let _ = control.shutdown().await;
+                    break;
+                }
+                command = command_receiver.recv() => {
+                    match command {
+                        None => {
+                            debug!("Command receiver completed, shutting down tentacle service");
+                            let _ = control.shutdown().await;
+                            break;
+                        }
+                        Some(command) => {
+                            process_command(&control, command).await;
+                        }
+                    }
+                }
+            }
+        }
     });
 }
