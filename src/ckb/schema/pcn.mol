@@ -133,3 +133,28 @@ table RemoveTlc {
     tlc_id:             Uint64,
     reason:             RemoveTlcReason,
 }
+
+table TestMessage {
+    bytes: Bytes,
+}
+
+union PCNMessage {
+    TestMessage,
+    OpenChannel,
+    AcceptChannel,
+    CommitmentSigned,
+    TxSignatures,
+    ChannelReady,
+    TxAdd,
+    TxRemove,
+    TxComplete,
+    TxAbort,
+    TxInitRBF,
+    TxAckRBF,
+    Shutdown,
+    ClosingSigned,
+    AddTlc,
+    TlcsSigned,
+    RevokeAndAck,
+    RemoveTlc,
+}
