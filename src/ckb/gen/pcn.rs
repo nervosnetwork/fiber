@@ -3,8 +3,8 @@
 use super::blockchain::*;
 use molecule::prelude::*;
 #[derive(Clone)]
-pub struct Byte64(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Byte64 {
+pub struct Signature(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for Signature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -13,25 +13,25 @@ impl ::core::fmt::LowerHex for Byte64 {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for Byte64 {
+impl ::core::fmt::Debug for Signature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for Byte64 {
+impl ::core::fmt::Display for Signature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl ::core::default::Default for Byte64 {
+impl ::core::default::Default for Signature {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Byte64::new_unchecked(v)
+        Signature::new_unchecked(v)
     }
 }
-impl Byte64 {
+impl Signature {
     const DEFAULT_VALUE: [u8; 64] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -235,15 +235,15 @@ impl Byte64 {
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
-    pub fn as_reader<'r>(&'r self) -> Byte64Reader<'r> {
-        Byte64Reader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> SignatureReader<'r> {
+        SignatureReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for Byte64 {
-    type Builder = Byte64Builder;
-    const NAME: &'static str = "Byte64";
+impl molecule::prelude::Entity for Signature {
+    type Builder = SignatureBuilder;
+    const NAME: &'static str = "Signature";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Byte64(data)
+        Signature(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -252,10 +252,10 @@ impl molecule::prelude::Entity for Byte64 {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte64Reader::from_slice(slice).map(|reader| reader.to_entity())
+        SignatureReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte64Reader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        SignatureReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -330,8 +330,8 @@ impl molecule::prelude::Entity for Byte64 {
     }
 }
 #[derive(Clone, Copy)]
-pub struct Byte64Reader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for Byte64Reader<'r> {
+pub struct SignatureReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for SignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -340,19 +340,19 @@ impl<'r> ::core::fmt::LowerHex for Byte64Reader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for Byte64Reader<'r> {
+impl<'r> ::core::fmt::Debug for SignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for Byte64Reader<'r> {
+impl<'r> ::core::fmt::Display for SignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl<'r> Byte64Reader<'r> {
+impl<'r> SignatureReader<'r> {
     pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 64;
@@ -552,14 +552,14 @@ impl<'r> Byte64Reader<'r> {
         self.as_slice()
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for Byte64Reader<'r> {
-    type Entity = Byte64;
-    const NAME: &'static str = "Byte64Reader";
+impl<'r> molecule::prelude::Reader<'r> for SignatureReader<'r> {
+    type Entity = Signature;
+    const NAME: &'static str = "SignatureReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        Byte64Reader(slice)
+        SignatureReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -573,15 +573,15 @@ impl<'r> molecule::prelude::Reader<'r> for Byte64Reader<'r> {
         Ok(())
     }
 }
-pub struct Byte64Builder(pub(crate) [Byte; 64]);
-impl ::core::fmt::Debug for Byte64Builder {
+pub struct SignatureBuilder(pub(crate) [Byte; 64]);
+impl ::core::fmt::Debug for SignatureBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
     }
 }
-impl ::core::default::Default for Byte64Builder {
+impl ::core::default::Default for SignatureBuilder {
     fn default() -> Self {
-        Byte64Builder([
+        SignatureBuilder([
             Byte::default(),
             Byte::default(),
             Byte::default(),
@@ -649,7 +649,7 @@ impl ::core::default::Default for Byte64Builder {
         ])
     }
 }
-impl Byte64Builder {
+impl SignatureBuilder {
     pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 64;
@@ -914,9 +914,9 @@ impl Byte64Builder {
         self
     }
 }
-impl molecule::prelude::Builder for Byte64Builder {
-    type Entity = Byte64;
-    const NAME: &'static str = "Byte64Builder";
+impl molecule::prelude::Builder for SignatureBuilder {
+    type Entity = Signature;
+    const NAME: &'static str = "SignatureBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -991,12 +991,12 @@ impl molecule::prelude::Builder for Byte64Builder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Byte64::new_unchecked(inner.into())
+        Signature::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
-pub struct Byte33(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Byte33 {
+pub struct Pubkey(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for Pubkey {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1005,25 +1005,25 @@ impl ::core::fmt::LowerHex for Byte33 {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for Byte33 {
+impl ::core::fmt::Debug for Pubkey {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for Byte33 {
+impl ::core::fmt::Display for Pubkey {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl ::core::default::Default for Byte33 {
+impl ::core::default::Default for Pubkey {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Byte33::new_unchecked(v)
+        Pubkey::new_unchecked(v)
     }
 }
-impl Byte33 {
+impl Pubkey {
     const DEFAULT_VALUE: [u8; 33] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0,
@@ -1133,15 +1133,15 @@ impl Byte33 {
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
-    pub fn as_reader<'r>(&'r self) -> Byte33Reader<'r> {
-        Byte33Reader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> PubkeyReader<'r> {
+        PubkeyReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for Byte33 {
-    type Builder = Byte33Builder;
-    const NAME: &'static str = "Byte33";
+impl molecule::prelude::Entity for Pubkey {
+    type Builder = PubkeyBuilder;
+    const NAME: &'static str = "Pubkey";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Byte33(data)
+        Pubkey(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -1150,10 +1150,10 @@ impl molecule::prelude::Entity for Byte33 {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte33Reader::from_slice(slice).map(|reader| reader.to_entity())
+        PubkeyReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte33Reader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        PubkeyReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -1197,8 +1197,8 @@ impl molecule::prelude::Entity for Byte33 {
     }
 }
 #[derive(Clone, Copy)]
-pub struct Byte33Reader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for Byte33Reader<'r> {
+pub struct PubkeyReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PubkeyReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1207,19 +1207,19 @@ impl<'r> ::core::fmt::LowerHex for Byte33Reader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for Byte33Reader<'r> {
+impl<'r> ::core::fmt::Debug for PubkeyReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for Byte33Reader<'r> {
+impl<'r> ::core::fmt::Display for PubkeyReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl<'r> Byte33Reader<'r> {
+impl<'r> PubkeyReader<'r> {
     pub const TOTAL_SIZE: usize = 33;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 33;
@@ -1326,14 +1326,14 @@ impl<'r> Byte33Reader<'r> {
         self.as_slice()
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for Byte33Reader<'r> {
-    type Entity = Byte33;
-    const NAME: &'static str = "Byte33Reader";
+impl<'r> molecule::prelude::Reader<'r> for PubkeyReader<'r> {
+    type Entity = Pubkey;
+    const NAME: &'static str = "PubkeyReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        Byte33Reader(slice)
+        PubkeyReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -1347,15 +1347,15 @@ impl<'r> molecule::prelude::Reader<'r> for Byte33Reader<'r> {
         Ok(())
     }
 }
-pub struct Byte33Builder(pub(crate) [Byte; 33]);
-impl ::core::fmt::Debug for Byte33Builder {
+pub struct PubkeyBuilder(pub(crate) [Byte; 33]);
+impl ::core::fmt::Debug for PubkeyBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
     }
 }
-impl ::core::default::Default for Byte33Builder {
+impl ::core::default::Default for PubkeyBuilder {
     fn default() -> Self {
-        Byte33Builder([
+        PubkeyBuilder([
             Byte::default(),
             Byte::default(),
             Byte::default(),
@@ -1392,7 +1392,7 @@ impl ::core::default::Default for Byte33Builder {
         ])
     }
 }
-impl Byte33Builder {
+impl PubkeyBuilder {
     pub const TOTAL_SIZE: usize = 33;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 33;
@@ -1533,9 +1533,9 @@ impl Byte33Builder {
         self
     }
 }
-impl molecule::prelude::Builder for Byte33Builder {
-    type Entity = Byte33;
-    const NAME: &'static str = "Byte33Builder";
+impl molecule::prelude::Builder for PubkeyBuilder {
+    type Entity = Pubkey;
+    const NAME: &'static str = "PubkeyBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -1579,12 +1579,12 @@ impl molecule::prelude::Builder for Byte33Builder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Byte33::new_unchecked(inner.into())
+        Pubkey::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
-pub struct Byte64Vec(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Byte64Vec {
+pub struct SignatureVec(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for SignatureVec {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1593,12 +1593,12 @@ impl ::core::fmt::LowerHex for Byte64Vec {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for Byte64Vec {
+impl ::core::fmt::Debug for SignatureVec {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for Byte64Vec {
+impl ::core::fmt::Display for SignatureVec {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} [", Self::NAME)?;
         for i in 0..self.len() {
@@ -1611,13 +1611,13 @@ impl ::core::fmt::Display for Byte64Vec {
         write!(f, "]")
     }
 }
-impl ::core::default::Default for Byte64Vec {
+impl ::core::default::Default for SignatureVec {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Byte64Vec::new_unchecked(v)
+        SignatureVec::new_unchecked(v)
     }
 }
-impl Byte64Vec {
+impl SignatureVec {
     const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
     pub const ITEM_SIZE: usize = 64;
     pub fn total_size(&self) -> usize {
@@ -1632,27 +1632,27 @@ impl Byte64Vec {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn get(&self, idx: usize) -> Option<Byte64> {
+    pub fn get(&self, idx: usize) -> Option<Signature> {
         if idx >= self.len() {
             None
         } else {
             Some(self.get_unchecked(idx))
         }
     }
-    pub fn get_unchecked(&self, idx: usize) -> Byte64 {
+    pub fn get_unchecked(&self, idx: usize) -> Signature {
         let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
         let end = start + Self::ITEM_SIZE;
-        Byte64::new_unchecked(self.0.slice(start..end))
+        Signature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn as_reader<'r>(&'r self) -> Byte64VecReader<'r> {
-        Byte64VecReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> SignatureVecReader<'r> {
+        SignatureVecReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for Byte64Vec {
-    type Builder = Byte64VecBuilder;
-    const NAME: &'static str = "Byte64Vec";
+impl molecule::prelude::Entity for SignatureVec {
+    type Builder = SignatureVecBuilder;
+    const NAME: &'static str = "SignatureVec";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Byte64Vec(data)
+        SignatureVec(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -1661,10 +1661,10 @@ impl molecule::prelude::Entity for Byte64Vec {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte64VecReader::from_slice(slice).map(|reader| reader.to_entity())
+        SignatureVecReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte64VecReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        SignatureVecReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -1674,8 +1674,8 @@ impl molecule::prelude::Entity for Byte64Vec {
     }
 }
 #[derive(Clone, Copy)]
-pub struct Byte64VecReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for Byte64VecReader<'r> {
+pub struct SignatureVecReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for SignatureVecReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1684,12 +1684,12 @@ impl<'r> ::core::fmt::LowerHex for Byte64VecReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for Byte64VecReader<'r> {
+impl<'r> ::core::fmt::Debug for SignatureVecReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for Byte64VecReader<'r> {
+impl<'r> ::core::fmt::Display for SignatureVecReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} [", Self::NAME)?;
         for i in 0..self.len() {
@@ -1702,7 +1702,7 @@ impl<'r> ::core::fmt::Display for Byte64VecReader<'r> {
         write!(f, "]")
     }
 }
-impl<'r> Byte64VecReader<'r> {
+impl<'r> SignatureVecReader<'r> {
     pub const ITEM_SIZE: usize = 64;
     pub fn total_size(&self) -> usize {
         molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
@@ -1716,27 +1716,27 @@ impl<'r> Byte64VecReader<'r> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn get(&self, idx: usize) -> Option<Byte64Reader<'r>> {
+    pub fn get(&self, idx: usize) -> Option<SignatureReader<'r>> {
         if idx >= self.len() {
             None
         } else {
             Some(self.get_unchecked(idx))
         }
     }
-    pub fn get_unchecked(&self, idx: usize) -> Byte64Reader<'r> {
+    pub fn get_unchecked(&self, idx: usize) -> SignatureReader<'r> {
         let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
         let end = start + Self::ITEM_SIZE;
-        Byte64Reader::new_unchecked(&self.as_slice()[start..end])
+        SignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for Byte64VecReader<'r> {
-    type Entity = Byte64Vec;
-    const NAME: &'static str = "Byte64VecReader";
+impl<'r> molecule::prelude::Reader<'r> for SignatureVecReader<'r> {
+    type Entity = SignatureVec;
+    const NAME: &'static str = "SignatureVecReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        Byte64VecReader(slice)
+        SignatureVecReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -1762,32 +1762,32 @@ impl<'r> molecule::prelude::Reader<'r> for Byte64VecReader<'r> {
     }
 }
 #[derive(Debug, Default)]
-pub struct Byte64VecBuilder(pub(crate) Vec<Byte64>);
-impl Byte64VecBuilder {
+pub struct SignatureVecBuilder(pub(crate) Vec<Signature>);
+impl SignatureVecBuilder {
     pub const ITEM_SIZE: usize = 64;
-    pub fn set(mut self, v: Vec<Byte64>) -> Self {
+    pub fn set(mut self, v: Vec<Signature>) -> Self {
         self.0 = v;
         self
     }
-    pub fn push(mut self, v: Byte64) -> Self {
+    pub fn push(mut self, v: Signature) -> Self {
         self.0.push(v);
         self
     }
-    pub fn extend<T: ::core::iter::IntoIterator<Item = Byte64>>(mut self, iter: T) -> Self {
+    pub fn extend<T: ::core::iter::IntoIterator<Item = Signature>>(mut self, iter: T) -> Self {
         for elem in iter {
             self.0.push(elem);
         }
         self
     }
-    pub fn replace(&mut self, index: usize, v: Byte64) -> Option<Byte64> {
+    pub fn replace(&mut self, index: usize, v: Signature) -> Option<Signature> {
         self.0
             .get_mut(index)
             .map(|item| ::core::mem::replace(item, v))
     }
 }
-impl molecule::prelude::Builder for Byte64VecBuilder {
-    type Entity = Byte64Vec;
-    const NAME: &'static str = "Byte64VecBuilder";
+impl molecule::prelude::Builder for SignatureVecBuilder {
+    type Entity = SignatureVec;
+    const NAME: &'static str = "SignatureVecBuilder";
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.0.len()
     }
@@ -1802,12 +1802,12 @@ impl molecule::prelude::Builder for Byte64VecBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Byte64Vec::new_unchecked(inner.into())
+        SignatureVec::new_unchecked(inner.into())
     }
 }
-pub struct Byte64VecIterator(Byte64Vec, usize, usize);
-impl ::core::iter::Iterator for Byte64VecIterator {
-    type Item = Byte64;
+pub struct SignatureVecIterator(SignatureVec, usize, usize);
+impl ::core::iter::Iterator for SignatureVecIterator {
+    type Item = Signature;
     fn next(&mut self) -> Option<Self::Item> {
         if self.1 >= self.2 {
             None
@@ -1818,27 +1818,27 @@ impl ::core::iter::Iterator for Byte64VecIterator {
         }
     }
 }
-impl ::core::iter::ExactSizeIterator for Byte64VecIterator {
+impl ::core::iter::ExactSizeIterator for SignatureVecIterator {
     fn len(&self) -> usize {
         self.2 - self.1
     }
 }
-impl ::core::iter::IntoIterator for Byte64Vec {
-    type Item = Byte64;
-    type IntoIter = Byte64VecIterator;
+impl ::core::iter::IntoIterator for SignatureVec {
+    type Item = Signature;
+    type IntoIter = SignatureVecIterator;
     fn into_iter(self) -> Self::IntoIter {
         let len = self.len();
-        Byte64VecIterator(self, 0, len)
+        SignatureVecIterator(self, 0, len)
     }
 }
-impl<'r> Byte64VecReader<'r> {
-    pub fn iter<'t>(&'t self) -> Byte64VecReaderIterator<'t, 'r> {
-        Byte64VecReaderIterator(&self, 0, self.len())
+impl<'r> SignatureVecReader<'r> {
+    pub fn iter<'t>(&'t self) -> SignatureVecReaderIterator<'t, 'r> {
+        SignatureVecReaderIterator(&self, 0, self.len())
     }
 }
-pub struct Byte64VecReaderIterator<'t, 'r>(&'t Byte64VecReader<'r>, usize, usize);
-impl<'t: 'r, 'r> ::core::iter::Iterator for Byte64VecReaderIterator<'t, 'r> {
-    type Item = Byte64Reader<'t>;
+pub struct SignatureVecReaderIterator<'t, 'r>(&'t SignatureVecReader<'r>, usize, usize);
+impl<'t: 'r, 'r> ::core::iter::Iterator for SignatureVecReaderIterator<'t, 'r> {
+    type Item = SignatureReader<'t>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.1 >= self.2 {
             None
@@ -1849,7 +1849,7 @@ impl<'t: 'r, 'r> ::core::iter::Iterator for Byte64VecReaderIterator<'t, 'r> {
         }
     }
 }
-impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for Byte64VecReaderIterator<'t, 'r> {
+impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for SignatureVecReaderIterator<'t, 'r> {
     fn len(&self) -> usize {
         self.2 - self.1
     }
@@ -2034,47 +2034,47 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[44..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_pubkey(&self) -> Byte33 {
+    pub fn funding_pubkey(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn revocation_basepoint(&self) -> Byte33 {
+    pub fn revocation_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn payment_basepoint(&self) -> Byte33 {
+    pub fn payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         let end = molecule::unpack_number(&slice[56..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn delayed_payment_basepoint(&self) -> Byte33 {
+    pub fn delayed_payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
         let end = molecule::unpack_number(&slice[60..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tlc_basepoint(&self) -> Byte33 {
+    pub fn tlc_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[60..]) as usize;
         let end = molecule::unpack_number(&slice[64..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn first_per_commitment_point(&self) -> Byte33 {
+    pub fn first_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[64..]) as usize;
         let end = molecule::unpack_number(&slice[68..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn second_per_commitment_point(&self) -> Byte33 {
+    pub fn second_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[68..]) as usize;
         let end = molecule::unpack_number(&slice[72..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
     pub fn channel_flags(&self) -> Byte {
         let slice = self.as_slice();
@@ -2290,47 +2290,47 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[44..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_pubkey(&self) -> Byte33Reader<'r> {
+    pub fn funding_pubkey(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn revocation_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn revocation_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn payment_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         let end = molecule::unpack_number(&slice[56..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn delayed_payment_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn delayed_payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
         let end = molecule::unpack_number(&slice[60..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tlc_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn tlc_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[60..]) as usize;
         let end = molecule::unpack_number(&slice[64..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn first_per_commitment_point(&self) -> Byte33Reader<'r> {
+    pub fn first_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[64..]) as usize;
         let end = molecule::unpack_number(&slice[68..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn second_per_commitment_point(&self) -> Byte33Reader<'r> {
+    pub fn second_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[68..]) as usize;
         let end = molecule::unpack_number(&slice[72..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn channel_flags(&self) -> ByteReader<'r> {
         let slice = self.as_slice();
@@ -2399,13 +2399,13 @@ impl<'r> molecule::prelude::Reader<'r> for OpenChannelReader<'r> {
         Uint64Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         Uint64Reader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
         Uint64Reader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[14]..offsets[15]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[15]..offsets[16]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[16]..offsets[17]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[14]..offsets[15]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[15]..offsets[16]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[16]..offsets[17]], compatible)?;
         ByteReader::verify(&slice[offsets[17]..offsets[18]], compatible)?;
         Ok(())
     }
@@ -2422,13 +2422,13 @@ pub struct OpenChannelBuilder {
     pub(crate) max_accept_tlcs: Uint64,
     pub(crate) min_tlc_value: Uint64,
     pub(crate) to_self_delay: Uint64,
-    pub(crate) funding_pubkey: Byte33,
-    pub(crate) revocation_basepoint: Byte33,
-    pub(crate) payment_basepoint: Byte33,
-    pub(crate) delayed_payment_basepoint: Byte33,
-    pub(crate) tlc_basepoint: Byte33,
-    pub(crate) first_per_commitment_point: Byte33,
-    pub(crate) second_per_commitment_point: Byte33,
+    pub(crate) funding_pubkey: Pubkey,
+    pub(crate) revocation_basepoint: Pubkey,
+    pub(crate) payment_basepoint: Pubkey,
+    pub(crate) delayed_payment_basepoint: Pubkey,
+    pub(crate) tlc_basepoint: Pubkey,
+    pub(crate) first_per_commitment_point: Pubkey,
+    pub(crate) second_per_commitment_point: Pubkey,
     pub(crate) channel_flags: Byte,
 }
 impl OpenChannelBuilder {
@@ -2473,31 +2473,31 @@ impl OpenChannelBuilder {
         self.to_self_delay = v;
         self
     }
-    pub fn funding_pubkey(mut self, v: Byte33) -> Self {
+    pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
         self.funding_pubkey = v;
         self
     }
-    pub fn revocation_basepoint(mut self, v: Byte33) -> Self {
+    pub fn revocation_basepoint(mut self, v: Pubkey) -> Self {
         self.revocation_basepoint = v;
         self
     }
-    pub fn payment_basepoint(mut self, v: Byte33) -> Self {
+    pub fn payment_basepoint(mut self, v: Pubkey) -> Self {
         self.payment_basepoint = v;
         self
     }
-    pub fn delayed_payment_basepoint(mut self, v: Byte33) -> Self {
+    pub fn delayed_payment_basepoint(mut self, v: Pubkey) -> Self {
         self.delayed_payment_basepoint = v;
         self
     }
-    pub fn tlc_basepoint(mut self, v: Byte33) -> Self {
+    pub fn tlc_basepoint(mut self, v: Pubkey) -> Self {
         self.tlc_basepoint = v;
         self
     }
-    pub fn first_per_commitment_point(mut self, v: Byte33) -> Self {
+    pub fn first_per_commitment_point(mut self, v: Pubkey) -> Self {
         self.first_per_commitment_point = v;
         self
     }
-    pub fn second_per_commitment_point(mut self, v: Byte33) -> Self {
+    pub fn second_per_commitment_point(mut self, v: Pubkey) -> Self {
         self.second_per_commitment_point = v;
         self
     }
@@ -2739,50 +2739,50 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_pubkey(&self) -> Byte33 {
+    pub fn funding_pubkey(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn revocation_basepoint(&self) -> Byte33 {
+    pub fn revocation_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn payment_basepoint(&self) -> Byte33 {
+    pub fn payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn delayed_payment_basepoint(&self) -> Byte33 {
+    pub fn delayed_payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tlc_basepoint(&self) -> Byte33 {
+    pub fn tlc_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn first_per_commitment_point(&self) -> Byte33 {
+    pub fn first_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        Byte33::new_unchecked(self.0.slice(start..end))
+        Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn second_per_commitment_point(&self) -> Byte33 {
+    pub fn second_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[56..]) as usize;
-            Byte33::new_unchecked(self.0.slice(start..end))
+            Pubkey::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte33::new_unchecked(self.0.slice(start..))
+            Pubkey::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AcceptChannelReader<'r> {
@@ -2945,50 +2945,50 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_pubkey(&self) -> Byte33Reader<'r> {
+    pub fn funding_pubkey(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn revocation_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn revocation_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn payment_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn delayed_payment_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn delayed_payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tlc_basepoint(&self) -> Byte33Reader<'r> {
+    pub fn tlc_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn first_per_commitment_point(&self) -> Byte33Reader<'r> {
+    pub fn first_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
-        Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn second_per_commitment_point(&self) -> Byte33Reader<'r> {
+    pub fn second_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[56..]) as usize;
-            Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+            PubkeyReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte33Reader::new_unchecked(&self.as_slice()[start..])
+            PubkeyReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -3044,13 +3044,13 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
         Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Uint64Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         Uint64Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
         Ok(())
     }
 }
@@ -3062,13 +3062,13 @@ pub struct AcceptChannelBuilder {
     pub(crate) max_accept_tlcs: Uint64,
     pub(crate) min_tlc_value: Uint64,
     pub(crate) to_self_delay: Uint64,
-    pub(crate) funding_pubkey: Byte33,
-    pub(crate) revocation_basepoint: Byte33,
-    pub(crate) payment_basepoint: Byte33,
-    pub(crate) delayed_payment_basepoint: Byte33,
-    pub(crate) tlc_basepoint: Byte33,
-    pub(crate) first_per_commitment_point: Byte33,
-    pub(crate) second_per_commitment_point: Byte33,
+    pub(crate) funding_pubkey: Pubkey,
+    pub(crate) revocation_basepoint: Pubkey,
+    pub(crate) payment_basepoint: Pubkey,
+    pub(crate) delayed_payment_basepoint: Pubkey,
+    pub(crate) tlc_basepoint: Pubkey,
+    pub(crate) first_per_commitment_point: Pubkey,
+    pub(crate) second_per_commitment_point: Pubkey,
 }
 impl AcceptChannelBuilder {
     pub const FIELD_COUNT: usize = 13;
@@ -3096,31 +3096,31 @@ impl AcceptChannelBuilder {
         self.to_self_delay = v;
         self
     }
-    pub fn funding_pubkey(mut self, v: Byte33) -> Self {
+    pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
         self.funding_pubkey = v;
         self
     }
-    pub fn revocation_basepoint(mut self, v: Byte33) -> Self {
+    pub fn revocation_basepoint(mut self, v: Pubkey) -> Self {
         self.revocation_basepoint = v;
         self
     }
-    pub fn payment_basepoint(mut self, v: Byte33) -> Self {
+    pub fn payment_basepoint(mut self, v: Pubkey) -> Self {
         self.payment_basepoint = v;
         self
     }
-    pub fn delayed_payment_basepoint(mut self, v: Byte33) -> Self {
+    pub fn delayed_payment_basepoint(mut self, v: Pubkey) -> Self {
         self.delayed_payment_basepoint = v;
         self
     }
-    pub fn tlc_basepoint(mut self, v: Byte33) -> Self {
+    pub fn tlc_basepoint(mut self, v: Pubkey) -> Self {
         self.tlc_basepoint = v;
         self
     }
-    pub fn first_per_commitment_point(mut self, v: Byte33) -> Self {
+    pub fn first_per_commitment_point(mut self, v: Pubkey) -> Self {
         self.first_per_commitment_point = v;
         self
     }
-    pub fn second_per_commitment_point(mut self, v: Byte33) -> Self {
+    pub fn second_per_commitment_point(mut self, v: Pubkey) -> Self {
         self.second_per_commitment_point = v;
         self
     }
@@ -3263,14 +3263,14 @@ impl CommitmentSigned {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn signature(&self) -> Byte64 {
+    pub fn signature(&self) -> Signature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[12..]) as usize;
-            Byte64::new_unchecked(self.0.slice(start..end))
+            Signature::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte64::new_unchecked(self.0.slice(start..))
+            Signature::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> CommitmentSignedReader<'r> {
@@ -3356,14 +3356,14 @@ impl<'r> CommitmentSignedReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn signature(&self) -> Byte64Reader<'r> {
+    pub fn signature(&self) -> SignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[12..]) as usize;
-            Byte64Reader::new_unchecked(&self.as_slice()[start..end])
+            SignatureReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte64Reader::new_unchecked(&self.as_slice()[start..])
+            SignatureReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -3414,14 +3414,14 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Byte64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        SignatureReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct CommitmentSignedBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) signature: Byte64,
+    pub(crate) signature: Signature,
 }
 impl CommitmentSignedBuilder {
     pub const FIELD_COUNT: usize = 2;
@@ -3429,7 +3429,7 @@ impl CommitmentSignedBuilder {
         self.channel_id = v;
         self
     }
-    pub fn signature(mut self, v: Byte64) -> Self {
+    pub fn signature(mut self, v: Signature) -> Self {
         self.signature = v;
         self
     }
@@ -5854,14 +5854,14 @@ impl ClosingSigned {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
-    pub fn signature(&self) -> Byte64 {
+    pub fn signature(&self) -> Signature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte64::new_unchecked(self.0.slice(start..end))
+            Signature::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte64::new_unchecked(self.0.slice(start..))
+            Signature::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> ClosingSignedReader<'r> {
@@ -5955,14 +5955,14 @@ impl<'r> ClosingSignedReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn signature(&self) -> Byte64Reader<'r> {
+    pub fn signature(&self) -> SignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte64Reader::new_unchecked(&self.as_slice()[start..end])
+            SignatureReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte64Reader::new_unchecked(&self.as_slice()[start..])
+            SignatureReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -6014,7 +6014,7 @@ impl<'r> molecule::prelude::Reader<'r> for ClosingSignedReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Byte64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        SignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
@@ -6022,7 +6022,7 @@ impl<'r> molecule::prelude::Reader<'r> for ClosingSignedReader<'r> {
 pub struct ClosingSignedBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) fee: Uint64,
-    pub(crate) signature: Byte64,
+    pub(crate) signature: Signature,
 }
 impl ClosingSignedBuilder {
     pub const FIELD_COUNT: usize = 3;
@@ -6034,7 +6034,7 @@ impl ClosingSignedBuilder {
         self.fee = v;
         self
     }
-    pub fn signature(mut self, v: Byte64) -> Self {
+    pub fn signature(mut self, v: Signature) -> Self {
         self.signature = v;
         self
     }
@@ -6478,20 +6478,20 @@ impl TlcsSigned {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn signature(&self) -> Byte64 {
+    pub fn signature(&self) -> Signature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte64::new_unchecked(self.0.slice(start..end))
+        Signature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tlc_signatures(&self) -> Byte64Vec {
+    pub fn tlc_signatures(&self) -> SignatureVec {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte64Vec::new_unchecked(self.0.slice(start..end))
+            SignatureVec::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte64Vec::new_unchecked(self.0.slice(start..))
+            SignatureVec::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> TlcsSignedReader<'r> {
@@ -6579,20 +6579,20 @@ impl<'r> TlcsSignedReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn signature(&self) -> Byte64Reader<'r> {
+    pub fn signature(&self) -> SignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte64Reader::new_unchecked(&self.as_slice()[start..end])
+        SignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tlc_signatures(&self) -> Byte64VecReader<'r> {
+    pub fn tlc_signatures(&self) -> SignatureVecReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte64VecReader::new_unchecked(&self.as_slice()[start..end])
+            SignatureVecReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte64VecReader::new_unchecked(&self.as_slice()[start..])
+            SignatureVecReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -6643,16 +6643,16 @@ impl<'r> molecule::prelude::Reader<'r> for TlcsSignedReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Byte64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Byte64VecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        SignatureReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        SignatureVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct TlcsSignedBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) signature: Byte64,
-    pub(crate) tlc_signatures: Byte64Vec,
+    pub(crate) signature: Signature,
+    pub(crate) tlc_signatures: SignatureVec,
 }
 impl TlcsSignedBuilder {
     pub const FIELD_COUNT: usize = 3;
@@ -6660,11 +6660,11 @@ impl TlcsSignedBuilder {
         self.channel_id = v;
         self
     }
-    pub fn signature(mut self, v: Byte64) -> Self {
+    pub fn signature(mut self, v: Signature) -> Self {
         self.signature = v;
         self
     }
-    pub fn tlc_signatures(mut self, v: Byte64Vec) -> Self {
+    pub fn tlc_signatures(mut self, v: SignatureVec) -> Self {
         self.tlc_signatures = v;
         self
     }
@@ -6784,14 +6784,14 @@ impl RevokeAndAck {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_per_commitment_point(&self) -> Byte33 {
+    pub fn next_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte33::new_unchecked(self.0.slice(start..end))
+            Pubkey::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte33::new_unchecked(self.0.slice(start..))
+            Pubkey::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> RevokeAndAckReader<'r> {
@@ -6895,14 +6895,14 @@ impl<'r> RevokeAndAckReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_per_commitment_point(&self) -> Byte33Reader<'r> {
+    pub fn next_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte33Reader::new_unchecked(&self.as_slice()[start..end])
+            PubkeyReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte33Reader::new_unchecked(&self.as_slice()[start..])
+            PubkeyReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -6954,7 +6954,7 @@ impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Byte33Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
@@ -6962,7 +6962,7 @@ impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
 pub struct RevokeAndAckBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) per_commitment_secret: Byte32,
-    pub(crate) next_per_commitment_point: Byte33,
+    pub(crate) next_per_commitment_point: Pubkey,
 }
 impl RevokeAndAckBuilder {
     pub const FIELD_COUNT: usize = 3;
@@ -6974,7 +6974,7 @@ impl RevokeAndAckBuilder {
         self.per_commitment_secret = v;
         self
     }
-    pub fn next_per_commitment_point(mut self, v: Byte33) -> Self {
+    pub fn next_per_commitment_point(mut self, v: Pubkey) -> Self {
         self.next_per_commitment_point = v;
         self
     }

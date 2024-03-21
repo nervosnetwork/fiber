@@ -1,8 +1,8 @@
 import blockchain;
 
-array Byte64 [byte; 64];
-array Byte33 [byte; 33];
-vector Byte64Vec <Byte64>;
+array Signature [byte; 65];
+array Pubkey [byte; 33];
+vector SignatureVec <Signature>;
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -15,13 +15,13 @@ table OpenChannel {
     max_accept_tlcs:             Uint64,
     min_tlc_value:               Uint64,
     to_self_delay:               Uint64,
-    funding_pubkey:              Byte33,
-    revocation_basepoint:        Byte33,
-    payment_basepoint:           Byte33,
-    delayed_payment_basepoint:   Byte33,
-    tlc_basepoint:               Byte33,
-    first_per_commitment_point:  Byte33,
-    second_per_commitment_point: Byte33,
+    funding_pubkey:              Pubkey,
+    revocation_basepoint:        Pubkey,
+    payment_basepoint:           Pubkey,
+    delayed_payment_basepoint:   Pubkey,
+    tlc_basepoint:               Pubkey,
+    first_per_commitment_point:  Pubkey,
+    second_per_commitment_point: Pubkey,
     channel_flags:               byte,
 }
 
@@ -32,18 +32,18 @@ table AcceptChannel {
     max_accept_tlcs:             Uint64,
     min_tlc_value:               Uint64,
     to_self_delay:               Uint64,
-    funding_pubkey:              Byte33,
-    revocation_basepoint:        Byte33,
-    payment_basepoint:           Byte33,
-    delayed_payment_basepoint:   Byte33,
-    tlc_basepoint:               Byte33,
-    first_per_commitment_point:  Byte33,
-    second_per_commitment_point: Byte33,
+    funding_pubkey:              Pubkey,
+    revocation_basepoint:        Pubkey,
+    payment_basepoint:           Pubkey,
+    delayed_payment_basepoint:   Pubkey,
+    tlc_basepoint:               Pubkey,
+    first_per_commitment_point:  Pubkey,
+    second_per_commitment_point: Pubkey,
 }
 
 table CommitmentSigned {
     channel_id:     Byte32,
-    signature:      Byte64,
+    signature:      Signature,
 }
 
 table TxSignatures {
@@ -92,7 +92,7 @@ table Shutdown {
 table ClosingSigned {
     channel_id: Byte32,
     fee:        Uint64,
-    signature:  Byte64,
+    signature:  Signature,
 }
 
 table AddTlc {
@@ -105,14 +105,14 @@ table AddTlc {
 
 table TlcsSigned {
     channel_id:     Byte32,
-    signature:      Byte64,
-    tlc_signatures: Byte64Vec,
+    signature:      Signature,
+    tlc_signatures: SignatureVec,
 }
 
 table RevokeAndAck {
     channel_id:                 Byte32,
     per_commitment_secret:      Byte32,
-    next_per_commitment_point:  Byte33,
+    next_per_commitment_point:  Pubkey,
 }
 
 struct RemoveTlcFulfill {

@@ -1,16 +1,27 @@
+pub use ckb_crypto::secp::{Pubkey, Signature};
 use ckb_types::{
     packed::{Byte32, BytesVec, Script, ScriptOpt, Transaction},
     prelude::Pack,
 };
-use molecule::prelude::{Builder, Entity};
+use molecule::prelude::{Builder, Byte, Entity};
 
-use super::gen::pcn::{self as molecule_pcn, Byte64Vec};
+use super::gen::pcn::{self as molecule_pcn, SignatureVec};
 
-pub struct Point(pub Vec<u8>);
+pub type Point = Pubkey;
 
-impl From<Point> for molecule_pcn::Byte33 {
-    fn from(_point: Point) -> molecule_pcn::Byte33 {
-        unimplemented!("Point to Byte33");
+impl From<Point> for molecule_pcn::Pubkey {
+    fn from(point: Point) -> molecule_pcn::Pubkey {
+        molecule_pcn::Pubkey::new_builder()
+            .set(
+                point
+                    .serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Public serialized to corrent length"),
+            )
+            .build()
     }
 }
 
@@ -96,11 +107,19 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
     }
 }
 
-pub struct Signature(pub Vec<u8>);
-
-impl From<Signature> for molecule_pcn::Byte64 {
-    fn from(_signature: Signature) -> molecule_pcn::Byte64 {
-        unimplemented!("Signature to Byte64");
+impl From<Signature> for molecule_pcn::Signature {
+    fn from(signature: Signature) -> molecule_pcn::Signature {
+        molecule_pcn::Signature::new_builder()
+            .set(
+                signature
+                    .serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Signature serialized to corrent length"),
+            )
+            .build()
     }
 }
 
@@ -297,7 +316,7 @@ impl From<TlcsSigned> for molecule_pcn::TlcsSigned {
             .channel_id(tlcs_signed.channel_id.into())
             .signature(tlcs_signed.signature.into())
             .tlc_signatures(
-                Byte64Vec::new_builder()
+                SignatureVec::new_builder()
                     .set(
                         tlcs_signed
                             .tlc_signatures

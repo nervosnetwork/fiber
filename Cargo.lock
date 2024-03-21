@@ -611,6 +611,7 @@ dependencies = [
  "bitcoin",
  "bitcoin-bech32",
  "chrono",
+ "ckb-crypto",
  "ckb-sdk",
  "ckb-types",
  "clap",
