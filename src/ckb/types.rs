@@ -69,24 +69,24 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
 
 #[derive(Debug, Clone)]
 pub struct OpenChannel {
-    chain_hash: Byte32,
-    channel_id: Byte32,
-    funding_type_script: Option<Script>,
-    funding_amount: u64,
-    funding_fee_rate: u64,
-    commitment_fee_rate: u64,
-    max_tlc_value_in_flight: u64,
-    max_accept_tlcs: u64,
-    min_tlc_value: u64,
-    to_self_delay: u64,
-    funding_pubkey: Pubkey,
-    revocation_basepoint: Pubkey,
-    payment_basepoint: Pubkey,
-    delayed_payment_basepoint: Pubkey,
-    tlc_basepoint: Pubkey,
-    first_per_commitment_point: Pubkey,
-    second_per_commitment_point: Pubkey,
-    channel_flags: u8,
+    pub chain_hash: Byte32,
+    pub channel_id: Byte32,
+    pub funding_type_script: Option<Script>,
+    pub funding_amount: u64,
+    pub funding_fee_rate: u64,
+    pub commitment_fee_rate: u64,
+    pub max_tlc_value_in_flight: u64,
+    pub max_accept_tlcs: u64,
+    pub min_tlc_value: u64,
+    pub to_self_delay: u64,
+    pub funding_pubkey: Pubkey,
+    pub revocation_basepoint: Pubkey,
+    pub payment_basepoint: Pubkey,
+    pub delayed_payment_basepoint: Pubkey,
+    pub tlc_basepoint: Pubkey,
+    pub first_per_commitment_point: Pubkey,
+    pub second_per_commitment_point: Pubkey,
+    pub channel_flags: u8,
 }
 
 impl From<OpenChannel> for molecule_pcn::OpenChannel {
@@ -143,19 +143,19 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
 
 #[derive(Debug, Clone)]
 pub struct AcceptChannel {
-    channel_id: Byte32,
-    funding_amount: u64,
-    max_tlc_value_in_flight: u64,
-    max_accept_tlcs: u64,
-    min_tlc_value: u64,
-    to_self_delay: u64,
-    funding_pubkey: Pubkey,
-    revocation_basepoint: Pubkey,
-    payment_basepoint: Pubkey,
-    delayed_payment_basepoint: Pubkey,
-    tlc_basepoint: Pubkey,
-    first_per_commitment_point: Pubkey,
-    second_per_commitment_point: Pubkey,
+    pub channel_id: Byte32,
+    pub funding_amount: u64,
+    pub max_tlc_value_in_flight: u64,
+    pub max_accept_tlcs: u64,
+    pub min_tlc_value: u64,
+    pub to_self_delay: u64,
+    pub funding_pubkey: Pubkey,
+    pub revocation_basepoint: Pubkey,
+    pub payment_basepoint: Pubkey,
+    pub delayed_payment_basepoint: Pubkey,
+    pub tlc_basepoint: Pubkey,
+    pub first_per_commitment_point: Pubkey,
+    pub second_per_commitment_point: Pubkey,
 }
 
 impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
@@ -202,8 +202,8 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
 
 #[derive(Debug, Clone)]
 pub struct CommitmentSigned {
-    channel_id: Byte32,
-    signature: Signature,
+    pub channel_id: Byte32,
+    pub signature: Signature,
 }
 
 impl From<CommitmentSigned> for molecule_pcn::CommitmentSigned {
@@ -228,9 +228,9 @@ impl TryFrom<molecule_pcn::CommitmentSigned> for CommitmentSigned {
 
 #[derive(Debug, Clone)]
 pub struct TxSignatures {
-    channel_id: Byte32,
-    tx_hash: Byte32,
-    witnesses: Vec<Vec<u8>>,
+    pub channel_id: Byte32,
+    pub tx_hash: Byte32,
+    pub witnesses: Vec<Vec<u8>>,
 }
 
 impl From<TxSignatures> for molecule_pcn::TxSignatures {
@@ -271,7 +271,7 @@ impl TryFrom<molecule_pcn::TxSignatures> for TxSignatures {
 
 #[derive(Debug, Clone)]
 pub struct ChannelReady {
-    channel_id: Byte32,
+    pub channel_id: Byte32,
 }
 
 impl From<ChannelReady> for molecule_pcn::ChannelReady {
@@ -294,8 +294,8 @@ impl TryFrom<molecule_pcn::ChannelReady> for ChannelReady {
 
 #[derive(Debug, Clone)]
 pub struct TxAdd {
-    channel_id: Byte32,
-    tx: Transaction,
+    pub channel_id: Byte32,
+    pub tx: Transaction,
 }
 
 impl From<TxAdd> for molecule_pcn::TxAdd {
@@ -320,8 +320,8 @@ impl TryFrom<molecule_pcn::TxAdd> for TxAdd {
 
 #[derive(Debug, Clone)]
 pub struct TxRemove {
-    channel_id: Byte32,
-    tx: Transaction,
+    pub channel_id: Byte32,
+    pub tx: Transaction,
 }
 
 impl From<TxRemove> for molecule_pcn::TxRemove {
@@ -346,7 +346,7 @@ impl TryFrom<molecule_pcn::TxRemove> for TxRemove {
 
 #[derive(Debug, Clone)]
 pub struct TxComplete {
-    channel_id: Byte32,
+    pub channel_id: Byte32,
 }
 
 impl From<TxComplete> for molecule_pcn::TxComplete {
@@ -369,8 +369,8 @@ impl TryFrom<molecule_pcn::TxComplete> for TxComplete {
 
 #[derive(Debug, Clone)]
 pub struct TxAbort {
-    channel_id: Byte32,
-    message: Vec<u8>,
+    pub channel_id: Byte32,
+    pub message: Vec<u8>,
 }
 
 impl From<TxAbort> for molecule_pcn::TxAbort {
@@ -395,8 +395,8 @@ impl TryFrom<molecule_pcn::TxAbort> for TxAbort {
 
 #[derive(Debug, Clone)]
 pub struct TxInitRBF {
-    channel_id: Byte32,
-    fee_rate: u64,
+    pub channel_id: Byte32,
+    pub fee_rate: u64,
 }
 
 impl From<TxInitRBF> for molecule_pcn::TxInitRBF {
@@ -421,7 +421,7 @@ impl TryFrom<molecule_pcn::TxInitRBF> for TxInitRBF {
 
 #[derive(Debug, Clone)]
 pub struct TxAckRBF {
-    channel_id: Byte32,
+    pub channel_id: Byte32,
 }
 
 impl From<TxAckRBF> for molecule_pcn::TxAckRBF {
@@ -444,8 +444,8 @@ impl TryFrom<molecule_pcn::TxAckRBF> for TxAckRBF {
 
 #[derive(Debug, Clone)]
 pub struct Shutdown {
-    channel_id: Byte32,
-    close_script: Script,
+    pub channel_id: Byte32,
+    pub close_script: Script,
 }
 
 impl From<Shutdown> for molecule_pcn::Shutdown {
@@ -470,9 +470,9 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 
 #[derive(Debug, Clone)]
 pub struct ClosingSigned {
-    channel_id: Byte32,
-    fee: u64,
-    signature: Signature,
+    pub channel_id: Byte32,
+    pub fee: u64,
+    pub signature: Signature,
 }
 
 impl From<ClosingSigned> for molecule_pcn::ClosingSigned {
@@ -499,11 +499,11 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
 
 #[derive(Debug, Clone)]
 pub struct AddTlc {
-    channel_id: Byte32,
-    tlc_id: u64,
-    amount: u64,
-    payment_hash: Byte32,
-    expiry: u64,
+    pub channel_id: Byte32,
+    pub tlc_id: u64,
+    pub amount: u64,
+    pub payment_hash: Byte32,
+    pub expiry: u64,
 }
 
 impl From<AddTlc> for molecule_pcn::AddTlc {
@@ -534,9 +534,9 @@ impl TryFrom<molecule_pcn::AddTlc> for AddTlc {
 
 #[derive(Debug, Clone)]
 pub struct TlcsSigned {
-    channel_id: Byte32,
-    signature: Signature,
-    tlc_signatures: Vec<Signature>,
+    pub channel_id: Byte32,
+    pub signature: Signature,
+    pub tlc_signatures: Vec<Signature>,
 }
 
 impl From<TlcsSigned> for molecule_pcn::TlcsSigned {
@@ -577,9 +577,9 @@ impl TryFrom<molecule_pcn::TlcsSigned> for TlcsSigned {
 
 #[derive(Debug, Clone)]
 pub struct RevokeAndAck {
-    channel_id: Byte32,
-    per_commitment_secret: Byte32,
-    next_per_commitment_point: Pubkey,
+    pub channel_id: Byte32,
+    pub per_commitment_secret: Byte32,
+    pub next_per_commitment_point: Pubkey,
 }
 
 impl From<RevokeAndAck> for molecule_pcn::RevokeAndAck {
@@ -606,7 +606,7 @@ impl TryFrom<molecule_pcn::RevokeAndAck> for RevokeAndAck {
 
 #[derive(Debug, Clone)]
 pub struct RemoveTlcFulfill {
-    payment_preimage: Byte32,
+    pub payment_preimage: Byte32,
 }
 
 impl From<RemoveTlcFulfill> for molecule_pcn::RemoveTlcFulfill {
@@ -629,7 +629,7 @@ impl TryFrom<molecule_pcn::RemoveTlcFulfill> for RemoveTlcFulfill {
 
 #[derive(Debug, Clone)]
 pub struct RemoveTlcFail {
-    error_code: u32,
+    pub error_code: u32,
 }
 
 impl From<RemoveTlcFail> for molecule_pcn::RemoveTlcFail {
@@ -694,9 +694,9 @@ impl TryFrom<molecule_pcn::RemoveTlcReason> for RemoveTlcReason {
 
 #[derive(Debug, Clone)]
 pub struct RemoveTlc {
-    channel_id: Byte32,
-    tlc_id: u64,
-    reason: RemoveTlcReason,
+    pub channel_id: Byte32,
+    pub tlc_id: u64,
+    pub reason: RemoveTlcReason,
 }
 
 impl From<RemoveTlc> for molecule_pcn::RemoveTlc {
