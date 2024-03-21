@@ -1,4 +1,4 @@
-use ckb_gen_types::prelude::Pack;
+use ckb_types::prelude::Pack;
 use futures::{
     channel::oneshot::{channel, Sender},
     future::select,
