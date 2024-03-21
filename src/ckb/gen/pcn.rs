@@ -32,14 +32,14 @@ impl ::core::default::Default for Signature {
     }
 }
 impl Signature {
-    const DEFAULT_VALUE: [u8; 64] = [
+    const DEFAULT_VALUE: [u8; 65] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0,
+        0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 65;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
+    pub const ITEM_COUNT: usize = 65;
     pub fn nth0(&self) -> Byte {
         Byte::new_unchecked(self.0.slice(0..1))
     }
@@ -232,6 +232,9 @@ impl Signature {
     pub fn nth63(&self) -> Byte {
         Byte::new_unchecked(self.0.slice(63..64))
     }
+    pub fn nth64(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(64..65))
+    }
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
@@ -326,6 +329,7 @@ impl molecule::prelude::Entity for Signature {
             self.nth61(),
             self.nth62(),
             self.nth63(),
+            self.nth64(),
         ])
     }
 }
@@ -353,9 +357,9 @@ impl<'r> ::core::fmt::Display for SignatureReader<'r> {
     }
 }
 impl<'r> SignatureReader<'r> {
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 65;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
+    pub const ITEM_COUNT: usize = 65;
     pub fn nth0(&self) -> ByteReader<'r> {
         ByteReader::new_unchecked(&self.as_slice()[0..1])
     }
@@ -548,6 +552,9 @@ impl<'r> SignatureReader<'r> {
     pub fn nth63(&self) -> ByteReader<'r> {
         ByteReader::new_unchecked(&self.as_slice()[63..64])
     }
+    pub fn nth64(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[64..65])
+    }
     pub fn raw_data(&self) -> &'r [u8] {
         self.as_slice()
     }
@@ -573,7 +580,7 @@ impl<'r> molecule::prelude::Reader<'r> for SignatureReader<'r> {
         Ok(())
     }
 }
-pub struct SignatureBuilder(pub(crate) [Byte; 64]);
+pub struct SignatureBuilder(pub(crate) [Byte; 65]);
 impl ::core::fmt::Debug for SignatureBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
@@ -646,14 +653,15 @@ impl ::core::default::Default for SignatureBuilder {
             Byte::default(),
             Byte::default(),
             Byte::default(),
+            Byte::default(),
         ])
     }
 }
 impl SignatureBuilder {
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 65;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
-    pub fn set(mut self, v: [Byte; 64]) -> Self {
+    pub const ITEM_COUNT: usize = 65;
+    pub fn set(mut self, v: [Byte; 65]) -> Self {
         self.0 = v;
         self
     }
@@ -913,6 +921,10 @@ impl SignatureBuilder {
         self.0[63] = v;
         self
     }
+    pub fn nth64(mut self, v: Byte) -> Self {
+        self.0[64] = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for SignatureBuilder {
     type Entity = Signature;
@@ -985,6 +997,7 @@ impl molecule::prelude::Builder for SignatureBuilder {
         writer.write_all(self.0[61].as_slice())?;
         writer.write_all(self.0[62].as_slice())?;
         writer.write_all(self.0[63].as_slice())?;
+        writer.write_all(self.0[64].as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -1619,7 +1632,7 @@ impl ::core::default::Default for SignatureVec {
 }
 impl SignatureVec {
     const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
-    pub const ITEM_SIZE: usize = 64;
+    pub const ITEM_SIZE: usize = 65;
     pub fn total_size(&self) -> usize {
         molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
     }
@@ -1703,7 +1716,7 @@ impl<'r> ::core::fmt::Display for SignatureVecReader<'r> {
     }
 }
 impl<'r> SignatureVecReader<'r> {
-    pub const ITEM_SIZE: usize = 64;
+    pub const ITEM_SIZE: usize = 65;
     pub fn total_size(&self) -> usize {
         molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
     }
@@ -1764,7 +1777,7 @@ impl<'r> molecule::prelude::Reader<'r> for SignatureVecReader<'r> {
 #[derive(Debug, Default)]
 pub struct SignatureVecBuilder(pub(crate) Vec<Signature>);
 impl SignatureVecBuilder {
-    pub const ITEM_SIZE: usize = 64;
+    pub const ITEM_SIZE: usize = 65;
     pub fn set(mut self, v: Vec<Signature>) -> Self {
         self.0 = v;
         self
@@ -3234,11 +3247,11 @@ impl ::core::default::Default for CommitmentSigned {
     }
 }
 impl CommitmentSigned {
-    const DEFAULT_VALUE: [u8; 108] = [
-        108, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 109] = [
+        109, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
@@ -5818,12 +5831,12 @@ impl ::core::default::Default for ClosingSigned {
     }
 }
 impl ClosingSigned {
-    const DEFAULT_VALUE: [u8; 120] = [
-        120, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 121] = [
+        121, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0,
+        0, 0,
     ];
     pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
@@ -6449,11 +6462,11 @@ impl ::core::default::Default for TlcsSigned {
     }
 }
 impl TlcsSigned {
-    const DEFAULT_VALUE: [u8; 116] = [
-        116, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 117] = [
+        117, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
