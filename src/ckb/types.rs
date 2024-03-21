@@ -67,7 +67,6 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct OpenChannel {
     chain_hash: Byte32,
@@ -771,14 +770,6 @@ pub enum PCNMessage {
     RemoveTlc(RemoveTlc),
 }
 
-impl PCNMessage {
-    pub fn from_slice(data: &[u8]) -> Result<Self, Error> {
-        molecule_pcn::PCNMessage::from_slice(data)
-            .map_err(Into::into)
-            .and_then(TryInto::try_into)
-    }
-}
-
 impl From<PCNMessage> for molecule_pcn::PCNMessageUnion {
     fn from(pcn_message: PCNMessage) -> Self {
         match pcn_message {
@@ -904,3 +895,42 @@ impl TryFrom<molecule_pcn::PCNMessage> for PCNMessage {
         })
     }
 }
+
+macro_rules! impl_traits {
+    ($t:ident) => {
+        impl $t {
+            pub fn to_molecule_bytes(&self) -> molecule::bytes::Bytes {
+                // TODO: we cloned twice here, both in self.clone and as_bytes.
+                molecule_pcn::$t::from(self.clone()).as_bytes()
+            }
+        }
+
+        impl $t {
+            pub fn from_molecule_slice(data: &[u8]) -> Result<Self, Error> {
+                molecule_pcn::$t::from_slice(data)
+                    .map_err(Into::into)
+                    .and_then(TryInto::try_into)
+            }
+        }
+    };
+}
+
+impl_traits!(TestMessage);
+impl_traits!(OpenChannel);
+impl_traits!(AcceptChannel);
+impl_traits!(CommitmentSigned);
+impl_traits!(TxSignatures);
+impl_traits!(ChannelReady);
+impl_traits!(TxAdd);
+impl_traits!(TxRemove);
+impl_traits!(TxComplete);
+impl_traits!(TxAbort);
+impl_traits!(TxInitRBF);
+impl_traits!(TxAckRBF);
+impl_traits!(Shutdown);
+impl_traits!(ClosingSigned);
+impl_traits!(AddTlc);
+impl_traits!(TlcsSigned);
+impl_traits!(RevokeAndAck);
+impl_traits!(RemoveTlc);
+impl_traits!(PCNMessage);

@@ -4,7 +4,6 @@ use futures::{
     prelude::*,
 };
 use log::{debug, error, info};
-use molecule::prelude::Entity;
 use std::collections::HashMap;
 use std::{str, time::Duration};
 use tentacle::{
@@ -97,7 +96,7 @@ impl ServiceProtocol for PHandle {
                     .send_message_to(
                         session_id,
                         1.into(),
-                        super::gen::pcn::PCNMessage::from(msg).as_bytes(),
+                        msg.to_molecule_bytes()
                     )
                     .await;
             }
@@ -150,7 +149,7 @@ impl ServiceProtocol for PHandle {
             };
         }
 
-        let msg = unwrap_or_return!(PCNMessage::from_slice(&data), "parse message");
+        let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
         match msg {
             PCNMessage::TestMessage(test) => {
                 debug!("Test message {:?}", test);
