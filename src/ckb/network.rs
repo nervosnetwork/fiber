@@ -1,11 +1,9 @@
-use ckb_types::prelude::Pack;
 use futures::{
     channel::oneshot::{channel, Sender},
     future::select,
     prelude::*,
 };
-use log::{debug, error, info, warn};
-use molecule::prelude::Builder;
+use log::{debug, error, info};
 use molecule::prelude::Entity;
 use std::collections::HashMap;
 use std::{str, time::Duration};
@@ -25,9 +23,9 @@ use tokio::select as tselect;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::gen::pcn::{PCNMessage, PCNMessageUnion};
+use super::types::{PCNMessage, TestMessage};
 use super::Command;
-use crate::{ckb::gen::pcn::TestMessage, CkbConfig};
+use crate::CkbConfig;
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(1);
 const PCN_TARGET_PROTOCOL: TargetProtocol = TargetProtocol::Single(PCN_PROTOCOL_ID);
@@ -92,15 +90,15 @@ impl ServiceProtocol for PHandle {
                 tokio::time::interval_at(tokio::time::Instant::now(), Duration::from_secs(5));
             loop {
                 interval.tick().await;
-                let msg = PCNMessage::new_builder()
-                    .set(PCNMessageUnion::TestMessage(
-                        TestMessage::new_builder()
-                            .bytes("Just a simple test message".pack())
-                            .build(),
-                    ))
-                    .build();
+                let msg = PCNMessage::TestMessage(TestMessage {
+                    bytes: "Just a simple test message".into(),
+                });
                 let _ = interval_sender
-                    .send_message_to(session_id, 1.into(), msg.as_bytes())
+                    .send_message_to(
+                        session_id,
+                        1.into(),
+                        super::gen::pcn::PCNMessage::from(msg).as_bytes(),
+                    )
                     .await;
             }
         };
@@ -137,39 +135,33 @@ impl ServiceProtocol for PHandle {
         self.count += 1;
         info!(
             "received from [{}]: proto [{}] data {:?}, message count: {}",
-            context.session.id,
-            context.proto_id,
-            str::from_utf8(data.as_ref()).unwrap(),
-            self.count
+            context.session.id, context.proto_id, &data, self.count
         );
 
-        match PCNMessage::from_compatible_slice(&data) {
-            Ok(msg) => {
-                let item = msg.to_enum();
-                debug!(
-                    "Received msg {} from {}",
-                    item.item_name(),
-                    context.session.id
-                );
-                match item {
-                    PCNMessageUnion::TestMessage(test) => {
-                        debug!("Test message {:?}", test);
-                    }
-                    PCNMessageUnion::OpenChannel(open_channel) => {
-                        debug!("Openning channel {:?}", open_channel);
-                    }
-                    _ => {
-                        error!("Message handling for {} unimplemented", item);
+        macro_rules! unwrap_or_return {
+            ($expr:expr, $msg:expr) => {
+                match $expr {
+                    Ok(val) => val,
+                    Err(err) => {
+                        error!("{}: {:?}", $msg, err);
+                        return;
                     }
                 }
+            };
+        }
+
+        let msg = unwrap_or_return!(PCNMessage::from_slice(&data), "parse message");
+        match msg {
+            PCNMessage::TestMessage(test) => {
+                debug!("Test message {:?}", test);
             }
-            Err(err) => {
-                warn!(
-                    "A malformed message from peer {}: {}",
-                    context.session.id, err
-                );
+            PCNMessage::OpenChannel(open_channel) => {
+                debug!("Openning channel {:?}", open_channel);
             }
-        };
+            _ => {
+                error!("Message handling for {:?} unimplemented", msg);
+            }
+        }
     }
 
     async fn notify(&mut self, context: &mut ProtocolContext, token: u64) {

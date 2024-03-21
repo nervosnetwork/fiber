@@ -9,11 +9,13 @@ use thiserror::Error;
 use super::gen::pcn::{self as molecule_pcn, SignatureVec};
 
 /// The error type wrap various ser/de errors.
-#[derive(Error, Debug, PartialEq, Eq)]
+#[derive(Error, Debug)]
 pub enum Error {
-    /// Invalid privkey
+    /// Invalid pubkey/signature format
     #[error("Secp error: {0}")]
     Secp(#[from] ckb_crypto::secp::Error),
+    #[error("Molecule error: {0}")]
+    Molecule(#[from] molecule::error::VerificationError),
 }
 
 impl From<Pubkey> for molecule_pcn::Pubkey {
@@ -65,6 +67,8 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
     }
 }
 
+
+#[derive(Debug, Clone)]
 pub struct OpenChannel {
     chain_hash: Byte32,
     channel_id: Byte32,
@@ -138,6 +142,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct AcceptChannel {
     channel_id: Byte32,
     funding_amount: u64,
@@ -196,6 +201,7 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct CommitmentSigned {
     channel_id: Byte32,
     signature: Signature,
@@ -221,6 +227,7 @@ impl TryFrom<molecule_pcn::CommitmentSigned> for CommitmentSigned {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxSignatures {
     channel_id: Byte32,
     tx_hash: Byte32,
@@ -263,6 +270,7 @@ impl TryFrom<molecule_pcn::TxSignatures> for TxSignatures {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ChannelReady {
     channel_id: Byte32,
 }
@@ -285,6 +293,7 @@ impl TryFrom<molecule_pcn::ChannelReady> for ChannelReady {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxAdd {
     channel_id: Byte32,
     tx: Transaction,
@@ -310,6 +319,7 @@ impl TryFrom<molecule_pcn::TxAdd> for TxAdd {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxRemove {
     channel_id: Byte32,
     tx: Transaction,
@@ -335,6 +345,7 @@ impl TryFrom<molecule_pcn::TxRemove> for TxRemove {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxComplete {
     channel_id: Byte32,
 }
@@ -357,6 +368,7 @@ impl TryFrom<molecule_pcn::TxComplete> for TxComplete {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxAbort {
     channel_id: Byte32,
     message: Vec<u8>,
@@ -382,6 +394,7 @@ impl TryFrom<molecule_pcn::TxAbort> for TxAbort {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxInitRBF {
     channel_id: Byte32,
     fee_rate: u64,
@@ -407,6 +420,7 @@ impl TryFrom<molecule_pcn::TxInitRBF> for TxInitRBF {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxAckRBF {
     channel_id: Byte32,
 }
@@ -429,6 +443,7 @@ impl TryFrom<molecule_pcn::TxAckRBF> for TxAckRBF {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Shutdown {
     channel_id: Byte32,
     close_script: Script,
@@ -454,6 +469,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct ClosingSigned {
     channel_id: Byte32,
     fee: u64,
@@ -482,6 +498,7 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct AddTlc {
     channel_id: Byte32,
     tlc_id: u64,
@@ -516,6 +533,7 @@ impl TryFrom<molecule_pcn::AddTlc> for AddTlc {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TlcsSigned {
     channel_id: Byte32,
     signature: Signature,
@@ -558,6 +576,7 @@ impl TryFrom<molecule_pcn::TlcsSigned> for TlcsSigned {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RevokeAndAck {
     channel_id: Byte32,
     per_commitment_secret: Byte32,
@@ -586,6 +605,7 @@ impl TryFrom<molecule_pcn::RevokeAndAck> for RevokeAndAck {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RemoveTlcFulfill {
     payment_preimage: Byte32,
 }
@@ -608,6 +628,7 @@ impl TryFrom<molecule_pcn::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RemoveTlcFail {
     error_code: u32,
 }
@@ -630,6 +651,7 @@ impl TryFrom<molecule_pcn::RemoveTlcFail> for RemoveTlcFail {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(RemoveTlcFail),
@@ -671,6 +693,7 @@ impl TryFrom<molecule_pcn::RemoveTlcReason> for RemoveTlcReason {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct RemoveTlc {
     channel_id: Byte32,
     tlc_id: u64,
@@ -703,8 +726,9 @@ impl TryFrom<molecule_pcn::RemoveTlc> for RemoveTlc {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TestMessage {
-    bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
 impl From<TestMessage> for molecule_pcn::TestMessage {
@@ -725,6 +749,7 @@ impl TryFrom<molecule_pcn::TestMessage> for TestMessage {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum PCNMessage {
     TestMessage(TestMessage),
     OpenChannel(OpenChannel),
@@ -744,6 +769,14 @@ pub enum PCNMessage {
     TlcsSigned(TlcsSigned),
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
+}
+
+impl PCNMessage {
+    pub fn from_slice(data: &[u8]) -> Result<Self, Error> {
+        molecule_pcn::PCNMessage::from_slice(data)
+            .map_err(Into::into)
+            .and_then(TryInto::try_into)
+    }
 }
 
 impl From<PCNMessage> for molecule_pcn::PCNMessageUnion {
