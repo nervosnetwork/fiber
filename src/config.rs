@@ -31,7 +31,7 @@ fn get_default_config_file() -> PathBuf {
 enum Service {
     #[serde(alias = "ckb", alias = "CKB")]
     CKB,
-    #[serde(alias = "ldk", alias = "ldk")]
+    #[serde(alias = "ldk", alias = "LDK")]
     LDK,
 }
 

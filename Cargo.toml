@@ -20,7 +20,6 @@ lightning-net-tokio = { version = "0.0.121" }
 lightning-persister = { version = "0.0.121" }
 lightning-background-processor = { version = "0.0.121", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.121" }
-
 base64 = "0.13.0"
 bitcoin = { version = "0.30.2", features = ["serde"] }
 bitcoin-bech32 = "0.12"
@@ -52,6 +51,8 @@ tokio-util = { version = "0.7.10", features = ["rt"] }
 molecule = { version = "0.7.5", default-features = false }
 ckb-types = "0.114.0"
 ckb-crypto = "0.114.0"
+serde_with = { version = "3.7.0", features = ["macros"] }
+hex = "0.4.3"
 
 [profile.release]
 panic = "abort"

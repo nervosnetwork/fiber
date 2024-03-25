@@ -93,11 +93,7 @@ impl ServiceProtocol for PHandle {
                     bytes: "Just a simple test message".into(),
                 });
                 let _ = interval_sender
-                    .send_message_to(
-                        session_id,
-                        1.into(),
-                        msg.to_molecule_bytes()
-                    )
+                    .send_message_to(session_id, 1.into(), msg.to_molecule_bytes())
                     .await;
             }
         };

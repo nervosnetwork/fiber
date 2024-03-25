@@ -8,7 +8,7 @@ use tokio_util::task::task_tracker::TaskTracker;
 use std::str::FromStr;
 
 use ckb_pcn_node::ckb::Command;
-use ckb_pcn_node::{start_ckb, start_ldk, Config, CkbConfig};
+use ckb_pcn_node::{start_ckb, start_ldk, CkbConfig, Config};
 
 #[derive(Debug, Clone)]
 struct TaskTrackerWithCancellation {
