@@ -53,6 +53,8 @@ ckb-types = "0.114.0"
 ckb-crypto = "0.114.0"
 serde_with = { version = "3.7.0", features = ["macros"] }
 hex = "0.4.3"
+tower = "0.4.13"
+axum = "0.7.5"
 
 [profile.release]
 panic = "abort"

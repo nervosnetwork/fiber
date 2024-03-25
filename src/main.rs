@@ -95,7 +95,7 @@ pub async fn main() {
     debug!("Parsed config: {:?}", &config);
 
     match config {
-        Config { ckb, ldk , rpc} => {
+        Config { ckb, ldk, rpc } => {
             if let Some(ldk_config) = ldk {
                 info!("Starting ldk");
                 start_ldk(ldk_config).await;
@@ -104,7 +104,13 @@ pub async fn main() {
                 run_ckb(ckb_config).await;
             }
             if let Some(rpc_config) = rpc {
-                start_rpc(rpc_config).await;
+                let shutdown_signal = async {
+                    let token = new_tokio_cancellation_token();
+                    token.cancelled().await;
+                };
+                new_tokio_task_tracker().spawn(async move {
+                    start_rpc(rpc_config, shutdown_signal).await;
+                });
             }
         }
     }
