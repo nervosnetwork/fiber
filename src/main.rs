@@ -8,7 +8,7 @@ use tokio_util::task::task_tracker::TaskTracker;
 use std::str::FromStr;
 
 use ckb_pcn_node::ckb::Command;
-use ckb_pcn_node::{start_ckb, start_ldk, CkbConfig, Config};
+use ckb_pcn_node::{start_ckb, start_ldk, start_rpc, CkbConfig, Config};
 
 #[derive(Debug, Clone)]
 struct TaskTrackerWithCancellation {
@@ -95,13 +95,16 @@ pub async fn main() {
     debug!("Parsed config: {:?}", &config);
 
     match config {
-        Config { ckb, ldk } => {
+        Config { ckb, ldk , rpc} => {
             if let Some(ldk_config) = ldk {
                 info!("Starting ldk");
                 start_ldk(ldk_config).await;
             }
             if let Some(ckb_config) = ckb {
                 run_ckb(ckb_config).await;
+            }
+            if let Some(rpc_config) = rpc {
+                start_rpc(rpc_config).await;
             }
         }
     }

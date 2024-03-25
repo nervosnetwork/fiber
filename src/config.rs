@@ -9,7 +9,7 @@ use home::home_dir;
 use log::error;
 use serde::{Deserialize, Serialize};
 
-use crate::{CkbConfig, LdkConfig};
+use crate::{CkbConfig, LdkConfig, RpcConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_CKB_DIR_NAME: &str = "ckb";
@@ -33,6 +33,8 @@ enum Service {
     CKB,
     #[serde(alias = "ldk", alias = "LDK")]
     LDK,
+    #[serde(alias = "rpc", alias = "RPC")]
+    RPC,
 }
 
 impl FromStr for Service {
@@ -41,6 +43,7 @@ impl FromStr for Service {
         match s {
             "ckb" | "CKB" => Ok(Self::CKB),
             "ldk" | "LDK" => Ok(Self::LDK),
+            "rpc" | "RPC" => Ok(Self::RPC),
             _ => Err(format!("invalid service {}", s)),
         }
     }
@@ -71,6 +74,10 @@ struct Args {
     /// config for ldk (lightning network for bitcoin)
     #[command(flatten)]
     pub ldk: <LdkConfig as ClapSerde>::Opt,
+
+    /// config for rpc
+    #[command(flatten)]
+    pub rpc: <RpcConfig as ClapSerde>::Opt,
 }
 
 #[derive(Deserialize)]
@@ -78,6 +85,7 @@ struct SerializedConfig {
     services: Option<Vec<Service>>,
     ckb: Option<<CkbConfig as ClapSerde>::Opt>,
     ldk: Option<<LdkConfig as ClapSerde>::Opt>,
+    rpc: Option<<RpcConfig as ClapSerde>::Opt>,
 }
 
 #[derive(Debug)]
@@ -86,6 +94,8 @@ pub struct Config {
     pub ckb: Option<CkbConfig>,
     // ldk config, None represents that we should not run ldk service
     pub ldk: Option<LdkConfig>,
+    // rpc server config, None represents that we should not run rpc service
+    pub rpc: Option<RpcConfig>,
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
@@ -141,23 +151,26 @@ impl Config {
         args.ckb.base_dir = Some(Some(base_dir.join(DEFAULT_CKB_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
 
-        let (ckb, ldk) = match config_from_file
+        let (ckb, ldk, rpc) = match config_from_file
             .map(|x| match x {
                 SerializedConfig {
                     services: _,
                     ckb,
                     ldk,
+                    rpc,
                 } => (
                     // Successfully read config file, merging these options with the default ones.
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                     ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
+                    rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
                 ),
             })
-            .unwrap_or((None, None))
+            .unwrap_or((None, None, None))
         {
-            (ckb, ldk) => (
+            (ckb, ldk, rpc) => (
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
                 ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
+                rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
             ),
         };
 
@@ -171,6 +184,11 @@ impl Config {
         } else {
             None
         };
-        Self { ckb, ldk }
+        let rpc = if services.contains(&Service::RPC) {
+            Some(rpc)
+        } else {
+            None
+        };
+        Self { ckb, ldk, rpc }
     }
 }
