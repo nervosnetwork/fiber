@@ -1,4 +1,4 @@
-pub use ckb_crypto::secp::{Pubkey, Signature};
+pub use ckb_crypto::secp::{Pubkey as CkbPubkey, Signature as CkbSignature};
 use ckb_types::{
     packed::{Byte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
@@ -7,6 +7,36 @@ use molecule::prelude::{Builder, Byte, Entity};
 use thiserror::Error;
 
 use super::gen::pcn::{self as molecule_pcn, SignatureVec};
+
+#[derive(Debug, Clone)]
+pub struct Pubkey(pub CkbPubkey);
+
+impl From<Pubkey> for CkbPubkey {
+    fn from(pk: Pubkey) -> CkbPubkey {
+        pk.0
+    }
+}
+
+impl From<CkbPubkey> for Pubkey {
+    fn from(pk: CkbPubkey) -> Pubkey {
+        Pubkey(pk)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Signature(pub CkbSignature);
+
+impl From<Signature> for CkbSignature {
+    fn from(sig: Signature) -> CkbSignature {
+        sig.0
+    }
+}
+
+impl From<CkbSignature> for Signature {
+    fn from(sig: CkbSignature) -> Signature {
+        Signature(sig)
+    }
+}
 
 /// The error type wrap various ser/de errors.
 #[derive(Error, Debug)]
@@ -22,7 +52,7 @@ impl From<Pubkey> for molecule_pcn::Pubkey {
     fn from(pk: Pubkey) -> molecule_pcn::Pubkey {
         molecule_pcn::Pubkey::new_builder()
             .set(
-                pk.serialize()
+                pk.0.serialize()
                     .into_iter()
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
@@ -38,7 +68,7 @@ impl TryFrom<molecule_pcn::Pubkey> for Pubkey {
 
     fn try_from(pubkey: molecule_pcn::Pubkey) -> Result<Self, Self::Error> {
         let pubkey = pubkey.as_slice();
-        Pubkey::from_slice(pubkey).map_err(Into::into)
+        CkbPubkey::from_slice(pubkey).map(Into::into).map_err(Into::into)
     }
 }
 
@@ -47,6 +77,7 @@ impl From<Signature> for molecule_pcn::Signature {
         molecule_pcn::Signature::new_builder()
             .set(
                 signature
+                    .0
                     .serialize()
                     .into_iter()
                     .map(Into::into)
@@ -63,7 +94,9 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
 
     fn try_from(signature: molecule_pcn::Signature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
-        Signature::from_slice(signature).map_err(Into::into)
+        CkbSignature::from_slice(signature)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
