@@ -5,6 +5,7 @@ use ckb_types::{
 };
 use molecule::prelude::{Builder, Byte, Entity};
 use serde::{Deserialize, Serialize};
+use serde_utils::{EntityWrapperBase64, EntityWrapperHex};
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use thiserror::Error;
@@ -176,7 +177,7 @@ pub mod serde_utils {
             })
     }
 
-    pub fn as_base64<E, S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn to_base64<E, S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
     where
         E: Entity,
         S: Serializer,
@@ -184,9 +185,42 @@ pub mod serde_utils {
         serializer.serialize_str(&base64::encode(e.as_slice()))
     }
 
-    pub struct EntityWrapper<E: Entity>(pub E);
+    pub fn from_hex<'de, D, E>(deserializer: D) -> Result<E, D::Error>
+    where
+        D: Deserializer<'de>,
+        E: Entity,
+    {
+        use serde::de::Error;
 
-    impl<E> SerializeAs<E> for EntityWrapper<E>
+        String::deserialize(deserializer)
+            .and_then(|string| {
+                if &string[..2].to_lowercase() != "0x" {
+                    return Err(Error::custom("hex string should start with 0x"));
+                };
+                hex::decode(&string[2..])
+                    .map_err(|err| Error::custom(format!("failed to decode hex: {:?}", err)))
+            })
+            .and_then(|vec| {
+                E::from_slice(&vec).map_err(|err| {
+                    serde::de::Error::custom(format!(
+                        "failed to deserialize molecule entity: {:?}",
+                        err
+                    ))
+                })
+            })
+    }
+
+    pub fn to_hex<E, S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        E: Entity,
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("0x{}", &hex::encode(e.as_slice())))
+    }
+
+    pub struct EntityWrapperBase64<E: Entity>(pub E);
+
+    impl<E> SerializeAs<E> for EntityWrapperBase64<E>
     where
         E: Entity,
     {
@@ -194,11 +228,11 @@ pub mod serde_utils {
         where
             S: Serializer,
         {
-            as_base64(e, serializer)
+            to_base64(e, serializer)
         }
     }
 
-    impl<'de, E> DeserializeAs<'de, E> for EntityWrapper<E>
+    impl<'de, E> DeserializeAs<'de, E> for EntityWrapperBase64<E>
     where
         E: Entity,
     {
@@ -209,18 +243,42 @@ pub mod serde_utils {
             from_base64(deserializer)
         }
     }
-}
 
-use serde_utils::EntityWrapper;
+    pub struct EntityWrapperHex<E: Entity>(pub E);
+
+    impl<E> SerializeAs<E> for EntityWrapperHex<E>
+    where
+        E: Entity,
+    {
+        fn serialize_as<S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            to_hex(e, serializer)
+        }
+    }
+
+    impl<'de, E> DeserializeAs<'de, E> for EntityWrapperHex<E>
+    where
+        E: Entity,
+    {
+        fn deserialize_as<D>(deserializer: D) -> Result<E, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            from_hex(deserializer)
+        }
+    }
+}
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenChannel {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub chain_hash: Byte32,
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "Option<EntityWrapper<Script>>")]
+    #[serde_as(as = "Option<EntityWrapperBase64<Script>>")]
     pub funding_type_script: Option<Script>,
     pub funding_amount: u64,
     pub funding_fee_rate: u64,
@@ -294,7 +352,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptChannel {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub funding_amount: u64,
     pub max_tlc_value_in_flight: u64,
@@ -355,7 +413,7 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitmentSigned {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub signature: Signature,
 }
@@ -383,9 +441,9 @@ impl TryFrom<molecule_pcn::CommitmentSigned> for CommitmentSigned {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxSignatures {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub tx_hash: Byte32,
     pub witnesses: Vec<Vec<u8>>,
 }
@@ -429,7 +487,7 @@ impl TryFrom<molecule_pcn::TxSignatures> for TxSignatures {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelReady {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
 }
 
@@ -454,9 +512,9 @@ impl TryFrom<molecule_pcn::ChannelReady> for ChannelReady {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxAdd {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "EntityWrapper<Transaction>")]
+    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
     pub tx: Transaction,
 }
 
@@ -483,9 +541,9 @@ impl TryFrom<molecule_pcn::TxAdd> for TxAdd {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxRemove {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "EntityWrapper<Transaction>")]
+    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
     pub tx: Transaction,
 }
 
@@ -512,7 +570,7 @@ impl TryFrom<molecule_pcn::TxRemove> for TxRemove {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
 }
 
@@ -537,7 +595,7 @@ impl TryFrom<molecule_pcn::TxComplete> for TxComplete {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxAbort {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub message: Vec<u8>,
 }
@@ -565,7 +623,7 @@ impl TryFrom<molecule_pcn::TxAbort> for TxAbort {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxInitRBF {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub fee_rate: u64,
 }
@@ -593,7 +651,7 @@ impl TryFrom<molecule_pcn::TxInitRBF> for TxInitRBF {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxAckRBF {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
 }
 
@@ -618,9 +676,9 @@ impl TryFrom<molecule_pcn::TxAckRBF> for TxAckRBF {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shutdown {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "EntityWrapper<Script>")]
+    #[serde_as(as = "EntityWrapperBase64<Script>")]
     pub close_script: Script,
 }
 
@@ -647,7 +705,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosingSigned {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub fee: u64,
     pub signature: Signature,
@@ -678,11 +736,11 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddTlc {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub tlc_id: u64,
     pub amount: u64,
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub payment_hash: Byte32,
     pub expiry: u64,
 }
@@ -716,7 +774,7 @@ impl TryFrom<molecule_pcn::AddTlc> for AddTlc {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlcsSigned {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub signature: Signature,
     pub tlc_signatures: Vec<Signature>,
@@ -761,9 +819,9 @@ impl TryFrom<molecule_pcn::TlcsSigned> for TlcsSigned {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub per_commitment_secret: Byte32,
     pub next_per_commitment_point: Pubkey,
 }
@@ -793,7 +851,7 @@ impl TryFrom<molecule_pcn::RevokeAndAck> for RevokeAndAck {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveTlcFulfill {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub payment_preimage: Byte32,
 }
 
@@ -884,7 +942,7 @@ impl TryFrom<molecule_pcn::RemoveTlcReason> for RemoveTlcReason {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoveTlc {
-    #[serde_as(as = "EntityWrapper<Byte32>")]
+    #[serde_as(as = "EntityWrapperHex<Byte32>")]
     pub channel_id: Byte32,
     pub tlc_id: u64,
     pub reason: RemoveTlcReason,
