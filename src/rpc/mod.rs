@@ -55,7 +55,8 @@ pub async fn start_rpc<F>(
         .route("/", post(handle_request))
         .with_state(app_state);
 
-    let listener = tokio::net::TcpListener::bind(config.listening_addr)
+    let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
+    let listener = tokio::net::TcpListener::bind(listening_addr)
         .await
         .expect("bind rpc addr");
     info!("Starting rpc server at {:?}", &listener.local_addr());
