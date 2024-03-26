@@ -24,7 +24,6 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use super::{types::PCNMessage, CkbConfig, Command, Event};
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
-const PCN_TARGET_PROTOCOL: TargetProtocol = TargetProtocol::Single(PCN_PROTOCOL_ID);
 
 #[derive(Clone, Debug)]
 struct PHandle {
@@ -226,7 +225,7 @@ impl NetworkState {
                 // e.g. whether the peer support some specific feature.
                 // TODO: If we are already connected to the peer, skip connecting.
                 debug!("Dialing {}", &addr);
-                let result = self.control.dial(addr.clone(), PCN_TARGET_PROTOCOL).await;
+                let result = self.control.dial(addr.clone(), TargetProtocol::All).await;
                 if let Err(err) = result {
                     error!("Dialing {} failed: {}", &addr, err);
                 }
