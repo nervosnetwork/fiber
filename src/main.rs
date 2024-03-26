@@ -1,7 +1,7 @@
 use log::{debug, error, info};
 use tentacle::multiaddr::Multiaddr;
-use tokio::signal;
 use tokio::sync::mpsc;
+use tokio::{select, signal};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::task_tracker::TaskTracker;
 
@@ -76,21 +76,57 @@ pub async fn main() {
                     );
                     for bootnode in &ckb_config.bootnode_addrs {
                         let addr = Multiaddr::from_str(bootnode).expect("valid bootnode");
-                        let command = Command::Connect(addr);
+                        let command = Command::ConnectPeer(addr);
                         command_sender
                             .send(command)
                             .await
                             .expect("receiver not closed")
                     }
 
+                    let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
+
                     info!("Starting ckb");
                     start_ckb(
                         ckb_config,
                         command_receiver,
+                        event_sender,
                         new_tokio_cancellation_token(),
                         new_tokio_task_tracker(),
                     )
                     .await;
+
+                    new_tokio_task_tracker().spawn(async move {
+                        let token = new_tokio_cancellation_token();
+                        loop {
+                            select! {
+                                _ = token.cancelled() => {
+                                    debug!("Cancellation received, event processing service");
+                                    break;
+                                }
+                                event = event_receiver.recv() => {
+                                    match event {
+                                        None => {
+                                            debug!("Event receiver completed, event processing service");
+                                            break;
+                                        }
+                                        Some(event) => {
+                                            debug!("Received event: {:?}", event);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        debug!("Event processing service exited");
+                    });
+
+                    // Just keep command sender around until tasks finish.
+                    // This is a hack to keep the command receiver alive until the tasks are done.
+                    let cloned_command_sender = command_sender.clone();
+                    new_tokio_task_tracker().spawn(async move {
+                        let _command_sender: mpsc::Sender<ckb_pcn_node::ckb::Command> =
+                            cloned_command_sender;
+                        new_tokio_cancellation_token().cancelled().await;
+                    });
 
                     // Start rpc service
                     if let Some(rpc_config) = rpc {

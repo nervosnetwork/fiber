@@ -2,6 +2,7 @@ use serde::Deserialize;
 use tentacle::multiaddr::Multiaddr;
 
 #[derive(PartialEq, Eq, Clone, Debug, Deserialize)]
-pub enum Command {
-    ConnectPeer(Multiaddr),
+pub enum Event {
+    PeerConnected(Multiaddr),
+    PeerDisConnected(Multiaddr),
 }

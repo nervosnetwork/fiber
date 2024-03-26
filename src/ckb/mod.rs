@@ -12,4 +12,7 @@ pub mod gen;
 mod command;
 pub use command::Command;
 
+mod event;
+pub use event::Event;
+
 mod types;

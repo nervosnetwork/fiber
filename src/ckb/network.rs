@@ -20,21 +20,19 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::types::PCNMessage;
-use super::Command;
-use crate::CkbConfig;
+use super::{types::PCNMessage, CkbConfig, Command, Event};
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 const PCN_TARGET_PROTOCOL: TargetProtocol = TargetProtocol::Single(PCN_PROTOCOL_ID);
 
-#[derive(Default)]
+#[derive(Clone, Debug)]
 struct PHandle {
-    peer_state: PeerState,
+    state: SharedState,
 }
 
 impl PHandle {
-    fn new(state: PeerState) -> Self {
-        Self { peer_state: state }
+    fn new(state: SharedState) -> Self {
+        Self { state }
     }
 
     fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
@@ -58,11 +56,16 @@ impl ServiceProtocol for PHandle {
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
             context.proto_id, session.id, session.address, session.ty, version
         );
+        self.state
+            .event_sender
+            .send(Event::PeerConnected(context.session.address.clone()))
+            .await
+            .expect("send event");
 
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id {
             Some(peer_id) => {
-                let mut peer_state = self.peer_state.lock().unwrap();
+                let mut peer_state = self.state.peers.lock().unwrap();
                 debug!("Trying to save session of peer {:?}", peer_id);
                 let peer = peer_state.entry(peer_id).or_default();
                 peer.sessions.insert(context.session.id);
@@ -79,10 +82,15 @@ impl ServiceProtocol for PHandle {
             "proto id [{}] close on session [{}]",
             context.proto_id, context.session.id
         );
+        self.state
+            .event_sender
+            .send(Event::PeerDisConnected(context.session.address.clone()))
+            .await
+            .expect("send event");
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id.as_ref() {
             Some(peer_id) => {
-                let mut peer_state = self.peer_state.lock().unwrap();
+                let mut peer_state = self.state.peers.lock().unwrap();
                 debug!("Trying to save session of peer {:?}", peer_id);
                 let peer = peer_state.get_mut(peer_id);
                 match peer {
@@ -179,15 +187,24 @@ impl ServiceHandle for SHandle {
     }
 }
 
-type PeerState = Arc<Mutex<HashMap<PeerId, PeerInfo>>>;
+#[derive(Clone, Debug)]
+pub struct SharedState {
+    peers: Arc<Mutex<HashMap<PeerId, PeerInfo>>>,
+    event_sender: mpsc::Sender<Event>,
+}
 
-fn new_peer_state() -> PeerState {
-    Arc::new(Mutex::new(HashMap::new()))
+impl SharedState {
+    fn new(event_sender: mpsc::Sender<Event>) -> Self {
+        Self {
+            peers: Arc::new(Mutex::new(HashMap::new())),
+            event_sender,
+        }
+    }
 }
 
 struct NetworkState {
     control: ServiceAsyncControl,
-    peer_state: PeerState,
+    shared_state: SharedState,
     token: CancellationToken,
     command_receiver: mpsc::Receiver<Command>,
 }
@@ -195,13 +212,13 @@ struct NetworkState {
 impl NetworkState {
     fn new(
         control: ServiceAsyncControl,
-        peer_state: PeerState,
+        shared_state: SharedState,
         token: CancellationToken,
         command_receiver: mpsc::Receiver<Command>,
     ) -> Self {
         Self {
             control,
-            peer_state,
+            shared_state,
             token,
             command_receiver,
         }
@@ -210,7 +227,7 @@ impl NetworkState {
     async fn process_command(&self, command: Command) {
         debug!("Processing command {:?}", command);
         match command {
-            Command::Connect(addr) => {
+            Command::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 // TODO: If we are already connected to the peer, skip connecting.
@@ -256,6 +273,7 @@ struct PeerInfo {
 pub async fn start_ckb(
     config: CkbConfig,
     command_receiver: mpsc::Receiver<Command>,
+    event_sender: mpsc::Sender<Event>,
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
@@ -263,9 +281,9 @@ pub async fn start_ckb(
         .read_or_generate_secret_key()
         .expect("read or generate secret key");
     let pk = kp.public_key();
-    let peer_state = new_peer_state();
+    let shared_state = SharedState::new(event_sender);
     let mut service = ServiceBuilder::default()
-        .insert_protocol(PHandle::new(peer_state.clone()).create_meta(PCN_PROTOCOL_ID))
+        .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
         .key_pair(kp)
         .build(SHandle);
     let listen_addr = service
@@ -291,7 +309,7 @@ pub async fn start_ckb(
     });
 
     tracker.spawn(async move {
-        NetworkState::new(control, peer_state, token, command_receiver)
+        NetworkState::new(control, shared_state, token, command_receiver)
             .run()
             .await;
     });
