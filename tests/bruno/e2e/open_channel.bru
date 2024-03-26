@@ -1,0 +1,53 @@
+meta {
+  name: open_channel
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{ NODE3_RPC_URL }}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "Command": {
+        "SendPcnMessage": {
+          "peer_id": "{{ NODE1_PEERID }}",
+          "message": {
+            "OpenChannel": {
+              "chain_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "channel_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "funding_amount": 123,
+              "funding_fee_rate": 123,
+              "commitment_fee_rate": 123,
+              "max_tlc_value_in_flight": 123,
+              "max_accept_tlcs": 123,
+              "min_tlc_value": 123,
+              "to_self_delay": 123,
+              "funding_pubkey": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "revocation_basepoint": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "payment_basepoint": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "delayed_payment_basepoint": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "tlc_basepoint": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "first_per_commitment_point": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "second_per_commitment_point": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+              "channel_flags": 123
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
