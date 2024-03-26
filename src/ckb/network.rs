@@ -1,7 +1,7 @@
 use log::{debug, error, info, warn};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use std::{str, time::Duration};
 use tentacle::{
@@ -17,7 +17,7 @@ use tentacle::{
 };
 use tentacle::{bytes::Bytes, secio::PeerId};
 use tokio::select;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::{types::PCNMessage, CkbConfig, Command, Event};
@@ -65,7 +65,7 @@ impl ServiceProtocol for PHandle {
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id {
             Some(peer_id) => {
-                let mut peer_state = self.state.peers.lock().unwrap();
+                let mut peer_state = self.state.peers.lock().await;
                 debug!("Trying to save session of peer {:?}", peer_id);
                 let peer = peer_state.entry(peer_id).or_default();
                 peer.sessions.insert(context.session.id);
@@ -90,7 +90,7 @@ impl ServiceProtocol for PHandle {
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id.as_ref() {
             Some(peer_id) => {
-                let mut peer_state = self.state.peers.lock().unwrap();
+                let mut peer_state = self.state.peers.lock().await;
                 debug!("Trying to save session of peer {:?}", peer_id);
                 let peer = peer_state.get_mut(peer_id);
                 match peer {
@@ -235,6 +235,31 @@ impl NetworkState {
                 let result = self.control.dial(addr.clone(), PCN_TARGET_PROTOCOL).await;
                 if let Err(err) = result {
                     error!("Dialing {} failed: {}", &addr, err);
+                }
+            }
+
+            Command::SendPcnMessage(peer_id, message) => {
+                let peer_state = self.shared_state.peers.lock().await;
+                let peer = peer_state.get(&peer_id);
+                match peer {
+                    Some(peer) => {
+                        for session_id in &peer.sessions {
+                            let result = self
+                                .control
+                                .send_message_to(
+                                    *session_id,
+                                    PCN_PROTOCOL_ID,
+                                    message.to_molecule_bytes(),
+                                )
+                                .await;
+                            if let Err(err) = result {
+                                error!("Sending message to session {} failed: {}", session_id, err);
+                            }
+                        }
+                    }
+                    None => {
+                        warn!("Trying to send message to unknown peer {:?}", peer_id);
+                    }
                 }
             }
         }
