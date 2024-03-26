@@ -32,7 +32,7 @@ impl Serialize for Pubkey {
     where
         S: serde::ser::Serializer,
     {
-        hex::encode(&self.0.serialize()).serialize(serializer)
+        base64::encode(&self.0.serialize()).serialize(serializer)
     }
 }
 
@@ -42,7 +42,7 @@ impl<'de> Deserialize<'de> for Pubkey {
         D: serde::de::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        let bytes = base64::decode(s).map_err(serde::de::Error::custom)?;
         CkbPubkey::from_slice(&bytes)
             .map(Into::into)
             .map_err(serde::de::Error::custom)
@@ -69,7 +69,7 @@ impl Serialize for Signature {
     where
         S: serde::ser::Serializer,
     {
-        hex::encode(&self.0.serialize()).serialize(serializer)
+        base64::encode(&self.0.serialize()).serialize(serializer)
     }
 }
 
@@ -79,7 +79,7 @@ impl<'de> Deserialize<'de> for Signature {
         D: serde::de::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let bytes = hex::decode(s).map_err(serde::de::Error::custom)?;
+        let bytes = base64::decode(s).map_err(serde::de::Error::custom)?;
         CkbSignature::from_slice(&bytes)
             .map(Into::into)
             .map_err(serde::de::Error::custom)
