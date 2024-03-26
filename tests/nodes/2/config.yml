@@ -1,0 +1,11 @@
+ckb:
+  listening_port: 8345
+  bootnode_addrs:
+    - "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8"
+
+rpc:
+  listening_addr: 127.0.0.1:41715
+
+services:
+  - ckb
+  - rpc

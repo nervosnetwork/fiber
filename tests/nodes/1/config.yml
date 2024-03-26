@@ -1,0 +1,9 @@
+ckb:
+  listening_port: 8344
+
+rpc:
+  listening_addr: 127.0.0.1:41714
+
+services:
+  - ckb
+  - rpc
