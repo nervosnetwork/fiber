@@ -5,6 +5,7 @@ use ckb_types::{
 };
 use molecule::prelude::{Builder, Byte, Entity};
 use serde::{Deserialize, Serialize};
+use serde_with::base64::Base64;
 use serde_with::serde_as;
 use thiserror::Error;
 
@@ -918,6 +919,7 @@ impl TryFrom<molecule_pcn::RemoveTlc> for RemoveTlc {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestMessage {
+    #[serde_as(as = "Base64")]
     pub bytes: Vec<u8>,
 }
 
