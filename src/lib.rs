@@ -9,5 +9,5 @@ pub use ckb::{start_ckb, CkbConfig};
 pub mod rpc;
 pub use rpc::{start_rpc, RpcConfig};
 
-mod errros;
-pub use errros::{Error, Result};
+mod errors;
+pub use errors::{Error, Result};
