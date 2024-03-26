@@ -21,6 +21,8 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use crate::ckb::command::PCNMessageWithPeerId;
+
 use super::{types::PCNMessage, CkbConfig, Command, Event};
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -231,7 +233,7 @@ impl NetworkState {
                 }
             }
 
-            Command::SendPcnMessage(peer_id, message) => {
+            Command::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
                 let peer_state = self.shared_state.peers.lock().await;
                 let peer = peer_state.get(&peer_id);
                 match peer {

@@ -8,5 +8,13 @@ use super::types::PCNMessage;
 #[derive(Clone, Debug, Deserialize)]
 pub enum Command {
     ConnectPeer(Multiaddr),
-    SendPcnMessage(#[serde_as(as = "DisplayFromStr")] PeerId, PCNMessage),
+    SendPcnMessage(PCNMessageWithPeerId),
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Deserialize)]
+pub struct PCNMessageWithPeerId {
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    pub message: PCNMessage,
 }

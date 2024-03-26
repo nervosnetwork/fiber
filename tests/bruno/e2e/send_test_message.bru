@@ -1,0 +1,37 @@
+meta {
+  name: send_test_message
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{ NODE3_RPC_URL }}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "Command": {
+        "SendPcnMessage": {
+          "peer_id": "{{ NODE1_PEERID }}",
+          "message": {
+            "TestMessage": {
+              "bytes": "aGVsbG8gd29ybGQK"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}

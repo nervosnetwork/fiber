@@ -1,7 +1,7 @@
 meta {
-  name: send test message
+  name: connect_peer
   type: http
-  seq: 2
+  seq: 1
 }
 
 post {
@@ -19,12 +19,13 @@ body:json {
   {
     "request": {
       "Command": {
-        "SendPcnMessage": [
-          "{{NODE1_PEERID}}",
-          { "TestMessage": { "bytes": "aGVsbG8gd29ybGQK" } }
-        ]
+        "ConnectPeer": "{{ NODE1_ADDR }}"
       }
     }
   }
   
+}
+
+assert {
+  res.status: eq 200
 }
