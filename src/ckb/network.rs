@@ -1,21 +1,22 @@
 use log::{debug, error, info, warn};
 use std::{
     collections::{HashMap, HashSet},
+    str,
     sync::Arc,
 };
-use std::{str, time::Duration};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
+    bytes::Bytes,
     context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
+    secio::PeerId,
     service::{
         ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
-        TargetProtocol, TargetSession,
+        TargetProtocol,
     },
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
-use tentacle::{bytes::Bytes, secio::PeerId};
 use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -44,6 +45,10 @@ impl PHandle {
             })
             .build()
     }
+
+    async fn send_event(&self, event: Event) {
+        let _ = self.state.event_sender.send(event).await;
+    }
 }
 
 #[async_trait]
@@ -56,11 +61,8 @@ impl ServiceProtocol for PHandle {
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
             context.proto_id, session.id, session.address, session.ty, version
         );
-        self.state
-            .event_sender
-            .send(Event::PeerConnected(context.session.address.clone()))
-            .await
-            .expect("send event");
+        self.send_event(Event::PeerConnected(context.session.address.clone()))
+            .await;
 
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id {
@@ -82,11 +84,9 @@ impl ServiceProtocol for PHandle {
             "proto id [{}] close on session [{}]",
             context.proto_id, context.session.id
         );
-        self.state
-            .event_sender
-            .send(Event::PeerDisConnected(context.session.address.clone()))
-            .await
-            .expect("send event");
+        self.send_event(Event::PeerDisConnected(context.session.address.clone()))
+            .await;
+
         let peer_id = context.session.remote_pubkey.clone().map(Into::into);
         match peer_id.as_ref() {
             Some(peer_id) => {
@@ -156,34 +156,28 @@ impl ServiceProtocol for PHandle {
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
 
-pub struct SHandle;
+#[derive(Clone, Debug)]
+struct SHandle {
+    state: SharedState,
+}
+
+impl SHandle {
+    fn new(state: SharedState) -> Self {
+        Self { state }
+    }
+
+    async fn send_event(&self, event: Event) {
+        let _ = self.state.event_sender.send(event).await;
+    }
+}
 
 #[async_trait]
 impl ServiceHandle for SHandle {
-    // A lot of internal error events will be output here, but not all errors need to close the service,
-    // some just tell users that they need to pay attention
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        info!("service error: {:?}", error);
+        self.send_event(Event::ServiceError(error)).await;
     }
-    async fn handle_event(&mut self, context: &mut ServiceContext, event: ServiceEvent) {
-        info!("service event: {:?}", event);
-        if let ServiceEvent::SessionOpen { .. } = event {
-            let delay_sender = context.control().clone();
-
-            let _ = context
-                .future_task(async move {
-                    tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_secs(3))
-                        .await;
-                    let _ = delay_sender
-                        .filter_broadcast(
-                            TargetSession::All,
-                            0.into(),
-                            Bytes::from("I am a delayed message"),
-                        )
-                        .await;
-                })
-                .await;
-        }
+    async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
+        self.send_event(Event::ServiceEvent(event)).await;
     }
 }
 
@@ -310,7 +304,7 @@ pub async fn start_ckb(
     let mut service = ServiceBuilder::default()
         .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
         .key_pair(kp)
-        .build(SHandle);
+        .build(SHandle::new(shared_state.clone()));
     let listen_addr = service
         .listen(
             format!("/ip4/127.0.0.1/tcp/{}", config.listening_port)

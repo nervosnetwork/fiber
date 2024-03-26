@@ -1,8 +1,12 @@
-use serde::Deserialize;
-use tentacle::multiaddr::Multiaddr;
+use tentacle::{
+    multiaddr::Multiaddr,
+    service::{ServiceError, ServiceEvent},
+};
 
-#[derive(PartialEq, Eq, Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub enum Event {
+    ServiceError(ServiceError),
+    ServiceEvent(ServiceEvent),
     PeerConnected(Multiaddr),
     PeerDisConnected(Multiaddr),
 }
