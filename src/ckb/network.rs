@@ -1,3 +1,4 @@
+use ckb_types::packed::Byte32;
 use log::{debug, error, info, warn};
 use std::{
     collections::{HashMap, HashSet},
@@ -23,7 +24,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::ckb::command::PCNMessageWithPeerId;
 
-use super::{types::PCNMessage, CkbConfig, Command, Event};
+use super::{channel::Channel, types::PCNMessage, CkbConfig, Command, Event};
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -141,13 +142,46 @@ impl ServiceProtocol for PHandle {
         }
 
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
+        let peer_id = match context.session.remote_pubkey.clone().map(Into::into) {
+            Some(peer_id) => peer_id,
+            None => {
+                warn!("Received message from a peer without public key");
+                return;
+            }
+        };
+        let mut peer_state = self.state.peers.lock().await;
+        let peer = match peer_state.get_mut(&peer_id) {
+            Some(peer) => peer,
+            None => {
+                warn!("Trying to send message to unknown peer {:?}", peer_id);
+                return;
+            }
+        };
         match msg {
             PCNMessage::TestMessage(test) => {
                 debug!("Test message {:?}", test);
             }
             PCNMessage::OpenChannel(open_channel) => {
                 debug!("Openning channel {:?}", open_channel);
+                peer.channels
+                    .insert(open_channel.channel_id.clone(), Channel::new());
+                debug!("Peer {:?} openning channel", peer_id);
             }
+            PCNMessage::AcceptChannel(accpet_channel) => {
+                debug!("Accepting channel {:?}", accpet_channel);
+                let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
+                    Some(channel) => channel,
+                    None => {
+                        warn!(
+                            "Trying to accept unknown channel {:?}",
+                            accpet_channel.channel_id
+                        );
+                        return;
+                    }
+                };
+                debug!("Accepter channel {:?}", channel);
+            }
+
             _ => {
                 error!("Message handling for {:?} unimplemented", msg);
             }
@@ -288,6 +322,7 @@ impl NetworkState {
 #[derive(Debug, Default)]
 struct PeerInfo {
     sessions: HashSet<SessionId>,
+    channels: HashMap<Byte32, Channel>,
 }
 
 pub async fn start_ckb(
