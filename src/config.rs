@@ -116,8 +116,8 @@ impl Config {
         let base_dir = args.base_dir.clone().unwrap_or(get_default_base_dir());
 
         // Get config file by
-        // 1. Using the explictly set command line argument `config`
-        // 2. Prepending `config.yml` to the explictly set command line argument `dir`
+        // 1. Using the explicitly set command line argument `config`
+        // 2. Prepending `config.yml` to the explicitly set command line argument `dir`
         // 3. Using the default `config.yml` file
         let config_file = args
             .config_file
@@ -147,7 +147,7 @@ impl Config {
             print_help_and_exit(1)
         };
 
-        // Set default ckb/ldk base directory. These may be overridden by values explictly set by the user.
+        // Set default ckb/ldk base directory. These may be overridden by values explicitly set by the user.
         args.ckb.base_dir = Some(Some(base_dir.join(DEFAULT_CKB_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
 
