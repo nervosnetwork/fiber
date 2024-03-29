@@ -5,6 +5,8 @@ pub mod ldk;
 pub use ldk::{start_ldk, LdkConfig};
 pub mod ckb;
 pub use ckb::{start_ckb, CkbConfig};
+pub mod cch;
+pub use cch::{start_cch, CchConfig};
 
 pub mod rpc;
 pub use rpc::{start_rpc, RpcConfig};
