@@ -6,4 +6,5 @@ rpc:
 
 services:
   - ckb
+  - cch
   - rpc
