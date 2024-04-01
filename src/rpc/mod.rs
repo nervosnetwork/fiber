@@ -7,11 +7,12 @@ use serde::Deserialize;
 use std::{future::Future, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::ckb::Command;
+use crate::{cch::CchCommand, ckb::Command};
 
 #[derive(Debug, Deserialize)]
 pub enum HttpRequest {
     Command(Command),
+    CchCommand(CchCommand),
 }
 
 #[derive(Debug, Deserialize)]
@@ -21,36 +22,51 @@ pub struct HttpBody {
 }
 
 pub struct AppState {
-    pub ckb_command_sender: mpsc::Sender<Command>,
+    pub ckb_command_sender: Option<mpsc::Sender<Command>>,
+    pub cch_command_sender: Option<mpsc::Sender<CchCommand>>,
 }
 
 async fn handle_request(
     State(state): State<Arc<AppState>>,
     Json(http_request): Json<HttpBody>,
 ) -> impl IntoResponse {
-    debug!("Recevied http request: {:?}", http_request);
-    match http_request {
-        HttpBody { id: _, request } => match request {
-            HttpRequest::Command(command) => {
-                state
-                    .ckb_command_sender
-                    .send(command)
-                    .await
-                    .expect("send command");
-            }
-        },
+    debug!("Received http request: {:?}", http_request);
+    let payload = http_request.request;
+    match (
+        payload,
+        &state.ckb_command_sender,
+        &state.cch_command_sender,
+    ) {
+        (HttpRequest::Command(command), Some(ckb_command_sender), _) => {
+            ckb_command_sender
+                .send(command)
+                .await
+                .expect("send command");
+            StatusCode::OK
+        }
+        (HttpRequest::CchCommand(command), _, Some(cch_command_sender)) => {
+            cch_command_sender
+                .send(command)
+                .await
+                .expect("send command");
+            StatusCode::OK
+        }
+        _ => StatusCode::NOT_FOUND,
     }
-    StatusCode::OK
 }
 
 pub async fn start_rpc<F>(
     config: RpcConfig,
-    ckb_command_sender: mpsc::Sender<Command>,
+    ckb_command_sender: Option<mpsc::Sender<Command>>,
+    cch_command_sender: Option<mpsc::Sender<CchCommand>>,
     shutdown_signal: F,
 ) where
     F: Future<Output = ()> + Send + 'static,
 {
-    let app_state = Arc::new(AppState { ckb_command_sender });
+    let app_state = Arc::new(AppState {
+        ckb_command_sender,
+        cch_command_sender,
+    });
     let app = Router::new()
         .route("/", post(handle_request))
         .with_state(app_state);
