@@ -187,26 +187,10 @@ impl Config {
             ),
         };
 
-        let ckb = if services.contains(&Service::CKB) {
-            Some(ckb)
-        } else {
-            None
-        };
-        let ldk = if services.contains(&Service::LDK) {
-            Some(ldk)
-        } else {
-            None
-        };
-        let cch = if services.contains(&Service::CCH) {
-            Some(cch)
-        } else {
-            None
-        };
-        let rpc = if services.contains(&Service::RPC) {
-            Some(rpc)
-        } else {
-            None
-        };
+        let ckb = services.contains(&Service::CKB).then_some(ckb);
+        let ldk = services.contains(&Service::LDK).then_some(ldk);
+        let cch = services.contains(&Service::CCH).then_some(cch);
+        let rpc = services.contains(&Service::RPC).then_some(rpc);
         Self { ckb, ldk, cch, rpc }
     }
 }
