@@ -1,39 +1,17 @@
-use clap_serde_derive::ClapSerde;
-use serde::Deserialize;
-use serde_with::serde_as;
-use tokio::sync::mpsc;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
 mod service;
-use service::{CchService, CchState};
+pub use service::start_cch;
 
-pub async fn start_cch(
-    _config: CchConfig,
-    command_receiver: mpsc::Receiver<CchCommand>,
-    token: CancellationToken,
-    tracker: TaskTracker,
-) {
-    let service = CchService::new(CchState {
-        command_receiver,
-        token,
-    });
-    tracker.spawn(async move {
-        service.run().await;
-    });
-}
+mod error;
+pub use error::{CchError, CchResult};
 
-// Use prefix `cch-`/`CCH_`
-#[derive(ClapSerde, Debug, Clone)]
-pub struct CchConfig {}
+mod config;
+pub use config::{
+    CchConfig, DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME, DEFAULT_CKB_FINAL_TLC_EXPIRY_TIME,
+    DEFAULT_ORDER_EXPIRY_TIME,
+};
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
-pub enum CchCommand {
-    SendBTC(SendBTC),
-}
+mod command;
+pub use command::{CchCommand, SendBTC};
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
-pub struct SendBTC {
-    pub btc_pay_req: String,
-}
+mod order;
+pub use order::{CchOrderStatus, SendBTCOrder};
