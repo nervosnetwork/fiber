@@ -164,7 +164,8 @@ impl ServiceProtocol for PHandle {
             PCNMessage::OpenChannel(open_channel) => {
                 debug!("Openning channel {:?}", open_channel);
                 peer.channels
-                    .insert(open_channel.channel_id.clone(), Channel::new());
+                    .insert(open_channel.channel_id.clone(), Channel::new_inbound_channel());
+                
                 debug!("Peer {:?} openning channel", peer_id);
             }
             PCNMessage::AcceptChannel(accpet_channel) => {
