@@ -130,7 +130,7 @@ pub async fn main() {
         Some(cch_config) => {
             const CHANNEL_SIZE: usize = 4000;
             let (command_sender, command_receiver) = mpsc::channel::<CchCommand>(CHANNEL_SIZE);
-            info!("Starting ldk");
+            info!("Starting cch");
             start_cch(cch_config, command_receiver).await;
             Some(command_sender)
         }
