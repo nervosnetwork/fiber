@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{ NODE3_RPC_URL }}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,7 +19,7 @@ body:json {
   {
     "request": {
       "Command": {
-        "ConnectPeer": "{{ NODE1_ADDR }}"
+        "ConnectPeer": "{{NODE1_ADDR}}"
       }
     }
   }
