@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{ NODE3_RPC_URL }}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -20,7 +20,7 @@ body:json {
     "request": {
       "Command": {
         "SendPcnMessage": {
-          "peer_id": "{{ NODE1_PEERID }}",
+          "peer_id": "{{NODE1_PEERID}}",
           "message": {
             "OpenChannel": {
               "chain_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
