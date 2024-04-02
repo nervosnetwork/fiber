@@ -7,7 +7,7 @@ use lightning_invoice::Bolt11Invoice;
 use tokio::{select, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::{CchCommand, CchConfig, CchError, CchOrderStatus, SendBTC, SendBTCOrder};
+use super::{CchCommand, CchConfig, CchError, CchOrderStatus, CchOrdersDb, SendBTC, SendBTCOrder};
 
 pub async fn start_cch(
     config: CchConfig,
@@ -19,6 +19,7 @@ pub async fn start_cch(
         config,
         command_receiver,
         token,
+        orders_db: Default::default(),
     };
     tracker.spawn(async move {
         service.run().await;
@@ -28,6 +29,7 @@ struct CchService {
     config: CchConfig,
     token: CancellationToken,
     command_receiver: mpsc::Receiver<CchCommand>,
+    orders_db: CchOrdersDb,
 }
 
 impl CchService {
@@ -61,14 +63,14 @@ impl CchService {
         }
     }
 
-    async fn process_command(&self, command: CchCommand) -> Result<()> {
+    async fn process_command(&mut self, command: CchCommand) -> Result<()> {
         log::debug!("CchCommand received: {:?}", command);
         match command {
             CchCommand::SendBTC(send_btc) => self.send_btc(send_btc).await,
         }
     }
 
-    async fn send_btc(&self, send_btc: SendBTC) -> Result<()> {
+    async fn send_btc(&mut self, send_btc: SendBTC) -> Result<()> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
@@ -115,6 +117,7 @@ impl CchService {
 
         // TODO: Return it as the RPC response
         log::info!("SendBTCOrder: {}", serde_json::to_string(&order)?);
+        self.orders_db.insert_send_btc_order(order).await?;
 
         Ok(())
     }

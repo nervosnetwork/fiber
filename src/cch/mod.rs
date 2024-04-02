@@ -15,3 +15,6 @@ pub use command::{CchCommand, SendBTC};
 
 mod order;
 pub use order::{CchOrderStatus, SendBTCOrder};
+
+mod orders_db;
+pub use orders_db::CchOrdersDb;
