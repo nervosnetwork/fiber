@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use super::gen::pcn::{self as molecule_pcn, SignatureVec};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct Pubkey(pub CkbPubkey);
 
 impl From<Pubkey> for CkbPubkey {

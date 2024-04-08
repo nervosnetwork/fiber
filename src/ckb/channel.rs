@@ -1,15 +1,20 @@
+use bitcoin::{key::Secp256k1, secp256k1};
 use bitflags::bitflags;
+use log::debug;
 
 use ckb_types::packed::{Byte32, OutPoint, Transaction};
+use molecule::prelude::Entity;
 
 use super::types::{PCNMessage, Pubkey};
+use crate::ckb::types::OpenChannel;
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct Channel {
-    state: ChannelState,
-    funding_tx: Option<OutPoint>,
+    pub state: ChannelState,
+    pub funding_tx: Option<OutPoint>,
 }
 
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
 pub enum ChannelEvent {
@@ -17,21 +22,21 @@ pub enum ChannelEvent {
 }
 
 bitflags! {
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     struct NegotiatingFundingFlags: u32 {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
         const CHANNEL_READY = AwaitingChannelReadyFlags::OUR_CHANNEL_READY.bits() | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY.bits();
     }
 
-    #[derive(Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     struct ChannelReadyFlags: u32 {
         /// Indicates that we have sent a `commitment_signed` but are awaiting the responding
         ///	`revoke_and_ack` message. During this period, we can't generate new messages as
@@ -41,7 +46,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
@@ -75,11 +80,35 @@ impl Channel {
         }
     }
 
+    pub fn handle_open_channel(&mut self, open_channel: OpenChannel) {
+        debug!("OpenChannel: {:?}", &open_channel);
+        let OpenChannel {
+            chain_hash,
+            channel_id,
+            funding_type_script,
+            funding_amount,
+            funding_fee_rate,
+            commitment_fee_rate,
+            max_tlc_value_in_flight,
+            max_accept_tlcs,
+            min_tlc_value,
+            to_self_delay,
+            funding_pubkey,
+            revocation_basepoint,
+            payment_basepoint,
+            delayed_payment_basepoint,
+            tlc_basepoint,
+            first_per_commitment_point,
+            second_per_commitment_point,
+            channel_flags,
+        } = open_channel;
+    }
+
     pub fn step(&mut self, event: ChannelEvent) {
         match event {
             ChannelEvent::Message(msg) => match msg {
                 PCNMessage::OpenChannel(open_channel) => {
-                    dbg!(open_channel);
+                    self.handle_open_channel(open_channel);
                 }
                 _ => {}
             },
@@ -109,16 +138,100 @@ impl Channel {
     }
 }
 
+/// The commitment transactions are the transaction that each parties holds to
+/// spend the funding transaction and create a new partition of the channel
+/// balance between each parties. This struct contains all the information
+/// that we need to build the actual CKB transaction.
+/// Note that these commitment transactions are asymmetrical,
+/// meaning that counterparties have different resulting CKB transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitmentTransaction {
-    commitment_number: u64,
-    to_broadcaster_value_sat: u64,
-    to_countersignatory_value_sat: u64,
-    to_broadcaster_delay: Option<u16>, // Added in 0.0.117
-    htlcs: Vec<TLCOutputInCommitment>,
-    // A cache of the parties' pubkeys required to construct the transaction, see doc for trust()
-    keys: TxCreationKeys,
-    // For access to the pre-built transaction, see doc for trust()
-    pub tx: Transaction,
+    // Will change after each commitment to derive new commitment secrets.
+    // Currently always 0.
+    pub commitment_number: u64,
+    // The broadcaster's balance, may be spent after timelock by the broadcaster or
+    // by the countersignatory with revocation key.
+    pub to_broadcaster_value: u64,
+    // The countersignatory's balance, may be spent immediately by the countersignatory.
+    pub to_countersignatory_value: u64,
+    // The list of TLC commitmentments. These outputs are already multisiged to another
+    // set of transactions, whose output may be spent by countersignatory with revocation key,
+    // the original sender after delay, or the receiver if they has correct preimage,
+    pub tlcs: Vec<TLCOutputInCommitment>,
+    // A cache of the parties' pubkeys required to construct the transaction.
+    pub keys: TxCreationKeys,
+}
+
+/// A wrapper on CommitmentTransaction indicating that the derived fields (the built bitcoin
+/// transaction and the transaction creation keys) are trusted.
+///
+/// See trust() and verify() functions on CommitmentTransaction.
+///
+/// This structure implements Deref.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TrustedCommitmentTransaction<'a> {
+    inner: &'a CommitmentTransaction,
+}
+
+impl CommitmentTransaction {
+    pub fn build_tx(&self) -> Transaction {
+        unimplemented!("build_tx");
+    }
+
+    fn internal_rebuild_transaction(
+        &self,
+        keys: &TxCreationKeys,
+        channel_parameters: &DirectedChannelTransactionParameters,
+        broadcaster_funding_pubkey: &Pubkey,
+        countersignatory_funding_pubkey: &Pubkey,
+    ) -> Result<Transaction, ()> {
+        unimplemented!("internal_rebuild_transaction");
+    }
+
+    /// Trust our pre-built transaction and derived transaction creation public keys.
+    ///
+    /// Applies a wrapper which allows access to these fields.
+    ///
+    /// This should only be used if you fully trust the builder of this object.  It should not
+    /// be used by an external signer - instead use the verify function.
+    pub fn trust(&self) -> TrustedCommitmentTransaction {
+        TrustedCommitmentTransaction { inner: self }
+    }
+
+    /// Verify our pre-built transaction and derived transaction creation public keys.
+    ///
+    /// Applies a wrapper which allows access to these fields.
+    ///
+    /// An external validating signer must call this method before signing
+    /// or using the built transaction.
+    pub fn verify<T: secp256k1::Signing + secp256k1::Verification>(
+        &self,
+        channel_parameters: &DirectedChannelTransactionParameters,
+        broadcaster_keys: &ChannelPublicKeys,
+        countersignatory_keys: &ChannelPublicKeys,
+        secp_ctx: &Secp256k1<T>,
+    ) -> Result<TrustedCommitmentTransaction, ()> {
+        // This is the only field of the key cache that we trust
+        let per_commitment_point = &self.keys.per_commitment_point;
+        let keys = TxCreationKeys::from_channel_static_keys(
+            per_commitment_point,
+            broadcaster_keys,
+            countersignatory_keys,
+        );
+        if keys != self.keys {
+            return Err(());
+        }
+        let tx = self.internal_rebuild_transaction(
+            &keys,
+            channel_parameters,
+            &broadcaster_keys.funding_pubkey,
+            &countersignatory_keys.funding_pubkey,
+        )?;
+        if self.build_tx().as_bytes() != tx.as_bytes() {
+            return Err(());
+        }
+        Ok(TrustedCommitmentTransaction { inner: self })
+    }
 }
 
 pub struct FundedChannelParameters {
@@ -134,6 +247,18 @@ pub struct FundedChannelParameters {
     pub counterparty_parameters: Option<CounterpartyChannelTransactionParameters>,
     /// The late-bound funding outpoint
     pub funding_outpoint: OutPoint,
+}
+
+/// Static channel fields used to build transactions given per-commitment fields, organized by
+/// broadcaster/countersignatory.
+///
+/// This is derived from the holder/counterparty-organized ChannelTransactionParameters via the
+/// as_holder_broadcastable and as_counterparty_broadcastable functions.
+pub struct DirectedChannelTransactionParameters<'a> {
+    /// The holder's channel static parameters
+    inner: &'a FundedChannelParameters,
+    /// Whether the holder is the broadcaster
+    holder_is_broadcaster: bool,
 }
 
 /// One counterparty's public keys which do not change over the life of a channel.
@@ -167,7 +292,7 @@ pub struct CounterpartyChannelTransactionParameters {
     pub selected_contest_delay: u16,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TLCOutputInCommitment {
     /// Whether the HTLC was "offered" (ie outbound in relation to this commitment transaction).
     /// Note that this is not the same as whether it is ountbound *from us*. To determine that you
@@ -198,6 +323,7 @@ pub struct TLCOutputInCommitment {
 /// channel basepoints via the new function, or they were obtained via
 /// CommitmentTransaction.trust().keys() because we trusted the source of the
 /// pre-calculated keys.
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct TxCreationKeys {
     /// The broadcaster's per-commitment public key which was used to derive the other keys.
     pub per_commitment_point: Pubkey,
@@ -211,4 +337,54 @@ pub struct TxCreationKeys {
     pub countersignatory_htlc_key: Pubkey,
     /// Broadcaster's Payment Key (which isn't allowed to be spent from for some delay)
     pub broadcaster_delayed_payment_key: Pubkey,
+}
+
+pub fn derive_public_key(basepoint: &Pubkey, per_commitment_point: &Pubkey) -> Pubkey {
+    // TODO: actual derive new public keys.
+    basepoint.clone()
+}
+
+impl TxCreationKeys {
+    /// Create per-state keys from channel base points and the per-commitment point.
+    /// Key set is asymmetric and can't be used as part of counter-signatory set of transactions.
+    pub fn derive_new(
+        per_commitment_point: &Pubkey,
+        broadcaster_delayed_payment_base: &Pubkey,
+        broadcaster_tlc_base: &Pubkey,
+        countersignatory_revocation_base: &Pubkey,
+        countersignatory_tlc_base: &Pubkey,
+    ) -> TxCreationKeys {
+        TxCreationKeys {
+            per_commitment_point: per_commitment_point.clone(),
+            revocation_key: derive_public_key(
+                countersignatory_revocation_base,
+                per_commitment_point,
+            ),
+            broadcaster_htlc_key: derive_public_key(broadcaster_tlc_base, per_commitment_point),
+            countersignatory_htlc_key: derive_public_key(
+                countersignatory_tlc_base,
+                per_commitment_point,
+            ),
+            broadcaster_delayed_payment_key: derive_public_key(
+                broadcaster_delayed_payment_base,
+                per_commitment_point,
+            ),
+        }
+    }
+
+    /// Generate per-state keys from channel static keys.
+    /// Key set is asymmetric and can't be used as part of counter-signatory set of transactions.
+    pub fn from_channel_static_keys(
+        per_commitment_point: &Pubkey,
+        broadcaster_keys: &ChannelPublicKeys,
+        countersignatory_keys: &ChannelPublicKeys,
+    ) -> TxCreationKeys {
+        TxCreationKeys::derive_new(
+            &per_commitment_point,
+            &broadcaster_keys.delayed_payment_basepoint,
+            &broadcaster_keys.tlc_basepoint,
+            &countersignatory_keys.revocation_basepoint,
+            &countersignatory_keys.tlc_basepoint,
+        )
+    }
 }
