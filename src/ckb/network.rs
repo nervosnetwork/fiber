@@ -22,19 +22,18 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::{channel::ChannelEvent, command::PCNMessageWithPeerId, types::OpenChannel};
-
-use super::{channel::Channel, types::PCNMessage, CkbConfig, Command, Event};
+use super::{
+    channel::{Channel, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
+    command::PCNMessageWithPeerId,
+    types::{OpenChannel, PCNMessage},
+    CkbConfig, Command, Event,
+};
 
 const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 #[derive(Clone, Debug)]
 struct PHandle {
     state: SharedState,
-}
-
-pub enum PeerError {
-    InvalidParameter(String),
 }
 
 impl PHandle {
@@ -61,7 +60,7 @@ impl PHandle {
         peer_id: PeerId,
         peer: &mut PeerInfo,
         msg: PCNMessage,
-    ) -> Result<(), PeerError> {
+    ) -> ProcessingChannelResult {
         match msg {
             PCNMessage::TestMessage(test) => {
                 debug!("Test message {:?}", test);
@@ -89,21 +88,21 @@ impl PHandle {
                 } = &open_channel;
 
                 if peer.channels.contains_key(&open_channel.channel_id) {
-                    return Err(PeerError::InvalidParameter(format!(
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Trying to open channel {:?} that already exists",
                         open_channel.channel_id
                     )));
                 }
 
                 if chain_hash != &Byte32::zero() {
-                    return Err(PeerError::InvalidParameter(format!(
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Invalid chain hash {:?}",
                         chain_hash
                     )));
                 }
 
                 if funding_type_script.is_some() {
-                    return Err(PeerError::InvalidParameter(
+                    return Err(ProcessingChannelError::InvalidParameter(
                         "Funding type script is not none".to_string(),
                     ));
                 }
@@ -133,14 +132,13 @@ impl PHandle {
                 let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
                     Some(channel) => channel,
                     None => {
-                        return Err(PeerError::InvalidParameter(format!(
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Trying to accept channel {:?} that does not exist",
                             &accpet_channel.channel_id
                         )));
                     }
                 };
-                channel.step(ChannelEvent::AcceptChannel(accpet_channel));
-                Ok(())
+                channel.step(ChannelEvent::AcceptChannel(accpet_channel))
             }
 
             _ => {

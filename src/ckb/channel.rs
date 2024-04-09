@@ -1,6 +1,6 @@
 use bitflags::bitflags;
 use ckb_hash::new_blake2b;
-use log::{debug, warn};
+use log::{debug, error, warn};
 
 use std::fmt::Debug;
 
@@ -9,14 +9,14 @@ use molecule::prelude::Entity;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 
-use super::types::{Privkey, Pubkey};
+use super::types::{ChannelReady, CommitmentSigned, Privkey, Pubkey};
 use crate::ckb::types::{AcceptChannel, OpenChannel};
 use molecule::prelude::Builder;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub state: ChannelState,
-    pub id: Byte32,
+    pub temp_id: Byte32,
     pub total_value: u64,
     pub to_self_value: u64,
     pub signer: InMemorySigner,
@@ -42,16 +42,22 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     AcceptChannel(AcceptChannel),
+    CommitmentSigned(CommitmentSigned),
+    ChannelReady(ChannelReady),
 }
 
+pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
+
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum ProcessingChannelError {
     #[error("Invalid chain hash: {0}")]
     InvalidChainHash(Byte32),
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
     #[error("Invalid state")]
     InvalidState,
+    #[error("Invalid Parameter: {0}")]
+    InvalidParameter(String),
 }
 
 bitflags! {
@@ -126,7 +132,7 @@ impl Channel {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             total_value: counterparty_value,
-            id,
+            temp_id: id,
             to_self_value: 0,
             signer,
             holder_pubkeys,
@@ -146,7 +152,7 @@ impl Channel {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             total_value: value,
-            id: channel_id.into(),
+            temp_id: channel_id.into(),
             to_self_value,
             signer,
             holder_pubkeys,
@@ -154,17 +160,42 @@ impl Channel {
         }
     }
 
-    pub fn handle_accept_channel(&mut self, accept_channel: AcceptChannel) {
+    pub fn handle_accept_channel(
+        &mut self,
+        accept_channel: AcceptChannel,
+    ) -> ProcessingChannelResult {
+        if accept_channel.funding_amount != self.total_value {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "funding_amount mismatch".to_string(),
+            ));
+        }
+        self.state = ChannelState::FundingNegotiated;
+        let counterparty_pubkeys = (&accept_channel).into();
+        self.counterparty_pubkeys = Some(counterparty_pubkeys);
+
         debug!("OpenChannel: {:?}", &accept_channel);
+        Ok(())
     }
 
-    pub fn step(&mut self, event: ChannelEvent) {
+    pub fn handle_commitment_signed(
+        &mut self,
+        commitment_signed: CommitmentSigned,
+    ) -> ProcessingChannelResult {
+        debug!("CommitmentSigned: {:?}", &commitment_signed);
+        Ok(())
+    }
+
+    pub fn step(&mut self, event: ChannelEvent) -> ProcessingChannelResult {
         match event {
             ChannelEvent::AcceptChannel(accept_channel) => {
-                self.handle_accept_channel(accept_channel);
+                self.handle_accept_channel(accept_channel)
+            }
+            ChannelEvent::CommitmentSigned(commitment_signed) => {
+                self.handle_commitment_signed(commitment_signed)
             }
             _ => {
                 warn!("Unexpected event: {:?}", event);
+                Ok(())
             }
         }
     }
