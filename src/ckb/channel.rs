@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-use ckb_hash::new_blake2b;
+use ckb_hash::{blake2b_256, new_blake2b};
 use log::{debug, error, warn};
 
 use std::fmt::Debug;
@@ -22,6 +22,7 @@ pub struct Channel {
     pub signer: InMemorySigner,
     pub holder_pubkeys: ChannelPublicKeys,
 
+    pub id: Option<Byte32>,
     pub counterparty_pubkeys: Option<ChannelPublicKeys>,
 
     pub funding_tx: Option<OutPoint>,
@@ -104,7 +105,7 @@ pub enum ChannelState {
     ShutdownComplete,
 }
 
-fn new_channel_id(seed: &[u8]) -> Byte32 {
+fn new_channel_id_from_seed(seed: &[u8]) -> Byte32 {
     Byte32Builder::default()
         .set(
             blake2b_hash_with_salt(seed, b"channel id".as_slice())
@@ -117,22 +118,49 @@ fn new_channel_id(seed: &[u8]) -> Byte32 {
         .build()
 }
 
+fn derive_channel_id_from_revocation_keys(
+    revocation_basepoint1: &Pubkey,
+    revocation_basepoint2: &Pubkey,
+) -> Byte32 {
+    let holder_revocation = revocation_basepoint1.0.serialize();
+    let counterparty_revocation = revocation_basepoint2.0.serialize();
+
+    let preimage = if holder_revocation >= counterparty_revocation {
+        counterparty_revocation
+            .into_iter()
+            .chain(holder_revocation.into_iter())
+            .collect::<Vec<_>>()
+    } else {
+        holder_revocation
+            .into_iter()
+            .chain(counterparty_revocation.into_iter())
+            .collect()
+    };
+    new_channel_id_from_seed(&preimage)
+}
+
 impl Channel {
     pub fn new_inbound_channel<'a>(
-        id: Byte32,
+        temp_channel_id: Byte32,
         seed: &[u8],
         counterparty_peer_id: PeerId,
         counterparty_value: u64,
         counterparty_pubkeys: ChannelPublicKeys,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let holder_pubkeys = (&signer).into();
+        let holder_pubkeys = ChannelPublicKeys::from(&signer);
+
+        let channel_id = derive_channel_id_from_revocation_keys(
+            &holder_pubkeys.revocation_basepoint,
+            &counterparty_pubkeys.revocation_basepoint,
+        );
 
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             total_value: counterparty_value,
-            temp_id: id,
+            temp_id: temp_channel_id,
+            id: Some(channel_id),
             to_self_value: 0,
             signer,
             holder_pubkeys,
@@ -145,14 +173,15 @@ impl Channel {
             to_self_value <= value,
             "to_self_value must be less than or equal to value"
         );
-        let channel_id = new_channel_id(seed);
+        let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = signer.to_publickeys();
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             total_value: value,
-            temp_id: channel_id.into(),
+            temp_id: new_channel_id.into(),
+            id: None,
             to_self_value,
             signer,
             holder_pubkeys,
@@ -169,7 +198,11 @@ impl Channel {
                 "funding_amount mismatch".to_string(),
             ));
         }
-        self.state = ChannelState::FundingNegotiated;
+
+        if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
+            return Err(ProcessingChannelError::InvalidState);
+        }
+        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
         let counterparty_pubkeys = (&accept_channel).into();
         self.counterparty_pubkeys = Some(counterparty_pubkeys);
 
@@ -183,6 +216,24 @@ impl Channel {
     ) -> ProcessingChannelResult {
         debug!("CommitmentSigned: {:?}", &commitment_signed);
         Ok(())
+    }
+
+    pub fn fill_in_channel_id(&mut self) {
+        assert!(self.id.is_none(), "Channel id is already filled in");
+        assert!(
+            self.counterparty_pubkeys.is_some(),
+            "Counterparty pubkeys is required to derive actual channel id"
+        );
+        let counterparty_revocation = &self
+            .counterparty_pubkeys
+            .as_ref()
+            .unwrap()
+            .revocation_basepoint;
+        let holder_revocation = &self.holder_pubkeys.revocation_basepoint;
+        let channel_id =
+            derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
+
+        self.id = Some(channel_id);
     }
 
     pub fn step(&mut self, event: ChannelEvent) -> ProcessingChannelResult {
