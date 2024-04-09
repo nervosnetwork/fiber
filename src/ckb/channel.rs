@@ -1,17 +1,43 @@
-use bitcoin::{key::Secp256k1, secp256k1};
+use bitcoin::{
+    key::{self, Secp256k1},
+    secp256k1,
+};
 use bitflags::bitflags;
-use log::debug;
+use ckb_hash::new_blake2b;
+use log::{debug, warn};
 
-use ckb_types::packed::{Byte32, OutPoint, Transaction};
+use std::fmt::Debug;
+
+use ckb_types::packed::{Byte, Byte32, Byte32Builder, OutPoint, Transaction};
 use molecule::prelude::Entity;
+use tentacle::secio::PeerId;
+use thiserror::Error;
 
-use super::types::{PCNMessage, Pubkey};
-use crate::ckb::types::OpenChannel;
+use super::types::{PCNMessage, Privkey, Pubkey};
+use crate::ckb::types::{AcceptChannel, OpenChannel};
+use molecule::prelude::Builder;
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub state: ChannelState,
+    pub id: Byte32,
+    pub total_value: u64,
+    pub to_self_value: u64,
+    pub signer: InMemorySigner,
+    pub holder_pubkeys: ChannelPublicKeys,
+
+    pub counterparty_pubkeys: Option<ChannelPublicKeys>,
+
     pub funding_tx: Option<OutPoint>,
+}
+
+fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(salt);
+    hasher.update(data);
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -21,23 +47,33 @@ pub enum ChannelEvent {
     Message(PCNMessage),
 }
 
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Invalid chain hash: {0}")]
+    InvalidChainHash(Byte32),
+    #[error("Unsupported operation: {0}")]
+    Unsupported(String),
+    #[error("Invalid state")]
+    InvalidState,
+}
+
 bitflags! {
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    struct NegotiatingFundingFlags: u32 {
+    pub struct NegotiatingFundingFlags: u32 {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    struct AwaitingChannelReadyFlags: u32 {
+    pub struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
         const CHANNEL_READY = AwaitingChannelReadyFlags::OUR_CHANNEL_READY.bits() | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY.bits();
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-    struct ChannelReadyFlags: u32 {
+    pub struct ChannelReadyFlags: u32 {
         /// Indicates that we have sent a `commitment_signed` but are awaiting the responding
         ///	`revoke_and_ack` message. During this period, we can't generate new messages as
         /// we'd be unable to determine which TLCs they included in their `revoke_and_ack`
@@ -65,18 +101,56 @@ pub enum ChannelState {
     ShutdownComplete,
 }
 
+fn new_channel_id(seed: &[u8]) -> Byte32 {
+    Byte32Builder::default()
+        .set(
+            blake2b_hash_with_salt(seed, b"channel id".as_slice())
+                .into_iter()
+                .map(Byte::new)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .build()
+}
+
 impl Channel {
-    pub fn new_inbound_channel() -> Self {
+    pub fn new_inbound_channel<'a>(
+        id: Byte32,
+        seed: &[u8],
+        counterparty_peer_id: PeerId,
+        counterparty_value: u64,
+        counterparty_pubkeys: ChannelPublicKeys,
+    ) -> Self {
+        let signer = InMemorySigner::generate_from_seed(seed);
+        let holder_pubkeys = (&signer).into();
+
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            total_value: counterparty_value,
+            id,
+            to_self_value: 0,
+            signer,
+            holder_pubkeys,
+            counterparty_pubkeys: Some(counterparty_pubkeys),
         }
     }
 
-    pub fn new_outbound_channel() -> Self {
+    pub fn new_outbound_channel(seed: &[u8], value: u64, to_self_value: u64) -> Self {
+        let channel_id = new_channel_id(seed);
+        let signer = InMemorySigner::generate_from_seed(seed);
+        let holder_pubkeys = signer.to_publickeys();
+        let counterparty_pubkeys = ChannelPublicKeys::from(&signer);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            total_value: value,
+            id: channel_id.into(),
+            to_self_value: 0,
+            signer,
+            holder_pubkeys,
+            counterparty_pubkeys: None,
         }
     }
 
@@ -262,7 +336,7 @@ pub struct DirectedChannelTransactionParameters<'a> {
 }
 
 /// One counterparty's public keys which do not change over the life of a channel.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelPublicKeys {
     /// The public key which is used to sign all commitment transactions, as it appears in the
     /// on-chain channel lock-in 2-of-2 multisig output.
@@ -283,6 +357,30 @@ pub struct ChannelPublicKeys {
     /// The base point which is used (with derive_public_key) to derive a per-commitment public key
     /// which is used to encumber HTLC-in-flight outputs.
     pub tlc_basepoint: Pubkey,
+}
+
+impl From<&OpenChannel> for ChannelPublicKeys {
+    fn from(value: &OpenChannel) -> Self {
+        ChannelPublicKeys {
+            funding_pubkey: value.funding_pubkey.clone(),
+            revocation_basepoint: value.revocation_basepoint.clone(),
+            payment_point: value.payment_basepoint.clone(),
+            delayed_payment_basepoint: value.delayed_payment_basepoint.clone(),
+            tlc_basepoint: value.tlc_basepoint.clone(),
+        }
+    }
+}
+
+impl From<&AcceptChannel> for ChannelPublicKeys {
+    fn from(value: &AcceptChannel) -> Self {
+        ChannelPublicKeys {
+            funding_pubkey: value.funding_pubkey.clone(),
+            revocation_basepoint: value.revocation_basepoint.clone(),
+            payment_point: value.payment_basepoint.clone(),
+            delayed_payment_basepoint: value.delayed_payment_basepoint.clone(),
+            tlc_basepoint: value.tlc_basepoint.clone(),
+        }
+    }
 }
 
 pub struct CounterpartyChannelTransactionParameters {
@@ -340,8 +438,109 @@ pub struct TxCreationKeys {
 }
 
 pub fn derive_public_key(basepoint: &Pubkey, per_commitment_point: &Pubkey) -> Pubkey {
-    // TODO: actual derive new public keys.
+    // TODO: Currently we only copy the input pubkey. We need to actually derive new public keys
+    // from the per_commitment_point.
     basepoint.clone()
+}
+
+/// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
+///
+/// This implementation performs no policy checks and is insufficient by itself as
+/// a secure external signer.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct InMemorySigner {
+    /// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
+    /// holder's anchor output in a commitment transaction, if one is present.
+    pub funding_key: Privkey,
+    /// Holder secret key for blinded revocation pubkey.
+    pub revocation_base_key: Privkey,
+    /// Holder secret key used for our balance in counterparty-broadcasted commitment transactions.
+    pub payment_key: Privkey,
+    /// Holder secret key used in an HTLC transaction.
+    pub delayed_payment_base_key: Privkey,
+    /// Holder HTLC secret key used in commitment transaction HTLC outputs.
+    pub htlc_base_key: Privkey,
+    /// Commitment seed.
+    pub commitment_seed: [u8; 32],
+    /// Key derivation parameters.
+    channel_keys_id: [u8; 32],
+}
+
+impl InMemorySigner {
+    pub fn new(
+        funding_key: Privkey,
+        revocation_base_key: Privkey,
+        payment_key: Privkey,
+        delayed_payment_base_key: Privkey,
+        htlc_base_key: Privkey,
+        commitment_seed: [u8; 32],
+        channel_keys_id: [u8; 32],
+    ) -> Self {
+        InMemorySigner {
+            funding_key,
+            revocation_base_key,
+            payment_key,
+            delayed_payment_base_key,
+            htlc_base_key,
+            commitment_seed,
+            channel_keys_id,
+        }
+    }
+
+    pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
+        let seed = ckb_hash::blake2b_256(params);
+
+        let commitment_seed = {
+            let mut hasher = new_blake2b();
+            hasher.update(&seed);
+            hasher.update(&b"commitment seed"[..]);
+            let mut result = [0u8; 32];
+            hasher.finalize(&mut result);
+            result
+        };
+
+        let key_derive = |seed: &[u8], info: &[u8]| {
+            let mut hasher = new_blake2b();
+            hasher.update(&seed);
+            hasher.update(&b"commitment seed"[..]);
+            let mut result = [0u8; 32];
+            hasher.finalize(&mut result);
+            Privkey::from_slice(&result)
+        };
+
+        let funding_key = key_derive(&seed, b"funding key");
+        let revocation_base_key = key_derive(&seed, b"revocation base key");
+        let payment_key = key_derive(&seed, b"payment key");
+        let delayed_payment_base_key = key_derive(&seed, b"delayed payment base key");
+        let delayed_payment_base_key = key_derive(&seed, b"delayed payment base key");
+        let htlc_base_key = key_derive(&seed, b"HTLC base key");
+
+        Self::new(
+            funding_key,
+            revocation_base_key,
+            payment_key,
+            delayed_payment_base_key,
+            htlc_base_key,
+            commitment_seed,
+            seed.clone(),
+        )
+    }
+
+    fn to_publickeys(&self) -> ChannelPublicKeys {
+        ChannelPublicKeys {
+            funding_pubkey: self.funding_key.pubkey(),
+            revocation_basepoint: self.revocation_base_key.pubkey(),
+            payment_point: self.payment_key.pubkey(),
+            delayed_payment_basepoint: self.delayed_payment_base_key.pubkey(),
+            tlc_basepoint: self.htlc_base_key.pubkey(),
+        }
+    }
+}
+
+impl From<&InMemorySigner> for ChannelPublicKeys {
+    fn from(signer: &InMemorySigner) -> Self {
+        signer.to_publickeys()
+    }
 }
 
 impl TxCreationKeys {

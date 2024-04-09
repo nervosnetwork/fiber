@@ -57,6 +57,7 @@ hex = "0.4.3"
 tower = "0.4.13"
 axum = "0.7.5"
 bitflags = "2.5.0"
+ckb-hash = "0.115.0"
 
 [profile.release]
 panic = "abort"

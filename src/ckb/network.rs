@@ -22,7 +22,7 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::command::PCNMessageWithPeerId;
+use crate::ckb::{command::PCNMessageWithPeerId, types::OpenChannel};
 
 use super::{channel::Channel, types::PCNMessage, CkbConfig, Command, Event};
 
@@ -31,6 +31,10 @@ const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 #[derive(Clone, Debug)]
 struct PHandle {
     state: SharedState,
+}
+
+pub enum PeerError {
+    InvalidParameter(String),
 }
 
 impl PHandle {
@@ -50,6 +54,99 @@ impl PHandle {
 
     async fn send_event(&self, event: Event) {
         let _ = self.state.event_sender.send(event).await;
+    }
+
+    pub fn handle_channel_update_message(
+        &self,
+        peer_id: PeerId,
+        peer: &mut PeerInfo,
+        msg: PCNMessage,
+    ) -> Result<(), PeerError> {
+        match msg {
+            PCNMessage::TestMessage(test) => {
+                debug!("Test message {:?}", test);
+                Ok(())
+            }
+            PCNMessage::OpenChannel(open_channel) => {
+                debug!("Openning channel {:?}", &open_channel);
+
+                let counterpart_pubkeys = (&open_channel).into();
+                let OpenChannel {
+                    channel_id,
+                    chain_hash,
+                    funding_type_script,
+                    funding_amount,
+                    funding_fee_rate,
+                    commitment_fee_rate,
+                    max_tlc_value_in_flight,
+                    max_accept_tlcs,
+                    min_tlc_value,
+                    to_self_delay,
+                    first_per_commitment_point,
+                    second_per_commitment_point,
+                    channel_flags,
+                    ..
+                } = &open_channel;
+
+                if peer.channels.contains_key(&open_channel.channel_id) {
+                    return Err(PeerError::InvalidParameter(format!(
+                        "Trying to open channel {:?} that already exists",
+                        open_channel.channel_id
+                    )));
+                }
+
+                if chain_hash != &Byte32::zero() {
+                    return Err(PeerError::InvalidParameter(format!(
+                        "Invalid chain hash {:?}",
+                        chain_hash
+                    )));
+                }
+
+                if funding_type_script.is_some() {
+                    return Err(PeerError::InvalidParameter(
+                        "Funding type script is not none".to_string(),
+                    ));
+                }
+
+                let channel_user_id = peer.channels.len();
+                let seed = channel_user_id
+                    .to_be_bytes()
+                    .into_iter()
+                    .chain(peer_id.as_bytes().iter().cloned())
+                    .collect::<Vec<u8>>();
+
+                let channel = Channel::new_inbound_channel(
+                    channel_id.clone(),
+                    &seed,
+                    peer_id,
+                    open_channel.funding_amount,
+                    counterpart_pubkeys,
+                );
+                let _ = peer.channels.insert(channel_id.clone(), channel);
+
+                debug!("Peer {:?} openning channel", peer);
+                Ok(())
+            }
+            PCNMessage::AcceptChannel(accpet_channel) => {
+                debug!("Accepting channel {:?}", accpet_channel);
+                let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
+                    Some(channel) => channel,
+                    None => {
+                        return Err(PeerError::InvalidParameter(format!(
+                            "Trying to accept channel {:?} that does not exist",
+                            accpet_channel.channel_id
+                        )));
+                    }
+                };
+                debug!("Accepter channel {:?}", channel);
+                Ok(())
+            }
+
+            _ => {
+                error!("Message handling for {:?} unimplemented", msg);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -157,36 +254,7 @@ impl ServiceProtocol for PHandle {
                 return;
             }
         };
-        match msg {
-            PCNMessage::TestMessage(test) => {
-                debug!("Test message {:?}", test);
-            }
-            PCNMessage::OpenChannel(open_channel) => {
-                debug!("Openning channel {:?}", open_channel);
-                peer.channels
-                    .insert(open_channel.channel_id.clone(), Channel::new_inbound_channel());
-                
-                debug!("Peer {:?} openning channel", peer_id);
-            }
-            PCNMessage::AcceptChannel(accpet_channel) => {
-                debug!("Accepting channel {:?}", accpet_channel);
-                let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
-                    Some(channel) => channel,
-                    None => {
-                        warn!(
-                            "Trying to accept unknown channel {:?}",
-                            accpet_channel.channel_id
-                        );
-                        return;
-                    }
-                };
-                debug!("Accepter channel {:?}", channel);
-            }
-
-            _ => {
-                error!("Message handling for {:?} unimplemented", msg);
-            }
-        }
+        if let Err(err) = self.handle_channel_update_message(peer_id, peer, msg) {}
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}

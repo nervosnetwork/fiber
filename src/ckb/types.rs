@@ -1,4 +1,4 @@
-pub use ckb_crypto::secp::{Pubkey as CkbPubkey, Signature as CkbSignature};
+pub use ckb_crypto::secp::{Privkey as CkbPrivkey, Pubkey as CkbPubkey, Signature as CkbSignature};
 use ckb_types::{
     packed::{Byte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
@@ -11,6 +11,34 @@ use serde_with::serde_as;
 use thiserror::Error;
 
 use super::gen::pcn::{self as molecule_pcn, SignatureVec};
+
+#[derive(Debug, Eq, PartialEq, Hash, Clone)]
+pub struct Privkey(pub [u8; 32]);
+
+impl From<Privkey> for CkbPrivkey {
+    fn from(pk: Privkey) -> CkbPrivkey {
+        CkbPrivkey::from_slice(&pk.0)
+    }
+}
+
+impl From<&Privkey> for CkbPrivkey {
+    fn from(pk: &Privkey) -> CkbPrivkey {
+        CkbPrivkey::from_slice(&pk.0)
+    }
+}
+
+impl Privkey {
+    pub fn from_slice(key: &[u8]) -> Self {
+        assert_eq!(32, key.len(), "should provide 32-byte length slice");
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&key[0..32]);
+        Privkey(h)
+    }
+
+    pub fn pubkey(&self) -> Pubkey {
+        Pubkey::from(CkbPrivkey::from(self).pubkey().unwrap())
+    }
+}
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub struct Pubkey(pub CkbPubkey);
