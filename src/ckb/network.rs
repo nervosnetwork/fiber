@@ -22,6 +22,10 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use crate::ckb::channel::ChannelCommand;
+
+use crate::unwrap_or_return;
+
 use super::{
     channel::{Channel, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
     command::PCNMessageWithPeerId,
@@ -29,7 +33,13 @@ use super::{
     CkbConfig, Command, Event,
 };
 
-const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
+pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
+pub const DEFAULT_FEE_RATE: u64 = 0;
+pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
+pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
+pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
+pub const DEFAULT_MIN_TLC_VALUE: u64 = 0;
+pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
 
 #[derive(Clone, Debug)]
 struct PHandle {
@@ -117,9 +127,12 @@ impl PHandle {
                 let channel = Channel::new_inbound_channel(
                     channel_id.clone(),
                     &seed,
+                    *to_self_delay,
                     peer_id,
                     *funding_amount,
                     counterpart_pubkeys,
+                    first_per_commitment_point.clone(),
+                    second_per_commitment_point.clone(),
                 );
                 let _ = peer.channels.insert(channel_id.clone(), channel);
 
@@ -224,18 +237,6 @@ impl ServiceProtocol for PHandle {
             context.proto_id,
             hex::encode(data.as_ref()),
         );
-
-        macro_rules! unwrap_or_return {
-            ($expr:expr, $msg:expr) => {
-                match $expr {
-                    Ok(val) => val,
-                    Err(err) => {
-                        error!("{}: {:?}", $msg, err);
-                        return;
-                    }
-                }
-            };
-        }
 
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
         let peer_id = match context.session.remote_pubkey.clone().map(Into::into) {
@@ -359,6 +360,61 @@ impl NetworkState {
                     }
                 }
             }
+            Command::IssuePcnChannelCommand(c) => match c {
+                ChannelCommand::OpenChannel(open_channel) => {
+                    let channel = open_channel.create_channel();
+                    let channel = unwrap_or_return!(channel, "failed to create a channel");
+                    let message = OpenChannel {
+                        chain_hash: Byte32::zero(),
+                        funding_type_script: None,
+                        funding_amount: channel.to_self_value,
+                        funding_fee_rate: DEFAULT_FEE_RATE,
+                        commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+                        max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+                        max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
+                        min_tlc_value: DEFAULT_MIN_TLC_VALUE,
+                        to_self_delay: DEFAULT_TO_SELF_DELAY,
+                        channel_flags: 0,
+                        first_per_commitment_point: channel.signer.get_commitment_point(0),
+                        second_per_commitment_point: channel.signer.get_commitment_point(1),
+                        channel_id: channel.temp_id,
+                        funding_pubkey: channel.holder_pubkeys.funding_pubkey,
+                        revocation_basepoint: channel.holder_pubkeys.revocation_basepoint,
+                        payment_basepoint: channel.holder_pubkeys.payment_point,
+                        delayed_payment_basepoint: channel.holder_pubkeys.delayed_payment_basepoint,
+                        tlc_basepoint: channel.holder_pubkeys.tlc_basepoint,
+                    };
+
+                    let peer_state = self.shared_state.peers.lock().await;
+                    let peer = peer_state.get(&open_channel.peer_id);
+                    match peer {
+                        Some(peer) => {
+                            for session_id in &peer.sessions {
+                                let result = self
+                                    .control
+                                    .send_message_to(
+                                        *session_id,
+                                        PCN_PROTOCOL_ID,
+                                        message.to_molecule_bytes(),
+                                    )
+                                    .await;
+                                if let Err(err) = result {
+                                    error!(
+                                        "Sending message to session {} failed: {}",
+                                        session_id, err
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            warn!(
+                                "Trying to send message to unknown peer {:?}",
+                                &open_channel.peer_id
+                            );
+                        }
+                    }
+                }
+            },
         }
     }
 

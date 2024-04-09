@@ -1,6 +1,8 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use log::{debug, error, warn};
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
 use std::fmt::Debug;
 
@@ -9,9 +11,40 @@ use molecule::prelude::Entity;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 
-use super::types::{ChannelReady, CommitmentSigned, Privkey, Pubkey};
+use super::{
+    network::DEFAULT_TO_SELF_DELAY,
+    types::{ChannelReady, CommitmentSigned, Privkey, Pubkey},
+};
 use crate::ckb::types::{AcceptChannel, OpenChannel};
 use molecule::prelude::Builder;
+
+#[derive(Clone, Debug, Deserialize)]
+pub enum ChannelCommand {
+    OpenChannel(OpenChannelCommand),
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Deserialize)]
+pub struct OpenChannelCommand {
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    pub total_value: u64,
+    pub to_self_value: u64,
+}
+
+impl OpenChannelCommand {
+    pub fn create_channel(&self) -> Result<Channel, ProcessingChannelError> {
+        // Use a deterministic RNG for now to facilitate development.
+        let seed = 42u64.to_le_bytes();
+
+        Ok(Channel::new_outbound_channel(
+            &seed,
+            self.total_value,
+            self.to_self_value,
+            DEFAULT_TO_SELF_DELAY,
+        ))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
@@ -19,12 +52,16 @@ pub struct Channel {
     pub temp_id: Byte32,
     pub total_value: u64,
     pub to_self_value: u64,
+    pub to_self_delay: u64,
     pub signer: InMemorySigner,
     pub holder_pubkeys: ChannelPublicKeys,
+    pub holder_commitment_number: u64,
+    pub counterparty_commitment_number: u64,
 
     pub id: Option<Byte32>,
+    pub counterparty_commitment_point: Option<Pubkey>,
+    pub counterparty_prev_commitment_point: Option<Pubkey>,
     pub counterparty_pubkeys: Option<ChannelPublicKeys>,
-
     pub funding_tx: Option<OutPoint>,
 }
 
@@ -57,8 +94,10 @@ pub enum ProcessingChannelError {
     Unsupported(String),
     #[error("Invalid state")]
     InvalidState,
-    #[error("Invalid Parameter: {0}")]
+    #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
+    #[error("Unimplemented operation: {0}")]
+    Unimplemented(String),
 }
 
 bitflags! {
@@ -139,13 +178,38 @@ fn derive_channel_id_from_revocation_keys(
     new_channel_id_from_seed(&preimage)
 }
 
+pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
+    // Note that here, we hold the same assumption to bolts for commitment number,
+    // i.e. this number should be in the range [0, 2^48).
+    let mut res: [u8; 32] = commitment_seed.clone();
+    for i in 0..48 {
+        let bitpos = 47 - i;
+        if commitment_number & (1 << bitpos) == (1 << bitpos) {
+            res[bitpos / 8] ^= 1 << (bitpos & 7);
+            res = blake2b_256(&res);
+        }
+    }
+    res
+}
+
+pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) -> Pubkey {
+    Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
+}
+
 impl Channel {
+    pub fn build_holder_tx_keys(&self, commitment_number: u64) -> TxCreationKeys {
+        todo!()
+    }
+
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Byte32,
         seed: &[u8],
+        to_self_delay: u64,
         counterparty_peer_id: PeerId,
         counterparty_value: u64,
         counterparty_pubkeys: ChannelPublicKeys,
+        counterparty_commitment_point: Pubkey,
+        counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = ChannelPublicKeys::from(&signer);
@@ -162,13 +226,23 @@ impl Channel {
             temp_id: temp_channel_id,
             id: Some(channel_id),
             to_self_value: 0,
+            to_self_delay,
             signer,
             holder_pubkeys,
             counterparty_pubkeys: Some(counterparty_pubkeys),
+            holder_commitment_number: 2 ^ 48 - 1,
+            counterparty_commitment_number: 0,
+            counterparty_commitment_point: Some(counterparty_commitment_point),
+            counterparty_prev_commitment_point: Some(counterparty_prev_commitment_point),
         }
     }
 
-    pub fn new_outbound_channel(seed: &[u8], value: u64, to_self_value: u64) -> Self {
+    pub fn new_outbound_channel(
+        seed: &[u8],
+        value: u64,
+        to_self_value: u64,
+        to_self_delay: u64,
+    ) -> Self {
         assert!(
             to_self_value <= value,
             "to_self_value must be less than or equal to value"
@@ -183,13 +257,18 @@ impl Channel {
             temp_id: new_channel_id.into(),
             id: None,
             to_self_value,
+            to_self_delay,
             signer,
             holder_pubkeys,
             counterparty_pubkeys: None,
+            holder_commitment_number: 0,
+            counterparty_commitment_number: 2 ^ 48 - 1,
+            counterparty_commitment_point: None,
+            counterparty_prev_commitment_point: None,
         }
     }
 
-    pub fn handle_accept_channel(
+    pub fn handle_accept_channel_message(
         &mut self,
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
@@ -210,7 +289,7 @@ impl Channel {
         Ok(())
     }
 
-    pub fn handle_commitment_signed(
+    pub fn handle_commitment_signed_message(
         &mut self,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
@@ -239,10 +318,29 @@ impl Channel {
     pub fn step(&mut self, event: ChannelEvent) -> ProcessingChannelResult {
         match event {
             ChannelEvent::AcceptChannel(accept_channel) => {
-                self.handle_accept_channel(accept_channel)
+                self.handle_accept_channel_message(accept_channel)
             }
             ChannelEvent::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed(commitment_signed)
+                self.handle_commitment_signed_message(commitment_signed)
+            }
+            ChannelEvent::ChannelReady(channel_ready) => {
+                match self.state {
+                    ChannelState::FundingNegotiated => {
+                        self.state = ChannelState::AwaitingChannelReady(
+                            AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+                        );
+                    }
+                    ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::THEIR_CHANNEL_READY,
+                    ) => {
+                        self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                    }
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState);
+                    }
+                }
+                debug!("ChannelReady: {:?}", &channel_ready);
+                Ok(())
             }
             _ => {
                 warn!("Unexpected event: {:?}", event);
@@ -265,12 +363,8 @@ impl Channel {
         self.funding_tx.clone().expect("Channel is not funded")
     }
 
-    pub fn buil_commitment_tx(&self) -> CommitmentTransaction {
+    pub fn build_commitment_tx(&self) -> CommitmentTransaction {
         unimplemented!("build_commitment_tx");
-    }
-
-    pub fn get_input_cells(&self) {
-        let _channel = self.must_get_funding_transaction();
     }
 }
 
@@ -594,6 +688,14 @@ impl InMemorySigner {
             delayed_payment_basepoint: self.delayed_payment_base_key.pubkey(),
             tlc_basepoint: self.htlc_base_key.pubkey(),
         }
+    }
+
+    pub fn get_commitment_point(&self, commitment_number: u64) -> Pubkey {
+        get_commitment_point(&self.commitment_seed, commitment_number)
+    }
+
+    pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
+        get_commitment_secret(&self.commitment_seed, commitment_number)
     }
 }
 

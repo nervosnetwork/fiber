@@ -13,3 +13,27 @@ pub use rpc::{start_rpc, RpcConfig};
 
 mod errors;
 pub use errors::{Error, Result};
+
+pub mod macros {
+    #[macro_export]
+    macro_rules! unwrap_or_return {
+        ($expr:expr, $msg:expr) => {
+            match $expr {
+                Ok(val) => val,
+                Err(err) => {
+                    error!("{}: {:?}", $msg, err);
+                    return;
+                }
+            }
+        };
+        ($expr:expr) => {
+            match $expr {
+                Ok(val) => val,
+                Err(err) => {
+                    error!("{:?}", err);
+                    return;
+                }
+            }
+        };
+    }
+}

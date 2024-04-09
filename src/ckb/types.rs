@@ -22,8 +22,14 @@ impl From<Privkey> for CkbPrivkey {
 }
 
 impl From<&Privkey> for CkbPrivkey {
-    fn from(pk: &Privkey) -> CkbPrivkey {
-        CkbPrivkey::from_slice(&pk.0)
+    fn from(k: &Privkey) -> CkbPrivkey {
+        CkbPrivkey::from_slice(&k.0)
+    }
+}
+
+impl From<&[u8; 32]> for Privkey {
+    fn from(k: &[u8; 32]) -> Privkey {
+        Self(*k)
     }
 }
 
