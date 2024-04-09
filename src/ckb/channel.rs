@@ -1,7 +1,3 @@
-use bitcoin::{
-    key::{self, Secp256k1},
-    secp256k1,
-};
 use bitflags::bitflags;
 use ckb_hash::new_blake2b;
 use log::{debug, warn};
@@ -13,7 +9,7 @@ use molecule::prelude::Entity;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 
-use super::types::{PCNMessage, Privkey, Pubkey};
+use super::types::{Privkey, Pubkey};
 use crate::ckb::types::{AcceptChannel, OpenChannel};
 use molecule::prelude::Builder;
 
@@ -43,8 +39,9 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
+#[derive(Debug)]
 pub enum ChannelEvent {
-    Message(PCNMessage),
+    AcceptChannel(AcceptChannel),
 }
 
 #[derive(Error, Debug)]
@@ -138,54 +135,37 @@ impl Channel {
     }
 
     pub fn new_outbound_channel(seed: &[u8], value: u64, to_self_value: u64) -> Self {
+        assert!(
+            to_self_value <= value,
+            "to_self_value must be less than or equal to value"
+        );
         let channel_id = new_channel_id(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = signer.to_publickeys();
-        let counterparty_pubkeys = ChannelPublicKeys::from(&signer);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             total_value: value,
             id: channel_id.into(),
-            to_self_value: 0,
+            to_self_value,
             signer,
             holder_pubkeys,
             counterparty_pubkeys: None,
         }
     }
 
-    pub fn handle_open_channel(&mut self, open_channel: OpenChannel) {
-        debug!("OpenChannel: {:?}", &open_channel);
-        let OpenChannel {
-            chain_hash,
-            channel_id,
-            funding_type_script,
-            funding_amount,
-            funding_fee_rate,
-            commitment_fee_rate,
-            max_tlc_value_in_flight,
-            max_accept_tlcs,
-            min_tlc_value,
-            to_self_delay,
-            funding_pubkey,
-            revocation_basepoint,
-            payment_basepoint,
-            delayed_payment_basepoint,
-            tlc_basepoint,
-            first_per_commitment_point,
-            second_per_commitment_point,
-            channel_flags,
-        } = open_channel;
+    pub fn handle_accept_channel(&mut self, accept_channel: AcceptChannel) {
+        debug!("OpenChannel: {:?}", &accept_channel);
     }
 
     pub fn step(&mut self, event: ChannelEvent) {
         match event {
-            ChannelEvent::Message(msg) => match msg {
-                PCNMessage::OpenChannel(open_channel) => {
-                    self.handle_open_channel(open_channel);
-                }
-                _ => {}
-            },
+            ChannelEvent::AcceptChannel(accept_channel) => {
+                self.handle_accept_channel(accept_channel);
+            }
+            _ => {
+                warn!("Unexpected event: {:?}", event);
+            }
         }
     }
 
@@ -278,12 +258,11 @@ impl CommitmentTransaction {
     ///
     /// An external validating signer must call this method before signing
     /// or using the built transaction.
-    pub fn verify<T: secp256k1::Signing + secp256k1::Verification>(
+    pub fn verify(
         &self,
         channel_parameters: &DirectedChannelTransactionParameters,
         broadcaster_keys: &ChannelPublicKeys,
         countersignatory_keys: &ChannelPublicKeys,
-        secp_ctx: &Secp256k1<T>,
     ) -> Result<TrustedCommitmentTransaction, ()> {
         // This is the only field of the key cache that we trust
         let per_commitment_point = &self.keys.per_commitment_point;
@@ -511,7 +490,6 @@ impl InMemorySigner {
         let funding_key = key_derive(&seed, b"funding key");
         let revocation_base_key = key_derive(&seed, b"revocation base key");
         let payment_key = key_derive(&seed, b"payment key");
-        let delayed_payment_base_key = key_derive(&seed, b"delayed payment base key");
         let delayed_payment_base_key = key_derive(&seed, b"delayed payment base key");
         let htlc_base_key = key_derive(&seed, b"HTLC base key");
 

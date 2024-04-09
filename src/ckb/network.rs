@@ -22,7 +22,7 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::{command::PCNMessageWithPeerId, types::OpenChannel};
+use crate::ckb::{channel::ChannelEvent, command::PCNMessageWithPeerId, types::OpenChannel};
 
 use super::{channel::Channel, types::PCNMessage, CkbConfig, Command, Event};
 
@@ -56,7 +56,7 @@ impl PHandle {
         let _ = self.state.event_sender.send(event).await;
     }
 
-    pub fn handle_channel_update_message(
+    pub fn handle_pcnmessage(
         &self,
         peer_id: PeerId,
         peer: &mut PeerInfo,
@@ -119,7 +119,7 @@ impl PHandle {
                     channel_id.clone(),
                     &seed,
                     peer_id,
-                    open_channel.funding_amount,
+                    *funding_amount,
                     counterpart_pubkeys,
                 );
                 let _ = peer.channels.insert(channel_id.clone(), channel);
@@ -127,18 +127,19 @@ impl PHandle {
                 debug!("Peer {:?} openning channel", peer);
                 Ok(())
             }
+
             PCNMessage::AcceptChannel(accpet_channel) => {
-                debug!("Accepting channel {:?}", accpet_channel);
+                debug!("Accepting channel {:?}", &accpet_channel);
                 let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
                     Some(channel) => channel,
                     None => {
                         return Err(PeerError::InvalidParameter(format!(
                             "Trying to accept channel {:?} that does not exist",
-                            accpet_channel.channel_id
+                            &accpet_channel.channel_id
                         )));
                     }
                 };
-                debug!("Accepter channel {:?}", channel);
+                channel.step(ChannelEvent::AcceptChannel(accpet_channel));
                 Ok(())
             }
 
@@ -254,7 +255,7 @@ impl ServiceProtocol for PHandle {
                 return;
             }
         };
-        if let Err(err) = self.handle_channel_update_message(peer_id, peer, msg) {}
+        if let Err(err) = self.handle_pcnmessage(peer_id, peer, msg) {}
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
