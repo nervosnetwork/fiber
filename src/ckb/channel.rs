@@ -1,6 +1,6 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
-use log::{debug, error, warn};
+use log::{debug, error};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
@@ -53,6 +53,11 @@ impl OpenChannelCommand {
 pub struct Channel {
     pub state: ChannelState,
     pub temp_id: Byte32,
+
+    // Is this channel initially inbound?
+    // An inbound channel is one where the counterparty is the funder of the channel.
+    pub was_initially_inbound: bool,
+
     pub total_value: u64,
     pub to_self_value: u64,
 
@@ -206,10 +211,6 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 }
 
 impl Channel {
-    pub fn build_holder_tx_keys(&self, commitment_number: u64) -> TxCreationKeys {
-        todo!()
-    }
-
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Byte32,
         seed: &[u8],
@@ -220,8 +221,9 @@ impl Channel {
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
+        let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
         let signer = InMemorySigner::generate_from_seed(seed);
-        let holder_pubkeys = ChannelPublicKeys::from(&signer);
+        let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
 
         let channel_id = derive_channel_id_from_revocation_keys(
             &holder_pubkeys.revocation_basepoint,
@@ -231,6 +233,7 @@ impl Channel {
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            was_initially_inbound: true,
             total_value: counterparty_value,
             temp_id: temp_channel_id,
             id: Some(channel_id),
@@ -244,7 +247,7 @@ impl Channel {
                 pubkeys: counterparty_pubkeys,
                 selected_contest_delay: counterparty_delay,
             }),
-            holder_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
+            holder_commitment_number: commitment_number,
             counterparty_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: Some(counterparty_commitment_point),
             counterparty_prev_commitment_point: Some(counterparty_prev_commitment_point),
@@ -261,12 +264,15 @@ impl Channel {
             to_self_value <= value,
             "to_self_value must be less than or equal to value"
         );
+
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let holder_pubkeys = signer.to_publickeys();
+        let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
+        let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            was_initially_inbound: false,
             total_value: value,
             temp_id: new_channel_id.into(),
             id: None,
@@ -277,7 +283,7 @@ impl Channel {
                 selected_contest_delay: to_self_delay,
             },
             counterparty_channel_parameters: None,
-            holder_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
+            holder_commitment_number: commitment_number,
             counterparty_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: None,
             counterparty_prev_commitment_point: None,
@@ -362,10 +368,6 @@ impl Channel {
                 debug!("ChannelReady: {:?}", &channel_ready);
                 Ok(())
             }
-            _ => {
-                warn!("Unexpected event: {:?}", event);
-                Ok(())
-            }
         }
     }
 
@@ -373,6 +375,10 @@ impl Channel {
         match self.state {
             ChannelState::ChannelReady(_) => {
                 assert!(self.funding_tx.is_some());
+                assert!(self.id.is_some());
+                assert!(self.counterparty_commitment_point.is_some());
+                assert!(self.counterparty_prev_commitment_point.is_some());
+                assert!(self.counterparty_channel_parameters.is_some());
                 true
             }
             _ => false,
@@ -383,8 +389,17 @@ impl Channel {
         self.funding_tx.as_ref().expect("Channel is not funded")
     }
 
-    pub fn build_commitment_tx(&self) -> CommitmentTransaction {
-        unimplemented!("build_commitment_tx");
+    pub fn build_commitment_tx(
+        &self,
+        commitment_number: u64,
+        keys: &TxCreationKeys,
+        local: bool,
+    ) -> CommitmentTransaction {
+        let directed_channel_parameters = self.must_get_directed_channel_parameters(local);
+        // 1. Get transaction inputs from direct channel parameters.
+        // 2. Assemble transaction outputs from current chanenl information.
+        // 3. Sign the transaction with the private key.
+        todo!("build_commitment_tx");
     }
 
     pub fn must_get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -643,6 +658,12 @@ pub fn derive_public_key(basepoint: &Pubkey, per_commitment_point: &Pubkey) -> P
     basepoint.clone()
 }
 
+pub fn derive_private_key(secret: &Privkey, per_commitment_point: &Pubkey) -> Privkey {
+    // TODO: Currently we only copy the input secret. We need to actually derive new private keys
+    // from the per_commitment_point.
+    secret.clone()
+}
+
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
 ///
 /// This implementation performs no policy checks and is insufficient by itself as
@@ -659,35 +680,13 @@ pub struct InMemorySigner {
     /// Holder secret key used in an HTLC transaction.
     pub delayed_payment_base_key: Privkey,
     /// Holder HTLC secret key used in commitment transaction HTLC outputs.
-    pub htlc_base_key: Privkey,
-    /// Commitment seed.
+    pub tlc_base_key: Privkey,
+    /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
-    /// Key derivation parameters.
-    channel_keys_id: [u8; 32],
 }
 
 impl InMemorySigner {
-    pub fn new(
-        funding_key: Privkey,
-        revocation_base_key: Privkey,
-        payment_key: Privkey,
-        delayed_payment_base_key: Privkey,
-        htlc_base_key: Privkey,
-        commitment_seed: [u8; 32],
-        channel_keys_id: [u8; 32],
-    ) -> Self {
-        InMemorySigner {
-            funding_key,
-            revocation_base_key,
-            payment_key,
-            delayed_payment_base_key,
-            htlc_base_key,
-            commitment_seed,
-            channel_keys_id,
-        }
-    }
-
-    pub fn generate_from_seed(params: &[u8]) -> InMemorySigner {
+    pub fn generate_from_seed(params: &[u8]) -> Self {
         let seed = ckb_hash::blake2b_256(params);
 
         let commitment_seed = {
@@ -701,37 +700,37 @@ impl InMemorySigner {
 
         let key_derive = |seed: &[u8], info: &[u8]| {
             let mut hasher = new_blake2b();
-            hasher.update(&seed);
-            hasher.update(&b"commitment seed"[..]);
+            hasher.update(seed);
+            hasher.update(info);
             let mut result = [0u8; 32];
             hasher.finalize(&mut result);
             Privkey::from_slice(&result)
         };
 
         let funding_key = key_derive(&seed, b"funding key");
-        let revocation_base_key = key_derive(&seed, b"revocation base key");
-        let payment_key = key_derive(&seed, b"payment key");
-        let delayed_payment_base_key = key_derive(&seed, b"delayed payment base key");
-        let htlc_base_key = key_derive(&seed, b"HTLC base key");
+        let revocation_base_key = key_derive(funding_key.as_ref(), b"revocation base key");
+        let payment_key = key_derive(revocation_base_key.as_ref(), b"payment key");
+        let delayed_payment_base_key =
+            key_derive(payment_key.as_ref(), b"delayed payment base key");
+        let htlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
 
-        Self::new(
+        Self {
             funding_key,
             revocation_base_key,
             payment_key,
             delayed_payment_base_key,
-            htlc_base_key,
+            tlc_base_key: htlc_base_key,
             commitment_seed,
-            seed.clone(),
-        )
+        }
     }
 
-    fn to_publickeys(&self) -> ChannelPublicKeys {
+    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelPublicKeys {
         ChannelPublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_basepoint: self.revocation_base_key.pubkey(),
-            payment_point: self.payment_key.pubkey(),
-            delayed_payment_basepoint: self.delayed_payment_base_key.pubkey(),
-            tlc_basepoint: self.htlc_base_key.pubkey(),
+            revocation_basepoint: self.derive_revocation_key(commitment_number).pubkey(),
+            payment_point: self.derive_payment_key(commitment_number).pubkey(),
+            delayed_payment_basepoint: self.derive_delayed_payment_key(commitment_number).pubkey(),
+            tlc_basepoint: self.derive_tlc_key(commitment_number).pubkey(),
         }
     }
 
@@ -742,11 +741,25 @@ impl InMemorySigner {
     pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
         get_commitment_secret(&self.commitment_seed, commitment_number)
     }
-}
 
-impl From<&InMemorySigner> for ChannelPublicKeys {
-    fn from(signer: &InMemorySigner) -> Self {
-        signer.to_publickeys()
+    pub fn derive_revocation_key(&self, commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(commitment_number);
+        derive_private_key(&self.revocation_base_key, &per_commitment_point)
+    }
+
+    pub fn derive_payment_key(&self, new_commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(new_commitment_number);
+        derive_private_key(&self.payment_key, &per_commitment_point)
+    }
+
+    pub fn derive_delayed_payment_key(&self, new_commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(new_commitment_number);
+        derive_private_key(&self.delayed_payment_base_key, &per_commitment_point)
+    }
+
+    pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {
+        let per_commitment_point = self.get_commitment_point(new_commitment_number);
+        derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 }
 

@@ -33,6 +33,22 @@ impl From<&[u8; 32]> for Privkey {
     }
 }
 
+impl AsRef<[u8; 32]> for Privkey {
+    /// Gets a reference to the underlying array.
+    ///
+    /// # Side channel attacks
+    ///
+    /// Using ordering functions (`PartialOrd`/`Ord`) on a reference to secret keys leaks data
+    /// because the implementations are not constant time. Doing so will make your code vulnerable
+    /// to side channel attacks. [`SecretKey::eq`] is implemented using a constant time algorithm,
+    /// please consider using it to do comparisons of secret keys.
+    #[inline]
+    fn as_ref(&self) -> &[u8; 32] {
+        let Self(dat) = self;
+        dat
+    }
+}
+
 impl Privkey {
     pub fn from_slice(key: &[u8]) -> Self {
         assert_eq!(32, key.len(), "should provide 32-byte length slice");
