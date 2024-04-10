@@ -807,3 +807,19 @@ impl TxCreationKeys {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ckb::types::Privkey;
+
+    use super::{derive_private_key, derive_public_key};
+
+    #[test]
+    fn test_derive_private_and_public_keys() {
+        let privkey = Privkey::from(&[1; 32]);
+        let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
+        let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
+        let derived_pubkey = derive_public_key(&privkey.pubkey(), &per_commitment_point);
+        assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+    }
+}
