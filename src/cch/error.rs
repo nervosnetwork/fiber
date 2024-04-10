@@ -16,6 +16,10 @@ pub enum CchError {
     BTCInvoiceMissingAmount,
     #[error("CKB asset not allowed to exchange BTC")]
     CKBAssetNotAllowed,
+    #[error("SendBTC order not found")]
+    SendBTCOrderNotFound,
+    #[error("SendBTC order already paid")]
+    SendBTCOrderAlreadyPaid,
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

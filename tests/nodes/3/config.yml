@@ -8,6 +8,8 @@ cch:
   ratio_btc_msat: 1
   ratio_ckb_shannons: 5000
   allow_expired_btc_invoice: true
+  lnd_cert_path: lnd.cert
+  lnd_macaroon_path: lnd.macaroon
 
 services:
   - ckb

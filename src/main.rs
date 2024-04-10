@@ -131,13 +131,17 @@ pub async fn main() {
             const CHANNEL_SIZE: usize = 4000;
             let (command_sender, command_receiver) = mpsc::channel::<CchCommand>(CHANNEL_SIZE);
             info!("Starting cch");
-            start_cch(
+            if let Err(err) = start_cch(
                 cch_config,
                 command_receiver,
                 new_tokio_cancellation_token(),
                 new_tokio_task_tracker(),
             )
-            .await;
+            .await
+            {
+                error!("Cross-chain service failed to start: {}", err);
+                return;
+            }
             Some(command_sender)
         }
         None => None,

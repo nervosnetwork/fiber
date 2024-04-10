@@ -15,4 +15,11 @@ impl CchOrdersDb {
             .insert(order.payment_hash.clone(), order);
         Ok(())
     }
+
+    pub async fn get_send_btc_order(
+        &mut self,
+        payment_hash: &str,
+    ) -> Result<Option<SendBTCOrder>, CchDbError> {
+        Ok(self.send_btc_orders.get(payment_hash).cloned())
+    }
 }
