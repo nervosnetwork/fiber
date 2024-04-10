@@ -1,35 +1,42 @@
-pub use ckb_crypto::secp::{Privkey as CkbPrivkey, Pubkey as CkbPubkey, Signature as CkbSignature};
+use super::gen::pcn::{self as molecule_pcn, SignatureVec};
 use ckb_types::{
     packed::{Byte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use molecule::prelude::{Builder, Byte, Entity};
+use once_cell::sync::OnceCell;
+use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_utils::{EntityWrapperBase64, EntityWrapperHex};
-use serde_with::base64::Base64;
 use serde_with::serde_as;
+use serde_with::{base64::Base64, SerializeDisplay};
 use thiserror::Error;
 
-use super::gen::pcn::{self as molecule_pcn, SignatureVec};
+use std::fmt::Debug;
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
-pub struct Privkey(pub [u8; 32]);
+pub fn secp256k1_instance() -> &'static Secp256k1<All> {
+    static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
+    INSTANCE.get_or_init(|| Secp256k1::new())
+}
 
-impl From<Privkey> for CkbPrivkey {
-    fn from(pk: Privkey) -> CkbPrivkey {
-        CkbPrivkey::from_slice(&pk.0)
+#[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
+pub struct Privkey(pub SecretKey);
+
+impl From<Privkey> for SecretKey {
+    fn from(pk: Privkey) -> Self {
+        pk.0
     }
 }
 
-impl From<&Privkey> for CkbPrivkey {
-    fn from(k: &Privkey) -> CkbPrivkey {
-        CkbPrivkey::from_slice(&k.0)
+impl From<SecretKey> for Privkey {
+    fn from(sk: SecretKey) -> Self {
+        Self::from(sk)
     }
 }
 
 impl From<&[u8; 32]> for Privkey {
-    fn from(k: &[u8; 32]) -> Privkey {
-        Self(*k)
+    fn from(k: &[u8; 32]) -> Self {
+        Self::from_slice(k)
     }
 }
 
@@ -44,95 +51,49 @@ impl AsRef<[u8; 32]> for Privkey {
     /// please consider using it to do comparisons of secret keys.
     #[inline]
     fn as_ref(&self) -> &[u8; 32] {
-        let Self(dat) = self;
-        dat
+        self.0.as_ref()
     }
 }
 
 impl Privkey {
     pub fn from_slice(key: &[u8]) -> Self {
-        assert_eq!(32, key.len(), "should provide 32-byte length slice");
-        let mut h = [0u8; 32];
-        h.copy_from_slice(&key[0..32]);
-        Privkey(h)
+        SecretKey::from_slice(key)
+            .expect("Invalid secret key")
+            .into()
     }
 
     pub fn pubkey(&self) -> Pubkey {
-        Pubkey::from(CkbPrivkey::from(self).pubkey().unwrap())
+        Pubkey::from(self.0.public_key(secp256k1_instance()))
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone)]
-pub struct Pubkey(pub CkbPubkey);
+#[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Pubkey(pub PublicKey);
 
-impl From<Pubkey> for CkbPubkey {
-    fn from(pk: Pubkey) -> CkbPubkey {
+impl From<Pubkey> for PublicKey {
+    fn from(pk: Pubkey) -> Self {
         pk.0
     }
 }
 
-impl From<CkbPubkey> for Pubkey {
-    fn from(pk: CkbPubkey) -> Pubkey {
+impl From<PublicKey> for Pubkey {
+    fn from(pk: PublicKey) -> Pubkey {
         Pubkey(pk)
     }
 }
 
-impl Serialize for Pubkey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        base64::encode(&self.0.serialize()).serialize(serializer)
-    }
-}
+#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
+pub struct Signature(pub Secp256k1Signature);
 
-impl<'de> Deserialize<'de> for Pubkey {
-    fn deserialize<D>(deserializer: D) -> Result<Pubkey, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = base64::decode(s).map_err(serde::de::Error::custom)?;
-        CkbPubkey::from_slice(&bytes)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Signature(pub CkbSignature);
-
-impl From<Signature> for CkbSignature {
-    fn from(sig: Signature) -> CkbSignature {
+impl From<Signature> for Secp256k1Signature {
+    fn from(sig: Signature) -> Self {
         sig.0
     }
 }
 
-impl From<CkbSignature> for Signature {
-    fn from(sig: CkbSignature) -> Signature {
-        Signature(sig)
-    }
-}
-
-impl Serialize for Signature {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        base64::encode(&self.0.serialize()).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Signature {
-    fn deserialize<D>(deserializer: D) -> Result<Signature, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let bytes = base64::decode(s).map_err(serde::de::Error::custom)?;
-        CkbSignature::from_slice(&bytes)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
+impl From<Secp256k1Signature> for Signature {
+    fn from(sig: Secp256k1Signature) -> Self {
+        Self(sig)
     }
 }
 
@@ -141,7 +102,7 @@ impl<'de> Deserialize<'de> for Signature {
 pub enum Error {
     /// Invalid pubkey/signature format
     #[error("Secp error: {0}")]
-    Secp(#[from] ckb_crypto::secp::Error),
+    Secp(#[from] secp256k1::Error),
     #[error("Molecule error: {0}")]
     Molecule(#[from] molecule::error::VerificationError),
 }
@@ -166,7 +127,7 @@ impl TryFrom<molecule_pcn::Pubkey> for Pubkey {
 
     fn try_from(pubkey: molecule_pcn::Pubkey) -> Result<Self, Self::Error> {
         let pubkey = pubkey.as_slice();
-        CkbPubkey::from_slice(pubkey)
+        PublicKey::from_slice(pubkey)
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -178,7 +139,7 @@ impl From<Signature> for molecule_pcn::Signature {
             .set(
                 signature
                     .0
-                    .serialize()
+                    .serialize_compact()
                     .into_iter()
                     .map(Into::into)
                     .collect::<Vec<Byte>>()
@@ -194,7 +155,7 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
 
     fn try_from(signature: molecule_pcn::Signature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
-        CkbSignature::from_slice(signature)
+        Secp256k1Signature::from_compact(signature)
             .map(Into::into)
             .map_err(Into::into)
     }

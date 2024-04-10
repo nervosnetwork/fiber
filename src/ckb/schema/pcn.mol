@@ -1,6 +1,6 @@
 import blockchain;
 
-array Signature [byte; 65];
+array Signature [byte; 64];
 array Pubkey [byte; 33];
 vector SignatureVec <Signature>;
 
