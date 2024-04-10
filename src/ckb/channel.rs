@@ -23,6 +23,9 @@ pub enum ChannelCommand {
     OpenChannel(OpenChannelCommand),
 }
 
+const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
+const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = 2 ^ 48 - 1;
+
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct OpenChannelCommand {
@@ -52,16 +55,22 @@ pub struct Channel {
     pub temp_id: Byte32,
     pub total_value: u64,
     pub to_self_value: u64,
-    pub to_self_delay: u64,
+
+    // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
-    pub holder_pubkeys: ChannelPublicKeys,
+
+    pub holder_channel_parameters: ChannelParametersOneParty,
+
+    // Commitment numbers that are used to derive keys.
     pub holder_commitment_number: u64,
     pub counterparty_commitment_number: u64,
 
+    // Below are fields that are only usable after the channel is funded,
+    // (or at some point of the state).
     pub id: Option<Byte32>,
     pub counterparty_commitment_point: Option<Pubkey>,
     pub counterparty_prev_commitment_point: Option<Pubkey>,
-    pub counterparty_pubkeys: Option<ChannelPublicKeys>,
+    pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
     pub funding_tx: Option<OutPoint>,
 }
 
@@ -204,9 +213,9 @@ impl Channel {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Byte32,
         seed: &[u8],
-        to_self_delay: u64,
         counterparty_peer_id: PeerId,
         counterparty_value: u64,
+        counterparty_delay: u64,
         counterparty_pubkeys: ChannelPublicKeys,
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
@@ -226,12 +235,17 @@ impl Channel {
             temp_id: temp_channel_id,
             id: Some(channel_id),
             to_self_value: 0,
-            to_self_delay,
+            holder_channel_parameters: ChannelParametersOneParty {
+                pubkeys: holder_pubkeys,
+                selected_contest_delay: counterparty_delay as u64,
+            },
             signer,
-            holder_pubkeys,
-            counterparty_pubkeys: Some(counterparty_pubkeys),
-            holder_commitment_number: 2 ^ 48 - 1,
-            counterparty_commitment_number: 0,
+            counterparty_channel_parameters: Some(ChannelParametersOneParty {
+                pubkeys: counterparty_pubkeys,
+                selected_contest_delay: counterparty_delay,
+            }),
+            holder_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: Some(counterparty_commitment_point),
             counterparty_prev_commitment_point: Some(counterparty_prev_commitment_point),
         }
@@ -257,12 +271,14 @@ impl Channel {
             temp_id: new_channel_id.into(),
             id: None,
             to_self_value,
-            to_self_delay,
             signer,
-            holder_pubkeys,
-            counterparty_pubkeys: None,
-            holder_commitment_number: 0,
-            counterparty_commitment_number: 2 ^ 48 - 1,
+            holder_channel_parameters: ChannelParametersOneParty {
+                pubkeys: holder_pubkeys,
+                selected_contest_delay: to_self_delay,
+            },
+            counterparty_channel_parameters: None,
+            holder_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: None,
             counterparty_prev_commitment_point: None,
         }
@@ -283,7 +299,10 @@ impl Channel {
         }
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
         let counterparty_pubkeys = (&accept_channel).into();
-        self.counterparty_pubkeys = Some(counterparty_pubkeys);
+        self.counterparty_channel_parameters = Some(ChannelParametersOneParty {
+            pubkeys: counterparty_pubkeys,
+            selected_contest_delay: accept_channel.to_self_delay as u64,
+        });
 
         debug!("OpenChannel: {:?}", &accept_channel);
         Ok(())
@@ -300,15 +319,16 @@ impl Channel {
     pub fn fill_in_channel_id(&mut self) {
         assert!(self.id.is_none(), "Channel id is already filled in");
         assert!(
-            self.counterparty_pubkeys.is_some(),
+            self.counterparty_channel_parameters.is_some(),
             "Counterparty pubkeys is required to derive actual channel id"
         );
         let counterparty_revocation = &self
-            .counterparty_pubkeys
+            .counterparty_channel_parameters
             .as_ref()
             .unwrap()
+            .pubkeys
             .revocation_basepoint;
-        let holder_revocation = &self.holder_pubkeys.revocation_basepoint;
+        let holder_revocation = &self.holder_channel_parameters.pubkeys.revocation_basepoint;
         let channel_id =
             derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
 
@@ -359,12 +379,36 @@ impl Channel {
         }
     }
 
-    pub fn must_get_funding_transaction(&self) -> OutPoint {
-        self.funding_tx.clone().expect("Channel is not funded")
+    pub fn must_get_funding_transaction(&self) -> &OutPoint {
+        self.funding_tx.as_ref().expect("Channel is not funded")
     }
 
     pub fn build_commitment_tx(&self) -> CommitmentTransaction {
         unimplemented!("build_commitment_tx");
+    }
+
+    pub fn must_get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
+        self.counterparty_channel_parameters
+            .as_ref()
+            .expect("Counterparty channel parameters")
+    }
+
+    pub fn must_get_fouded_channel_parameters(&self) -> FundedChannelParameters<'_> {
+        FundedChannelParameters {
+            holder: &self.holder_channel_parameters,
+            counterparty: self.must_get_counterparty_channel_parameters(),
+            funding_outpoint: self.must_get_funding_transaction(),
+        }
+    }
+
+    pub fn must_get_directed_channel_parameters(
+        &self,
+        holder_is_broadcaster: bool,
+    ) -> DirectedChannelTransactionParameters<'_> {
+        DirectedChannelTransactionParameters {
+            inner: self.must_get_fouded_channel_parameters(),
+            holder_is_broadcaster,
+        }
     }
 }
 
@@ -414,7 +458,7 @@ impl CommitmentTransaction {
         channel_parameters: &DirectedChannelTransactionParameters,
         broadcaster_funding_pubkey: &Pubkey,
         countersignatory_funding_pubkey: &Pubkey,
-    ) -> Result<Transaction, ()> {
+    ) -> Result<Transaction, ProcessingChannelError> {
         unimplemented!("internal_rebuild_transaction");
     }
 
@@ -439,7 +483,7 @@ impl CommitmentTransaction {
         channel_parameters: &DirectedChannelTransactionParameters,
         broadcaster_keys: &ChannelPublicKeys,
         countersignatory_keys: &ChannelPublicKeys,
-    ) -> Result<TrustedCommitmentTransaction, ()> {
+    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
         // This is the only field of the key cache that we trust
         let per_commitment_point = &self.keys.per_commitment_point;
         let keys = TxCreationKeys::from_channel_static_keys(
@@ -448,7 +492,9 @@ impl CommitmentTransaction {
             countersignatory_keys,
         );
         if keys != self.keys {
-            return Err(());
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Key mismatch".to_string(),
+            ));
         }
         let tx = self.internal_rebuild_transaction(
             &keys,
@@ -457,25 +503,24 @@ impl CommitmentTransaction {
             &countersignatory_keys.funding_pubkey,
         )?;
         if self.build_tx().as_bytes() != tx.as_bytes() {
-            return Err(());
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Transaction mismatch".to_string(),
+            ));
         }
         Ok(TrustedCommitmentTransaction { inner: self })
     }
 }
 
-pub struct FundedChannelParameters {
-    /// Holder public keys
-    pub holder_pubkeys: Pubkey,
-    /// The contest delay selected by the holder, which applies to counterparty-broadcast transactions
-    pub holder_selected_contest_delay: u16,
-    /// Whether the holder is the initiator of this channel.
-    /// This is an input to the commitment number obscure factor computation.
-    pub is_outbound_from_holder: bool,
-    /// The late-bound counterparty channel transaction parameters.
-    /// These parameters are populated at the point in the protocol where the counterparty provides them.
-    pub counterparty_parameters: Option<CounterpartyChannelTransactionParameters>,
-    /// The late-bound funding outpoint
-    pub funding_outpoint: OutPoint,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelParametersOneParty {
+    pub pubkeys: ChannelPublicKeys,
+    pub selected_contest_delay: u64,
+}
+
+pub struct FundedChannelParameters<'a> {
+    pub holder: &'a ChannelParametersOneParty,
+    pub counterparty: &'a ChannelParametersOneParty,
+    pub funding_outpoint: &'a OutPoint,
 }
 
 /// Static channel fields used to build transactions given per-commitment fields, organized by
@@ -485,7 +530,7 @@ pub struct FundedChannelParameters {
 /// as_holder_broadcastable and as_counterparty_broadcastable functions.
 pub struct DirectedChannelTransactionParameters<'a> {
     /// The holder's channel static parameters
-    inner: &'a FundedChannelParameters,
+    inner: FundedChannelParameters<'a>,
     /// Whether the holder is the broadcaster
     holder_is_broadcaster: bool,
 }

@@ -85,15 +85,9 @@ impl PHandle {
                     chain_hash,
                     funding_type_script,
                     funding_amount,
-                    funding_fee_rate,
-                    commitment_fee_rate,
-                    max_tlc_value_in_flight,
-                    max_accept_tlcs,
-                    min_tlc_value,
                     to_self_delay,
                     first_per_commitment_point,
                     second_per_commitment_point,
-                    channel_flags,
                     ..
                 } = &open_channel;
 
@@ -127,9 +121,9 @@ impl PHandle {
                 let channel = Channel::new_inbound_channel(
                     channel_id.clone(),
                     &seed,
-                    *to_self_delay,
                     peer_id,
                     *funding_amount,
+                    *to_self_delay,
                     counterpart_pubkeys,
                     first_per_commitment_point.clone(),
                     second_per_commitment_point.clone(),
@@ -254,7 +248,9 @@ impl ServiceProtocol for PHandle {
                 return;
             }
         };
-        if let Err(err) = self.handle_pcnmessage(peer_id, peer, msg) {}
+        if let Err(err) = self.handle_pcnmessage(peer_id, peer, msg) {
+            error!("Error while processing message: {:?}", err);
+        }
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
@@ -378,11 +374,17 @@ impl NetworkState {
                         first_per_commitment_point: channel.signer.get_commitment_point(0),
                         second_per_commitment_point: channel.signer.get_commitment_point(1),
                         channel_id: channel.temp_id,
-                        funding_pubkey: channel.holder_pubkeys.funding_pubkey,
-                        revocation_basepoint: channel.holder_pubkeys.revocation_basepoint,
-                        payment_basepoint: channel.holder_pubkeys.payment_point,
-                        delayed_payment_basepoint: channel.holder_pubkeys.delayed_payment_basepoint,
-                        tlc_basepoint: channel.holder_pubkeys.tlc_basepoint,
+                        funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
+                        revocation_basepoint: channel
+                            .holder_channel_parameters
+                            .pubkeys
+                            .revocation_basepoint,
+                        payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_point,
+                        delayed_payment_basepoint: channel
+                            .holder_channel_parameters
+                            .pubkeys
+                            .delayed_payment_basepoint,
+                        tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
                     };
 
                     let peer_state = self.shared_state.peers.lock().await;
