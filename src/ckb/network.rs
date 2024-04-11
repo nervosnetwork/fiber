@@ -133,7 +133,7 @@ impl PHandle {
                 let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
 
                 let accept_channel = AcceptChannel {
-                    channel_id: channel.id.unwrap(),
+                    channel_id: *channel_id,
                     funding_amount: 0,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
@@ -152,6 +152,10 @@ impl PHandle {
                         .get_commitment_point(commitment_number - 1),
                     next_local_nonce: channel.signer.misig_nonce.public_nonce(),
                 };
+
+                if peer.channels.contains_key(&channel_id) {
+                    error!("Channel {:?} already exists", &channel_id);
+                }
                 let _ = peer.channels.insert(channel_id.clone(), channel);
                 let command = PCNMessageWithPeerId {
                     peer_id,
@@ -328,6 +332,18 @@ impl SharedState {
             command_sender,
         }
     }
+
+    async fn save_channel(&self, peer: &PeerId, channel: Channel) -> bool {
+        let mut peer_state = self.peers.lock().await;
+        let peer = peer_state.get_mut(peer).expect("Peer must exist");
+
+        let channel_id = channel.id();
+        if peer.channels.contains_key(&channel_id) {
+            return false;
+        }
+        let _ = peer.channels.insert(channel_id, channel);
+        true
+    }
 }
 
 struct NetworkState {
@@ -412,9 +428,22 @@ impl NetworkState {
             Command::ControlPcnChannel(c) => match c {
                 ChannelCommand::OpenChannel(open_channel) => {
                     info!("Trying to open a channel to {:?}", &open_channel.peer_id);
+                    let session_id = get_session_or_return!(&open_channel.peer_id);
+
                     let channel: Result<Channel, ProcessingChannelError> =
                         open_channel.create_channel();
                     let channel = unwrap_or_return!(channel, "failed to create a channel");
+                    if !self
+                        .shared_state
+                        .save_channel(&open_channel.peer_id, channel.clone())
+                        .await
+                    {
+                        error!(
+                            "Failed to save a already existed channel {:?}",
+                            channel.id()
+                        );
+                    }
+
                     let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
                     let message = PCNMessage::OpenChannel(OpenChannel {
                         chain_hash: Byte32::zero().into(),
@@ -453,7 +482,6 @@ impl NetworkState {
                         &open_channel.peer_id, &message
                     );
                     let message_bytes = message.to_molecule_bytes();
-                    let session_id = get_session_or_return!(&open_channel.peer_id);
 
                     let result = self
                         .control

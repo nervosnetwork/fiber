@@ -93,6 +93,12 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
     result
 }
 
+impl Channel {
+    pub fn id(&self) -> Hash256 {
+        self.id.unwrap_or(self.temp_id)
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
