@@ -1,19 +1,25 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
-use log::{debug, error};
+use log::{debug, error, info};
 use molecule::prelude::Entity;
 use musig2::SecNonce;
+use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
-use tentacle::secio::PeerId;
+use tentacle::{secio::PeerId, service::ServiceAsyncControl};
 use thiserror::Error;
-use tokio::sync::mpsc::error::{SendError, TrySendError};
+use tokio::sync::mpsc::error::TrySendError;
 
 use std::fmt::Debug;
 
+use crate::ckb::command::PCNMessageWithPeerId;
+
 use super::{
-    types::{AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, Privkey, Pubkey},
+    types::{
+        AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
+        Pubkey,
+    },
     Command,
 };
 
@@ -41,11 +47,11 @@ pub struct OpenChannelCommand {
 }
 
 impl OpenChannelCommand {
-    pub fn create_channel(&self) -> Result<Channel, ProcessingChannelError> {
+    pub fn create_channel(&self) -> Result<ChannelActorState, ProcessingChannelError> {
         // Use a deterministic RNG for now to facilitate development.
         let seed = 42u64.to_le_bytes();
 
-        Ok(Channel::new_outbound_channel(
+        Ok(ChannelActorState::new_outbound_channel(
             &seed,
             self.total_value,
             self.to_self_value,
@@ -54,8 +60,114 @@ impl OpenChannelCommand {
     }
 }
 
+pub enum ChannelInitializationParameter {
+    /// To open a new channel to another peer, we process OpenChannelCommand
+    /// and create a new outgoing channel.
+    OpenChannelCommand(OpenChannelCommand),
+    /// To accept a new channel from another peer, we process received
+    /// OpenChannel message and create a incoming channel.
+    OpenChannel(OpenChannel),
+}
+
+pub struct ChannelActor {
+    control: ActorRef<Command>,
+}
+
+#[rasync_trait]
+impl Actor for ChannelActor {
+    // An actor has a message type
+    type Msg = PCNMessage;
+    // and (optionally) internal state
+    type State = ChannelActorState;
+    // Startup arguments for actor initialization
+    type Arguments = ChannelInitializationParameter;
+
+    // Initially we need to create our state, and potentially
+    // start some internal processing (by posting a message for
+    // example)
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        // startup the event processing
+        match args {
+            ChannelInitializationParameter::OpenChannel(open_channel) => {
+                todo!();
+            }
+            ChannelInitializationParameter::OpenChannelCommand(open_channel) => {
+                info!("Trying to open a channel to {:?}", &open_channel.peer_id);
+
+                let channel = open_channel.create_channel()?;
+
+                let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
+                let message = PCNMessage::OpenChannel(OpenChannel {
+                    chain_hash: Hash256::default(),
+                    funding_type_script: None,
+                    funding_amount: channel.to_self_value,
+                    funding_fee_rate: DEFAULT_FEE_RATE,
+                    commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+                    max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+                    max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
+                    min_tlc_value: DEFAULT_MIN_TLC_VALUE,
+                    to_self_delay: DEFAULT_TO_SELF_DELAY,
+                    channel_flags: 0,
+                    first_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number),
+                    second_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number + 1),
+                    channel_id: channel.temp_id,
+                    funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
+                    revocation_basepoint: channel
+                        .holder_channel_parameters
+                        .pubkeys
+                        .revocation_basepoint,
+                    payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_point,
+                    delayed_payment_basepoint: channel
+                        .holder_channel_parameters
+                        .pubkeys
+                        .delayed_payment_basepoint,
+                    tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
+                    next_local_nonce: channel.signer.misig_nonce.public_nonce(),
+                });
+
+                debug!(
+                    "OpenChannel message to {:?} created: {:?}",
+                    &open_channel.peer_id, &message
+                );
+                self.control
+                    .send_message(Command::SendPcnMessage(PCNMessageWithPeerId {
+                        peer_id: open_channel.peer_id,
+                        message,
+                    }))
+                    .expect("network controller actor alive");
+                Ok(channel)
+            }
+        }
+    }
+
+    // This is our main message handler
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            PCNMessage::OpenChannel(_) => {
+                panic!("OpenChannel message should be processed while prestarting")
+            }
+            PCNMessage::AcceptChannel(accept_channel) => {}
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Channel {
+pub struct ChannelActorState {
     pub state: ChannelState,
     pub temp_id: Hash256,
 
@@ -93,7 +205,7 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
     result
 }
 
-impl Channel {
+impl ChannelActorState {
     pub fn id(&self) -> Hash256 {
         self.id.unwrap_or(self.temp_id)
     }
@@ -214,7 +326,7 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
     Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
 }
 
-impl Channel {
+impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
         seed: &[u8],

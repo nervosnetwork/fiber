@@ -1,5 +1,5 @@
-use ckb_types::packed::Byte32;
 use log::{debug, error, info, warn};
+use ractor::{async_trait as rasync_trait, forward, Actor, ActorProcessingErr, ActorRef};
 use std::{
     collections::{HashMap, HashSet},
     str,
@@ -34,13 +34,102 @@ use crate::ckb::{
 use crate::unwrap_or_return;
 
 use super::{
-    channel::{Channel, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
+    channel::{ChannelActorState, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
     command::PCNMessageWithPeerId,
     types::{Hash256, OpenChannel, PCNMessage},
     CkbConfig, Command, Event,
 };
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
+
+pub struct NetworkControllerActor {
+    control: ServiceAsyncControl,
+}
+
+#[derive(Default)]
+pub struct NetworkStateNew {
+    peers: HashMap<PeerId, PeerInfo>,
+}
+
+#[rasync_trait]
+impl Actor for NetworkControllerActor {
+    // An actor has a message type
+    type Msg = Command;
+    // and (optionally) internal state
+    type State = NetworkStateNew;
+    // Startup arguments for actor initialization
+    type Arguments = ();
+
+    // Initially we need to create our state, and potentially
+    // start some internal processing (by posting a message for
+    // example)
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(Default::default())
+    }
+
+    // This is our main message handler
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        command: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("Processing command {:?}", command);
+
+        match command {
+            Command::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
+                match state
+                    .peers
+                    .get(&peer_id)
+                    .and_then(|p| p.sessions.iter().next())
+                    .cloned()
+                {
+                    Some(session_id) => {
+                        let result = self
+                            .control
+                            .send_message_to(
+                                session_id,
+                                PCN_PROTOCOL_ID,
+                                message.to_molecule_bytes(),
+                            )
+                            .await;
+                        if let Err(err) = result {
+                            error!(
+                                "Sending message to session {:?} failed: {}",
+                                &session_id, err
+                            );
+                            return Ok(());
+                        }
+                        info!("Message send to peer {:?}", &peer_id);
+                    }
+                    None => {
+                        error!("Session for peer {:?} not found", &peer_id);
+                    }
+                }
+            }
+
+            Command::ConnectPeer(addr) => {
+                // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
+                // e.g. whether the peer support some specific feature.
+                // TODO: If we are already connected to the peer, skip connecting.
+                debug!("Dialing {}", &addr);
+                let result = self.control.dial(addr.clone(), TargetProtocol::All).await;
+                if let Err(err) = result {
+                    error!("Dialing {} failed: {}", &addr, err);
+                }
+            }
+
+            Command::ControlPcnChannel(c) => match c {
+                ChannelCommand::OpenChannel(open_channel) => {}
+            },
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug)]
 struct PHandle {
@@ -77,98 +166,7 @@ impl PHandle {
                 debug!("Test message {:?}", test);
                 Ok(())
             }
-            PCNMessage::OpenChannel(open_channel) => {
-                debug!("Openning channel {:?}", &open_channel);
-
-                let counterpart_pubkeys = (&open_channel).into();
-                let OpenChannel {
-                    channel_id,
-                    chain_hash,
-                    funding_type_script,
-                    funding_amount,
-                    to_self_delay,
-                    first_per_commitment_point,
-                    second_per_commitment_point,
-                    ..
-                } = &open_channel;
-
-                if peer.channels.contains_key(&open_channel.channel_id) {
-                    return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "Trying to open channel {:?} that already exists",
-                        open_channel.channel_id
-                    )));
-                }
-
-                if *chain_hash != [0u8; 32].into() {
-                    return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "Invalid chain hash {:?}",
-                        chain_hash
-                    )));
-                }
-
-                if funding_type_script.is_some() {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "Funding type script is not none".to_string(),
-                    ));
-                }
-
-                let channel_user_id = peer.channels.len();
-                let seed = channel_user_id
-                    .to_be_bytes()
-                    .into_iter()
-                    .chain(peer_id.as_bytes().iter().cloned())
-                    .collect::<Vec<u8>>();
-
-                let channel = Channel::new_inbound_channel(
-                    *channel_id,
-                    &seed,
-                    peer_id.clone(),
-                    *funding_amount,
-                    *to_self_delay,
-                    counterpart_pubkeys,
-                    first_per_commitment_point.clone(),
-                    second_per_commitment_point.clone(),
-                );
-
-                let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
-
-                let accept_channel = AcceptChannel {
-                    channel_id: *channel_id,
-                    funding_amount: 0,
-                    max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-                    max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
-                    to_self_delay: *to_self_delay,
-                    funding_pubkey: channel.signer.funding_key.pubkey(),
-                    revocation_basepoint: channel.signer.revocation_base_key.pubkey(),
-                    payment_basepoint: channel.signer.payment_key.pubkey(),
-                    min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    delayed_payment_basepoint: channel.signer.delayed_payment_base_key.pubkey(),
-                    tlc_basepoint: channel.signer.tlc_base_key.pubkey(),
-                    first_per_commitment_point: channel
-                        .signer
-                        .get_commitment_point(commitment_number),
-                    second_per_commitment_point: channel
-                        .signer
-                        .get_commitment_point(commitment_number - 1),
-                    next_local_nonce: channel.signer.misig_nonce.public_nonce(),
-                };
-
-                if peer.channels.contains_key(&channel_id) {
-                    error!("Channel {:?} already exists", &channel_id);
-                }
-                let _ = peer.channels.insert(channel_id.clone(), channel);
-                let command = PCNMessageWithPeerId {
-                    peer_id,
-                    message: PCNMessage::AcceptChannel(accept_channel),
-                };
-                // TODO: maybe we should not use try_send here.
-                self.state
-                    .command_sender
-                    .try_send(Command::SendPcnMessage(command))?;
-
-                debug!("Peer {:?} openning channel", peer);
-                Ok(())
-            }
+            PCNMessage::OpenChannel(open_channel) => Ok(()),
 
             PCNMessage::AcceptChannel(accpet_channel) => {
                 debug!("Accepting channel {:?}", &accpet_channel);
@@ -321,7 +319,6 @@ impl ServiceHandle for SHandle {
 pub struct SharedState {
     peers: Arc<Mutex<HashMap<PeerId, PeerInfo>>>,
     event_sender: mpsc::Sender<Event>,
-    command_sender: mpsc::Sender<Command>,
 }
 
 impl SharedState {
@@ -329,197 +326,6 @@ impl SharedState {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             event_sender,
-            command_sender,
-        }
-    }
-
-    async fn save_channel(&self, peer: &PeerId, channel: Channel) -> bool {
-        let mut peer_state = self.peers.lock().await;
-        let peer = peer_state.get_mut(peer).expect("Peer must exist");
-
-        let channel_id = channel.id();
-        if peer.channels.contains_key(&channel_id) {
-            return false;
-        }
-        let _ = peer.channels.insert(channel_id, channel);
-        true
-    }
-}
-
-struct NetworkState {
-    control: ServiceAsyncControl,
-    shared_state: SharedState,
-    token: CancellationToken,
-    command_receiver: mpsc::Receiver<Command>,
-}
-
-impl NetworkState {
-    fn new(
-        control: ServiceAsyncControl,
-        shared_state: SharedState,
-        token: CancellationToken,
-        command_receiver: mpsc::Receiver<Command>,
-    ) -> Self {
-        Self {
-            control,
-            shared_state,
-            token,
-            command_receiver,
-        }
-    }
-
-    async fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        let peer_state = self.shared_state.peers.lock().await;
-        peer_state
-            .get(&peer_id)
-            .and_then(|p| p.sessions.iter().next())
-            .cloned()
-    }
-
-    async fn process_command(&self, command: Command) {
-        debug!("Processing command {:?}", command);
-
-        macro_rules! get_session_or_return {
-            ($expr:expr) => {
-                match self.get_peer_session($expr).await {
-                    Some(s) => s,
-                    None => {
-                        error!("Session for peer {:?} not found", $expr);
-                        return;
-                    }
-                }
-            };
-        }
-
-        match command {
-            Command::ConnectPeer(addr) => {
-                // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
-                // e.g. whether the peer support some specific feature.
-                // TODO: If we are already connected to the peer, skip connecting.
-                debug!("Dialing {}", &addr);
-                let result = self.control.dial(addr.clone(), TargetProtocol::All).await;
-                if let Err(err) = result {
-                    error!("Dialing {} failed: {}", &addr, err);
-                }
-            }
-
-            Command::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
-                debug!(
-                    "received command to send message {:?} to peer {:?}",
-                    &peer_id, &message
-                );
-
-                let session_id = get_session_or_return!(&peer_id);
-
-                let result = self
-                    .control
-                    .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
-                    .await;
-                if let Err(err) = result {
-                    error!(
-                        "Sending message to session {:?} failed: {}",
-                        &session_id, err
-                    );
-                    return;
-                }
-                info!("Message send to peer {:?}", &peer_id);
-            }
-
-            Command::ControlPcnChannel(c) => match c {
-                ChannelCommand::OpenChannel(open_channel) => {
-                    info!("Trying to open a channel to {:?}", &open_channel.peer_id);
-                    let session_id = get_session_or_return!(&open_channel.peer_id);
-
-                    let channel: Result<Channel, ProcessingChannelError> =
-                        open_channel.create_channel();
-                    let channel = unwrap_or_return!(channel, "failed to create a channel");
-                    if !self
-                        .shared_state
-                        .save_channel(&open_channel.peer_id, channel.clone())
-                        .await
-                    {
-                        error!(
-                            "Failed to save a already existed channel {:?}",
-                            channel.id()
-                        );
-                    }
-
-                    let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
-                    let message = PCNMessage::OpenChannel(OpenChannel {
-                        chain_hash: Byte32::zero().into(),
-                        funding_type_script: None,
-                        funding_amount: channel.to_self_value,
-                        funding_fee_rate: DEFAULT_FEE_RATE,
-                        commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
-                        max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-                        max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
-                        min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                        to_self_delay: DEFAULT_TO_SELF_DELAY,
-                        channel_flags: 0,
-                        first_per_commitment_point: channel
-                            .signer
-                            .get_commitment_point(commitment_number),
-                        second_per_commitment_point: channel
-                            .signer
-                            .get_commitment_point(commitment_number + 1),
-                        channel_id: channel.temp_id,
-                        funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
-                        revocation_basepoint: channel
-                            .holder_channel_parameters
-                            .pubkeys
-                            .revocation_basepoint,
-                        payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_point,
-                        delayed_payment_basepoint: channel
-                            .holder_channel_parameters
-                            .pubkeys
-                            .delayed_payment_basepoint,
-                        tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
-                        next_local_nonce: channel.signer.misig_nonce.public_nonce(),
-                    });
-
-                    debug!(
-                        "OpenChannel message to {:?} created: {:?}",
-                        &open_channel.peer_id, &message
-                    );
-                    let message_bytes = message.to_molecule_bytes();
-
-                    let result = self
-                        .control
-                        .send_message_to(session_id, PCN_PROTOCOL_ID, message_bytes)
-                        .await;
-                    if let Err(err) = result {
-                        error!("Sending message to session {} failed: {}", session_id, err);
-                    }
-                    debug!(
-                        "Sent OpenChannel message to peer {:?}",
-                        &open_channel.peer_id
-                    );
-                }
-            },
-        }
-    }
-
-    async fn run(mut self) {
-        loop {
-            select! {
-                _ = self.token.cancelled() => {
-                    debug!("Cancellation received, shutting down tentacle service");
-                    let _ = self.control.shutdown().await;
-                    break;
-                }
-                command = self.command_receiver.recv() => {
-                    match command {
-                        None => {
-                            debug!("Command receiver completed, shutting down tentacle service");
-                            let _ = self.control.shutdown().await;
-                            break;
-                        }
-                        Some(command) => {
-                            self.process_command(command).await;
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -527,12 +333,35 @@ impl NetworkState {
 #[derive(Debug, Default)]
 struct PeerInfo {
     sessions: HashSet<SessionId>,
-    channels: HashMap<Hash256, Channel>,
+    channels: HashMap<Hash256, ChannelActorState>,
+}
+
+struct RootActor;
+
+#[rasync_trait]
+impl Actor for RootActor {
+    type Msg = String;
+    type State = ();
+    type Arguments = CancellationToken;
+
+    /// Spawn a thread that waits for token to be cancelled,
+    /// after that kill all sub actors.
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        token: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        tokio::spawn(async move {
+            token.cancelled().await;
+            myself.stop(None);
+        });
+        Ok(())
+    }
 }
 
 pub async fn start_ckb(
     config: CkbConfig,
-    command_receiver: mpsc::Receiver<Command>,
+    mut command_receiver: mpsc::Receiver<Command>,
     command_sender: mpsc::Sender<Command>,
     event_sender: mpsc::Sender<Event>,
     token: CancellationToken,
@@ -569,9 +398,35 @@ pub async fn start_ckb(
         debug!("Tentacle service shutdown");
     });
 
+    let (root_actor, _) = Actor::spawn(Some("root actor".to_string()), RootActor, token.clone())
+        .await
+        .expect("Failed to start root actor");
+
+    let (actor, _handle) = Actor::spawn_linked(
+        Some("network controller".to_string()),
+        NetworkControllerActor { control },
+        (),
+        root_actor.get_cell(),
+    )
+    .await
+    .expect("Failed to start network controller actor");
+
     tracker.spawn(async move {
-        NetworkState::new(control, shared_state, token, command_receiver)
-            .run()
-            .await;
+        loop {
+            select! {
+                command = (&mut command_receiver).recv() => {
+                    match command {
+                        Some(command) => actor.send_message(command).expect("network controller alive"),
+                        None => {
+                            info!("Command reciever exited, exiting forwarding program");
+                            return;
+                        }
+                    }
+                },
+                _ = token.cancelled() => {
+                    return;
+                }
+            }
+        }
     });
 }
