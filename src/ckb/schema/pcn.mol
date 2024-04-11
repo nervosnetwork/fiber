@@ -1,6 +1,7 @@
 import blockchain;
 
 array Signature [byte; 64];
+array Byte66 [byte; 66];
 array Pubkey [byte; 33];
 vector SignatureVec <Signature>;
 
@@ -22,6 +23,7 @@ table OpenChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
+    next_local_nonce:            Byte66,
     channel_flags:               byte,
 }
 

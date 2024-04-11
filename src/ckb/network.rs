@@ -355,7 +355,8 @@ impl NetworkState {
             }
             Command::IssuePcnChannelCommand(c) => match c {
                 ChannelCommand::OpenChannel(open_channel) => {
-                    let channel = open_channel.create_channel();
+                    let channel: Result<Channel, ProcessingChannelError> =
+                        open_channel.create_channel();
                     let channel = unwrap_or_return!(channel, "failed to create a channel");
                     let message = OpenChannel {
                         chain_hash: Byte32::zero().into(),
@@ -382,6 +383,7 @@ impl NetworkState {
                             .pubkeys
                             .delayed_payment_basepoint,
                         tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
+                        next_local_nonce: channel.signer.misig_nonce.public_nonce(),
                     };
 
                     let peer_state = self.shared_state.peers.lock().await;

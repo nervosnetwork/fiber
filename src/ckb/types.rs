@@ -1,10 +1,12 @@
-use super::gen::pcn::{self as molecule_pcn, SignatureVec};
+use super::gen::pcn::{self as molecule_pcn, Byte66, SignatureVec};
 use super::serde_utils::{EntityWrapperBase64, WrapperHex};
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use molecule::prelude::{Builder, Byte, Entity};
+use musig2::errors::DecodeError;
+use musig2::PubNonce;
 use once_cell::sync::OnceCell;
 use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -174,6 +176,8 @@ pub enum Error {
     Secp(#[from] secp256k1::Error),
     #[error("Molecule error: {0}")]
     Molecule(#[from] molecule::error::VerificationError),
+    #[error("Musig2 error: {0}")]
+    Musig2(String),
 }
 
 impl From<Pubkey> for molecule_pcn::Pubkey {
@@ -230,6 +234,14 @@ impl TryFrom<molecule_pcn::Signature> for Signature {
     }
 }
 
+impl TryFrom<Byte66> for PubNonce {
+    type Error = DecodeError<Self>;
+
+    fn try_from(value: Byte66) -> Result<Self, Self::Error> {
+        PubNonce::from_bytes(value.as_slice())
+    }
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenChannel {
@@ -251,6 +263,7 @@ pub struct OpenChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub next_local_nonce: PubNonce,
     pub channel_flags: u8,
 }
 
@@ -301,6 +314,10 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
+            next_local_nonce: open_channel
+                .next_local_nonce()
+                .try_into()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
             channel_flags: open_channel.channel_flags().into(),
         })
     }

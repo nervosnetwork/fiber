@@ -3,6 +3,7 @@ use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
 use log::{debug, error};
 use molecule::prelude::Entity;
+use musig2::SecNonce;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
@@ -161,7 +162,7 @@ pub enum ChannelState {
 }
 
 fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
-    <[u8; 32]>::try_from(seed).unwrap().into()
+    blake2b_256(seed).into()
 }
 
 fn derive_channel_id_from_revocation_keys(
@@ -674,6 +675,8 @@ pub struct InMemorySigner {
     pub delayed_payment_base_key: Privkey,
     /// Holder HTLC secret key used in commitment transaction HTLC outputs.
     pub tlc_base_key: Privkey,
+    /// SecNonce used to generate valid signature in musig.
+    pub misig_nonce: SecNonce,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
 }
@@ -701,14 +704,17 @@ impl InMemorySigner {
         let payment_key = key_derive(revocation_base_key.as_ref(), b"payment key");
         let delayed_payment_base_key =
             key_derive(payment_key.as_ref(), b"delayed payment base key");
-        let htlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
+        let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
+        let misig_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
+        let misig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
 
         Self {
             funding_key,
             revocation_base_key,
             payment_key,
             delayed_payment_base_key,
-            tlc_base_key: htlc_base_key,
+            tlc_base_key,
+            misig_nonce,
             commitment_seed,
         }
     }
