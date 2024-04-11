@@ -1,7 +1,7 @@
 meta {
-  name: send_test_message
+  name: connect peer
   type: http
-  seq: 2
+  seq: 1
 }
 
 post {
@@ -19,17 +19,11 @@ body:json {
   {
     "request": {
       "Command": {
-        "SendPcnMessage": {
-          "peer_id": "{{NODE1_PEERID}}",
-          "message": {
-            "TestMessage": {
-              "bytes": "aGVsbG8gd29ybGQK"
-            }
-          }
-        }
+        "ConnectPeer": "{{NODE1_ADDR}}"
       }
     }
   }
+  
 }
 
 assert {
