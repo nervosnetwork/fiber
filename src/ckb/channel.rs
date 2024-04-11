@@ -8,11 +8,13 @@ use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 use thiserror::Error;
+use tokio::sync::mpsc::error::{SendError, TrySendError};
 
 use std::fmt::Debug;
 
-use super::types::{
-    AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, Privkey, Pubkey,
+use super::{
+    types::{AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, Privkey, Pubkey},
+    Command,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -115,6 +117,8 @@ pub enum ProcessingChannelError {
     InvalidParameter(String),
     #[error("Unimplemented operation: {0}")]
     Unimplemented(String),
+    #[error("Failed to send command: {0}")]
+    CommanderSendingError(#[from] TrySendError<Command>),
 }
 
 bitflags! {

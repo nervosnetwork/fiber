@@ -82,6 +82,7 @@ pub async fn main() {
             start_ckb(
                 ckb_config,
                 command_receiver,
+                command_sender.clone(),
                 event_sender,
                 new_tokio_cancellation_token(),
                 new_tokio_task_tracker(),

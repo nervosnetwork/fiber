@@ -22,9 +22,13 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::channel::{
-    ChannelCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY,
+use crate::ckb::{
+    channel::{
+        ChannelCommand, COUNTERPARTY_INITIAL_COMMITMENT_NUMBER, DEFAULT_COMMITMENT_FEE_RATE,
+        DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+        DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
+    },
+    types::{AcceptChannel, Pubkey},
 };
 
 use crate::unwrap_or_return;
@@ -118,14 +122,44 @@ impl PHandle {
                 let channel = Channel::new_inbound_channel(
                     *channel_id,
                     &seed,
-                    peer_id,
+                    peer_id.clone(),
                     *funding_amount,
                     *to_self_delay,
                     counterpart_pubkeys,
                     first_per_commitment_point.clone(),
                     second_per_commitment_point.clone(),
                 );
+
+                let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
+
+                let accept_channel = AcceptChannel {
+                    channel_id: channel.id.unwrap(),
+                    funding_amount: 0,
+                    max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+                    max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
+                    to_self_delay: *to_self_delay,
+                    funding_pubkey: channel.signer.funding_key.pubkey(),
+                    revocation_basepoint: channel.signer.revocation_base_key.pubkey(),
+                    payment_basepoint: channel.signer.payment_key.pubkey(),
+                    min_tlc_value: DEFAULT_MIN_TLC_VALUE,
+                    delayed_payment_basepoint: channel.signer.delayed_payment_base_key.pubkey(),
+                    tlc_basepoint: channel.signer.tlc_base_key.pubkey(),
+                    first_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number),
+                    second_per_commitment_point: channel
+                        .signer
+                        .get_commitment_point(commitment_number - 1),
+                };
                 let _ = peer.channels.insert(channel_id.clone(), channel);
+                let command = PCNMessageWithPeerId {
+                    peer_id,
+                    message: PCNMessage::AcceptChannel(accept_channel),
+                };
+                // TODO: maybe we should not use try_send here.
+                self.state
+                    .command_sender
+                    .try_send(Command::SendPcnMessage(command))?;
 
                 debug!("Peer {:?} openning channel", peer);
                 Ok(())
@@ -282,13 +316,15 @@ impl ServiceHandle for SHandle {
 pub struct SharedState {
     peers: Arc<Mutex<HashMap<PeerId, PeerInfo>>>,
     event_sender: mpsc::Sender<Event>,
+    command_sender: mpsc::Sender<Command>,
 }
 
 impl SharedState {
-    fn new(event_sender: mpsc::Sender<Event>) -> Self {
+    fn new(event_sender: mpsc::Sender<Event>, command_sender: mpsc::Sender<Command>) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             event_sender,
+            command_sender,
         }
     }
 }
@@ -358,6 +394,7 @@ impl NetworkState {
                     let channel: Result<Channel, ProcessingChannelError> =
                         open_channel.create_channel();
                     let channel = unwrap_or_return!(channel, "failed to create a channel");
+                    let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
                     let message = OpenChannel {
                         chain_hash: Byte32::zero().into(),
                         funding_type_script: None,
@@ -369,8 +406,12 @@ impl NetworkState {
                         min_tlc_value: DEFAULT_MIN_TLC_VALUE,
                         to_self_delay: DEFAULT_TO_SELF_DELAY,
                         channel_flags: 0,
-                        first_per_commitment_point: channel.signer.get_commitment_point(0),
-                        second_per_commitment_point: channel.signer.get_commitment_point(1),
+                        first_per_commitment_point: channel
+                            .signer
+                            .get_commitment_point(commitment_number),
+                        second_per_commitment_point: channel
+                            .signer
+                            .get_commitment_point(commitment_number + 1),
                         channel_id: channel.temp_id,
                         funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
                         revocation_basepoint: channel
@@ -453,6 +494,7 @@ struct PeerInfo {
 pub async fn start_ckb(
     config: CkbConfig,
     command_receiver: mpsc::Receiver<Command>,
+    command_sender: mpsc::Sender<Command>,
     event_sender: mpsc::Sender<Event>,
     token: CancellationToken,
     tracker: TaskTracker,
@@ -461,7 +503,7 @@ pub async fn start_ckb(
         .read_or_generate_secret_key()
         .expect("read or generate secret key");
     let pk = kp.public_key();
-    let shared_state = SharedState::new(event_sender);
+    let shared_state = SharedState::new(event_sender, command_sender);
     let mut service = ServiceBuilder::default()
         .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
         .key_pair(kp)
