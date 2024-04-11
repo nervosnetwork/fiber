@@ -6,7 +6,7 @@ use ckb_types::{
 };
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
-use musig2::PubNonce;
+use musig2::{BinaryEncoding, PubNonce};
 use once_cell::sync::OnceCell;
 use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,28 @@ use thiserror::Error;
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(|| Secp256k1::new())
+}
+
+impl From<&Byte66> for PubNonce {
+    fn from(value: &Byte66) -> Self {
+        PubNonce::from_bytes(value.as_slice()).unwrap()
+    }
+}
+
+impl From<&PubNonce> for Byte66 {
+    fn from(value: &PubNonce) -> Self {
+        Self::new_builder()
+            .set(
+                value
+                    .to_bytes()
+                    .into_iter()
+                    .map(Byte::new)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+            .build()
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
@@ -287,6 +309,7 @@ impl From<OpenChannel> for molecule_pcn::OpenChannel {
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
+            .next_local_nonce((&open_channel.next_local_nonce).into())
             .channel_flags(open_channel.channel_flags.into())
             .build()
     }
@@ -357,6 +380,7 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
+            .next_local_nonce((&accept_channel.next_local_nonce).into())
             .build()
     }
 }
