@@ -2,8 +2,11 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CchDbError {
-    #[error("Duplicated SendBTCOrder with the same payment hash: {0}")]
-    DuplicatedSendBTCOrder(String),
+    #[error("Inserting duplicated key: {0}")]
+    Duplicated(String),
+
+    #[error("Key not found: {0}")]
+    NotFound(String),
 }
 
 #[derive(Error, Debug)]
@@ -16,8 +19,6 @@ pub enum CchError {
     BTCInvoiceMissingAmount,
     #[error("CKB asset not allowed to exchange BTC")]
     CKBAssetNotAllowed,
-    #[error("SendBTC order not found")]
-    SendBTCOrderNotFound,
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
 }

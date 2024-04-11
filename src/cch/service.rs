@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
 use hex::ToHex;
 use lightning_invoice::Bolt11Invoice;
-use lnd_grpc_tonic_client::{create_router_client, routerrpc, RouterClient, Uri};
+use lnd_grpc_tonic_client::{create_router_client, lnrpc, routerrpc, RouterClient, Uri};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,7 +12,10 @@ use tokio::{select, sync::mpsc, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use super::command::TestPayBTC;
+use super::error::CchDbError;
 use super::{CchCommand, CchConfig, CchError, CchOrderStatus, CchOrdersDb, SendBTC, SendBTCOrder};
+
+pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
 
 pub async fn start_cch(
     config: CchConfig,
@@ -50,7 +53,17 @@ pub async fn start_cch(
     Ok(())
 }
 
-enum Event {}
+#[derive(Debug)]
+struct SettleSendBTCOrderEvent {
+    pub payment_hash: String,
+    pub preimage: Option<String>,
+    pub status: CchOrderStatus,
+}
+
+#[derive(Debug)]
+enum Event {
+    SettleSendBTCOrder(SettleSendBTCOrderEvent),
+}
 
 struct CchService {
     config: CchConfig,
@@ -64,6 +77,7 @@ struct CchService {
 }
 
 impl CchService {
+    // TODO: setup tracking on existing orders on startup
     pub fn spawn(self) {
         let tracker = self.tracker.clone();
         let lnd_connection = self.lnd_connection.clone();
@@ -95,11 +109,21 @@ impl CchService {
                             let command_name = command.name();
                             log::info!("Process cch command {}", command_name);
 
-                            match self.process_command(command).await {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    log::error!("Error processing command {}: {:?}", command_name, err);
-                                }
+                            if let Err(err) = self.process_command(command).await {
+                                log::error!("Error processing command {}: {:?}", command_name, err);
+                            }
+                        }
+                    }
+                }
+                event = self.event_receiver.recv() => {
+                    match event {
+                        None => {
+                            log::debug!("Event receiver completed, shutting down tentacle service");
+                            break;
+                        }
+                        Some(event) => {
+                            if let Err(err) = self.process_event(event).await {
+                                log::error!("Error processing event: {:?}", err);
                             }
                         }
                     }
@@ -156,6 +180,7 @@ impl CchService {
             ckb_final_tlc_expiry: self.config.ckb_final_tlc_expiry,
             btc_pay_req: send_btc.btc_pay_req,
             payment_hash: invoice.payment_hash().encode_hex(),
+            payment_preimage: None,
             amount_shannons: order_value + fee,
             status: CchOrderStatus::Pending,
         };
@@ -174,20 +199,17 @@ impl CchService {
         let order = self
             .orders_db
             .get_send_btc_order(&test_pay_btc.payment_hash)
-            .await?
-            .ok_or(CchError::SendBTCOrderNotFound)?;
+            .await?;
         if order.status != CchOrderStatus::Pending {
             return Err(CchError::SendBTCOrderAlreadyPaid.into());
         }
 
-        let invoice = Bolt11Invoice::from_str(&order.btc_pay_req)?;
         let req = routerrpc::SendPaymentRequest {
-            amt_msat: invoice
-                .amount_milli_satoshis()
-                .ok_or(CchError::BTCInvoiceMissingAmount)? as i64,
             payment_request: order.btc_pay_req,
+            timeout_seconds: BTC_PAYMENT_TIMEOUT_SECONDS,
             ..Default::default()
         };
+        log::debug!("[test_pay_btc] SendPaymentRequest: {:?}", req);
 
         let mut client = self.lnd_connection.create_router_client().await?;
         // TODO: set a fee
@@ -204,6 +226,33 @@ impl CchService {
         }
 
         Ok(())
+    }
+
+    async fn process_event(&mut self, event: Event) -> Result<()> {
+        log::debug!("Event received: {:?}", event);
+        match event {
+            Event::SettleSendBTCOrder(event) => {
+                // TODO: settle the received CKB payment using the found preimage
+                if event.preimage.is_some() {
+                    log::info!(
+                        "SettleSendBTCOrder: payment_hash={}, status={:?}",
+                        event.payment_hash,
+                        event.status
+                    );
+                }
+                match self
+                    .orders_db
+                    .update_send_btc_order(&event.payment_hash, event.preimage, event.status)
+                    .await
+                {
+                    Err(CchDbError::NotFound(_)) => {
+                        // ignore payments not found in the db
+                        Ok(())
+                    }
+                    result => result.map_err(Into::into),
+                }
+            }
+        }
     }
 }
 
@@ -277,7 +326,8 @@ impl LndPaymentsTracker {
             select! {
                 payment_opt = stream.next() => {
                     match payment_opt {
-                        Some(payment) => log::debug!("payment: {:?}", payment),
+                        Some(Ok(payment)) => self.on_payment(payment).await?,
+                        Some(Err(err)) => return Err(err.into()),
                         None => return Err(anyhow!("unexpected closed stream")),
                     }
                 }
@@ -289,6 +339,18 @@ impl LndPaymentsTracker {
         }
 
         Ok(())
+    }
+
+    async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
+        log::debug!("[LndPaymentsTracker] payment: {:?}", payment);
+        let event = Event::SettleSendBTCOrder(SettleSendBTCOrderEvent {
+            payment_hash: payment.payment_hash,
+            preimage: (!payment.payment_preimage.is_empty()).then_some(payment.payment_preimage),
+            status: lnrpc::payment::PaymentStatus::try_from(payment.status)
+                .map(Into::into)
+                .unwrap_or(CchOrderStatus::InFlight),
+        });
+        self.event_sender.send(event).await.map_err(Into::into)
     }
 }
 

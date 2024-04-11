@@ -1,3 +1,4 @@
+use lnd_grpc_tonic_client::lnrpc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -13,6 +14,17 @@ pub enum CchOrderStatus {
     Failed = 3,
 }
 
+impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
+    fn from(status: lnrpc::payment::PaymentStatus) -> Self {
+        use lnrpc::payment::PaymentStatus;
+        match status {
+            PaymentStatus::Succeeded => CchOrderStatus::Succeeded,
+            PaymentStatus::Failed => CchOrderStatus::Failed,
+            _ => CchOrderStatus::InFlight,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendBTCOrder {
     // Seconds since epoch when the order is created
@@ -24,6 +36,7 @@ pub struct SendBTCOrder {
 
     pub btc_pay_req: String,
     pub payment_hash: String,
+    pub payment_preimage: Option<String>,
 
     // Amount required to pay in Shannons
     pub amount_shannons: u64,
