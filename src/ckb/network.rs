@@ -15,40 +15,41 @@ use tentacle::{
         ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
         TargetProtocol,
     },
-    traits::{ServiceHandle, ServiceProtocol},
+    traits::{self, ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
 use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::{
-    channel::{
-        ChannelCommand, COUNTERPARTY_INITIAL_COMMITMENT_NUMBER, DEFAULT_COMMITMENT_FEE_RATE,
-        DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-        DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
+use crate::{
+    ckb::{
+        channel::{
+            ChannelCommand, COUNTERPARTY_INITIAL_COMMITMENT_NUMBER, DEFAULT_COMMITMENT_FEE_RATE,
+            DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+            DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
+        },
+        types::AcceptChannel,
     },
-    types::AcceptChannel,
+    Config,
 };
 
 use crate::unwrap_or_return;
 
 use super::{
     channel::{ChannelActorState, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
-    command::PCNMessageWithPeerId,
+    command::{self, PCNMessageWithPeerId},
     types::{Hash256, OpenChannel, PCNMessage},
     CkbConfig, Command, Event,
 };
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
-pub struct NetworkControllerActor {
-    control: ServiceAsyncControl,
-}
+pub struct NetworkControllerActor {}
 
-#[derive(Default)]
 pub struct NetworkStateNew {
     peers: HashMap<PeerId, PeerInfo>,
+    control: ServiceAsyncControl,
 }
 
 #[rasync_trait]
@@ -58,7 +59,7 @@ impl Actor for NetworkControllerActor {
     // and (optionally) internal state
     type State = NetworkStateNew;
     // Startup arguments for actor initialization
-    type Arguments = ();
+    type Arguments = (mpsc::Sender<Event>, CkbConfig, TaskTracker);
 
     // Initially we need to create our state, and potentially
     // start some internal processing (by posting a message for
@@ -66,9 +67,42 @@ impl Actor for NetworkControllerActor {
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _args: Self::Arguments,
+        (event_sender, config, tracker): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(Default::default())
+        let kp = config
+            .read_or_generate_secret_key()
+            .expect("read or generate secret key");
+        let pk = kp.public_key();
+        let shared_state = SharedState::new(event_sender);
+        let mut service = ServiceBuilder::default()
+            .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
+            .key_pair(kp)
+            .build(SHandle::new(shared_state.clone()));
+        let listen_addr = service
+            .listen(
+                format!("/ip4/127.0.0.1/tcp/{}", config.listening_port)
+                    .parse()
+                    .expect("valid tentacle address"),
+            )
+            .await
+            .expect("listen tentacle");
+
+        info!(
+            "Started listening tentacle on {}/p2p/{}",
+            listen_addr,
+            PeerId::from(pk).to_base58()
+        );
+
+        let control = service.control().to_owned();
+
+        tracker.spawn(async move {
+            service.run().await;
+            debug!("Tentacle service shutdown");
+        });
+        Ok(NetworkStateNew {
+            peers: HashMap::new(),
+            control,
+        })
     }
 
     // This is our main message handler
@@ -89,7 +123,7 @@ impl Actor for NetworkControllerActor {
                     .cloned()
                 {
                     Some(session_id) => {
-                        let result = self
+                        let result = state
                             .control
                             .send_message_to(
                                 session_id,
@@ -117,7 +151,7 @@ impl Actor for NetworkControllerActor {
                 // e.g. whether the peer support some specific feature.
                 // TODO: If we are already connected to the peer, skip connecting.
                 debug!("Dialing {}", &addr);
-                let result = self.control.dial(addr.clone(), TargetProtocol::All).await;
+                let result = state.control.dial(addr.clone(), TargetProtocol::All).await;
                 if let Err(err) = result {
                     error!("Dialing {} failed: {}", &addr, err);
                 }
@@ -322,7 +356,7 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    fn new(event_sender: mpsc::Sender<Event>, command_sender: mpsc::Sender<Command>) -> Self {
+    fn new(event_sender: mpsc::Sender<Event>) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             event_sender,
@@ -367,45 +401,14 @@ pub async fn start_ckb(
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
-    let kp = config
-        .read_or_generate_secret_key()
-        .expect("read or generate secret key");
-    let pk = kp.public_key();
-    let shared_state = SharedState::new(event_sender, command_sender);
-    let mut service = ServiceBuilder::default()
-        .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
-        .key_pair(kp)
-        .build(SHandle::new(shared_state.clone()));
-    let listen_addr = service
-        .listen(
-            format!("/ip4/127.0.0.1/tcp/{}", config.listening_port)
-                .parse()
-                .expect("valid tentacle address"),
-        )
-        .await
-        .expect("listen tentacle");
-
-    info!(
-        "Started listening tentacle on {}/p2p/{}",
-        listen_addr,
-        PeerId::from(pk).to_base58()
-    );
-
-    let control = service.control().to_owned();
-
-    tracker.spawn(async move {
-        service.run().await;
-        debug!("Tentacle service shutdown");
-    });
-
     let (root_actor, _) = Actor::spawn(Some("root actor".to_string()), RootActor, token.clone())
         .await
         .expect("Failed to start root actor");
 
     let (actor, _handle) = Actor::spawn_linked(
         Some("network controller".to_string()),
-        NetworkControllerActor { control },
-        (),
+        NetworkControllerActor {},
+        (event_sender, config, tracker.clone()),
         root_actor.get_cell(),
     )
     .await
