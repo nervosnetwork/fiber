@@ -8,8 +8,11 @@ use super::{channel::ChannelCommand, types::PCNMessage};
 #[derive(Clone, Debug, Deserialize)]
 pub enum Command {
     ConnectPeer(Multiaddr),
+    // For internal use and debugging only. Most of the messages requires some
+    // changes to local state. Even if we can send a message to a peer, some
+    // part of the local state is not changed.
     SendPcnMessage(PCNMessageWithPeerId),
-    IssuePcnChannelCommand(ChannelCommand),
+    ControlPcnChannel(ChannelCommand),
 }
 
 #[serde_as]

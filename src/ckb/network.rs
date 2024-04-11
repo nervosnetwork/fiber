@@ -28,7 +28,7 @@ use crate::ckb::{
         DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
         DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
     },
-    types::{AcceptChannel, Pubkey},
+    types::AcceptChannel,
 };
 
 use crate::unwrap_or_return;
@@ -352,8 +352,29 @@ impl NetworkState {
         }
     }
 
+    async fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
+        let peer_state = self.shared_state.peers.lock().await;
+        peer_state
+            .get(&peer_id)
+            .and_then(|p| p.sessions.iter().next())
+            .cloned()
+    }
+
     async fn process_command(&self, command: Command) {
         debug!("Processing command {:?}", command);
+
+        macro_rules! get_session_or_return {
+            ($expr:expr) => {
+                match self.get_peer_session($expr).await {
+                    Some(s) => s,
+                    None => {
+                        error!("Session for peer {:?} not found", $expr);
+                        return;
+                    }
+                }
+            };
+        }
+
         match command {
             Command::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
@@ -367,36 +388,35 @@ impl NetworkState {
             }
 
             Command::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
-                let peer_state = self.shared_state.peers.lock().await;
-                let peer = peer_state.get(&peer_id);
-                match peer {
-                    Some(peer) => {
-                        for session_id in &peer.sessions {
-                            let result = self
-                                .control
-                                .send_message_to(
-                                    *session_id,
-                                    PCN_PROTOCOL_ID,
-                                    message.to_molecule_bytes(),
-                                )
-                                .await;
-                            if let Err(err) = result {
-                                error!("Sending message to session {} failed: {}", session_id, err);
-                            }
-                        }
-                    }
-                    None => {
-                        warn!("Trying to send message to unknown peer {:?}", peer_id);
-                    }
+                debug!(
+                    "received command to send message {:?} to peer {:?}",
+                    &peer_id, &message
+                );
+
+                let session_id = get_session_or_return!(&peer_id);
+
+                let result = self
+                    .control
+                    .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
+                    .await;
+                if let Err(err) = result {
+                    error!(
+                        "Sending message to session {:?} failed: {}",
+                        &session_id, err
+                    );
+                    return;
                 }
+                info!("Message send to peer {:?}", &peer_id);
             }
-            Command::IssuePcnChannelCommand(c) => match c {
+
+            Command::ControlPcnChannel(c) => match c {
                 ChannelCommand::OpenChannel(open_channel) => {
+                    info!("Trying to open a channel to {:?}", &open_channel.peer_id);
                     let channel: Result<Channel, ProcessingChannelError> =
                         open_channel.create_channel();
                     let channel = unwrap_or_return!(channel, "failed to create a channel");
                     let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
-                    let message = OpenChannel {
+                    let message = PCNMessage::OpenChannel(OpenChannel {
                         chain_hash: Byte32::zero().into(),
                         funding_type_script: None,
                         funding_amount: channel.to_self_value,
@@ -426,36 +446,26 @@ impl NetworkState {
                             .delayed_payment_basepoint,
                         tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
                         next_local_nonce: channel.signer.misig_nonce.public_nonce(),
-                    };
+                    });
 
-                    let peer_state = self.shared_state.peers.lock().await;
-                    let peer = peer_state.get(&open_channel.peer_id);
-                    match peer {
-                        Some(peer) => {
-                            for session_id in &peer.sessions {
-                                let result = self
-                                    .control
-                                    .send_message_to(
-                                        *session_id,
-                                        PCN_PROTOCOL_ID,
-                                        message.to_molecule_bytes(),
-                                    )
-                                    .await;
-                                if let Err(err) = result {
-                                    error!(
-                                        "Sending message to session {} failed: {}",
-                                        session_id, err
-                                    );
-                                }
-                            }
-                        }
-                        None => {
-                            warn!(
-                                "Trying to send message to unknown peer {:?}",
-                                &open_channel.peer_id
-                            );
-                        }
+                    debug!(
+                        "OpenChannel message to {:?} created: {:?}",
+                        &open_channel.peer_id, &message
+                    );
+                    let message_bytes = message.to_molecule_bytes();
+                    let session_id = get_session_or_return!(&open_channel.peer_id);
+
+                    let result = self
+                        .control
+                        .send_message_to(session_id, PCN_PROTOCOL_ID, message_bytes)
+                        .await;
+                    if let Err(err) = result {
+                        error!("Sending message to session {} failed: {}", session_id, err);
                     }
+                    debug!(
+                        "Sent OpenChannel message to peer {:?}",
+                        &open_channel.peer_id
+                    );
                 }
             },
         }

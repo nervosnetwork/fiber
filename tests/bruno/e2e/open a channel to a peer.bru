@@ -1,0 +1,36 @@
+meta {
+  name: open a channel to a peer
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "Command": {
+        "ControlPcnChannel": {
+          "OpenChannel": {
+            "peer_id": "{{NODE1_PEERID}}",
+            "total_value": 100,
+            "to_self_value": 50
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
