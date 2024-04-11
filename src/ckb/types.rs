@@ -338,6 +338,7 @@ pub struct AcceptChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub next_local_nonce: PubNonce,
 }
 
 impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
@@ -378,6 +379,10 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
+            next_local_nonce: accept_channel
+                .next_local_nonce()
+                .try_into()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
         })
     }
 }

@@ -3702,6 +3702,7 @@ impl ::core::fmt::Display for AcceptChannel {
             "second_per_commitment_point",
             self.second_per_commitment_point()
         )?;
+        write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -3716,9 +3717,10 @@ impl ::core::default::Default for AcceptChannel {
     }
 }
 impl AcceptChannel {
-    const DEFAULT_VALUE: [u8; 359] = [
-        103, 1, 0, 0, 56, 0, 0, 0, 88, 0, 0, 0, 96, 0, 0, 0, 104, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0,
-        0, 128, 0, 0, 0, 161, 0, 0, 0, 194, 0, 0, 0, 227, 0, 0, 0, 4, 1, 0, 0, 37, 1, 0, 0, 70, 1,
+    const DEFAULT_VALUE: [u8; 429] = [
+        173, 1, 0, 0, 60, 0, 0, 0, 92, 0, 0, 0, 100, 0, 0, 0, 108, 0, 0, 0, 116, 0, 0, 0, 124, 0,
+        0, 0, 132, 0, 0, 0, 165, 0, 0, 0, 198, 0, 0, 0, 231, 0, 0, 0, 8, 1, 0, 0, 41, 1, 0, 0, 74,
+        1, 0, 0, 107, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -3729,9 +3731,10 @@ impl AcceptChannel {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 13;
+    pub const FIELD_COUNT: usize = 14;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3823,11 +3826,17 @@ impl AcceptChannel {
     pub fn second_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
+        let end = molecule::unpack_number(&slice[56..]) as usize;
+        Pubkey::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn next_local_nonce(&self) -> Byte66 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[56..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[56..]) as usize;
-            Pubkey::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[60..]) as usize;
+            Byte66::new_unchecked(self.0.slice(start..end))
         } else {
-            Pubkey::new_unchecked(self.0.slice(start..))
+            Byte66::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AcceptChannelReader<'r> {
@@ -3870,6 +3879,7 @@ impl molecule::prelude::Entity for AcceptChannel {
             .tlc_basepoint(self.tlc_basepoint())
             .first_per_commitment_point(self.first_per_commitment_point())
             .second_per_commitment_point(self.second_per_commitment_point())
+            .next_local_nonce(self.next_local_nonce())
     }
 }
 #[derive(Clone, Copy)]
@@ -3929,6 +3939,7 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
             "second_per_commitment_point",
             self.second_per_commitment_point()
         )?;
+        write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -3937,7 +3948,7 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
     }
 }
 impl<'r> AcceptChannelReader<'r> {
-    pub const FIELD_COUNT: usize = 13;
+    pub const FIELD_COUNT: usize = 14;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4029,11 +4040,17 @@ impl<'r> AcceptChannelReader<'r> {
     pub fn second_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
+        let end = molecule::unpack_number(&slice[56..]) as usize;
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn next_local_nonce(&self) -> Byte66Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[56..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[56..]) as usize;
-            PubkeyReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[60..]) as usize;
+            Byte66Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            PubkeyReader::new_unchecked(&self.as_slice()[start..])
+            Byte66Reader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -4096,6 +4113,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
         PubkeyReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
         PubkeyReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
         PubkeyReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
+        Byte66Reader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
         Ok(())
     }
 }
@@ -4114,9 +4132,10 @@ pub struct AcceptChannelBuilder {
     pub(crate) tlc_basepoint: Pubkey,
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
+    pub(crate) next_local_nonce: Byte66,
 }
 impl AcceptChannelBuilder {
-    pub const FIELD_COUNT: usize = 13;
+    pub const FIELD_COUNT: usize = 14;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
@@ -4169,6 +4188,10 @@ impl AcceptChannelBuilder {
         self.second_per_commitment_point = v;
         self
     }
+    pub fn next_local_nonce(mut self, v: Byte66) -> Self {
+        self.next_local_nonce = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for AcceptChannelBuilder {
     type Entity = AcceptChannel;
@@ -4188,6 +4211,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
             + self.tlc_basepoint.as_slice().len()
             + self.first_per_commitment_point.as_slice().len()
             + self.second_per_commitment_point.as_slice().len()
+            + self.next_local_nonce.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -4218,6 +4242,8 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         total_size += self.first_per_commitment_point.as_slice().len();
         offsets.push(total_size);
         total_size += self.second_per_commitment_point.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.next_local_nonce.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -4235,6 +4261,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         writer.write_all(self.tlc_basepoint.as_slice())?;
         writer.write_all(self.first_per_commitment_point.as_slice())?;
         writer.write_all(self.second_per_commitment_point.as_slice())?;
+        writer.write_all(self.next_local_nonce.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

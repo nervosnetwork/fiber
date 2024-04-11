@@ -41,6 +41,7 @@ table AcceptChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
+    next_local_nonce:            Byte66,
 }
 
 table CommitmentSigned {

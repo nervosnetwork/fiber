@@ -150,6 +150,7 @@ impl PHandle {
                     second_per_commitment_point: channel
                         .signer
                         .get_commitment_point(commitment_number - 1),
+                    next_local_nonce: channel.signer.misig_nonce.public_nonce(),
                 };
                 let _ = peer.channels.insert(channel_id.clone(), channel);
                 let command = PCNMessageWithPeerId {
