@@ -692,11 +692,7 @@ impl InMemorySigner {
         };
 
         let key_derive = |seed: &[u8], info: &[u8]| {
-            let mut hasher = new_blake2b();
-            hasher.update(seed);
-            hasher.update(info);
-            let mut result = [0u8; 32];
-            hasher.finalize(&mut result);
+            let result = blake2b_hash_with_salt(seed, info);
             Privkey::from_slice(&result)
         };
 
