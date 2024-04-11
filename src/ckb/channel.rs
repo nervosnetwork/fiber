@@ -1,30 +1,32 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_types::packed::{OutPoint, Transaction};
 use log::{debug, error};
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
-
-use std::fmt::Debug;
-
-use ckb_types::packed::{Byte, Byte32, Byte32Builder, OutPoint, Transaction};
 use molecule::prelude::Entity;
+use serde::Deserialize;
+use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 use thiserror::Error;
 
-use super::{
-    network::DEFAULT_TO_SELF_DELAY,
-    types::{ChannelReady, CommitmentSigned, Privkey, Pubkey},
+use std::fmt::Debug;
+
+use super::types::{
+    AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, Privkey, Pubkey,
 };
-use crate::ckb::types::{AcceptChannel, OpenChannel};
-use molecule::prelude::Builder;
 
 #[derive(Clone, Debug, Deserialize)]
 pub enum ChannelCommand {
     OpenChannel(OpenChannelCommand),
 }
 
-const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
-const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = 2 ^ 48 - 1;
+pub const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
+pub const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = 2 ^ 48 - 1;
+pub const DEFAULT_FEE_RATE: u64 = 0;
+pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
+pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
+pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
+pub const DEFAULT_MIN_TLC_VALUE: u64 = 0;
+pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
@@ -52,7 +54,7 @@ impl OpenChannelCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub state: ChannelState,
-    pub temp_id: Byte32,
+    pub temp_id: Hash256,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -72,7 +74,7 @@ pub struct Channel {
 
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
-    pub id: Option<Byte32>,
+    pub id: Option<Hash256>,
     pub counterparty_commitment_point: Option<Pubkey>,
     pub counterparty_prev_commitment_point: Option<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
@@ -103,7 +105,7 @@ pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
 #[derive(Error, Debug)]
 pub enum ProcessingChannelError {
     #[error("Invalid chain hash: {0}")]
-    InvalidChainHash(Byte32),
+    InvalidChainHash(Hash256),
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
     #[error("Invalid state")]
@@ -158,23 +160,14 @@ pub enum ChannelState {
     ShutdownComplete,
 }
 
-fn new_channel_id_from_seed(seed: &[u8]) -> Byte32 {
-    Byte32Builder::default()
-        .set(
-            blake2b_hash_with_salt(seed, b"channel id".as_slice())
-                .into_iter()
-                .map(Byte::new)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-        .build()
+fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
+    <[u8; 32]>::try_from(seed).unwrap().into()
 }
 
 fn derive_channel_id_from_revocation_keys(
     revocation_basepoint1: &Pubkey,
     revocation_basepoint2: &Pubkey,
-) -> Byte32 {
+) -> Hash256 {
     let holder_revocation = revocation_basepoint1.0.serialize();
     let counterparty_revocation = revocation_basepoint2.0.serialize();
 
@@ -212,7 +205,7 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 
 impl Channel {
     pub fn new_inbound_channel<'a>(
-        temp_channel_id: Byte32,
+        temp_channel_id: Hash256,
         seed: &[u8],
         counterparty_peer_id: PeerId,
         counterparty_value: u64,
@@ -618,7 +611,7 @@ pub struct TLCOutputInCommitment {
     /// The CLTV lock-time at which this HTLC expires.
     pub lock_time: u32,
     /// The hash of the preimage which unlocks this HTLC.
-    pub payment_hash: Byte32,
+    pub payment_hash: Hash256,
     /// The position within the commitment transactions' outputs. This may be None if the value is
     /// below the dust limit (in which case no output appears in the commitment transaction and the
     /// value is spent to additional transaction fees).

@@ -22,24 +22,21 @@ use tokio::select;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::channel::ChannelCommand;
+use crate::ckb::channel::{
+    ChannelCommand, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY,
+};
 
 use crate::unwrap_or_return;
 
 use super::{
     channel::{Channel, ChannelEvent, ProcessingChannelError, ProcessingChannelResult},
     command::PCNMessageWithPeerId,
-    types::{OpenChannel, PCNMessage},
+    types::{Hash256, OpenChannel, PCNMessage},
     CkbConfig, Command, Event,
 };
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
-pub const DEFAULT_FEE_RATE: u64 = 0;
-pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
-pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
-pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
-pub const DEFAULT_MIN_TLC_VALUE: u64 = 0;
-pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
 
 #[derive(Clone, Debug)]
 struct PHandle {
@@ -98,7 +95,7 @@ impl PHandle {
                     )));
                 }
 
-                if chain_hash != &Byte32::zero() {
+                if *chain_hash != [0u8; 32].into() {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Invalid chain hash {:?}",
                         chain_hash
@@ -119,7 +116,7 @@ impl PHandle {
                     .collect::<Vec<u8>>();
 
                 let channel = Channel::new_inbound_channel(
-                    channel_id.clone(),
+                    *channel_id,
                     &seed,
                     peer_id,
                     *funding_amount,
@@ -361,7 +358,7 @@ impl NetworkState {
                     let channel = open_channel.create_channel();
                     let channel = unwrap_or_return!(channel, "failed to create a channel");
                     let message = OpenChannel {
-                        chain_hash: Byte32::zero(),
+                        chain_hash: Byte32::zero().into(),
                         funding_type_script: None,
                         funding_amount: channel.to_self_value,
                         funding_fee_rate: DEFAULT_FEE_RATE,
@@ -448,7 +445,7 @@ impl NetworkState {
 #[derive(Debug, Default)]
 struct PeerInfo {
     sessions: HashSet<SessionId>,
-    channels: HashMap<Byte32, Channel>,
+    channels: HashMap<Hash256, Channel>,
 }
 
 pub async fn start_ckb(

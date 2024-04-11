@@ -19,3 +19,5 @@ pub mod channel;
 // pub mod channel_manager;
 
 mod types;
+
+pub mod serde_utils;
