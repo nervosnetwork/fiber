@@ -4,18 +4,25 @@ use anyhow::{anyhow, Result};
 use futures::StreamExt as _;
 use hex::ToHex;
 use lightning_invoice::Bolt11Invoice;
-use lnd_grpc_tonic_client::{create_router_client, lnrpc, routerrpc, RouterClient, Uri};
+use lnd_grpc_tonic_client::{
+    create_invoices_client, create_router_client, invoicesrpc, lnrpc, routerrpc, InvoicesClient,
+    RouterClient, Uri,
+};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, sync::mpsc, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use super::command::TestPayBTC;
+use super::command::{ReceiveBTC, TestPayBTC};
 use super::error::CchDbError;
-use super::{CchCommand, CchConfig, CchError, CchOrderStatus, CchOrdersDb, SendBTC, SendBTCOrder};
+use super::{
+    CchCommand, CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTC,
+    SendBTCOrder,
+};
 
 pub const BTC_PAYMENT_TIMEOUT_SECONDS: i32 = 60;
+pub const DEFAULT_ORDER_EXPIRY_SECONDS: u64 = 86400; // 24 hours
 
 pub async fn start_cch(
     config: CchConfig,
@@ -137,6 +144,7 @@ impl CchService {
         match command {
             CchCommand::SendBTC(send_btc) => self.send_btc(send_btc).await,
             CchCommand::TestPayBTC(test_pay_btc) => self.test_pay_btc(test_pay_btc).await,
+            CchCommand::ReceiveBTC(receive_btc) => self.receive_btc(receive_btc).await,
         }
     }
 
@@ -224,6 +232,57 @@ impl CchService {
                 return Ok(());
             }
         }
+
+        Ok(())
+    }
+
+    async fn receive_btc(&mut self, receive_btc: ReceiveBTC) -> Result<()> {
+        let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let hash_bin = hex::decode(&receive_btc.payment_hash)?;
+
+        let (ratio_ckb_shannons, ratio_btc_msat) =
+            match (self.config.ratio_ckb_shannons, self.config.ratio_btc_msat) {
+                (Some(ratio_ckb_shannons), Some(ratio_btc_msat)) => {
+                    (ratio_ckb_shannons, ratio_btc_msat)
+                }
+                _ => return Err(CchError::CKBAssetNotAllowed.into()),
+            };
+        let order_value = ((ratio_ckb_shannons as u128) * (receive_btc.amount_msat as u128)
+            / (ratio_btc_msat as u128)) as u64;
+        let fee = order_value * self.config.fee_rate_per_million_shannons / 1_000_000
+            + self.config.base_fee_shannons;
+        // TODO: check that the amount is larger than the minimal allowed CKB payment.
+        let amount_shannons = order_value
+            .checked_sub(fee)
+            .ok_or(CchError::ReceiveBTCOrderAmountTooSmall)?;
+
+        let mut client = self.lnd_connection.create_invoices_client().await?;
+        let req = invoicesrpc::AddHoldInvoiceRequest {
+            hash: hash_bin,
+            value_msat: receive_btc.amount_msat as i64,
+            expiry: DEFAULT_ORDER_EXPIRY_SECONDS as i64,
+            cltv_expiry: self.config.btc_final_tlc_expiry + receive_btc.final_tlc_expiry,
+            ..Default::default()
+        };
+        let invoice = client.add_hold_invoice(req).await?.into_inner();
+        let btc_pay_req = invoice.payment_request;
+
+        let order = ReceiveBTCOrder {
+            timestamp: duration_since_epoch.as_secs(),
+            expiry: DEFAULT_ORDER_EXPIRY_SECONDS,
+            ckb_final_tlc_expiry: receive_btc.final_tlc_expiry,
+            btc_pay_req: btc_pay_req,
+            payment_hash: receive_btc.payment_hash,
+            payment_preimage: None,
+            amount_shannons,
+            // TODO: check whether this node has the peer with this pubkey.
+            payee_pubkey: receive_btc.payee_pubkey,
+            status: CchOrderStatus::Pending,
+        };
+
+        // TODO(cch): Return it as the RPC response
+        log::info!("ReceiveBTCOrder: {}", serde_json::to_string(&order)?);
+        self.orders_db.insert_receive_btc_order(order).await?;
 
         Ok(())
     }
@@ -366,6 +425,17 @@ impl LndConnectionInfo {
         &self,
     ) -> Result<RouterClient, lnd_grpc_tonic_client::channel::Error> {
         create_router_client(
+            self.uri.clone(),
+            self.cert.as_deref(),
+            self.macaroon.as_ref(),
+        )
+        .await
+    }
+
+    async fn create_invoices_client(
+        &self,
+    ) -> Result<InvoicesClient, lnd_grpc_tonic_client::channel::Error> {
+        create_invoices_client(
             self.uri.clone(),
             self.cert.as_deref(),
             self.macaroon.as_ref(),

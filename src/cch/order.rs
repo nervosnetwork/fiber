@@ -43,3 +43,25 @@ pub struct SendBTCOrder {
 
     pub status: CchOrderStatus,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiveBTCOrder {
+    // Seconds since epoch when the order is created
+    pub timestamp: u64,
+    // Seconds after timestamp that the order expires
+    pub expiry: u64,
+    // The minimal expiry in seconds of the final TLC in the CKB network
+    pub ckb_final_tlc_expiry: u64,
+
+    // Generated invoice
+    pub btc_pay_req: String,
+    pub payment_hash: String,
+    pub payment_preimage: Option<String>,
+
+    // Amount will be received by the payee
+    pub amount_shannons: u64,
+    // Payee in the CKB network
+    pub payee_pubkey: String,
+
+    pub status: CchOrderStatus,
+}

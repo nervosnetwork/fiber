@@ -21,6 +21,8 @@ pub enum CchError {
     CKBAssetNotAllowed,
     #[error("SendBTC order already paid")]
     SendBTCOrderAlreadyPaid,
+    #[error("ReceiveBTC order payment amount is too small")]
+    ReceiveBTCOrderAmountTooSmall,
 }
 
 pub type CchResult<T> = std::result::Result<T, CchError>;

@@ -1,0 +1,35 @@
+meta {
+  name: receive_btc
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "CchCommand": {
+        "ReceiveBTC": {
+          "payment_hash": "e51600d48d2f72eb428e78733e01fbd6081b349528335bf21269362edfae185d",
+          "payee_pubkey": "0369ff452d1d5518fee697501e573041163d7b0078544d0dff02884e09aab283a6",
+          "amount_msat": 500000,
+          "final_tlc_expiry": 18
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}

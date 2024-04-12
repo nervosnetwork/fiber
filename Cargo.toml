@@ -55,7 +55,7 @@ serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 hex = "0.4.3"
 tower = "0.4.13"
 axum = "0.7.5"
-lnd-grpc-tonic-client = "0.1.0"
+lnd-grpc-tonic-client = "0.2.0"
 
 [profile.release]
 panic = "abort"

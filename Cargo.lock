@@ -2085,9 +2085,9 @@ checksum = "01cda141df6706de531b6c46c3a33ecca755538219bd484262fa09410c13539c"
 
 [[package]]
 name = "lnd-grpc-tonic-client"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb0a9211334e340718da680b3d7d63cdabadf749422492e94d6ecacdea8d3a2b"
+checksum = "78ad58301ec1ce1be586884eeb13cb0dde6bebe0223551e694fec13bce35ef2c"
 dependencies = [
  "hex",
  "hyper 0.14.28",
