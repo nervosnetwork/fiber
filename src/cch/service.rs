@@ -68,8 +68,16 @@ struct SettleSendBTCOrderEvent {
 }
 
 #[derive(Debug)]
+struct SettleReceiveBTCOrderEvent {
+    pub payment_hash: String,
+    pub preimage: Option<String>,
+    pub status: CchOrderStatus,
+}
+
+#[derive(Debug)]
 enum Event {
     SettleSendBTCOrder(SettleSendBTCOrderEvent),
+    SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent),
 }
 
 struct CchService {
@@ -97,6 +105,8 @@ impl CchService {
 
         let payments_tracker = LndPaymentsTracker::new(lnd_connection, event_sender, token);
         tracker.spawn(async move { payments_tracker.run().await });
+
+        // TODO: start a task to cleanup expired orders
     }
 
     pub async fn run(mut self) {
@@ -224,8 +234,17 @@ impl CchService {
         let mut stream = client.send_payment_v2(req).await?.into_inner();
         // Wait for the first message then quit
         select! {
-            result = stream.next() => {
-                log::debug!("[test_pay_btc] payment result: {:?}", result);
+            payment_result_opt = stream.next() => {
+                log::debug!("[test_pay_btc] payment result: {:?}", payment_result_opt);
+                if let Some(Ok(payment)) = payment_result_opt {
+                    self.orders_db
+                        .update_send_btc_order(
+                            &test_pay_btc.payment_hash,
+                            None,
+                            lnrpc::payment::PaymentStatus::try_from(payment.status)?.into(),
+                        )
+                        .await?;
+                }
             }
             _ = self.token.cancelled() => {
                 log::debug!("Cancellation received, shutting down cch service");
@@ -271,8 +290,8 @@ impl CchService {
             timestamp: duration_since_epoch.as_secs(),
             expiry: DEFAULT_ORDER_EXPIRY_SECONDS,
             ckb_final_tlc_expiry: receive_btc.final_tlc_expiry,
-            btc_pay_req: btc_pay_req,
-            payment_hash: receive_btc.payment_hash,
+            btc_pay_req,
+            payment_hash: receive_btc.payment_hash.clone(),
             payment_preimage: None,
             amount_shannons,
             // TODO: check whether this node has the peer with this pubkey.
@@ -283,6 +302,15 @@ impl CchService {
         // TODO(cch): Return it as the RPC response
         log::info!("ReceiveBTCOrder: {}", serde_json::to_string(&order)?);
         self.orders_db.insert_receive_btc_order(order).await?;
+
+        let invoice_tracker = LndInvoiceTracker::new(
+            receive_btc.payment_hash,
+            self.lnd_connection.clone(),
+            self.event_sender.clone(),
+            self.token.clone(),
+        );
+        self.tracker
+            .spawn(async move { invoice_tracker.run().await });
 
         Ok(())
     }
@@ -311,6 +339,30 @@ impl CchService {
                     result => result.map_err(Into::into),
                 }
             }
+            Event::SettleReceiveBTCOrder(event) => {
+                if event.preimage.is_some() {
+                    log::info!(
+                        "SettleReceiveBTCOrder: payment_hash={}, status={:?}",
+                        event.payment_hash,
+                        event.status
+                    );
+                    // TODO: 1. Create a CKB payment to the payee to get preimage when event.status is Accepted
+                    // TODO: 2. Subscribe to the CKB payment events, once it's settled, use the preimage to settle the BTC payment via invoicesrpc `settle_invoice`.
+                    match self
+                        .orders_db
+                        .update_receive_btc_order(&event.payment_hash, event.preimage, event.status)
+                        .await
+                    {
+                        Err(CchDbError::NotFound(_)) => {
+                            // ignore payments not found in the db
+                            Ok(())
+                        }
+                        result => result.map_err(Into::into),
+                    }
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -335,6 +387,7 @@ impl LndPaymentsTracker {
     }
 
     async fn run(self) {
+        // TODO: clean up expired orders
         loop {
             select! {
                 result = self.run_inner() => {
@@ -373,7 +426,6 @@ impl LndPaymentsTracker {
             self.lnd_connection.uri
         );
         let mut client = self.lnd_connection.create_router_client().await?;
-        // Reuse the stream or create a new subscription
         let mut stream = client
             .track_payments(routerrpc::TrackPaymentsRequest {
                 no_inflight_updates: true,
@@ -410,6 +462,118 @@ impl LndPaymentsTracker {
                 .unwrap_or(CchOrderStatus::InFlight),
         });
         self.event_sender.send(event).await.map_err(Into::into)
+    }
+}
+
+/// Subscribe single invoice.
+///
+/// Lnd does not notify Accepted event in SubscribeInvoices rpc.
+///
+/// <https://github.com/lightningnetwork/lnd/blob/07b6af41dbe2a5a1c85e5c46cc41019b64640d90/invoices/invoiceregistry.go#L292-L293>
+struct LndInvoiceTracker {
+    payment_hash: String,
+    lnd_connection: LndConnectionInfo,
+    event_sender: mpsc::Sender<Event>,
+    token: CancellationToken,
+}
+
+impl LndInvoiceTracker {
+    fn new(
+        payment_hash: String,
+        lnd_connection: LndConnectionInfo,
+        event_sender: mpsc::Sender<Event>,
+        token: CancellationToken,
+    ) -> Self {
+        Self {
+            payment_hash,
+            lnd_connection,
+            event_sender,
+            token,
+        }
+    }
+
+    async fn run(self) {
+        loop {
+            select! {
+                result = self.run_inner() => {
+                    match result {
+                        Ok(_) => {
+                            break;
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "Error tracking LND invoices, retry 15 seconds later: {:?}",
+                                err
+                            );
+                            select! {
+                                _ = sleep(Duration::from_secs(15)) => {
+                                    // continue
+                                }
+                                _ = self.token.cancelled() => {
+                                    log::debug!("Cancellation received, shutting down cch service");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = self.token.cancelled() => {
+                    log::debug!("Cancellation received, shutting down cch service");
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn run_inner(&self) -> Result<()> {
+        log::debug!(
+            "[LndInvoiceTracker] will connect {}",
+            self.lnd_connection.uri
+        );
+        let mut client = self.lnd_connection.create_invoices_client().await?;
+        // TODO: clean up expired orders
+        let mut stream = client
+            .subscribe_single_invoice(invoicesrpc::SubscribeSingleInvoiceRequest {
+                r_hash: hex::decode(&self.payment_hash)?,
+            })
+            .await?
+            .into_inner();
+
+        loop {
+            select! {
+                invoice_opt = stream.next() => {
+                    match invoice_opt {
+                        Some(Ok(invoice)) => if self.on_invoice(invoice).await? {
+                            return Ok(());
+                        },
+                        Some(Err(err)) => return Err(err.into()),
+                        None => return Err(anyhow!("unexpected closed stream")),
+                    }
+                }
+                _ = self.token.cancelled() => {
+                    log::debug!("Cancellation received, shutting down cch service");
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // Return true to quit the tracker
+    async fn on_invoice(&self, invoice: lnrpc::Invoice) -> Result<bool> {
+        log::debug!("[LndPaymentsTracker] invoice: {:?}", invoice);
+        let status = lnrpc::invoice::InvoiceState::try_from(invoice.state)
+            .map(Into::into)
+            .unwrap_or(CchOrderStatus::Pending);
+        let event = Event::SettleReceiveBTCOrder(SettleReceiveBTCOrderEvent {
+            payment_hash: hex::encode(invoice.r_hash),
+            preimage: (!invoice.r_preimage.is_empty()).then_some(hex::encode(invoice.r_preimage)),
+            status,
+        });
+        self.event_sender.send(event).await?;
+        // Quit tracker when the status is final
+        Ok(status == CchOrderStatus::Succeeded || status == CchOrderStatus::Failed)
     }
 }
 

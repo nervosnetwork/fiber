@@ -48,7 +48,7 @@ impl CkbConfig {
 
     pub fn create_base_dir(&self) -> Result<()> {
         if !self.base_dir().exists() {
-            fs::create_dir_all(&self.base_dir()).map_err(Into::into)
+            fs::create_dir_all(self.base_dir()).map_err(Into::into)
         } else {
             Ok(())
         }

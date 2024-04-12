@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 pub enum CchOrderStatus {
     /// Order is created and has not send out payments yet.
     Pending = 0,
-    /// There's an outgoing payment in flight.
-    InFlight = 1,
+    /// HTLC in the first half is accepted.
+    Accepted = 1,
+    /// There's an outgoing payment in flight for the second half.
+    InFlight = 2,
     /// Order is settled.
-    Succeeded = 2,
+    Succeeded = 3,
     /// Order is failed.
-    Failed = 3,
+    Failed = 4,
 }
 
+/// lnd payment is the second half of SendBTCOrder
 impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
     fn from(status: lnrpc::payment::PaymentStatus) -> Self {
         use lnrpc::payment::PaymentStatus;
@@ -21,6 +24,19 @@ impl From<lnrpc::payment::PaymentStatus> for CchOrderStatus {
             PaymentStatus::Succeeded => CchOrderStatus::Succeeded,
             PaymentStatus::Failed => CchOrderStatus::Failed,
             _ => CchOrderStatus::InFlight,
+        }
+    }
+}
+
+/// lnd invoice is the first half of ReceiveBTCOrder
+impl From<lnrpc::invoice::InvoiceState> for CchOrderStatus {
+    fn from(state: lnrpc::invoice::InvoiceState) -> Self {
+        use lnrpc::invoice::InvoiceState;
+        // Set to InFlight only when a CKB HTLC is created
+        match state {
+            InvoiceState::Accepted => CchOrderStatus::Accepted,
+            InvoiceState::Canceled => CchOrderStatus::Failed,
+            _ => CchOrderStatus::Pending,
         }
     }
 }
