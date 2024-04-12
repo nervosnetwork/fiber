@@ -1,3 +1,4 @@
+use ckb_crypto::secp::Message;
 use log::{debug, error, info, warn};
 use ractor::{async_trait as rasync_trait, forward, Actor, ActorProcessingErr, ActorRef};
 use std::{
@@ -9,13 +10,14 @@ use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
-    context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
-    secio::PeerId,
+    context::{self, ProtocolContext, ProtocolContextMutRef, ServiceContext, SessionContext},
+    secio::{peer_id, PeerId},
     service::{
         ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
         TargetProtocol,
     },
     traits::{self, ServiceHandle, ServiceProtocol},
+    yamux::Session,
     ProtocolId, SessionId,
 };
 use tokio::select;
@@ -25,9 +27,10 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     ckb::{
         channel::{
-            ChannelCommand, COUNTERPARTY_INITIAL_COMMITMENT_NUMBER, DEFAULT_COMMITMENT_FEE_RATE,
-            DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-            DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
+            ChannelActor, ChannelCommand, ChannelInitializationParameter,
+            COUNTERPARTY_INITIAL_COMMITMENT_NUMBER, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+            DEFAULT_MAX_ACCEPT_TLCS, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, DEFAULT_MIN_TLC_VALUE,
+            DEFAULT_TO_SELF_DELAY, HOLDER_INITIAL_COMMITMENT_NUMBER,
         },
         types::AcceptChannel,
     },
@@ -66,18 +69,18 @@ impl Actor for NetworkControllerActor {
     // example)
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         (event_sender, config, tracker): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
         let pk = kp.public_key();
-        let shared_state = SharedState::new(event_sender);
+        let handle = Handle::new(event_sender, myself);
         let mut service = ServiceBuilder::default()
-            .insert_protocol(PHandle::new(shared_state.clone()).create_meta(PCN_PROTOCOL_ID))
+            .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
             .key_pair(kp)
-            .build(SHandle::new(shared_state.clone()));
+            .build(handle);
         let listen_addr = service
             .listen(
                 format!("/ip4/127.0.0.1/tcp/{}", config.listening_port)
@@ -166,13 +169,17 @@ impl Actor for NetworkControllerActor {
 }
 
 #[derive(Clone, Debug)]
-struct PHandle {
-    state: SharedState,
+struct Handle {
+    event_sender: mpsc::Sender<Event>,
+    actor: ActorRef<Command>,
 }
 
-impl PHandle {
-    fn new(state: SharedState) -> Self {
-        Self { state }
+impl Handle {
+    fn new(event_sender: mpsc::Sender<Event>, actor: ActorRef<Command>) -> Self {
+        Self {
+            event_sender,
+            actor,
+        }
     }
 
     fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
@@ -186,46 +193,122 @@ impl PHandle {
     }
 
     async fn send_event(&self, event: Event) {
-        let _ = self.state.event_sender.send(event).await;
-    }
-
-    pub fn handle_pcnmessage(
-        &self,
-        peer_id: PeerId,
-        peer: &mut PeerInfo,
-        msg: PCNMessage,
-    ) -> ProcessingChannelResult {
-        match msg {
-            PCNMessage::TestMessage(test) => {
-                debug!("Test message {:?}", test);
-                Ok(())
-            }
-            PCNMessage::OpenChannel(open_channel) => Ok(()),
-
-            PCNMessage::AcceptChannel(accpet_channel) => {
-                debug!("Accepting channel {:?}", &accpet_channel);
-                let channel = match peer.channels.get_mut(&accpet_channel.channel_id) {
-                    Some(channel) => channel,
-                    None => {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Trying to accept channel {:?} that does not exist",
-                            &accpet_channel.channel_id
-                        )));
-                    }
-                };
-                channel.step(ChannelEvent::AcceptChannel(accpet_channel))
-            }
-
-            _ => {
-                error!("Message handling for {:?} unimplemented", msg);
-                Ok(())
-            }
-        }
+        let _ = self.event_sender.send(event).await;
     }
 }
 
+#[derive(Debug)]
+pub enum PeerActorMessage {
+    Connected(SessionContext),
+    Disconneccted(SessionContext),
+    Message(SessionContext, PCNMessage),
+}
+
+pub struct PeerActor {
+    pub control: ActorRef<Command>,
+}
+
+impl PeerActor {
+    fn new(control: ActorRef<Command>) -> Self {
+        Self { control }
+    }
+}
+
+#[rasync_trait]
+impl Actor for PeerActor {
+    type Msg = PeerActorMessage;
+    type State = PeerInfo;
+    type Arguments = ();
+
+    /// Spawn a thread that waits for token to be cancelled,
+    /// after that kill all sub actors.
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        token: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(Default::default())
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("Processing command {:?}", msg);
+        match msg {
+            PeerActorMessage::Connected(s) => state.sessions.extend(&[s.id]),
+            PeerActorMessage::Disconneccted(s) => {
+                state.sessions.remove(&s.id);
+            }
+            PeerActorMessage::Message(session, message) => match message {
+                PCNMessage::OpenChannel(o) => {
+                    let id = o.channel_id;
+                    if state.channels.contains_key(&id) {
+                        error!("Received duplicated open channel request");
+                    }
+                    let channel_actor = Actor::spawn(
+                        Some("channel".to_string()),
+                        ChannelActor::new(self.control.clone()),
+                        ChannelInitializationParameter::OpenChannel(o),
+                    )
+                    .await
+                    .expect("start channel actor")
+                    .0;
+
+                    state.channels.insert(id, channel_actor);
+                }
+
+                PCNMessage::TestMessage(test) => {
+                    debug!("Test message {:?}", test);
+                }
+
+                PCNMessage::AcceptChannel(m) => match state.channels.remove(&m.channel_id) {
+                    None => {
+                        warn!("Received an AcceptChannel message without saved correponding channale {:?}", m.channel_id);
+                    }
+                    Some(c) => c
+                        .send_message(PCNMessage::AcceptChannel(m))
+                        .expect("channel actor alive"),
+                },
+
+                _ => {
+                    error!("Message handling for {:?} unimplemented", message);
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
+fn get_peer_actor_name(peer_id: &PeerId) -> String {
+    format!("peer {}", peer_id.to_base58())
+}
+
+async fn get_or_create_peer_actor(
+    session: &SessionContext,
+    control: &ActorRef<Command>,
+) -> Option<ActorRef<PeerActorMessage>> {
+    Some(match session.remote_pubkey.clone().map(PeerId::from) {
+        None => return None,
+        Some(p) => {
+            let actor_name = get_peer_actor_name(&p);
+            match ActorRef::where_is(actor_name.clone()) {
+                Some(a) => a,
+                None => {
+                    Actor::spawn(Some(actor_name), PeerActor::new(control.clone()), ())
+                        .await
+                        .expect("spawn peer actor")
+                        .0
+                }
+            }
+        }
+    })
+}
+
 #[async_trait]
-impl ServiceProtocol for PHandle {
+impl ServiceProtocol for Handle {
     async fn init(&mut self, _context: &mut ProtocolContext) {}
 
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, version: &str) {
@@ -237,19 +320,11 @@ impl ServiceProtocol for PHandle {
         self.send_event(Event::PeerConnected(context.session.address.clone()))
             .await;
 
-        let peer_id = context.session.remote_pubkey.clone().map(Into::into);
-        match peer_id {
-            Some(peer_id) => {
-                let mut peer_state = self.state.peers.lock().await;
-                debug!("Trying to save session of peer {:?}", peer_id);
-                let peer = peer_state.entry(peer_id).or_default();
-                peer.sessions.insert(context.session.id);
-            }
-            _ => {
-                warn!("Connected to a peer without public key");
-                return;
-            }
-        }
+        if let Some(actor) = get_or_create_peer_actor(session, &self.actor).await {
+            actor
+                .send_message(PeerActorMessage::Connected(context.session.clone()))
+                .expect("peer actor alive");
+        };
     }
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
@@ -260,36 +335,11 @@ impl ServiceProtocol for PHandle {
         self.send_event(Event::PeerDisConnected(context.session.address.clone()))
             .await;
 
-        let peer_id = context.session.remote_pubkey.clone().map(Into::into);
-        match peer_id.as_ref() {
-            Some(peer_id) => {
-                let mut peer_state = self.state.peers.lock().await;
-                debug!("Trying to save session of peer {:?}", peer_id);
-                let peer = peer_state.get_mut(peer_id);
-                match peer {
-                    Some(peer) => {
-                        peer.sessions.remove(&context.session.id);
-                        if peer.sessions.is_empty() {
-                            debug!(
-                                "Peer {:?} disconnected, the last session was {}",
-                                peer_id, context.session.id
-                            );
-                            peer_state.remove(peer_id);
-                        }
-                    }
-                    None => {
-                        warn!(
-                            "Trying to reomve a peer not recorded in peer state {:?}",
-                            peer_id
-                        )
-                    }
-                }
-            }
-            _ => {
-                warn!("Disconnected from a peer without public key");
-                return;
-            }
-        }
+        if let Some(actor) = get_or_create_peer_actor(&context.session, &self.actor).await {
+            actor
+                .send_message(PeerActorMessage::Disconneccted(context.session.clone()))
+                .expect("peer actor alive");
+        };
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
@@ -301,46 +351,18 @@ impl ServiceProtocol for PHandle {
         );
 
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
-        let peer_id = match context.session.remote_pubkey.clone().map(Into::into) {
-            Some(peer_id) => peer_id,
-            None => {
-                warn!("Received message from a peer without public key");
-                return;
-            }
+        if let Some(actor) = get_or_create_peer_actor(&context.session, &self.actor).await {
+            actor
+                .send_message(PeerActorMessage::Message(context.session.clone(), msg))
+                .expect("peer actor alive");
         };
-        let mut peer_state = self.state.peers.lock().await;
-        let peer = match peer_state.get_mut(&peer_id) {
-            Some(peer) => peer,
-            None => {
-                warn!("Trying to send message to unknown peer {:?}", peer_id);
-                return;
-            }
-        };
-        if let Err(err) = self.handle_pcnmessage(peer_id, peer, msg) {
-            error!("Error while processing message: {:?}", err);
-        }
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
 }
 
-#[derive(Clone, Debug)]
-struct SHandle {
-    state: SharedState,
-}
-
-impl SHandle {
-    fn new(state: SharedState) -> Self {
-        Self { state }
-    }
-
-    async fn send_event(&self, event: Event) {
-        let _ = self.state.event_sender.send(event).await;
-    }
-}
-
 #[async_trait]
-impl ServiceHandle for SHandle {
+impl ServiceHandle for Handle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
         self.send_event(Event::ServiceError(error)).await;
     }
@@ -365,9 +387,9 @@ impl SharedState {
 }
 
 #[derive(Debug, Default)]
-struct PeerInfo {
+pub struct PeerInfo {
     sessions: HashSet<SessionId>,
-    channels: HashMap<Hash256, ChannelActorState>,
+    channels: HashMap<Hash256, ActorRef<PCNMessage>>,
 }
 
 struct RootActor;

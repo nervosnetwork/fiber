@@ -69,8 +69,15 @@ pub enum ChannelInitializationParameter {
     OpenChannel(OpenChannel),
 }
 
+#[derive(Debug)]
 pub struct ChannelActor {
     control: ActorRef<Command>,
+}
+
+impl ChannelActor {
+    pub fn new(control: ActorRef<Command>) -> Self {
+        Self { control }
+    }
 }
 
 #[rasync_trait]
