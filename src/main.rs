@@ -8,7 +8,7 @@ use tokio_util::task::task_tracker::TaskTracker;
 use std::str::FromStr;
 
 use ckb_pcn_node::cch::CchCommand;
-use ckb_pcn_node::ckb::Command;
+use ckb_pcn_node::ckb::NetworkCommand;
 use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ pub async fn main() {
             );
             for bootnode in &ckb_config.bootnode_addrs {
                 let addr = Multiaddr::from_str(bootnode).expect("valid bootnode");
-                let command = Command::ConnectPeer(addr);
+                let command = NetworkCommand::ConnectPeer(addr);
                 command_sender
                     .send(command)
                     .await
@@ -117,7 +117,7 @@ pub async fn main() {
             // This is a hack to keep the command receiver alive until the tasks are done.
             let cloned_command_sender = command_sender.clone();
             new_tokio_task_tracker().spawn(async move {
-                let _command_sender: mpsc::Sender<ckb_pcn_node::ckb::Command> =
+                let _command_sender: mpsc::Sender<ckb_pcn_node::ckb::NetworkCommand> =
                     cloned_command_sender;
                 new_tokio_cancellation_token().cancelled().await;
             });

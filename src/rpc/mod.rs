@@ -7,11 +7,11 @@ use serde::Deserialize;
 use std::{future::Future, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::{cch::CchCommand, ckb::Command};
+use crate::{cch::CchCommand, ckb::NetworkCommand};
 
 #[derive(Debug, Deserialize)]
 pub enum HttpRequest {
-    Command(Command),
+    Command(NetworkCommand),
     CchCommand(CchCommand),
 }
 
@@ -22,7 +22,7 @@ pub struct HttpBody {
 }
 
 pub struct AppState {
-    pub ckb_command_sender: Option<mpsc::Sender<Command>>,
+    pub ckb_command_sender: Option<mpsc::Sender<NetworkCommand>>,
     pub cch_command_sender: Option<mpsc::Sender<CchCommand>>,
 }
 
@@ -57,7 +57,7 @@ async fn handle_request(
 
 pub async fn start_rpc<F>(
     config: RpcConfig,
-    ckb_command_sender: Option<mpsc::Sender<Command>>,
+    ckb_command_sender: Option<mpsc::Sender<NetworkCommand>>,
     cch_command_sender: Option<mpsc::Sender<CchCommand>>,
     shutdown_signal: F,
 ) where

@@ -7,20 +7,20 @@ use musig2::SecNonce;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
-use tentacle::{secio::PeerId, service::ServiceAsyncControl};
+use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::mpsc::error::TrySendError;
 
 use std::fmt::Debug;
 
-use crate::ckb::command::PCNMessageWithPeerId;
+use crate::ckb::network::PCNMessageWithPeerId;
 
 use super::{
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey,
     },
-    Command,
+    NetworkCommand,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -71,11 +71,11 @@ pub enum ChannelInitializationParameter {
 
 #[derive(Debug)]
 pub struct ChannelActor {
-    control: ActorRef<Command>,
+    control: ActorRef<NetworkCommand>,
 }
 
 impl ChannelActor {
-    pub fn new(control: ActorRef<Command>) -> Self {
+    pub fn new(control: ActorRef<NetworkCommand>) -> Self {
         Self { control }
     }
 }
@@ -145,7 +145,7 @@ impl Actor for ChannelActor {
                     &open_channel.peer_id, &message
                 );
                 self.control
-                    .send_message(Command::SendPcnMessage(PCNMessageWithPeerId {
+                    .send_message(NetworkCommand::SendPcnMessage(PCNMessageWithPeerId {
                         peer_id: open_channel.peer_id,
                         message,
                     }))
@@ -166,7 +166,9 @@ impl Actor for ChannelActor {
             PCNMessage::OpenChannel(_) => {
                 panic!("OpenChannel message should be processed while prestarting")
             }
-            PCNMessage::AcceptChannel(accept_channel) => {}
+            PCNMessage::AcceptChannel(accept_channel) => {
+                state.step(ChannelEvent::AcceptChannel(accept_channel))?
+            }
             _ => {}
         }
         Ok(())
@@ -243,7 +245,7 @@ pub enum ProcessingChannelError {
     #[error("Unimplemented operation: {0}")]
     Unimplemented(String),
     #[error("Failed to send command: {0}")]
-    CommanderSendingError(#[from] TrySendError<Command>),
+    CommanderSendingError(#[from] TrySendError<NetworkCommand>),
 }
 
 bitflags! {
