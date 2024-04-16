@@ -1,19 +1,18 @@
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::hashes::error;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use ractor::{async_trait, Actor, ActorProcessingErr, ActorRef};
 use tentacle::{context::SessionContext, secio::PeerId, SessionId};
 
 use crate::ckb::{
     channel::{ChannelActor, ChannelInitializationParameter},
-    network::{PCNMessageWithSessionId, PCN_PROTOCOL_ID},
+    network::PCNMessageWithSessionId,
 };
 
 use super::{
-    channel::{ChannelActorMessage, OpenChannelCommand},
+    channel::ChannelActorMessage,
     network::{NetworkActorEvent, NetworkActorMessage},
-    types::{Hash256, OpenChannel, PCNMessage},
+    types::{Hash256, PCNMessage},
     NetworkActorCommand,
 };
 
@@ -58,10 +57,11 @@ impl PeerActor {
                 match ActorRef::where_is(actor_name.clone()) {
                     Some(a) => a,
                     None => {
-                        Actor::spawn(
+                        Actor::spawn_linked(
                             Some(actor_name),
                             PeerActor::new(Some(p), network.clone()),
                             (),
+                            network.clone().get_cell(),
                         )
                         .await
                         .expect("spawn peer actor")
@@ -121,7 +121,7 @@ impl Actor for PeerActor {
             PeerActorMessage::Disconnected(s) => {
                 state.sessions.remove(&s.id);
             }
-            PeerActorMessage::Message(session, message) => match message {
+            PeerActorMessage::Message(_session, message) => match message {
                 PCNMessage::OpenChannel(o) => {
                     let id = o.channel_id;
                     if state.channels.contains_key(&id) {
@@ -129,7 +129,7 @@ impl Actor for PeerActor {
                     }
                     let channel_user_id = state.channels.len();
 
-                    if let Err(err) = Actor::spawn(
+                    if let Err(err) = Actor::spawn_linked(
                         Some("channel".to_string()),
                         ChannelActor::new(self.network.clone(), myself.clone()),
                         ChannelInitializationParameter::OpenChannel(
@@ -137,6 +137,7 @@ impl Actor for PeerActor {
                             channel_user_id,
                             o,
                         ),
+                        self.network.clone().get_cell(),
                     )
                     .await
                     {

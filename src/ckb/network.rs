@@ -3,9 +3,7 @@ use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::{collections::HashMap, str};
-use tentacle::{context::SessionContext, multiaddr::Multiaddr, secio::PeerId, SessionId};
-
-use super::{channel::ChannelCommand, types::PCNMessage};
+use tentacle::{multiaddr::Multiaddr, secio::PeerId, SessionId};
 
 use tentacle::{
     async_trait,
@@ -23,23 +21,16 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{
-    ckb::{
-        channel::{
-            ChannelActor, ChannelInitializationParameter, COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
-            DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, DEFAULT_MAX_ACCEPT_TLCS,
-            DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, DEFAULT_MIN_TLC_VALUE, DEFAULT_TO_SELF_DELAY,
-            HOLDER_INITIAL_COMMITMENT_NUMBER,
-        },
-        peer::PeerActorMessage,
-        types::AcceptChannel,
-    },
-    Config,
+use super::{
+    channel::ChannelCommand,
+    channel::{ChannelActor, ChannelInitializationParameter},
+    peer::PeerActor,
+    peer::PeerActorMessage,
+    types::PCNMessage,
+    CkbConfig, Event,
 };
 
 use crate::unwrap_or_return;
-
-use super::{peer::PeerActor, CkbConfig, Event};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -121,18 +112,23 @@ impl NetworkActorState {
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
-    type Arguments = (mpsc::Sender<Event>, CkbConfig, TaskTracker);
+    type Arguments = (
+        mpsc::Sender<Event>,
+        CkbConfig,
+        TaskTracker,
+        CancellationToken,
+    );
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (event_sender, config, tracker): Self::Arguments,
+        (event_sender, config, tracker, token): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
         let pk = kp.public_key();
-        let handle = Handle::new(event_sender, myself);
+        let handle = Handle::new(event_sender, myself.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
             .key_pair(kp)
@@ -158,6 +154,18 @@ impl Actor for NetworkActor {
             service.run().await;
             debug!("Tentacle service shutdown");
         });
+
+        let cloned_control = control.clone();
+        let cloned_myself = myself.clone();
+        tracker.spawn(async move {
+            token.cancelled().await;
+            if let Err(err) = cloned_control.close().await {
+                error!("Failed to close tentacle service: {}", err);
+            }
+            debug!("Tentacle service shutdown");
+            cloned_myself.stop(Some("Cancellation token received".to_owned()));
+        });
+
         Ok(NetworkActorState {
             peers: HashMap::new(),
             control,
@@ -183,13 +191,13 @@ impl Actor for NetworkActor {
                         state.peers.insert(peer_id, actor);
                     }
                 }
-                NetworkActorEvent::PeerDisconnected(peer_id, actor) => {
+                NetworkActorEvent::PeerDisconnected(peer_id, _actor) => {
                     match state.peers.remove(&peer_id) {
                         Some(_) => {
                             debug!("Removed actor for peer {:?} from network actor", peer_id);
                         }
                         None => {
-                            error!("Peer {:?} not found", &peer_id);
+                            warn!("Trying to remove a not found peer {:?}", &peer_id);
                         }
                     }
                 }
@@ -221,7 +229,7 @@ impl Actor for NetworkActor {
                                 .expect("peer actor alive");
                         }
                         None => {
-                            error!("Peer {:?} not found", &peer_id);
+                            error!("Sending messages to a not found peer {:?}", &peer_id);
                         }
                     }
                 }
@@ -242,16 +250,20 @@ impl Actor for NetworkActor {
                         let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
                         match peer_actor {
                             None => {
-                                error!("Peer {:?} not found", &open_channel.peer_id);
+                                warn!(
+                                    "Trying to control a not found peer {:?}",
+                                    &open_channel.peer_id
+                                );
                                 return Ok(());
                             }
                             Some(peer_actor) => {
-                                if let Err(err) = Actor::spawn(
+                                if let Err(err) = Actor::spawn_linked(
                                     Some("channel".to_string()),
-                                    ChannelActor::new(myself, peer_actor),
+                                    ChannelActor::new(myself.clone(), peer_actor),
                                     ChannelInitializationParameter::OpenChannelCommand(
                                         open_channel,
                                     ),
+                                    myself.clone().get_cell(),
                                 )
                                 .await
                                 {
@@ -263,6 +275,15 @@ impl Actor for NetworkActor {
                 },
             },
         }
+        Ok(())
+    }
+
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        info!("Network actor stopped");
         Ok(())
     }
 }
@@ -375,29 +396,6 @@ impl ServiceHandle for Handle {
     }
 }
 
-struct RootActor;
-
-#[rasync_trait]
-impl Actor for RootActor {
-    type Msg = String;
-    type State = ();
-    type Arguments = CancellationToken;
-
-    /// Spawn a thread that waits for token to be cancelled,
-    /// after that kill all sub actors.
-    async fn pre_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        token: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        tokio::spawn(async move {
-            token.cancelled().await;
-            myself.stop(None);
-        });
-        Ok(())
-    }
-}
-
 pub async fn start_ckb(
     config: CkbConfig,
     mut command_receiver: mpsc::Receiver<NetworkActorCommand>,
@@ -406,15 +404,10 @@ pub async fn start_ckb(
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
-    let (root_actor, _) = Actor::spawn(Some("root actor".to_string()), RootActor, token.clone())
-        .await
-        .expect("Failed to start root actor");
-
-    let (actor, _handle) = Actor::spawn_linked(
+    let (actor, _handle) = Actor::spawn(
         Some("network controller".to_string()),
         NetworkActor {},
-        (event_sender, config, tracker.clone()),
-        root_actor.get_cell(),
+        (event_sender, config, tracker.clone(), token.clone()),
     )
     .await
     .expect("Failed to start network controller actor");

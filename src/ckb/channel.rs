@@ -1,4 +1,3 @@
-use bitcoin::Network;
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
@@ -245,10 +244,9 @@ impl Actor for ChannelActor {
         }
     }
 
-    // This is our main message handler
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
