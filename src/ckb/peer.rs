@@ -27,7 +27,7 @@ pub enum PeerActorMessage {
     /// Events received from the underlying network stack.
     Connected(SessionContext),
     Disconnected(SessionContext),
-    Message(SessionContext, PCNMessage),
+    ReceivedMessage(SessionContext, PCNMessage),
 
     /// Events received from application layer.
     ChannelCreated(Hash256, ActorRef<ChannelActorMessage>),
@@ -42,34 +42,8 @@ pub struct PeerActor {
 }
 
 impl PeerActor {
-    fn new(id: Option<PeerId>, network: ActorRef<NetworkActorMessage>) -> Self {
+    pub fn new(id: Option<PeerId>, network: ActorRef<NetworkActorMessage>) -> Self {
         Self { id, network }
-    }
-
-    pub async fn get_or_create(
-        id: Option<PeerId>,
-        network: &ActorRef<NetworkActorMessage>,
-    ) -> Option<ActorRef<PeerActorMessage>> {
-        Some(match id {
-            None => return None,
-            Some(p) => {
-                let actor_name = get_peer_actor_name(&p);
-                match ActorRef::where_is(actor_name.clone()) {
-                    Some(a) => a,
-                    None => {
-                        Actor::spawn_linked(
-                            Some(actor_name),
-                            PeerActor::new(Some(p), network.clone()),
-                            (),
-                            network.clone().get_cell(),
-                        )
-                        .await
-                        .expect("spawn peer actor")
-                        .0
-                    }
-                }
-            }
-        })
     }
 }
 
@@ -81,31 +55,19 @@ impl Actor for PeerActor {
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        if let Some(id) = (&self.id).clone() {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::PeerConnected(id, myself),
-                ))
-                .expect("network actor alive");
-        }
+        debug!("Peer actor {:?} started", self.id);
         Ok(Default::default())
     }
 
     async fn post_stop(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let Some(id) = (&self.id).clone() {
-            self.network
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::PeerDisconnected(id, myself),
-                ))
-                .expect("network actor alive");
-        }
+        debug!("Peer actor {:?} stopped", self.id);
         Ok(())
     }
 
@@ -115,13 +77,13 @@ impl Actor for PeerActor {
         msg: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Processing command {:?}", msg);
+        debug!("Peer actor processing command {:?}", msg);
         match msg {
             PeerActorMessage::Connected(s) => state.sessions.extend(&[s.id]),
             PeerActorMessage::Disconnected(s) => {
                 state.sessions.remove(&s.id);
             }
-            PeerActorMessage::Message(_session, message) => match message {
+            PeerActorMessage::ReceivedMessage(_session, message) => match message {
                 PCNMessage::OpenChannel(o) => {
                     let id = o.channel_id;
                     if state.channels.contains_key(&id) {
@@ -153,9 +115,10 @@ impl Actor for PeerActor {
                     None => {
                         warn!("Received an AcceptChannel message without saved correponding channale {:?}", m.channel_id);
                     }
-                    Some(c) => c
-                        .send_message(PCNMessage::AcceptChannel(m))
-                        .expect("channel actor alive"),
+                    Some(c) => {
+                        c.send_message(PCNMessage::AcceptChannel(m))
+                            .expect("channel actor alive");
+                    }
                 },
 
                 _ => {
@@ -179,9 +142,12 @@ impl Actor for PeerActor {
 
             PeerActorMessage::ChannelCreated(id, actor) => {
                 if state.channels.contains_key(&id) {
-                    error!("Received duplicated channel creation request");
+                    error!(
+                        "Received duplicated channel creation request (id: {:?})",
+                        id
+                    );
                 } else {
-                    debug!("Channel created with id {:?}", id);
+                    debug!("Channel created with id {:?} for peer {:?}", id, self.id);
                     state.channels.insert(id, actor);
                 }
             }
@@ -190,6 +156,6 @@ impl Actor for PeerActor {
     }
 }
 
-fn get_peer_actor_name(peer_id: &PeerId) -> String {
+pub fn get_peer_actor_name(peer_id: &PeerId) -> String {
     format!("peer {}", peer_id.to_base58())
 }

@@ -82,7 +82,6 @@ pub async fn main() {
             start_ckb(
                 ckb_config,
                 command_receiver,
-                command_sender.clone(),
                 event_sender,
                 new_tokio_cancellation_token(),
                 new_tokio_task_tracker(),
@@ -120,6 +119,7 @@ pub async fn main() {
                 let _command_sender: mpsc::Sender<ckb_pcn_node::ckb::NetworkActorCommand> =
                     cloned_command_sender;
                 new_tokio_cancellation_token().cancelled().await;
+                debug!("Command sender service exited");
             });
 
             Some(command_sender)

@@ -15,7 +15,7 @@ use std::fmt::Debug;
 
 use super::{
     network::PCNMessageWithPeerId,
-    peer::{PeerActor, PeerActorMessage},
+    peer::PeerActorMessage,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey,
@@ -225,7 +225,7 @@ impl Actor for ChannelActor {
                 });
 
                 debug!(
-                    "OpenChannel message to {:?} created: {:?}",
+                    "Created OpenChannel message to {:?}: {:?}",
                     &open_channel.peer_id, &message
                 );
                 self.network

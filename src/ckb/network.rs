@@ -3,6 +3,7 @@ use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::{collections::HashMap, str};
+use tentacle::context::SessionContext;
 use tentacle::{multiaddr::Multiaddr, secio::PeerId, SessionId};
 
 use tentacle::{
@@ -21,6 +22,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use super::peer::get_peer_actor_name;
 use super::{
     channel::ChannelCommand,
     channel::{ChannelActor, ChannelInitializationParameter},
@@ -61,8 +63,9 @@ impl NetworkActorMessage {
 #[derive(Clone, Debug)]
 pub enum NetworkActorEvent {
     /// Network events
-    PeerConnected(PeerId, ActorRef<PeerActorMessage>),
-    PeerDisconnected(PeerId, ActorRef<PeerActorMessage>),
+    PeerConnected(PeerId, SessionContext),
+    PeerDisconnected(PeerId, SessionContext),
+    PeerMessage(PeerId, SessionContext, PCNMessage),
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +93,7 @@ pub struct PCNMessageWithSessionId {
 pub struct NetworkActor {}
 
 pub struct NetworkActorState {
+    peer_id: PeerId,
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
@@ -99,12 +103,27 @@ pub struct NetworkActorState {
 impl NetworkActorState {
     /// Get or create a peer actor.
     pub async fn get_or_create_peer(
+        &mut self,
         id: PeerId,
         control: &ActorRef<NetworkActorMessage>,
     ) -> ActorRef<PeerActorMessage> {
-        PeerActor::get_or_create(Some(id), &control)
-            .await
-            .expect("must create peer actor if peer id passed")
+        match self.peers.get(&id) {
+            Some(actor) => actor.clone(),
+            None => {
+                let peer_name = get_peer_actor_name(&id);
+                let actor = Actor::spawn_linked(
+                    Some(peer_name),
+                    PeerActor::new(Some(id.clone()), control.clone()),
+                    (),
+                    control.get_cell(),
+                )
+                .await
+                .expect("spawn peer actor")
+                .0;
+                self.peers.insert(id, actor.clone());
+                actor
+            }
+        }
     }
 }
 
@@ -142,10 +161,11 @@ impl Actor for NetworkActor {
             .await
             .expect("listen tentacle");
 
+        let my_peer_id: PeerId = PeerId::from(pk);
         info!(
             "Started listening tentacle on {}/p2p/{}",
             listen_addr,
-            PeerId::from(pk).to_base58()
+            my_peer_id.to_base58()
         );
 
         let control = service.control().to_owned();
@@ -167,37 +187,63 @@ impl Actor for NetworkActor {
         });
 
         Ok(NetworkActorState {
+            peer_id: my_peer_id,
             peers: HashMap::new(),
             control,
         })
     }
 
-    // This is our main message handler
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Processing network message {:?}", message);
+        debug!("Network actor processing message {:?}", message);
 
         match message {
             NetworkActorMessage::Event(event) => match event {
-                NetworkActorEvent::PeerConnected(peer_id, actor) => {
-                    if state.peers.contains_key(&peer_id) {
+                NetworkActorEvent::PeerConnected(id, session) => match state.peers.get(&id) {
+                    Some(_actor) => {
                         warn!("Duplicated peer connected event. Are we connecting here? The connection reestablishment processing is not implemented");
-                    } else {
-                        debug!("Saved actor for peer {:?} to network actor", peer_id);
-                        state.peers.insert(peer_id, actor);
                     }
-                }
-                NetworkActorEvent::PeerDisconnected(peer_id, _actor) => {
-                    match state.peers.remove(&peer_id) {
-                        Some(_) => {
-                            debug!("Removed actor for peer {:?} from network actor", peer_id);
+                    None => {
+                        let peer_name = get_peer_actor_name(&id);
+                        let actor = Actor::spawn_linked(
+                            Some(peer_name),
+                            PeerActor::new(Some(id.clone()), myself.clone()),
+                            (),
+                            myself.get_cell(),
+                        )
+                        .await
+                        .expect("spawn peer actor")
+                        .0;
+                        actor
+                            .send_message(PeerActorMessage::Connected(session))
+                            .expect("peer actor alive");
+                        state.peers.insert(id, actor.clone());
+                    }
+                },
+                NetworkActorEvent::PeerDisconnected(id, session) => match state.peers.remove(&id) {
+                    Some(actor) => {
+                        debug!("Removed actor for peer {:?} from network actor", id);
+                        actor
+                            .send_message(PeerActorMessage::Disconnected(session))
+                            .expect("peer actor alive");
+                    }
+                    None => {
+                        warn!("Trying to remove a not found peer {:?}", &id);
+                    }
+                },
+                NetworkActorEvent::PeerMessage(id, session, message) => {
+                    match state.peers.get(&id) {
+                        Some(actor) => {
+                            actor
+                                .send_message(PeerActorMessage::ReceivedMessage(session, message))
+                                .expect("peer actor alive");
                         }
                         None => {
-                            warn!("Trying to remove a not found peer {:?}", &peer_id);
+                            warn!("Received message for a not found peer {:?}", &id);
                         }
                     }
                 }
@@ -281,9 +327,9 @@ impl Actor for NetworkActor {
     async fn post_stop(
         &self,
         _myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        info!("Network actor stopped");
+        info!("Network actor for {:?} stopped", state.peer_id);
         Ok(())
     }
 }
@@ -330,16 +376,15 @@ impl ServiceProtocol for Handle {
         self.send_event(Event::PeerConnected(context.session.address.clone()))
             .await;
 
-        if let Some(actor) = PeerActor::get_or_create(
-            context.session.remote_pubkey.clone().map(PeerId::from),
-            &self.actor,
-        )
-        .await
-        {
-            actor
-                .send_message(PeerActorMessage::Connected(context.session.clone()))
-                .expect("peer actor alive");
-        };
+        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
+            self.actor
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerConnected(peer_id, context.session.clone()),
+                ))
+                .expect("network actor alive");
+        } else {
+            warn!("Peer connected without remote pubkey {:?}", context.session);
+        }
     }
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
@@ -350,16 +395,18 @@ impl ServiceProtocol for Handle {
         self.send_event(Event::PeerDisConnected(context.session.address.clone()))
             .await;
 
-        if let Some(actor) = PeerActor::get_or_create(
-            context.session.remote_pubkey.clone().map(PeerId::from),
-            &self.actor,
-        )
-        .await
-        {
-            actor
-                .send_message(PeerActorMessage::Disconnected(context.session.clone()))
-                .expect("peer actor alive");
-        };
+        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
+            self.actor
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerDisconnected(peer_id, context.session.clone()),
+                ))
+                .expect("network actor alive");
+        } else {
+            warn!(
+                "Peer disconnected without remote pubkey {:?}",
+                context.session
+            );
+        }
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
@@ -371,16 +418,18 @@ impl ServiceProtocol for Handle {
         );
 
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
-        if let Some(actor) = PeerActor::get_or_create(
-            context.session.remote_pubkey.clone().map(PeerId::from),
-            &self.actor,
-        )
-        .await
-        {
-            actor
-                .send_message(PeerActorMessage::Message(context.session.clone(), msg))
-                .expect("peer actor alive");
-        };
+        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
+            self.actor
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerMessage(peer_id, context.session.clone(), msg),
+                ))
+                .expect("network actor alive");
+        } else {
+            warn!(
+                "Received message from a peer without remote pubkey {:?}",
+                context.session
+            );
+        }
     }
 
     async fn notify(&mut self, _context: &mut ProtocolContext, _token: u64) {}
@@ -399,25 +448,24 @@ impl ServiceHandle for Handle {
 pub async fn start_ckb(
     config: CkbConfig,
     mut command_receiver: mpsc::Receiver<NetworkActorCommand>,
-    command_sender: mpsc::Sender<NetworkActorCommand>,
     event_sender: mpsc::Sender<Event>,
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
     let (actor, _handle) = Actor::spawn(
-        Some("network controller".to_string()),
+        Some("network actor".to_string()),
         NetworkActor {},
         (event_sender, config, tracker.clone(), token.clone()),
     )
     .await
-    .expect("Failed to start network controller actor");
+    .expect("Failed to start network actor");
 
     tracker.spawn(async move {
         loop {
             select! {
                 command = (&mut command_receiver).recv() => {
                     match command {
-                        Some(command) => actor.send_message(NetworkActorMessage::new_command(command)).expect("network controller alive"),
+                        Some(command) => actor.send_message(NetworkActorMessage::new_command(command)).expect("network actor alive"),
                         None => {
                             info!("Command reciever exited, exiting forwarding program");
                             return;
