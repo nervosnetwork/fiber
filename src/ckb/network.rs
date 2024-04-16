@@ -366,12 +366,11 @@ impl Handle {
     }
 
     async fn emit_event(&self, event: NetworkServiceEvent) {
-        let _ = self
-            .actor
-            .send_message(NetworkActorMessage::Event(
-                NetworkActorEvent::NetworkServiceEvent(event),
-            ))
-            .expect("network actor alive");
+        // If we are closing the whole network service, we may have already stopped the network actor.
+        // In that case the send_message will fail.
+        let _ = self.actor.send_message(NetworkActorMessage::Event(
+            NetworkActorEvent::NetworkServiceEvent(event),
+        ));
     }
 
     fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
