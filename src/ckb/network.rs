@@ -1,5 +1,5 @@
 use log::{debug, error, info, warn};
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait as rasync_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::{collections::HashMap, str};
@@ -22,17 +22,16 @@ use tentacle::{
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
-use super::peer::get_peer_actor_name;
 use super::{
     channel::ChannelCommand,
     channel::{ChannelActor, ChannelInitializationParameter},
+    peer::get_peer_actor_name,
     peer::PeerActor,
     peer::PeerActorMessage,
     types::PCNMessage,
     CkbConfig,
 };
 
-use crate::actors::RootActorMessage;
 use crate::unwrap_or_return;
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -470,13 +469,13 @@ pub async fn start_ckb(
     config: CkbConfig,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
-    root_actor: ActorRef<RootActorMessage>,
+    root_actor: ActorCell,
 ) -> ActorRef<NetworkActorMessage> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
         NetworkActor { event_sender },
         (config, tracker),
-        root_actor.get_cell(),
+        root_actor,
     )
     .await
     .expect("Failed to start network actor");

@@ -85,16 +85,10 @@ impl ChannelActor {
 
 #[rasync_trait]
 impl Actor for ChannelActor {
-    // An actor has a message type
     type Msg = PCNMessage;
-    // and (optionally) internal state
     type State = ChannelActorState;
-    // Startup arguments for actor initialization
     type Arguments = ChannelInitializationParameter;
 
-    // Initially we need to create our state, and potentially
-    // start some internal processing (by posting a message for
-    // example)
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,

@@ -88,7 +88,7 @@ pub async fn main() {
                 ckb_config,
                 event_sender,
                 new_tokio_task_tracker(),
-                root_actor.clone(),
+                root_actor.get_cell(),
             )
             .await;
 
