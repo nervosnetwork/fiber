@@ -5,10 +5,6 @@ array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 array Pubkey [byte; 33];
 vector SignatureVec <Signature>;
 
-option AmountOpt (Uint64);
-option SiPrefixOpt (Byte32);
-
-
 table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
@@ -162,16 +158,23 @@ union PCNMessage {
 }
 
 
-table RawHrp {
-    currency: Byte32,
-    amount: AmountOpt,
-    prefix: SiPrefixOpt,
-}
-
 array PaymentHash [byte; 32];
 option PaymentHashOpt (PaymentHash);
+option ExpiryTimeOpt (Duration);
 
-table RawDataPart {
+option AmountOpt (Uint64);
+option SiPrefixOpt (byte);
+
+table Duration {
+    seconds: Uint64,
+    nanos: Uint64,
+}
+
+table RawCkbInvoice {
+    currency: byte,
+    amount: AmountOpt,
+    prefix: SiPrefixOpt,
     payment_hash: PaymentHashOpt,
     description: BytesOpt,
+    expiry_time: ExpiryTimeOpt,
 }
