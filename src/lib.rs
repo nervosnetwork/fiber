@@ -14,8 +14,6 @@ pub use rpc::{start_rpc, RpcConfig};
 mod errors;
 pub use errors::{Error, Result};
 
-pub mod events;
-
 pub mod actors;
 
 pub mod macros {
