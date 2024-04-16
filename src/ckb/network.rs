@@ -3,7 +3,7 @@ use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::{collections::HashMap, str};
-use tentacle::{multiaddr::Multiaddr, secio::PeerId, SessionId};
+use tentacle::{context::SessionContext, multiaddr::Multiaddr, secio::PeerId, SessionId};
 
 use super::{channel::ChannelCommand, types::PCNMessage};
 
@@ -45,17 +45,39 @@ pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
-pub enum NetworkCommand {
+pub enum NetworkActorCommand {
+    /// Network commands
     ConnectPeer(Multiaddr),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
     SendPcnMessage(PCNMessageWithPeerId),
-
     // Directly send a message to session
     SendPcnMessageToSession(PCNMessageWithSessionId),
-
     ControlPcnChannel(ChannelCommand),
+}
+
+impl NetworkActorMessage {
+    pub fn new_event(event: NetworkActorEvent) -> Self {
+        Self::Event(event)
+    }
+
+    pub fn new_command(command: NetworkActorCommand) -> Self {
+        Self::Command(command)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum NetworkActorEvent {
+    /// Network events
+    PeerConnected(PeerId, ActorRef<PeerActorMessage>),
+    PeerDisconnected(PeerId, ActorRef<PeerActorMessage>),
+}
+
+#[derive(Clone, Debug)]
+pub enum NetworkActorMessage {
+    Command(NetworkActorCommand),
+    Event(NetworkActorEvent),
 }
 
 #[serde_as]
@@ -77,13 +99,27 @@ pub struct PCNMessageWithSessionId {
 pub struct NetworkActor {}
 
 pub struct NetworkActorState {
+    // This immutable attribute is placed here because we need to create it in
+    // the pre_start function.
     control: ServiceAsyncControl,
     peers: HashMap<PeerId, ActorRef<PeerActorMessage>>,
 }
 
+impl NetworkActorState {
+    /// Get or create a peer actor.
+    pub async fn get_or_create_peer(
+        id: PeerId,
+        control: &ActorRef<NetworkActorMessage>,
+    ) -> ActorRef<PeerActorMessage> {
+        PeerActor::get_or_create(Some(id), &control)
+            .await
+            .expect("must create peer actor if peer id passed")
+    }
+}
+
 #[rasync_trait]
 impl Actor for NetworkActor {
-    type Msg = NetworkCommand;
+    type Msg = NetworkActorMessage;
     type State = NetworkActorState;
     type Arguments = (mpsc::Sender<Event>, CkbConfig, TaskTracker);
 
@@ -132,64 +168,86 @@ impl Actor for NetworkActor {
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
-        command: Self::Msg,
+        message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Processing command {:?}", command);
+        debug!("Processing network message {:?}", message);
 
-        match command {
-            NetworkCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
-                session_id,
-                message,
-            }) => {
-                let result = state
-                    .control
-                    .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
-                    .await;
-                if let Err(err) = result {
-                    error!(
-                        "Sending message to session {:?} failed: {}",
-                        &session_id, err
-                    );
-                    return Ok(());
-                }
-                debug!("Message send to session {:?}", &session_id);
-            }
-
-            NetworkCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
-                match state.peers.get(&peer_id) {
-                    Some(actor) => {
-                        actor
-                            .send_message(PeerActorMessage::SendMessage(message))
-                            .expect("peer actor alive");
-                    }
-                    None => {
-                        error!("Peer {:?} not found", &peer_id);
+        match message {
+            NetworkActorMessage::Event(event) => match event {
+                NetworkActorEvent::PeerConnected(peer_id, actor) => {
+                    if state.peers.contains_key(&peer_id) {
+                        warn!("Duplicated peer connected event. Are we connecting here? The connection reestablishment processing is not implemented");
+                    } else {
+                        debug!("Saved actor for peer {:?} to network actor", peer_id);
+                        state.peers.insert(peer_id, actor);
                     }
                 }
-            }
-
-            NetworkCommand::ConnectPeer(addr) => {
-                // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
-                // e.g. whether the peer support some specific feature.
-                // TODO: If we are already connected to the peer, skip connecting.
-                debug!("Dialing {}", &addr);
-                let result = state.control.dial(addr.clone(), TargetProtocol::All).await;
-                if let Err(err) = result {
-                    error!("Dialing {} failed: {}", &addr, err);
+                NetworkActorEvent::PeerDisconnected(peer_id, actor) => {
+                    match state.peers.remove(&peer_id) {
+                        Some(_) => {
+                            debug!("Removed actor for peer {:?} from network actor", peer_id);
+                        }
+                        None => {
+                            error!("Peer {:?} not found", &peer_id);
+                        }
+                    }
                 }
-            }
-
-            NetworkCommand::ControlPcnChannel(c) => match c {
-                ChannelCommand::OpenChannel(open_channel) => {
-                    Actor::spawn(
-                        Some("channel".to_string()),
-                        ChannelActor::new(myself),
-                        ChannelInitializationParameter::OpenChannelCommand(open_channel),
-                    )
-                    .await
-                    .expect("spawn channel actor");
+            },
+            NetworkActorMessage::Command(command) => match command {
+                NetworkActorCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
+                    session_id,
+                    message,
+                }) => {
+                    let result = state
+                        .control
+                        .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
+                        .await;
+                    if let Err(err) = result {
+                        error!(
+                            "Sending message to session {:?} failed: {}",
+                            &session_id, err
+                        );
+                        return Ok(());
+                    }
+                    debug!("Message send to session {:?}", &session_id);
                 }
+
+                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
+                    match state.peers.get(&peer_id) {
+                        Some(actor) => {
+                            actor
+                                .send_message(PeerActorMessage::SendMessage(message))
+                                .expect("peer actor alive");
+                        }
+                        None => {
+                            error!("Peer {:?} not found", &peer_id);
+                        }
+                    }
+                }
+
+                NetworkActorCommand::ConnectPeer(addr) => {
+                    // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
+                    // e.g. whether the peer support some specific feature.
+                    // TODO: If we are already connected to the peer, skip connecting.
+                    debug!("Dialing {}", &addr);
+                    let result = state.control.dial(addr.clone(), TargetProtocol::All).await;
+                    if let Err(err) = result {
+                        error!("Dialing {} failed: {}", &addr, err);
+                    }
+                }
+
+                NetworkActorCommand::ControlPcnChannel(c) => match c {
+                    ChannelCommand::OpenChannel(open_channel) => {
+                        Actor::spawn(
+                            Some("channel".to_string()),
+                            ChannelActor::new(myself),
+                            ChannelInitializationParameter::OpenChannelCommand(open_channel),
+                        )
+                        .await
+                        .expect("spawn channel actor");
+                    }
+                },
             },
         }
         Ok(())
@@ -199,11 +257,11 @@ impl Actor for NetworkActor {
 #[derive(Clone, Debug)]
 struct Handle {
     event_sender: mpsc::Sender<Event>,
-    actor: ActorRef<NetworkCommand>,
+    actor: ActorRef<NetworkActorMessage>,
 }
 
 impl Handle {
-    fn new(event_sender: mpsc::Sender<Event>, actor: ActorRef<NetworkCommand>) -> Self {
+    fn new(event_sender: mpsc::Sender<Event>, actor: ActorRef<NetworkActorMessage>) -> Self {
         Self {
             event_sender,
             actor,
@@ -240,7 +298,6 @@ impl ServiceProtocol for Handle {
 
         if let Some(actor) = PeerActor::get_or_create(
             context.session.remote_pubkey.clone().map(PeerId::from),
-            session,
             &self.actor,
         )
         .await
@@ -261,7 +318,6 @@ impl ServiceProtocol for Handle {
 
         if let Some(actor) = PeerActor::get_or_create(
             context.session.remote_pubkey.clone().map(PeerId::from),
-            &context.session,
             &self.actor,
         )
         .await
@@ -283,7 +339,6 @@ impl ServiceProtocol for Handle {
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
         if let Some(actor) = PeerActor::get_or_create(
             context.session.remote_pubkey.clone().map(PeerId::from),
-            &context.session,
             &self.actor,
         )
         .await
@@ -332,8 +387,8 @@ impl Actor for RootActor {
 
 pub async fn start_ckb(
     config: CkbConfig,
-    mut command_receiver: mpsc::Receiver<NetworkCommand>,
-    command_sender: mpsc::Sender<NetworkCommand>,
+    mut command_receiver: mpsc::Receiver<NetworkActorCommand>,
+    command_sender: mpsc::Sender<NetworkActorCommand>,
     event_sender: mpsc::Sender<Event>,
     token: CancellationToken,
     tracker: TaskTracker,
@@ -356,7 +411,7 @@ pub async fn start_ckb(
             select! {
                 command = (&mut command_receiver).recv() => {
                     match command {
-                        Some(command) => actor.send_message(command).expect("network controller alive"),
+                        Some(command) => actor.send_message(NetworkActorMessage::new_command(command)).expect("network controller alive"),
                         None => {
                             info!("Command reciever exited, exiting forwarding program");
                             return;

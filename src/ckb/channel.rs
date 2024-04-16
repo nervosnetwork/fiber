@@ -16,11 +16,12 @@ use std::fmt::Debug;
 use crate::ckb::network::PCNMessageWithPeerId;
 
 use super::{
+    network::{NetworkActorEvent, NetworkActorMessage},
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey,
     },
-    NetworkCommand,
+    NetworkActorCommand,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -71,11 +72,11 @@ pub enum ChannelInitializationParameter {
 
 #[derive(Debug)]
 pub struct ChannelActor {
-    control: ActorRef<NetworkCommand>,
+    control: ActorRef<NetworkActorMessage>,
 }
 
 impl ChannelActor {
-    pub fn new(control: ActorRef<NetworkCommand>) -> Self {
+    pub fn new(control: ActorRef<NetworkActorMessage>) -> Self {
         Self { control }
     }
 }
@@ -145,10 +146,12 @@ impl Actor for ChannelActor {
                     &open_channel.peer_id, &message
                 );
                 self.control
-                    .send_message(NetworkCommand::SendPcnMessage(PCNMessageWithPeerId {
-                        peer_id: open_channel.peer_id,
-                        message,
-                    }))
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                            peer_id: open_channel.peer_id,
+                            message,
+                        }),
+                    ))
                     .expect("network controller actor alive");
                 Ok(channel)
             }
@@ -245,7 +248,7 @@ pub enum ProcessingChannelError {
     #[error("Unimplemented operation: {0}")]
     Unimplemented(String),
     #[error("Failed to send command: {0}")]
-    CommanderSendingError(#[from] TrySendError<NetworkCommand>),
+    CommanderSendingError(#[from] TrySendError<NetworkActorCommand>),
 }
 
 bitflags! {

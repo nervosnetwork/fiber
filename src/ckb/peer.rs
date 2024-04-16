@@ -10,8 +10,9 @@ use crate::ckb::{
 };
 
 use super::{
+    network::{NetworkActorEvent, NetworkActorMessage},
     types::{Hash256, PCNMessage},
-    NetworkCommand,
+    NetworkActorCommand,
 };
 
 #[derive(Debug, Default)]
@@ -33,30 +34,33 @@ pub enum PeerActorMessage {
 
 pub struct PeerActor {
     pub id: Option<PeerId>,
-    pub control: ActorRef<NetworkCommand>,
+    pub control: ActorRef<NetworkActorMessage>,
 }
 
 impl PeerActor {
-    fn new(id: Option<PeerId>, control: ActorRef<NetworkCommand>) -> Self {
+    fn new(id: Option<PeerId>, control: ActorRef<NetworkActorMessage>) -> Self {
         Self { id, control }
     }
 
     pub async fn get_or_create(
         id: Option<PeerId>,
-        session: &SessionContext,
-        control: &ActorRef<NetworkCommand>,
+        control: &ActorRef<NetworkActorMessage>,
     ) -> Option<ActorRef<PeerActorMessage>> {
-        Some(match session.remote_pubkey.clone().map(PeerId::from) {
+        Some(match id {
             None => return None,
             Some(p) => {
                 let actor_name = get_peer_actor_name(&p);
                 match ActorRef::where_is(actor_name.clone()) {
                     Some(a) => a,
                     None => {
-                        Actor::spawn(Some(actor_name), PeerActor::new(id, control.clone()), ())
-                            .await
-                            .expect("spawn peer actor")
-                            .0
+                        Actor::spawn(
+                            Some(actor_name),
+                            PeerActor::new(Some(p), control.clone()),
+                            (),
+                        )
+                        .await
+                        .expect("spawn peer actor")
+                        .0
                     }
                 }
             }
@@ -70,14 +74,34 @@ impl Actor for PeerActor {
     type State = PeerActorState;
     type Arguments = ();
 
-    /// Spawn a thread that waits for token to be cancelled,
-    /// after that kill all sub actors.
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        if let Some(id) = (&self.id).clone() {
+            self.control
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerConnected(id, myself),
+                ))
+                .expect("network actor alive");
+        }
         Ok(Default::default())
+    }
+
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(id) = (&self.id).clone() {
+            self.control
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerDisconnected(id, myself),
+                ))
+                .expect("network actor alive");
+        }
+        Ok(())
     }
 
     async fn handle(
@@ -130,11 +154,11 @@ impl Actor for PeerActor {
             PeerActorMessage::SendMessage(message) => match state.sessions.iter().next() {
                 Some(session_id) => self
                     .control
-                    .send_message(NetworkCommand::SendPcnMessageToSession(
-                        PCNMessageWithSessionId {
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
                             session_id: *session_id,
                             message,
-                        },
+                        }),
                     ))
                     .expect("network actor alive"),
                 None => {
