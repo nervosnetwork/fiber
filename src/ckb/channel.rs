@@ -249,7 +249,9 @@ impl Actor for ChannelActor {
                 panic!("OpenChannel message should be processed while prestarting")
             }
             PCNMessage::AcceptChannel(accept_channel) => {
-                state.step(ChannelEvent::AcceptChannel(accept_channel))?
+                if let Err(err) = state.step(ChannelEvent::AcceptChannel(accept_channel)) {
+                    error!("Error while processing AcceptChannel message: {:?}", err);
+                }
             }
             _ => {}
         }

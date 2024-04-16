@@ -350,7 +350,7 @@ impl Actor for NetworkActor {
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
-        debug!("Tentacle service shutdown");
+        debug!("Network service shutdown");
         Ok(())
     }
 }
