@@ -3,7 +3,10 @@ pub use config::CkbConfig;
 
 mod network;
 pub use network::start_ckb;
+pub use network::NetworkActor;
 pub use network::NetworkActorCommand;
+pub use network::NetworkActorEvent;
+pub use network::NetworkActorMessage;
 
 mod peer;
 

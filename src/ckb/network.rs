@@ -239,13 +239,26 @@ impl Actor for NetworkActor {
 
                 NetworkActorCommand::ControlPcnChannel(c) => match c {
                     ChannelCommand::OpenChannel(open_channel) => {
-                        Actor::spawn(
-                            Some("channel".to_string()),
-                            ChannelActor::new(myself),
-                            ChannelInitializationParameter::OpenChannelCommand(open_channel),
-                        )
-                        .await
-                        .expect("spawn channel actor");
+                        let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
+                        match peer_actor {
+                            None => {
+                                error!("Peer {:?} not found", &open_channel.peer_id);
+                                return Ok(());
+                            }
+                            Some(peer_actor) => {
+                                if let Err(err) = Actor::spawn(
+                                    Some("channel".to_string()),
+                                    ChannelActor::new(myself, peer_actor),
+                                    ChannelInitializationParameter::OpenChannelCommand(
+                                        open_channel,
+                                    ),
+                                )
+                                .await
+                                {
+                                    error!("Failed to start channel actor: {}", err);
+                                }
+                            }
+                        }
                     }
                 },
             },

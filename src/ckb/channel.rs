@@ -1,3 +1,4 @@
+use bitcoin::Network;
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
@@ -13,16 +14,17 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use std::fmt::Debug;
 
-use crate::ckb::network::PCNMessageWithPeerId;
-
 use super::{
-    network::{NetworkActorEvent, NetworkActorMessage},
+    network::PCNMessageWithPeerId,
+    peer::{PeerActor, PeerActorMessage},
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey,
     },
-    NetworkActorCommand,
+    NetworkActorCommand, NetworkActorMessage,
 };
+
+pub type ChannelActorMessage = PCNMessage;
 
 #[derive(Clone, Debug, Deserialize)]
 pub enum ChannelCommand {
@@ -67,17 +69,18 @@ pub enum ChannelInitializationParameter {
     OpenChannelCommand(OpenChannelCommand),
     /// To accept a new channel from another peer, we process received
     /// OpenChannel message and create a incoming channel.
-    OpenChannel(OpenChannel),
+    OpenChannel(PeerId, usize, OpenChannel),
 }
 
 #[derive(Debug)]
 pub struct ChannelActor {
-    control: ActorRef<NetworkActorMessage>,
+    network: ActorRef<NetworkActorMessage>,
+    peer: ActorRef<PeerActorMessage>,
 }
 
 impl ChannelActor {
-    pub fn new(control: ActorRef<NetworkActorMessage>) -> Self {
-        Self { control }
+    pub fn new(network: ActorRef<NetworkActorMessage>, peer: ActorRef<PeerActorMessage>) -> Self {
+        Self { network, peer }
     }
 }
 
@@ -95,13 +98,94 @@ impl Actor for ChannelActor {
     // example)
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
-            ChannelInitializationParameter::OpenChannel(open_channel) => {
-                todo!();
+            ChannelInitializationParameter::OpenChannel(peer_id, channel_user_id, open_channel) => {
+                debug!("Openning channel {:?}", &open_channel);
+
+                let counterpart_pubkeys = (&open_channel).into();
+                let OpenChannel {
+                    channel_id,
+                    chain_hash,
+                    funding_type_script,
+                    funding_amount,
+                    to_self_delay,
+                    first_per_commitment_point,
+                    second_per_commitment_point,
+                    ..
+                } = &open_channel;
+
+                if *chain_hash != [0u8; 32].into() {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                        "Invalid chain hash {:?}",
+                        chain_hash
+                    ))));
+                }
+
+                if funding_type_script.is_some() {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Funding type script is not none".to_string(),
+                    )));
+                }
+
+                let seed = channel_user_id
+                    .to_be_bytes()
+                    .into_iter()
+                    .chain(peer_id.as_bytes().iter().cloned())
+                    .collect::<Vec<u8>>();
+
+                let state = ChannelActorState::new_inbound_channel(
+                    *channel_id,
+                    &seed,
+                    peer_id.clone(),
+                    *funding_amount,
+                    *to_self_delay,
+                    counterpart_pubkeys,
+                    first_per_commitment_point.clone(),
+                    second_per_commitment_point.clone(),
+                );
+
+                let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
+
+                let accept_channel = AcceptChannel {
+                    channel_id: *channel_id,
+                    funding_amount: 0,
+                    max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+                    max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
+                    to_self_delay: *to_self_delay,
+                    funding_pubkey: state.signer.funding_key.pubkey(),
+                    revocation_basepoint: state.signer.revocation_base_key.pubkey(),
+                    payment_basepoint: state.signer.payment_key.pubkey(),
+                    min_tlc_value: DEFAULT_MIN_TLC_VALUE,
+                    delayed_payment_basepoint: state.signer.delayed_payment_base_key.pubkey(),
+                    tlc_basepoint: state.signer.tlc_base_key.pubkey(),
+                    first_per_commitment_point: state
+                        .signer
+                        .get_commitment_point(commitment_number),
+                    second_per_commitment_point: state
+                        .signer
+                        .get_commitment_point(commitment_number - 1),
+                    next_local_nonce: state.signer.misig_nonce.public_nonce(),
+                };
+
+                let command = PCNMessageWithPeerId {
+                    peer_id,
+                    message: PCNMessage::AcceptChannel(accept_channel),
+                };
+                // TODO: maybe we should not use try_send here.
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(command),
+                    ))
+                    .expect("network actor alive");
+
+                self.peer
+                    .send_message(PeerActorMessage::ChannelCreated(*channel_id, myself))
+                    .expect("peer actor alive");
+                Ok(state)
             }
             ChannelInitializationParameter::OpenChannelCommand(open_channel) => {
                 info!("Trying to open a channel to {:?}", &open_channel.peer_id);
@@ -111,6 +195,7 @@ impl Actor for ChannelActor {
                 let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
+                    channel_id: channel.id(),
                     funding_type_script: None,
                     funding_amount: channel.to_self_value,
                     funding_fee_rate: DEFAULT_FEE_RATE,
@@ -126,7 +211,6 @@ impl Actor for ChannelActor {
                     second_per_commitment_point: channel
                         .signer
                         .get_commitment_point(commitment_number + 1),
-                    channel_id: channel.temp_id,
                     funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
                     revocation_basepoint: channel
                         .holder_channel_parameters
@@ -145,14 +229,17 @@ impl Actor for ChannelActor {
                     "OpenChannel message to {:?} created: {:?}",
                     &open_channel.peer_id, &message
                 );
-                self.control
+                self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
                             peer_id: open_channel.peer_id,
                             message,
                         }),
                     ))
-                    .expect("network controller actor alive");
+                    .expect("network actor alive");
+                self.peer
+                    .send_message(PeerActorMessage::ChannelCreated(channel.id(), myself))
+                    .expect("peer actor alive");
                 Ok(channel)
             }
         }
