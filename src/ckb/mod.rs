@@ -15,9 +15,6 @@ pub use key::KeyPair;
 
 pub mod gen;
 
-mod event;
-pub use event::Event;
-
 pub mod channel;
 
 mod types;

@@ -29,7 +29,7 @@ use super::{
     peer::PeerActor,
     peer::PeerActorMessage,
     types::PCNMessage,
-    CkbConfig, Event,
+    CkbConfig,
 };
 
 use crate::unwrap_or_return;
@@ -60,15 +60,26 @@ impl NetworkActorMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+pub enum NetworkServiceEvent {
+    ServiceError(ServiceError),
+    ServiceEvent(ServiceEvent),
+    PeerConnected(Multiaddr),
+    PeerDisConnected(Multiaddr),
+}
+
+#[derive(Debug)]
 pub enum NetworkActorEvent {
-    /// Network events
+    /// Network eventss to be processed by this actor.
     PeerConnected(PeerId, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
     PeerMessage(PeerId, SessionContext, PCNMessage),
+
+    /// Network service events to be sent to outside observers.
+    NetworkServiceEvent(NetworkServiceEvent),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
     Event(NetworkActorEvent),
@@ -90,7 +101,16 @@ pub struct PCNMessageWithSessionId {
     pub message: PCNMessage,
 }
 
-pub struct NetworkActor {}
+pub struct NetworkActor {
+    // An event emitter to notify ourside observers.
+    event_sender: mpsc::Sender<NetworkServiceEvent>,
+}
+
+impl NetworkActor {
+    pub async fn emit_event(&self, event: NetworkServiceEvent) {
+        let _ = self.event_sender.send(event).await;
+    }
+}
 
 pub struct NetworkActorState {
     peer_id: PeerId,
@@ -131,23 +151,18 @@ impl NetworkActorState {
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
-    type Arguments = (
-        mpsc::Sender<Event>,
-        CkbConfig,
-        TaskTracker,
-        CancellationToken,
-    );
+    type Arguments = (CkbConfig, TaskTracker, CancellationToken);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (event_sender, config, tracker, token): Self::Arguments,
+        (config, tracker, token): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
         let pk = kp.public_key();
-        let handle = Handle::new(event_sender, myself.clone());
+        let handle = Handle::new(myself.clone(), self.event_sender.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
             .key_pair(kp)
@@ -203,6 +218,10 @@ impl Actor for NetworkActor {
 
         match message {
             NetworkActorMessage::Event(event) => match event {
+                NetworkActorEvent::NetworkServiceEvent(e) => {
+                    self.emit_event(e).await;
+                }
+
                 NetworkActorEvent::PeerConnected(id, session) => match state.peers.get(&id) {
                     Some(_actor) => {
                         warn!("Duplicated peer connected event. Are we connecting here? The connection reestablishment processing is not implemented");
@@ -218,6 +237,12 @@ impl Actor for NetworkActor {
                         .await
                         .expect("spawn peer actor")
                         .0;
+
+                        self.emit_event(NetworkServiceEvent::PeerConnected(
+                            session.address.clone(),
+                        ))
+                        .await;
+
                         actor
                             .send_message(PeerActorMessage::Connected(session))
                             .expect("peer actor alive");
@@ -227,6 +252,10 @@ impl Actor for NetworkActor {
                 NetworkActorEvent::PeerDisconnected(id, session) => match state.peers.remove(&id) {
                     Some(actor) => {
                         debug!("Removed actor for peer {:?} from network actor", id);
+                        self.emit_event(NetworkServiceEvent::PeerDisConnected(
+                            session.address.clone(),
+                        ))
+                        .await;
                         actor
                             .send_message(PeerActorMessage::Disconnected(session))
                             .expect("peer actor alive");
@@ -336,16 +365,21 @@ impl Actor for NetworkActor {
 
 #[derive(Clone, Debug)]
 struct Handle {
-    event_sender: mpsc::Sender<Event>,
     actor: ActorRef<NetworkActorMessage>,
 }
 
 impl Handle {
-    fn new(event_sender: mpsc::Sender<Event>, actor: ActorRef<NetworkActorMessage>) -> Self {
-        Self {
-            event_sender,
-            actor,
-        }
+    pub fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
+        Self { actor }
+    }
+
+    async fn emit_event(&self, event: NetworkServiceEvent) {
+        let _ = self
+            .actor
+            .send_message(NetworkActorMessage::Event(
+                NetworkActorEvent::NetworkServiceEvent(event),
+            ))
+            .expect("network actor alive");
     }
 
     fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
@@ -356,10 +390,6 @@ impl Handle {
                 ProtocolHandle::Callback(handle)
             })
             .build()
-    }
-
-    async fn send_event(&self, event: Event) {
-        let _ = self.event_sender.send(event).await;
     }
 }
 
@@ -373,8 +403,6 @@ impl ServiceProtocol for Handle {
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
             context.proto_id, session.id, session.address, session.ty, version
         );
-        self.send_event(Event::PeerConnected(context.session.address.clone()))
-            .await;
 
         if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
             self.actor
@@ -392,8 +420,6 @@ impl ServiceProtocol for Handle {
             "proto id [{}] close on session [{}]",
             context.proto_id, context.session.id
         );
-        self.send_event(Event::PeerDisConnected(context.session.address.clone()))
-            .await;
 
         if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
             self.actor
@@ -438,24 +464,26 @@ impl ServiceProtocol for Handle {
 #[async_trait]
 impl ServiceHandle for Handle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        self.send_event(Event::ServiceError(error)).await;
+        self.emit_event(NetworkServiceEvent::ServiceError(error))
+            .await;
     }
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        self.send_event(Event::ServiceEvent(event)).await;
+        self.emit_event(NetworkServiceEvent::ServiceEvent(event))
+            .await;
     }
 }
 
 pub async fn start_ckb(
     config: CkbConfig,
     mut command_receiver: mpsc::Receiver<NetworkActorCommand>,
-    event_sender: mpsc::Sender<Event>,
+    event_sender: mpsc::Sender<NetworkServiceEvent>,
     token: CancellationToken,
     tracker: TaskTracker,
 ) {
     let (actor, _handle) = Actor::spawn(
         Some("network actor".to_string()),
-        NetworkActor {},
-        (event_sender, config, tracker.clone(), token.clone()),
+        NetworkActor { event_sender },
+        (config, tracker.clone(), token.clone()),
     )
     .await
     .expect("Failed to start network actor");

@@ -11,7 +11,7 @@ use crate::ckb::{
 
 use super::{
     channel::ChannelActorMessage,
-    network::{NetworkActorEvent, NetworkActorMessage},
+    network::NetworkActorMessage,
     types::{Hash256, PCNMessage},
     NetworkActorCommand,
 };
