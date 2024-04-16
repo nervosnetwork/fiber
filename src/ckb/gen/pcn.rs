@@ -2873,6 +2873,334 @@ impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for SignatureVecReaderIterator<
     }
 }
 #[derive(Clone)]
+pub struct AmountOpt(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for AmountOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for AmountOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for AmountOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl ::core::default::Default for AmountOpt {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        AmountOpt::new_unchecked(v)
+    }
+}
+impl AmountOpt {
+    const DEFAULT_VALUE: [u8; 0] = [];
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Uint64> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Uint64::new_unchecked(self.0.clone()))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> AmountOptReader<'r> {
+        AmountOptReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for AmountOpt {
+    type Builder = AmountOptBuilder;
+    const NAME: &'static str = "AmountOpt";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        AmountOpt(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        AmountOptReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        AmountOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_opt())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct AmountOptReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for AmountOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for AmountOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for AmountOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl<'r> AmountOptReader<'r> {
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Uint64Reader<'r>> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Uint64Reader::new_unchecked(self.as_slice()))
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for AmountOptReader<'r> {
+    type Entity = AmountOpt;
+    const NAME: &'static str = "AmountOptReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        AmountOptReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        if !slice.is_empty() {
+            Uint64Reader::verify(&slice[..], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct AmountOptBuilder(pub(crate) Option<Uint64>);
+impl AmountOptBuilder {
+    pub fn set(mut self, v: Option<Uint64>) -> Self {
+        self.0 = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for AmountOptBuilder {
+    type Entity = AmountOpt;
+    const NAME: &'static str = "AmountOptBuilder";
+    fn expected_length(&self) -> usize {
+        self.0
+            .as_ref()
+            .map(|ref inner| inner.as_slice().len())
+            .unwrap_or(0)
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        self.0
+            .as_ref()
+            .map(|ref inner| writer.write_all(inner.as_slice()))
+            .unwrap_or(Ok(()))
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        AmountOpt::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct SiPrefixOpt(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for SiPrefixOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for SiPrefixOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for SiPrefixOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl ::core::default::Default for SiPrefixOpt {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        SiPrefixOpt::new_unchecked(v)
+    }
+}
+impl SiPrefixOpt {
+    const DEFAULT_VALUE: [u8; 0] = [];
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Byte32> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Byte32::new_unchecked(self.0.clone()))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> SiPrefixOptReader<'r> {
+        SiPrefixOptReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for SiPrefixOpt {
+    type Builder = SiPrefixOptBuilder;
+    const NAME: &'static str = "SiPrefixOpt";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        SiPrefixOpt(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        SiPrefixOptReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        SiPrefixOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_opt())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct SiPrefixOptReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for SiPrefixOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for SiPrefixOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for SiPrefixOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl<'r> SiPrefixOptReader<'r> {
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Byte32Reader<'r>> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Byte32Reader::new_unchecked(self.as_slice()))
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for SiPrefixOptReader<'r> {
+    type Entity = SiPrefixOpt;
+    const NAME: &'static str = "SiPrefixOptReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        SiPrefixOptReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        if !slice.is_empty() {
+            Byte32Reader::verify(&slice[..], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct SiPrefixOptBuilder(pub(crate) Option<Byte32>);
+impl SiPrefixOptBuilder {
+    pub fn set(mut self, v: Option<Byte32>) -> Self {
+        self.0 = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for SiPrefixOptBuilder {
+    type Entity = SiPrefixOpt;
+    const NAME: &'static str = "SiPrefixOptBuilder";
+    fn expected_length(&self) -> usize {
+        self.0
+            .as_ref()
+            .map(|ref inner| inner.as_slice().len())
+            .unwrap_or(0)
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        self.0
+            .as_ref()
+            .map(|ref inner| writer.write_all(inner.as_slice()))
+            .unwrap_or(Ok(()))
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        SiPrefixOpt::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct OpenChannel(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for OpenChannel {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -9725,5 +10053,1292 @@ impl<'r> PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
             PCNMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
         }
+    }
+}
+#[derive(Clone)]
+pub struct RawHrp(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for RawHrp {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for RawHrp {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for RawHrp {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "currency", self.currency())?;
+        write!(f, ", {}: {}", "amount", self.amount())?;
+        write!(f, ", {}: {}", "prefix", self.prefix())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for RawHrp {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        RawHrp::new_unchecked(v)
+    }
+}
+impl RawHrp {
+    const DEFAULT_VALUE: [u8; 48] = [
+        48, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 3;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn currency(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn amount(&self) -> AmountOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        AmountOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn prefix(&self) -> SiPrefixOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            SiPrefixOpt::new_unchecked(self.0.slice(start..end))
+        } else {
+            SiPrefixOpt::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> RawHrpReader<'r> {
+        RawHrpReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for RawHrp {
+    type Builder = RawHrpBuilder;
+    const NAME: &'static str = "RawHrp";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        RawHrp(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        RawHrpReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        RawHrpReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .currency(self.currency())
+            .amount(self.amount())
+            .prefix(self.prefix())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct RawHrpReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for RawHrpReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for RawHrpReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for RawHrpReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "currency", self.currency())?;
+        write!(f, ", {}: {}", "amount", self.amount())?;
+        write!(f, ", {}: {}", "prefix", self.prefix())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> RawHrpReader<'r> {
+    pub const FIELD_COUNT: usize = 3;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn currency(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn amount(&self) -> AmountOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        AmountOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn prefix(&self) -> SiPrefixOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            SiPrefixOptReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            SiPrefixOptReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for RawHrpReader<'r> {
+    type Entity = RawHrp;
+    const NAME: &'static str = "RawHrpReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        RawHrpReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        AmountOptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        SiPrefixOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct RawHrpBuilder {
+    pub(crate) currency: Byte32,
+    pub(crate) amount: AmountOpt,
+    pub(crate) prefix: SiPrefixOpt,
+}
+impl RawHrpBuilder {
+    pub const FIELD_COUNT: usize = 3;
+    pub fn currency(mut self, v: Byte32) -> Self {
+        self.currency = v;
+        self
+    }
+    pub fn amount(mut self, v: AmountOpt) -> Self {
+        self.amount = v;
+        self
+    }
+    pub fn prefix(mut self, v: SiPrefixOpt) -> Self {
+        self.prefix = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for RawHrpBuilder {
+    type Entity = RawHrp;
+    const NAME: &'static str = "RawHrpBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.currency.as_slice().len()
+            + self.amount.as_slice().len()
+            + self.prefix.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.currency.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.prefix.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.currency.as_slice())?;
+        writer.write_all(self.amount.as_slice())?;
+        writer.write_all(self.prefix.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        RawHrp::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct PaymentHash(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for PaymentHash {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for PaymentHash {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for PaymentHash {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        let raw_data = hex_string(&self.raw_data());
+        write!(f, "{}(0x{})", Self::NAME, raw_data)
+    }
+}
+impl ::core::default::Default for PaymentHash {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        PaymentHash::new_unchecked(v)
+    }
+}
+impl PaymentHash {
+    const DEFAULT_VALUE: [u8; 32] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ];
+    pub const TOTAL_SIZE: usize = 32;
+    pub const ITEM_SIZE: usize = 1;
+    pub const ITEM_COUNT: usize = 32;
+    pub fn nth0(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(0..1))
+    }
+    pub fn nth1(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(1..2))
+    }
+    pub fn nth2(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(2..3))
+    }
+    pub fn nth3(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(3..4))
+    }
+    pub fn nth4(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(4..5))
+    }
+    pub fn nth5(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(5..6))
+    }
+    pub fn nth6(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(6..7))
+    }
+    pub fn nth7(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(7..8))
+    }
+    pub fn nth8(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(8..9))
+    }
+    pub fn nth9(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(9..10))
+    }
+    pub fn nth10(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(10..11))
+    }
+    pub fn nth11(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(11..12))
+    }
+    pub fn nth12(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(12..13))
+    }
+    pub fn nth13(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(13..14))
+    }
+    pub fn nth14(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(14..15))
+    }
+    pub fn nth15(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(15..16))
+    }
+    pub fn nth16(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(16..17))
+    }
+    pub fn nth17(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(17..18))
+    }
+    pub fn nth18(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(18..19))
+    }
+    pub fn nth19(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(19..20))
+    }
+    pub fn nth20(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(20..21))
+    }
+    pub fn nth21(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(21..22))
+    }
+    pub fn nth22(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(22..23))
+    }
+    pub fn nth23(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(23..24))
+    }
+    pub fn nth24(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(24..25))
+    }
+    pub fn nth25(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(25..26))
+    }
+    pub fn nth26(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(26..27))
+    }
+    pub fn nth27(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(27..28))
+    }
+    pub fn nth28(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(28..29))
+    }
+    pub fn nth29(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(29..30))
+    }
+    pub fn nth30(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(30..31))
+    }
+    pub fn nth31(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(31..32))
+    }
+    pub fn raw_data(&self) -> molecule::bytes::Bytes {
+        self.as_bytes()
+    }
+    pub fn as_reader<'r>(&'r self) -> PaymentHashReader<'r> {
+        PaymentHashReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for PaymentHash {
+    type Builder = PaymentHashBuilder;
+    const NAME: &'static str = "PaymentHash";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        PaymentHash(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentHashReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentHashReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set([
+            self.nth0(),
+            self.nth1(),
+            self.nth2(),
+            self.nth3(),
+            self.nth4(),
+            self.nth5(),
+            self.nth6(),
+            self.nth7(),
+            self.nth8(),
+            self.nth9(),
+            self.nth10(),
+            self.nth11(),
+            self.nth12(),
+            self.nth13(),
+            self.nth14(),
+            self.nth15(),
+            self.nth16(),
+            self.nth17(),
+            self.nth18(),
+            self.nth19(),
+            self.nth20(),
+            self.nth21(),
+            self.nth22(),
+            self.nth23(),
+            self.nth24(),
+            self.nth25(),
+            self.nth26(),
+            self.nth27(),
+            self.nth28(),
+            self.nth29(),
+            self.nth30(),
+            self.nth31(),
+        ])
+    }
+}
+#[derive(Clone, Copy)]
+pub struct PaymentHashReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PaymentHashReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for PaymentHashReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for PaymentHashReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        let raw_data = hex_string(&self.raw_data());
+        write!(f, "{}(0x{})", Self::NAME, raw_data)
+    }
+}
+impl<'r> PaymentHashReader<'r> {
+    pub const TOTAL_SIZE: usize = 32;
+    pub const ITEM_SIZE: usize = 1;
+    pub const ITEM_COUNT: usize = 32;
+    pub fn nth0(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[0..1])
+    }
+    pub fn nth1(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[1..2])
+    }
+    pub fn nth2(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[2..3])
+    }
+    pub fn nth3(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[3..4])
+    }
+    pub fn nth4(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[4..5])
+    }
+    pub fn nth5(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[5..6])
+    }
+    pub fn nth6(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[6..7])
+    }
+    pub fn nth7(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[7..8])
+    }
+    pub fn nth8(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[8..9])
+    }
+    pub fn nth9(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[9..10])
+    }
+    pub fn nth10(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[10..11])
+    }
+    pub fn nth11(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[11..12])
+    }
+    pub fn nth12(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[12..13])
+    }
+    pub fn nth13(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[13..14])
+    }
+    pub fn nth14(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[14..15])
+    }
+    pub fn nth15(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[15..16])
+    }
+    pub fn nth16(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[16..17])
+    }
+    pub fn nth17(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[17..18])
+    }
+    pub fn nth18(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[18..19])
+    }
+    pub fn nth19(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[19..20])
+    }
+    pub fn nth20(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[20..21])
+    }
+    pub fn nth21(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[21..22])
+    }
+    pub fn nth22(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[22..23])
+    }
+    pub fn nth23(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[23..24])
+    }
+    pub fn nth24(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[24..25])
+    }
+    pub fn nth25(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[25..26])
+    }
+    pub fn nth26(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[26..27])
+    }
+    pub fn nth27(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[27..28])
+    }
+    pub fn nth28(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[28..29])
+    }
+    pub fn nth29(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[29..30])
+    }
+    pub fn nth30(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[30..31])
+    }
+    pub fn nth31(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[31..32])
+    }
+    pub fn raw_data(&self) -> &'r [u8] {
+        self.as_slice()
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for PaymentHashReader<'r> {
+    type Entity = PaymentHash;
+    const NAME: &'static str = "PaymentHashReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        PaymentHashReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len != Self::TOTAL_SIZE {
+            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
+        }
+        Ok(())
+    }
+}
+pub struct PaymentHashBuilder(pub(crate) [Byte; 32]);
+impl ::core::fmt::Debug for PaymentHashBuilder {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:?})", Self::NAME, &self.0[..])
+    }
+}
+impl ::core::default::Default for PaymentHashBuilder {
+    fn default() -> Self {
+        PaymentHashBuilder([
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+        ])
+    }
+}
+impl PaymentHashBuilder {
+    pub const TOTAL_SIZE: usize = 32;
+    pub const ITEM_SIZE: usize = 1;
+    pub const ITEM_COUNT: usize = 32;
+    pub fn set(mut self, v: [Byte; 32]) -> Self {
+        self.0 = v;
+        self
+    }
+    pub fn nth0(mut self, v: Byte) -> Self {
+        self.0[0] = v;
+        self
+    }
+    pub fn nth1(mut self, v: Byte) -> Self {
+        self.0[1] = v;
+        self
+    }
+    pub fn nth2(mut self, v: Byte) -> Self {
+        self.0[2] = v;
+        self
+    }
+    pub fn nth3(mut self, v: Byte) -> Self {
+        self.0[3] = v;
+        self
+    }
+    pub fn nth4(mut self, v: Byte) -> Self {
+        self.0[4] = v;
+        self
+    }
+    pub fn nth5(mut self, v: Byte) -> Self {
+        self.0[5] = v;
+        self
+    }
+    pub fn nth6(mut self, v: Byte) -> Self {
+        self.0[6] = v;
+        self
+    }
+    pub fn nth7(mut self, v: Byte) -> Self {
+        self.0[7] = v;
+        self
+    }
+    pub fn nth8(mut self, v: Byte) -> Self {
+        self.0[8] = v;
+        self
+    }
+    pub fn nth9(mut self, v: Byte) -> Self {
+        self.0[9] = v;
+        self
+    }
+    pub fn nth10(mut self, v: Byte) -> Self {
+        self.0[10] = v;
+        self
+    }
+    pub fn nth11(mut self, v: Byte) -> Self {
+        self.0[11] = v;
+        self
+    }
+    pub fn nth12(mut self, v: Byte) -> Self {
+        self.0[12] = v;
+        self
+    }
+    pub fn nth13(mut self, v: Byte) -> Self {
+        self.0[13] = v;
+        self
+    }
+    pub fn nth14(mut self, v: Byte) -> Self {
+        self.0[14] = v;
+        self
+    }
+    pub fn nth15(mut self, v: Byte) -> Self {
+        self.0[15] = v;
+        self
+    }
+    pub fn nth16(mut self, v: Byte) -> Self {
+        self.0[16] = v;
+        self
+    }
+    pub fn nth17(mut self, v: Byte) -> Self {
+        self.0[17] = v;
+        self
+    }
+    pub fn nth18(mut self, v: Byte) -> Self {
+        self.0[18] = v;
+        self
+    }
+    pub fn nth19(mut self, v: Byte) -> Self {
+        self.0[19] = v;
+        self
+    }
+    pub fn nth20(mut self, v: Byte) -> Self {
+        self.0[20] = v;
+        self
+    }
+    pub fn nth21(mut self, v: Byte) -> Self {
+        self.0[21] = v;
+        self
+    }
+    pub fn nth22(mut self, v: Byte) -> Self {
+        self.0[22] = v;
+        self
+    }
+    pub fn nth23(mut self, v: Byte) -> Self {
+        self.0[23] = v;
+        self
+    }
+    pub fn nth24(mut self, v: Byte) -> Self {
+        self.0[24] = v;
+        self
+    }
+    pub fn nth25(mut self, v: Byte) -> Self {
+        self.0[25] = v;
+        self
+    }
+    pub fn nth26(mut self, v: Byte) -> Self {
+        self.0[26] = v;
+        self
+    }
+    pub fn nth27(mut self, v: Byte) -> Self {
+        self.0[27] = v;
+        self
+    }
+    pub fn nth28(mut self, v: Byte) -> Self {
+        self.0[28] = v;
+        self
+    }
+    pub fn nth29(mut self, v: Byte) -> Self {
+        self.0[29] = v;
+        self
+    }
+    pub fn nth30(mut self, v: Byte) -> Self {
+        self.0[30] = v;
+        self
+    }
+    pub fn nth31(mut self, v: Byte) -> Self {
+        self.0[31] = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for PaymentHashBuilder {
+    type Entity = PaymentHash;
+    const NAME: &'static str = "PaymentHashBuilder";
+    fn expected_length(&self) -> usize {
+        Self::TOTAL_SIZE
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        writer.write_all(self.0[0].as_slice())?;
+        writer.write_all(self.0[1].as_slice())?;
+        writer.write_all(self.0[2].as_slice())?;
+        writer.write_all(self.0[3].as_slice())?;
+        writer.write_all(self.0[4].as_slice())?;
+        writer.write_all(self.0[5].as_slice())?;
+        writer.write_all(self.0[6].as_slice())?;
+        writer.write_all(self.0[7].as_slice())?;
+        writer.write_all(self.0[8].as_slice())?;
+        writer.write_all(self.0[9].as_slice())?;
+        writer.write_all(self.0[10].as_slice())?;
+        writer.write_all(self.0[11].as_slice())?;
+        writer.write_all(self.0[12].as_slice())?;
+        writer.write_all(self.0[13].as_slice())?;
+        writer.write_all(self.0[14].as_slice())?;
+        writer.write_all(self.0[15].as_slice())?;
+        writer.write_all(self.0[16].as_slice())?;
+        writer.write_all(self.0[17].as_slice())?;
+        writer.write_all(self.0[18].as_slice())?;
+        writer.write_all(self.0[19].as_slice())?;
+        writer.write_all(self.0[20].as_slice())?;
+        writer.write_all(self.0[21].as_slice())?;
+        writer.write_all(self.0[22].as_slice())?;
+        writer.write_all(self.0[23].as_slice())?;
+        writer.write_all(self.0[24].as_slice())?;
+        writer.write_all(self.0[25].as_slice())?;
+        writer.write_all(self.0[26].as_slice())?;
+        writer.write_all(self.0[27].as_slice())?;
+        writer.write_all(self.0[28].as_slice())?;
+        writer.write_all(self.0[29].as_slice())?;
+        writer.write_all(self.0[30].as_slice())?;
+        writer.write_all(self.0[31].as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        PaymentHash::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct PaymentHashOpt(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for PaymentHashOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for PaymentHashOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for PaymentHashOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl ::core::default::Default for PaymentHashOpt {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        PaymentHashOpt::new_unchecked(v)
+    }
+}
+impl PaymentHashOpt {
+    const DEFAULT_VALUE: [u8; 0] = [];
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<PaymentHash> {
+        if self.is_none() {
+            None
+        } else {
+            Some(PaymentHash::new_unchecked(self.0.clone()))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> PaymentHashOptReader<'r> {
+        PaymentHashOptReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for PaymentHashOpt {
+    type Builder = PaymentHashOptBuilder;
+    const NAME: &'static str = "PaymentHashOpt";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        PaymentHashOpt(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentHashOptReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentHashOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_opt())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct PaymentHashOptReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PaymentHashOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for PaymentHashOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for PaymentHashOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl<'r> PaymentHashOptReader<'r> {
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<PaymentHashReader<'r>> {
+        if self.is_none() {
+            None
+        } else {
+            Some(PaymentHashReader::new_unchecked(self.as_slice()))
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for PaymentHashOptReader<'r> {
+    type Entity = PaymentHashOpt;
+    const NAME: &'static str = "PaymentHashOptReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        PaymentHashOptReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        if !slice.is_empty() {
+            PaymentHashReader::verify(&slice[..], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct PaymentHashOptBuilder(pub(crate) Option<PaymentHash>);
+impl PaymentHashOptBuilder {
+    pub fn set(mut self, v: Option<PaymentHash>) -> Self {
+        self.0 = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for PaymentHashOptBuilder {
+    type Entity = PaymentHashOpt;
+    const NAME: &'static str = "PaymentHashOptBuilder";
+    fn expected_length(&self) -> usize {
+        self.0
+            .as_ref()
+            .map(|ref inner| inner.as_slice().len())
+            .unwrap_or(0)
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        self.0
+            .as_ref()
+            .map(|ref inner| writer.write_all(inner.as_slice()))
+            .unwrap_or(Ok(()))
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        PaymentHashOpt::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct RawDataPart(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for RawDataPart {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for RawDataPart {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for RawDataPart {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
+        write!(f, ", {}: {}", "description", self.description())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for RawDataPart {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        RawDataPart::new_unchecked(v)
+    }
+}
+impl RawDataPart {
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 12, 0, 0, 0, 12, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn payment_hash(&self) -> PaymentHashOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        PaymentHashOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn description(&self) -> BytesOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            BytesOpt::new_unchecked(self.0.slice(start..end))
+        } else {
+            BytesOpt::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> RawDataPartReader<'r> {
+        RawDataPartReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for RawDataPart {
+    type Builder = RawDataPartBuilder;
+    const NAME: &'static str = "RawDataPart";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        RawDataPart(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        RawDataPartReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        RawDataPartReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .payment_hash(self.payment_hash())
+            .description(self.description())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct RawDataPartReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for RawDataPartReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for RawDataPartReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for RawDataPartReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
+        write!(f, ", {}: {}", "description", self.description())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> RawDataPartReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn payment_hash(&self) -> PaymentHashOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        PaymentHashOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn description(&self) -> BytesOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            BytesOptReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            BytesOptReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for RawDataPartReader<'r> {
+    type Entity = RawDataPart;
+    const NAME: &'static str = "RawDataPartReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        RawDataPartReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        PaymentHashOptReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        BytesOptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct RawDataPartBuilder {
+    pub(crate) payment_hash: PaymentHashOpt,
+    pub(crate) description: BytesOpt,
+}
+impl RawDataPartBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn payment_hash(mut self, v: PaymentHashOpt) -> Self {
+        self.payment_hash = v;
+        self
+    }
+    pub fn description(mut self, v: BytesOpt) -> Self {
+        self.description = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for RawDataPartBuilder {
+    type Entity = RawDataPart;
+    const NAME: &'static str = "RawDataPartBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.payment_hash.as_slice().len()
+            + self.description.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.payment_hash.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.description.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.payment_hash.as_slice())?;
+        writer.write_all(self.description.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        RawDataPart::new_unchecked(inner.into())
     }
 }

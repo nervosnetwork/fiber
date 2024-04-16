@@ -5,6 +5,10 @@ array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 array Pubkey [byte; 33];
 vector SignatureVec <Signature>;
 
+option AmountOpt (Uint64);
+option SiPrefixOpt (Byte32);
+
+
 table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
@@ -155,4 +159,19 @@ union PCNMessage {
     TlcsSigned,
     RevokeAndAck,
     RemoveTlc,
+}
+
+
+table RawHrp {
+    currency: Byte32,
+    amount: AmountOpt,
+    prefix: SiPrefixOpt,
+}
+
+array PaymentHash [byte; 32];
+option PaymentHashOpt (PaymentHash);
+
+table RawDataPart {
+    payment_hash: PaymentHashOpt,
+    description: BytesOpt,
 }
