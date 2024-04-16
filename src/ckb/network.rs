@@ -162,7 +162,7 @@ impl Actor for NetworkActor {
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
         let pk = kp.public_key();
-        let handle = Handle::new(myself.clone(), self.event_sender.clone());
+        let handle = Handle::new(myself.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
             .key_pair(kp)
