@@ -32,12 +32,12 @@ use super::{
     CkbConfig,
 };
 
-use crate::unwrap_or_return;
+use crate::{unwrap_or_return, Error};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 #[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
@@ -56,7 +56,7 @@ impl NetworkActorMessage {
     }
 
     pub fn new_command(command: NetworkActorCommand) -> Self {
-        Self::Command(command)
+        Self::Command(command, None)
     }
 }
 
@@ -81,7 +81,11 @@ pub enum NetworkActorEvent {
 
 #[derive(Debug)]
 pub enum NetworkActorMessage {
-    Command(NetworkActorCommand),
+    Command(
+        NetworkActorCommand,
+        // TODO: we may need to refine the following type according to each commands.
+        Option<oneshot::Sender<crate::Result<()>>>,
+    ),
     Event(NetworkActorEvent),
 }
 
@@ -109,6 +113,78 @@ pub struct NetworkActor {
 impl NetworkActor {
     pub async fn emit_event(&self, event: NetworkServiceEvent) {
         let _ = self.event_sender.send(event).await;
+    }
+
+    pub async fn handle_command(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState,
+        command: NetworkActorCommand,
+    ) -> crate::Result<()> {
+        match command {
+            NetworkActorCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
+                session_id,
+                message,
+            }) => {
+                debug!("Sending message to session {:?}", session_id);
+                state
+                    .control
+                    .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
+                    .await?;
+            }
+
+            NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
+                debug!("Sending message to peer {:?}", &peer_id);
+                match state.peers.get(&peer_id) {
+                    Some(actor) => {
+                        actor
+                            .send_message(PeerActorMessage::SendMessage(message))
+                            .expect("peer actor alive");
+                    }
+                    None => {
+                        error!("Trying to send message to a not found peer {:?}", &peer_id);
+                        return Err(Error::PeerNotFound(peer_id));
+                    }
+                }
+            }
+
+            NetworkActorCommand::ConnectPeer(addr) => {
+                // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
+                // e.g. whether the peer support some specific feature.
+                // TODO: If we are already connected to the peer, skip connecting.
+                debug!("Dialing {}", &addr);
+                state
+                    .control
+                    .dial(addr.clone(), TargetProtocol::All)
+                    .await?
+            }
+
+            NetworkActorCommand::ControlPcnChannel(c) => match c {
+                ChannelCommand::OpenChannel(open_channel) => {
+                    debug!("Openning channel {:?}", &open_channel);
+                    let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
+                    match peer_actor {
+                        None => {
+                            warn!(
+                                "Trying to control a not found peer {:?}",
+                                &open_channel.peer_id
+                            );
+                            return Err(Error::PeerNotFound(open_channel.peer_id));
+                        }
+                        Some(peer_actor) => {
+                            Actor::spawn_linked(
+                                Some("channel".to_string()),
+                                ChannelActor::new(myself.clone(), peer_actor),
+                                ChannelInitializationParameter::OpenChannelCommand(open_channel),
+                                myself.clone().get_cell(),
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            },
+        };
+        Ok(())
     }
 }
 
@@ -266,78 +342,14 @@ impl Actor for NetworkActor {
                     }
                 }
             },
-            NetworkActorMessage::Command(command) => match command {
-                NetworkActorCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
-                    session_id,
-                    message,
-                }) => {
-                    let result = state
-                        .control
-                        .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
-                        .await;
-                    if let Err(err) = result {
-                        error!(
-                            "Sending message to session {:?} failed: {}",
-                            &session_id, err
-                        );
-                        return Ok(());
-                    }
-                    debug!("Message send to session {:?}", &session_id);
+            NetworkActorMessage::Command(command, sender) => {
+                debug!("Handling command");
+                let result = self.handle_command(myself, state, command).await;
+                debug!("Command result: {:?}", result);
+                if let Some(sender) = sender {
+                    sender.send(result).expect("receiver not closed");
                 }
-
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
-                    match state.peers.get(&peer_id) {
-                        Some(actor) => {
-                            actor
-                                .send_message(PeerActorMessage::SendMessage(message))
-                                .expect("peer actor alive");
-                        }
-                        None => {
-                            error!("Sending messages to a not found peer {:?}", &peer_id);
-                        }
-                    }
-                }
-
-                NetworkActorCommand::ConnectPeer(addr) => {
-                    // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
-                    // e.g. whether the peer support some specific feature.
-                    // TODO: If we are already connected to the peer, skip connecting.
-                    debug!("Dialing {}", &addr);
-                    let result = state.control.dial(addr.clone(), TargetProtocol::All).await;
-                    if let Err(err) = result {
-                        error!("Dialing {} failed: {}", &addr, err);
-                    }
-                }
-
-                NetworkActorCommand::ControlPcnChannel(c) => match c {
-                    ChannelCommand::OpenChannel(open_channel) => {
-                        let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
-                        match peer_actor {
-                            None => {
-                                warn!(
-                                    "Trying to control a not found peer {:?}",
-                                    &open_channel.peer_id
-                                );
-                                return Ok(());
-                            }
-                            Some(peer_actor) => {
-                                if let Err(err) = Actor::spawn_linked(
-                                    Some("channel".to_string()),
-                                    ChannelActor::new(myself.clone(), peer_actor),
-                                    ChannelInitializationParameter::OpenChannelCommand(
-                                        open_channel,
-                                    ),
-                                    myself.clone().get_cell(),
-                                )
-                                .await
-                                {
-                                    error!("Failed to start channel actor: {}", err);
-                                }
-                            }
-                        }
-                    }
-                },
-            },
+            }
         }
         Ok(())
     }

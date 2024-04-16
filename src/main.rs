@@ -9,7 +9,7 @@ use tokio_util::task::task_tracker::TaskTracker;
 use std::str::FromStr;
 
 use ckb_pcn_node::cch::CchCommand;
-use ckb_pcn_node::ckb::NetworkActorCommand;
+use ckb_pcn_node::ckb::{channel, NetworkActorCommand, NetworkActorMessage};
 use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ pub async fn main() {
             );
             for bootnode in &ckb_config.bootnode_addrs {
                 let addr = Multiaddr::from_str(bootnode).expect("valid bootnode");
-                let command = NetworkActorCommand::ConnectPeer(addr);
+                let command = (NetworkActorCommand::ConnectPeer(addr), None);
                 command_sender
                     .send(command)
                     .await
@@ -96,10 +96,6 @@ pub async fn main() {
                 let token = new_tokio_cancellation_token();
                 loop {
                     select! {
-                        _ = token.cancelled() => {
-                            debug!("Cancellation received, event processing service");
-                            break;
-                        }
                         event = event_receiver.recv() => {
                             match event {
                                 None => {
@@ -111,6 +107,10 @@ pub async fn main() {
                                 }
                             }
                         }
+                        _ = token.cancelled() => {
+                            debug!("Cancellation received, event processing service");
+                            break;
+                        }
                     }
                 }
                 debug!("Event processing service exited");
@@ -118,26 +118,25 @@ pub async fn main() {
 
             // TODO: we should really pass the created actor to other components.
             new_tokio_task_tracker().spawn(async move {
+                debug!("Starting command receiver");
                 let token = new_tokio_cancellation_token();
                 loop {
                     select! {
-                        _ = token.cancelled() => {
-                            debug!("Cancellation received, event processing service");
-                            break;
-                        }
                         command = command_receiver.recv() => {
                             match command {
                                 None => {
-                                    debug!("Event receiver completed, event processing service");
+                                    debug!("Command receiver completed");
                                     break;
                                 }
-                                Some(command) => {
-                                    debug!("Received event: {:?}", command);
-                                    ckb_actor.send_message(ckb_pcn_node::ckb::NetworkActorMessage::new_command(
-                                        command
-                                    )).expect("send ckb command");
+                                Some((command, sender)) => {
+                                    debug!("Received command: {:?}", command);
+                                    ckb_actor.send_message(NetworkActorMessage::Command(command, sender)).expect("network actor alive");
                                 }
                             }
+                        }
+                        _ = token.cancelled() => {
+                            debug!("Cancellation received, event processing service");
+                            break;
                         }
                     }
                 }

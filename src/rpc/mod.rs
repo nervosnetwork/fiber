@@ -2,10 +2,15 @@ mod config;
 pub use config::RpcConfig;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::Deserialize;
 use std::{future::Future, sync::Arc};
 use tokio::sync::mpsc;
+
+pub type NetworkActorCommandWithReply = (
+    NetworkActorCommand,
+    Option<oneshot::Sender<crate::Result<()>>>,
+);
 
 use crate::{cch::CchCommand, ckb::NetworkActorCommand};
 
@@ -22,7 +27,7 @@ pub struct HttpBody {
 }
 
 pub struct AppState {
-    pub ckb_command_sender: Option<mpsc::Sender<NetworkActorCommand>>,
+    pub ckb_command_sender: Option<mpsc::Sender<NetworkActorCommandWithReply>>,
     pub cch_command_sender: Option<mpsc::Sender<CchCommand>>,
 }
 
@@ -38,11 +43,20 @@ async fn handle_request(
         &state.cch_command_sender,
     ) {
         (HttpRequest::Command(command), Some(ckb_command_sender), _) => {
+            let (sender, receiver) = oneshot::channel::<crate::Result<()>>();
+            let command = (command, Some(sender));
             ckb_command_sender
                 .send(command)
                 .await
                 .expect("send command");
-            StatusCode::OK
+            debug!("Waiting for command to be processed");
+            match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(_) => StatusCode::OK,
+                Err(err) => {
+                    error!("Error processing command: {:?}", err);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            }
         }
         (HttpRequest::CchCommand(command), _, Some(cch_command_sender)) => {
             cch_command_sender
@@ -57,7 +71,7 @@ async fn handle_request(
 
 pub async fn start_rpc<F>(
     config: RpcConfig,
-    ckb_command_sender: Option<mpsc::Sender<NetworkActorCommand>>,
+    ckb_command_sender: Option<mpsc::Sender<NetworkActorCommandWithReply>>,
     cch_command_sender: Option<mpsc::Sender<CchCommand>>,
     shutdown_signal: F,
 ) where
