@@ -18,9 +18,9 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId,
 };
-use tokio::select;
+
 use tokio::sync::mpsc;
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 
 use super::peer::get_peer_actor_name;
 use super::{
@@ -32,6 +32,7 @@ use super::{
     CkbConfig,
 };
 
+use crate::actors::RootActorMessage;
 use crate::unwrap_or_return;
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -151,12 +152,12 @@ impl NetworkActorState {
 impl Actor for NetworkActor {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
-    type Arguments = (CkbConfig, TaskTracker, CancellationToken);
+    type Arguments = (CkbConfig, TaskTracker);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (config, tracker, token): Self::Arguments,
+        (config, tracker): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let kp = config
             .read_or_generate_secret_key()
@@ -188,17 +189,6 @@ impl Actor for NetworkActor {
         tracker.spawn(async move {
             service.run().await;
             debug!("Tentacle service shutdown");
-        });
-
-        let cloned_control = control.clone();
-        let cloned_myself = myself.clone();
-        tracker.spawn(async move {
-            token.cancelled().await;
-            if let Err(err) = cloned_control.close().await {
-                error!("Failed to close tentacle service: {}", err);
-            }
-            debug!("Tentacle service shutdown");
-            cloned_myself.stop(Some("Cancellation token received".to_owned()));
         });
 
         Ok(NetworkActorState {
@@ -358,7 +348,10 @@ impl Actor for NetworkActor {
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        info!("Network actor for {:?} stopped", state.peer_id);
+        if let Err(err) = state.control.close().await {
+            error!("Failed to close tentacle service: {}", err);
+        }
+        debug!("Tentacle service shutdown");
         Ok(())
     }
 }
@@ -475,35 +468,18 @@ impl ServiceHandle for Handle {
 
 pub async fn start_ckb(
     config: CkbConfig,
-    mut command_receiver: mpsc::Receiver<NetworkActorCommand>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
-    token: CancellationToken,
     tracker: TaskTracker,
-) {
-    let (actor, _handle) = Actor::spawn(
+    root_actor: ActorRef<RootActorMessage>,
+) -> ActorRef<NetworkActorMessage> {
+    let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
         NetworkActor { event_sender },
-        (config, tracker.clone(), token.clone()),
+        (config, tracker),
+        root_actor.get_cell(),
     )
     .await
     .expect("Failed to start network actor");
 
-    tracker.spawn(async move {
-        loop {
-            select! {
-                command = (&mut command_receiver).recv() => {
-                    match command {
-                        Some(command) => actor.send_message(NetworkActorMessage::new_command(command)).expect("network actor alive"),
-                        None => {
-                            info!("Command reciever exited, exiting forwarding program");
-                            return;
-                        }
-                    }
-                },
-                _ = token.cancelled() => {
-                    return;
-                }
-            }
-        }
-    });
+    actor
 }

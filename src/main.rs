@@ -1,4 +1,4 @@
-use axum::response::sse::Event;
+use ckb_pcn_node::actors::RootActor;
 use log::{debug, error, info};
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -58,10 +58,14 @@ pub async fn main() {
         start_ldk(ldk_config).await;
     }
 
+    let tracker = new_tokio_task_tracker();
+    let token = new_tokio_cancellation_token();
+    let root_actor = RootActor::start(tracker, token).await;
+
     let ckb_command_sender = match config.ckb {
         Some(ckb_config) => {
             const CHANNEL_SIZE: usize = 4000;
-            let (command_sender, command_receiver) = mpsc::channel(CHANNEL_SIZE);
+            let (command_sender, mut command_receiver) = mpsc::channel(CHANNEL_SIZE);
             assert!(
                 ckb_config.bootnode_addrs.len() < CHANNEL_SIZE,
                 "Too many bootnodes ({} allowed, having {})",
@@ -80,12 +84,11 @@ pub async fn main() {
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
 
             info!("Starting ckb");
-            start_ckb(
+            let ckb_actor = start_ckb(
                 ckb_config,
-                command_receiver,
                 event_sender,
-                new_tokio_cancellation_token(),
                 new_tokio_task_tracker(),
+                root_actor.clone(),
             )
             .await;
 
@@ -113,13 +116,31 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
-            // Just keep command sender around until tasks finish.
-            // This is a hack to keep the command receiver alive until the tasks are done.
-            let cloned_command_sender = command_sender.clone();
+            // TODO: we should really pass the created actor to other components.
             new_tokio_task_tracker().spawn(async move {
-                let _command_sender: mpsc::Sender<ckb_pcn_node::ckb::NetworkActorCommand> =
-                    cloned_command_sender;
-                new_tokio_cancellation_token().cancelled().await;
+                let token = new_tokio_cancellation_token();
+                loop {
+                    select! {
+                        _ = token.cancelled() => {
+                            debug!("Cancellation received, event processing service");
+                            break;
+                        }
+                        command = command_receiver.recv() => {
+                            match command {
+                                None => {
+                                    debug!("Event receiver completed, event processing service");
+                                    break;
+                                }
+                                Some(command) => {
+                                    debug!("Received event: {:?}", command);
+                                    ckb_actor.send_message(ckb_pcn_node::ckb::NetworkActorMessage::new_command(
+                                        command
+                                    )).expect("send ckb command");
+                                }
+                            }
+                        }
+                    }
+                }
                 debug!("Command sender service exited");
             });
 
