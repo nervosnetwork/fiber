@@ -112,11 +112,23 @@ pub struct PCNMessageWithPeerId {
     pub message: PCNMessage,
 }
 
+impl PCNMessageWithPeerId {
+    pub fn new(peer_id: PeerId, message: PCNMessage) -> Self {
+        Self { peer_id, message }
+    }
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct PCNMessageWithSessionId {
     #[serde_as(as = "FromInto<usize>")]
     pub session_id: SessionId,
+    pub message: PCNMessage,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PCNMessageWithChannelId {
+    pub channel_id: Hash256,
     pub message: PCNMessage,
 }
 

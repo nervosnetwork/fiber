@@ -20,7 +20,7 @@ use super::{
     serde_utils::EntityWrapperBase64,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey, TxCollaborationMsg,
+        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
     },
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -31,7 +31,16 @@ pub enum ChannelActorMessage {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub enum ChannelCommand {}
+pub enum ChannelCommand {
+    TxCollaborationCommand(TxCollaborationCommand),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub enum TxCollaborationCommand {
+    TxAdd(TxAddCommand),
+    TxRemove(TxRemoveCommand),
+    TxComplete(TxCompleteCommand),
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChannelCommandWithId {
@@ -97,6 +106,139 @@ pub struct ChannelActor {
 impl ChannelActor {
     pub fn new(peer_id: PeerId, network: ActorRef<NetworkActorMessage>) -> Self {
         Self { peer_id, network }
+    }
+
+    pub fn send_tx_collaboration_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: TxCollaborationCommand,
+    ) -> Result<(), ProcessingChannelError> {
+        let pcn_msg = match command {
+            TxCollaborationCommand::TxAdd(tx_add) => PCNMessage::TxAdd(TxAdd {
+                channel_id: state.id(),
+                tx: tx_add.transaction.clone(),
+            }),
+            TxCollaborationCommand::TxRemove(tx_remove) => PCNMessage::TxRemove(TxRemove {
+                channel_id: state.id(),
+                tx: tx_remove.transaction.clone(),
+            }),
+            TxCollaborationCommand::TxComplete(_) => PCNMessage::TxComplete(TxComplete {
+                channel_id: state.id(),
+            }),
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                    self.peer_id.clone(),
+                    pcn_msg,
+                )),
+            ))
+            .expect("network actor alive");
+        Ok(())
+    }
+
+    pub fn handle_peer_message(
+        &self,
+        state: &mut ChannelActorState,
+        message: PCNMessage,
+    ) -> Result<(), ProcessingChannelError> {
+        match message {
+            PCNMessage::OpenChannel(_) => {
+                panic!("OpenChannel message should be processed while prestarting")
+            }
+            PCNMessage::AcceptChannel(accept_channel) => {
+                state.step(ChannelEvent::AcceptChannel(accept_channel))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn handle_tx_collaboration_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: TxCollaborationCommand,
+    ) -> Result<(), ProcessingChannelError> {
+        match state.state {
+            ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
+                if state.was_initially_inbound {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "{0:?} expected, {1:?} given",
+                        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT,),
+                        state.state
+                    )));
+                } else if let TxCollaborationCommand::TxAdd(ref tx) = command.clone() {
+                    state.state = ChannelState::CollaboratingFundingTx(
+                        CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
+                    );
+                    self.send_tx_collaboration_command(state, command)?;
+                    state
+                        .funding_tx_inputs
+                        .push(FundingTxInput::TxAdd(tx.clone().transaction));
+                } else {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "the first message after AcceptChannel must be TxAdd, but we got {:?})",
+                        &command
+                    )));
+                }
+            }
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
+            )
+            | ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
+            ) => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "trying to send a message to remote while in {:?} which means we are waiting for remote to send message", state.state
+                )));
+            }
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+            ) => {
+                self.send_tx_collaboration_command(state, command.clone())?;
+                // TODO: Note that we may deadlock here if send_tx_collaboration_command does successfully send the message,
+                // as in that case both us and the remote are waiting for each other to send the message.
+                state.state = ChannelState::CollaboratingFundingTx(
+                    CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
+                );
+                match command {
+                    TxCollaborationCommand::TxAdd(tx) => {
+                        state
+                            .funding_tx_inputs
+                            .push(FundingTxInput::TxAdd(tx.transaction));
+                    }
+                    TxCollaborationCommand::TxRemove(tx) => {
+                        state
+                            .funding_tx_inputs
+                            .push(FundingTxInput::TxRemove(tx.transaction));
+                    }
+                    TxCollaborationCommand::TxComplete(_) => {
+                        state.state = ChannelState::CollaboratingFundingTx(
+                            CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
+                        );
+                    }
+                }
+            }
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "expecting state transition valid for tx collaboration, but got {:?}",
+                    state.state
+                )));
+            }
+        };
+        Ok(())
+    }
+
+    pub fn handle_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: ChannelCommand,
+    ) -> Result<(), ProcessingChannelError> {
+        match command {
+            ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
+                self.handle_tx_collaboration_command(state, tx_collaboration_command)
+            }
+        }
     }
 }
 
@@ -283,18 +425,16 @@ impl Actor for ChannelActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ChannelActorMessage::PeerMessage(message) => match message {
-                PCNMessage::OpenChannel(_) => {
-                    panic!("OpenChannel message should be processed while prestarting")
+            ChannelActorMessage::PeerMessage(message) => {
+                if let Err(error) = self.handle_peer_message(state, message) {
+                    error!("Error while processing channel message: {:?}", error);
                 }
-                PCNMessage::AcceptChannel(accept_channel) => {
-                    if let Err(err) = state.step(ChannelEvent::AcceptChannel(accept_channel)) {
-                        error!("Error while processing AcceptChannel message: {:?}", err);
-                    }
+            }
+            ChannelActorMessage::Command(command) => {
+                if let Err(err) = self.handle_command(state, command) {
+                    error!("Error while processing channel command: {:?}", err);
                 }
-                _ => {}
-            },
-            ChannelActorMessage::Command(command) => match command {},
+            }
         }
         Ok(())
     }
