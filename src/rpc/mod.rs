@@ -50,13 +50,16 @@ async fn handle_request(
                 .await
                 .expect("send command");
             debug!("Waiting for command to be processed");
-            match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
-                Ok(_) => StatusCode::OK,
-                Err(err) => {
-                    error!("Error processing command: {:?}", err);
-                    StatusCode::INTERNAL_SERVER_ERROR
-                }
-            }
+            tokio::spawn(async move {
+                let start = std::time::Instant::now();
+                let result = receiver.recv_timeout(std::time::Duration::from_secs(60));
+                debug!(
+                    "Processed command in {:?}: {:?}",
+                    std::time::Instant::now().checked_duration_since(start),
+                    result
+                );
+            });
+            StatusCode::OK
         }
         (HttpRequest::CchCommand(command), _, Some(cch_command_sender)) => {
             cch_command_sender
