@@ -145,7 +145,7 @@ impl Actor for ChannelActor {
 
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
-                    funding_amount: 0,
+                    funding_amount: open_channel.funding_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     to_self_delay: *to_self_delay,
@@ -190,7 +190,7 @@ impl Actor for ChannelActor {
                     chain_hash: Hash256::default(),
                     channel_id: channel.id(),
                     funding_type_script: None,
-                    funding_amount: channel.to_self_value,
+                    funding_amount: channel.total_value,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -504,9 +504,10 @@ impl ChannelActorState {
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
         if accept_channel.funding_amount != self.total_value {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "funding_amount mismatch".to_string(),
-            ));
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "funding_amount mismatch (expected {}, got {})",
+                self.total_value, accept_channel.funding_amount
+            )));
         }
 
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
