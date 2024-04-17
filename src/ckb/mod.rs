@@ -7,8 +7,6 @@ pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
 };
 
-mod peer;
-
 mod key;
 pub use key::KeyPair;
 

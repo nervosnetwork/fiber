@@ -13,9 +13,10 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use std::fmt::Debug;
 
+use crate::ckb::NetworkActorEvent;
+
 use super::{
     network::PCNMessageWithPeerId,
-    peer::PeerActorMessage,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey, TxCollaborationMsg,
@@ -73,13 +74,13 @@ pub enum ChannelInitializationParameter {
 
 #[derive(Debug)]
 pub struct ChannelActor {
+    peer_id: PeerId,
     network: ActorRef<NetworkActorMessage>,
-    peer: ActorRef<PeerActorMessage>,
 }
 
 impl ChannelActor {
-    pub fn new(network: ActorRef<NetworkActorMessage>, peer: ActorRef<PeerActorMessage>) -> Self {
-        Self { network, peer }
+    pub fn new(peer_id: PeerId, network: ActorRef<NetworkActorMessage>) -> Self {
+        Self { peer_id, network }
     }
 }
 
@@ -175,8 +176,14 @@ impl Actor for ChannelActor {
                     ))
                     .expect("network actor alive");
 
-                self.peer
-                    .send_message(PeerActorMessage::ChannelCreated(*channel_id, myself))
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelCreated(
+                            *channel_id,
+                            self.peer_id.clone(),
+                            myself,
+                        ),
+                    ))
                     .expect("peer actor alive");
                 Ok(state)
             }
@@ -232,8 +239,14 @@ impl Actor for ChannelActor {
                     .expect("network actor alive");
                 channel.state =
                     ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
-                self.peer
-                    .send_message(PeerActorMessage::ChannelCreated(channel.id(), myself))
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelCreated(
+                            channel.id(),
+                            self.peer_id.clone(),
+                            myself,
+                        ),
+                    ))
                     .expect("peer actor alive");
                 Ok(channel)
             }

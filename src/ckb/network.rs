@@ -2,6 +2,7 @@ use log::{debug, error, info, warn};
 use ractor::{async_trait as rasync_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
+use std::collections::HashSet;
 use std::{collections::HashMap, str};
 use tentacle::context::SessionContext;
 use tentacle::{multiaddr::Multiaddr, secio::PeerId, SessionId};
@@ -22,12 +23,11 @@ use tentacle::{
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
+use super::channel::ChannelActorMessage;
+use super::types::Hash256;
 use super::{
     channel::ChannelCommand,
     channel::{ChannelActor, ChannelInitializationParameter},
-    peer::get_peer_actor_name,
-    peer::PeerActor,
-    peer::PeerActorMessage,
     types::PCNMessage,
     CkbConfig,
 };
@@ -75,6 +75,9 @@ pub enum NetworkActorEvent {
     PeerDisconnected(PeerId, SessionContext),
     PeerMessage(PeerId, SessionContext, PCNMessage),
 
+    /// Channel related events.
+    ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
+
     /// Network service events to be sent to outside observers.
     NetworkServiceEvent(NetworkServiceEvent),
 }
@@ -111,8 +114,64 @@ pub struct NetworkActor {
 }
 
 impl NetworkActor {
-    pub async fn emit_event(&self, event: NetworkServiceEvent) {
+    pub async fn on_service_event(&self, event: NetworkServiceEvent) {
         let _ = self.event_sender.send(event).await;
+    }
+
+    pub async fn handle_peer_message(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState,
+        peer_id: PeerId,
+        session: SessionContext,
+        message: PCNMessage,
+    ) -> crate::Result<()> {
+        debug!(
+            "Received message from peer {:?} on session {:?}: {:?}",
+            &peer_id, &session.id, &message
+        );
+
+        match message {
+            PCNMessage::OpenChannel(o) => {
+                let id = o.channel_id;
+                if state.channels.contains_key(&id) {
+                    error!("Received duplicated open channel request");
+                    return Ok(());
+                }
+                let channel_user_id = state.channels.len();
+
+                Actor::spawn_linked(
+                    Some("channel".to_string()),
+                    ChannelActor::new(peer_id.clone(), myself.clone()),
+                    ChannelInitializationParameter::OpenChannel(
+                        peer_id.clone(),
+                        channel_user_id,
+                        o,
+                    ),
+                    myself.clone().get_cell(),
+                )
+                .await?;
+            }
+
+            PCNMessage::TestMessage(test) => {
+                debug!("Test message {:?}", test);
+            }
+
+            PCNMessage::AcceptChannel(m) => match state.channels.remove(&m.channel_id) {
+                None => {
+                    return Err(Error::ChannelNotFound(m.channel_id));
+                }
+                Some(c) => {
+                    c.send_message(PCNMessage::AcceptChannel(m))
+                        .expect("channel actor alive");
+                }
+            },
+
+            _ => {
+                error!("Message handling for {:?} unimplemented", message);
+            }
+        };
+        Ok(())
     }
 
     pub async fn handle_command(
@@ -130,10 +189,7 @@ impl NetworkActor {
                     "SendPcnMessageToSession command received: Sending message to session {:?}",
                     session_id
                 );
-                state
-                    .control
-                    .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
-                    .await?;
+                state.send_message_to_session(session_id, message).await?;
             }
 
             NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
@@ -141,17 +197,7 @@ impl NetworkActor {
                     "SendPcnMessage command received: sending message to peer {:?}",
                     &peer_id
                 );
-                match state.peers.get(&peer_id) {
-                    Some(actor) => {
-                        actor
-                            .send_message(PeerActorMessage::SendMessage(message))
-                            .expect("peer actor alive");
-                    }
-                    None => {
-                        error!("Trying to send message to a not found peer {:?}", &peer_id);
-                        return Err(Error::PeerNotFound(peer_id));
-                    }
-                }
+                state.send_message_to_peer(&peer_id, message).await?;
             }
 
             NetworkActorCommand::ConnectPeer(addr) => {
@@ -171,8 +217,8 @@ impl NetworkActor {
             NetworkActorCommand::ControlPcnChannel(c) => match c {
                 ChannelCommand::OpenChannel(open_channel) => {
                     debug!("OpenChannel command received: {:?}", &open_channel);
-                    let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
-                    match peer_actor {
+                    let peer_session = state.get_peer_session(&open_channel.peer_id);
+                    match peer_session {
                         None => {
                             warn!(
                                 "Trying to control a not found peer {:?}",
@@ -180,10 +226,10 @@ impl NetworkActor {
                             );
                             return Err(Error::PeerNotFound(open_channel.peer_id));
                         }
-                        Some(peer_actor) => {
+                        Some(_session_id) => {
                             Actor::spawn_linked(
                                 Some("channel".to_string()),
-                                ChannelActor::new(myself.clone(), peer_actor),
+                                ChannelActor::new(open_channel.peer_id.clone(), myself.clone()),
                                 ChannelInitializationParameter::OpenChannelCommand(open_channel),
                                 myself.clone().get_cell(),
                             )
@@ -202,33 +248,62 @@ pub struct NetworkActorState {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peers: HashMap<PeerId, ActorRef<PeerActorMessage>>,
+    peers: HashMap<PeerId, HashSet<SessionId>>,
+    channels: HashMap<Hash256, ActorRef<PCNMessage>>,
 }
 
 impl NetworkActorState {
-    /// Get or create a peer actor.
-    pub async fn get_or_create_peer(
-        &mut self,
-        id: PeerId,
-        control: &ActorRef<NetworkActorMessage>,
-    ) -> ActorRef<PeerActorMessage> {
-        match self.peers.get(&id) {
-            Some(actor) => actor.clone(),
-            None => {
-                let peer_name = get_peer_actor_name(&id);
-                let actor = Actor::spawn_linked(
-                    Some(peer_name),
-                    PeerActor::new(Some(id.clone()), control.clone()),
-                    (),
-                    control.get_cell(),
-                )
-                .await
-                .expect("spawn peer actor")
-                .0;
-                self.peers.insert(id, actor.clone());
-                actor
+    fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
+        self.peers
+            .get(peer_id)
+            .and_then(|sessions| sessions.iter().next().cloned())
+    }
+
+    async fn send_message_to_session(
+        &self,
+        session_id: SessionId,
+        message: PCNMessage,
+    ) -> crate::Result<()> {
+        self.control
+            .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
+            .await?;
+        Ok(())
+    }
+
+    async fn send_message_to_peer(
+        &self,
+        peer_id: &PeerId,
+        message: PCNMessage,
+    ) -> crate::Result<()> {
+        match self.get_peer_session(peer_id) {
+            Some(session) => self.send_message_to_session(session, message).await,
+            None => Err(Error::PeerNotFound(peer_id.clone())),
+        }
+    }
+
+    fn on_peer_connected(&mut self, id: &PeerId, session: SessionContext) {
+        debug!("Peer connected: {:?}", &id);
+        let sessions = self.peers.entry(id.clone()).or_insert_with(HashSet::new);
+        sessions.insert(session.id);
+    }
+
+    fn on_peer_disconnected(&mut self, id: &PeerId, session: SessionContext) {
+        debug!("Peer disconnected: {:?}", &id);
+        if let Some(sessions) = self.peers.get_mut(id) {
+            sessions.remove(&session.id);
+            if sessions.is_empty() {
+                self.peers.remove(id);
             }
         }
+    }
+
+    fn on_channel_created(
+        &mut self,
+        id: Hash256,
+        _peer_id: PeerId,
+        actor: ActorRef<ChannelActorMessage>,
+    ) {
+        self.channels.insert(id, actor);
     }
 }
 
@@ -277,8 +352,9 @@ impl Actor for NetworkActor {
 
         Ok(NetworkActorState {
             peer_id: my_peer_id,
-            peers: HashMap::new(),
             control,
+            peers: Default::default(),
+            channels: Default::default(),
         })
     }
 
@@ -293,62 +369,20 @@ impl Actor for NetworkActor {
         match message {
             NetworkActorMessage::Event(event) => match event {
                 NetworkActorEvent::NetworkServiceEvent(e) => {
-                    self.emit_event(e).await;
+                    self.on_service_event(e).await;
                 }
-
-                NetworkActorEvent::PeerConnected(id, session) => match state.peers.get(&id) {
-                    Some(_actor) => {
-                        warn!("Duplicated peer connected event. Are we connecting here? The connection reestablishment processing is not implemented");
-                    }
-                    None => {
-                        let peer_name = get_peer_actor_name(&id);
-                        let actor = Actor::spawn_linked(
-                            Some(peer_name),
-                            PeerActor::new(Some(id.clone()), myself.clone()),
-                            (),
-                            myself.get_cell(),
-                        )
-                        .await
-                        .expect("spawn peer actor")
-                        .0;
-
-                        self.emit_event(NetworkServiceEvent::PeerConnected(
-                            session.address.clone(),
-                        ))
-                        .await;
-
-                        actor
-                            .send_message(PeerActorMessage::Connected(session))
-                            .expect("peer actor alive");
-                        state.peers.insert(id, actor.clone());
-                    }
-                },
-                NetworkActorEvent::PeerDisconnected(id, session) => match state.peers.remove(&id) {
-                    Some(actor) => {
-                        debug!("Removed actor for peer {:?} from network actor", id);
-                        self.emit_event(NetworkServiceEvent::PeerDisConnected(
-                            session.address.clone(),
-                        ))
-                        .await;
-                        actor
-                            .send_message(PeerActorMessage::Disconnected(session))
-                            .expect("peer actor alive");
-                    }
-                    None => {
-                        warn!("Trying to remove a not found peer {:?}", &id);
-                    }
-                },
-                NetworkActorEvent::PeerMessage(id, session, message) => {
-                    match state.peers.get(&id) {
-                        Some(actor) => {
-                            actor
-                                .send_message(PeerActorMessage::ReceivedMessage(session, message))
-                                .expect("peer actor alive");
-                        }
-                        None => {
-                            warn!("Received message for a not found peer {:?}", &id);
-                        }
-                    }
+                NetworkActorEvent::PeerConnected(id, session) => {
+                    state.on_peer_connected(&id, session)
+                }
+                NetworkActorEvent::PeerDisconnected(id, session) => {
+                    state.on_peer_disconnected(&id, session)
+                }
+                NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
+                    state.on_channel_created(channel_id, peer_id, actor)
+                }
+                NetworkActorEvent::PeerMessage(peer_id, session, message) => {
+                    self.handle_peer_message(myself, state, peer_id, session, message)
+                        .await?
                 }
             },
             NetworkActorMessage::Command(command, sender) => {

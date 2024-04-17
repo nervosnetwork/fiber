@@ -9,7 +9,7 @@ use tokio_util::task::task_tracker::TaskTracker;
 use std::str::FromStr;
 
 use ckb_pcn_node::cch::CchCommand;
-use ckb_pcn_node::ckb::{channel, NetworkActorCommand, NetworkActorMessage};
+use ckb_pcn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
 use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[derive(Debug, Clone)]
