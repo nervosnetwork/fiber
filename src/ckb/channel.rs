@@ -24,7 +24,10 @@ use super::{
     NetworkActorCommand, NetworkActorMessage,
 };
 
-pub type ChannelActorMessage = PCNMessage;
+pub enum ChannelActorMessage {
+    Command(ChannelCommand),
+    PeerMessage(PCNMessage),
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub enum ChannelCommand {
@@ -86,7 +89,7 @@ impl ChannelActor {
 
 #[rasync_trait]
 impl Actor for ChannelActor {
-    type Msg = PCNMessage;
+    type Msg = ChannelActorMessage;
     type State = ChannelActorState;
     type Arguments = ChannelInitializationParameter;
 
@@ -260,15 +263,18 @@ impl Actor for ChannelActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            PCNMessage::OpenChannel(_) => {
-                panic!("OpenChannel message should be processed while prestarting")
-            }
-            PCNMessage::AcceptChannel(accept_channel) => {
-                if let Err(err) = state.step(ChannelEvent::AcceptChannel(accept_channel)) {
-                    error!("Error while processing AcceptChannel message: {:?}", err);
+            ChannelActorMessage::PeerMessage(message) => match message {
+                PCNMessage::OpenChannel(_) => {
+                    panic!("OpenChannel message should be processed while prestarting")
                 }
-            }
-            _ => {}
+                PCNMessage::AcceptChannel(accept_channel) => {
+                    if let Err(err) = state.step(ChannelEvent::AcceptChannel(accept_channel)) {
+                        error!("Error while processing AcceptChannel message: {:?}", err);
+                    }
+                }
+                _ => {}
+            },
+            ChannelActorMessage::Command(_) => todo!(),
         }
         Ok(())
     }

@@ -162,7 +162,7 @@ impl NetworkActor {
                     return Err(Error::ChannelNotFound(m.channel_id));
                 }
                 Some(c) => {
-                    c.send_message(PCNMessage::AcceptChannel(m))
+                    c.send_message(ChannelActorMessage::PeerMessage(PCNMessage::AcceptChannel(m)))
                         .expect("channel actor alive");
                 }
             },
@@ -249,7 +249,7 @@ pub struct NetworkActorState {
     // the pre_start function.
     control: ServiceAsyncControl,
     peers: HashMap<PeerId, HashSet<SessionId>>,
-    channels: HashMap<Hash256, ActorRef<PCNMessage>>,
+    channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
 }
 
 impl NetworkActorState {
