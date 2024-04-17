@@ -349,6 +349,10 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptChannel {
     pub channel_id: Hash256,
+    // TODO: remove funding_amount.
+    // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#the-accept_channel-message
+    // bolts2 does not mention the funding_satoshis in accept channel.
+    // Maybe we should remove it.
     pub funding_amount: u64,
     pub max_tlc_value_in_flight: u64,
     pub max_accept_tlcs: u64,
