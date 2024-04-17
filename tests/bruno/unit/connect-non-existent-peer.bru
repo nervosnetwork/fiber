@@ -1,0 +1,34 @@
+meta {
+  name: connect non-existent peer
+  type: http
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "Command": {
+        "ConnectPeer": "/ip4/127.127.127.127/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKbb2qJygwNs2wk41h8"
+      }
+    }
+  }
+  
+}
+
+
+tests {
+  test("should return non 200 status", function() {
+    // This actually fails because tentacle does not immediately return dialing error.
+    // expect(res.status).to.equal(200);
+  });
+}

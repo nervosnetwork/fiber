@@ -13,8 +13,14 @@ start() {
     cargo run -- "$@"
 }
 
-start -d 1 &
-start -d 2 &
-start -d 3 &
+if [ "$#" -ne 1 ]; then
+    start -d 1 &
+    start -d 2 &
+    start -d 3 &
+else
+    for id in "$@"; do
+        start -d "$id" &
+    done
+fi
 
 wait
