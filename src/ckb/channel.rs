@@ -6,7 +6,7 @@ use molecule::prelude::Entity;
 use musig2::SecNonce;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::mpsc::error::TrySendError;
@@ -16,7 +16,8 @@ use std::fmt::Debug;
 use crate::ckb::NetworkActorEvent;
 
 use super::{
-    network::PCNMessageWithPeerId,
+    network::{OpenChannelCommand, PCNMessageWithPeerId},
+    serde_utils::EntityWrapperBase64,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey, TxCollaborationMsg,
@@ -30,8 +31,12 @@ pub enum ChannelActorMessage {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub enum ChannelCommand {
-    OpenChannel(OpenChannelCommand),
+pub enum ChannelCommand {}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChannelCommandWithId {
+    pub channel_id: Hash256,
+    pub command: ChannelCommand,
 }
 
 pub const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
@@ -45,11 +50,19 @@ pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
-pub struct OpenChannelCommand {
-    #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
-    pub total_value: u64,
-    pub to_self_value: u64,
+pub struct TxCommand {
+    pub channel_id: Hash256,
+    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
+    pub transaction: Transaction,
+}
+
+pub type TxAddCommand = TxCommand;
+
+pub type TxRemoveCommand = TxCommand;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct TxCompleteCommand {
+    pub channel_id: Hash256,
 }
 
 impl OpenChannelCommand {
@@ -72,7 +85,7 @@ pub enum ChannelInitializationParameter {
     OpenChannelCommand(OpenChannelCommand),
     /// To accept a new channel from another peer, we process received
     /// OpenChannel message and create a incoming channel.
-    OpenChannel(PeerId, usize, OpenChannel),
+    OpenChannelMessage(PeerId, usize, OpenChannel),
 }
 
 #[derive(Debug)]
@@ -100,7 +113,11 @@ impl Actor for ChannelActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
-            ChannelInitializationParameter::OpenChannel(peer_id, channel_user_id, open_channel) => {
+            ChannelInitializationParameter::OpenChannelMessage(
+                peer_id,
+                channel_user_id,
+                open_channel,
+            ) => {
                 debug!("Openning channel {:?}", &open_channel);
 
                 let counterpart_pubkeys = (&open_channel).into();
@@ -240,6 +257,9 @@ impl Actor for ChannelActor {
                         }),
                     ))
                     .expect("network actor alive");
+                // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
+                // It is even possible that the peer_id is bogus, and we can't send a message to it.
+                // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
                 channel.state =
                     ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
                 self.network
@@ -250,7 +270,7 @@ impl Actor for ChannelActor {
                             myself,
                         ),
                     ))
-                    .expect("peer actor alive");
+                    .expect("network actor alive");
                 Ok(channel)
             }
         }
@@ -274,7 +294,7 @@ impl Actor for ChannelActor {
                 }
                 _ => {}
             },
-            ChannelActorMessage::Command(_) => todo!(),
+            ChannelActorMessage::Command(command) => match command {},
         }
         Ok(())
     }

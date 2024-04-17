@@ -4,30 +4,30 @@ use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::HashSet;
 use std::{collections::HashMap, str};
-use tentacle::context::SessionContext;
-use tentacle::{multiaddr::Multiaddr, secio::PeerId, SessionId};
 
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
     bytes::Bytes,
+    context::SessionContext,
     context::{ProtocolContext, ProtocolContextMutRef, ServiceContext},
+    multiaddr::Multiaddr,
+    secio::PeerId,
     service::{
         ProtocolHandle, ProtocolMeta, ServiceAsyncControl, ServiceError, ServiceEvent,
         TargetProtocol,
     },
     traits::{ServiceHandle, ServiceProtocol},
-    ProtocolId,
+    ProtocolId, SessionId,
 };
 
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
-use super::channel::ChannelActorMessage;
+use super::channel::{ChannelActorMessage, ChannelCommandWithId};
 use super::types::Hash256;
 use super::{
-    channel::ChannelCommand,
-    channel::{ChannelActor, ChannelInitializationParameter},
+    channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
     types::PCNMessage,
     CkbConfig,
 };
@@ -47,7 +47,19 @@ pub enum NetworkActorCommand {
     SendPcnMessage(PCNMessageWithPeerId),
     // Directly send a message to session
     SendPcnMessageToSession(PCNMessageWithSessionId),
-    ControlPcnChannel(ChannelCommand),
+    // Open channel to a peer.
+    OpenChannel(OpenChannelCommand),
+    // Send a command to a channel.
+    ControlPcnChannel(ChannelCommandWithId),
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Deserialize)]
+pub struct OpenChannelCommand {
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    pub total_value: u64,
+    pub to_self_value: u64,
 }
 
 impl NetworkActorMessage {
@@ -143,7 +155,7 @@ impl NetworkActor {
                 Actor::spawn_linked(
                     Some("channel".to_string()),
                     ChannelActor::new(peer_id.clone(), myself.clone()),
-                    ChannelInitializationParameter::OpenChannel(
+                    ChannelInitializationParameter::OpenChannelMessage(
                         peer_id.clone(),
                         channel_user_id,
                         o,
@@ -162,8 +174,10 @@ impl NetworkActor {
                     return Err(Error::ChannelNotFound(m.channel_id));
                 }
                 Some(c) => {
-                    c.send_message(ChannelActorMessage::PeerMessage(PCNMessage::AcceptChannel(m)))
-                        .expect("channel actor alive");
+                    c.send_message(ChannelActorMessage::PeerMessage(PCNMessage::AcceptChannel(
+                        m,
+                    )))
+                    .expect("channel actor alive");
                 }
             },
 
@@ -214,30 +228,24 @@ impl NetworkActor {
                 // may receive errors like DialerError.
             }
 
-            NetworkActorCommand::ControlPcnChannel(c) => match c {
-                ChannelCommand::OpenChannel(open_channel) => {
-                    debug!("OpenChannel command received: {:?}", &open_channel);
-                    let peer_session = state.get_peer_session(&open_channel.peer_id);
-                    match peer_session {
-                        None => {
-                            warn!(
-                                "Trying to control a not found peer {:?}",
-                                &open_channel.peer_id
-                            );
-                            return Err(Error::PeerNotFound(open_channel.peer_id));
-                        }
-                        Some(_session_id) => {
-                            Actor::spawn_linked(
-                                Some("channel".to_string()),
-                                ChannelActor::new(open_channel.peer_id.clone(), myself.clone()),
-                                ChannelInitializationParameter::OpenChannelCommand(open_channel),
-                                myself.clone().get_cell(),
-                            )
-                            .await?;
-                        }
-                    }
+            NetworkActorCommand::OpenChannel(open_channel) => {
+                if let Err(err) = Actor::spawn_linked(
+                    Some("channel".to_string()),
+                    ChannelActor::new(open_channel.peer_id.clone(), myself.clone()),
+                    ChannelInitializationParameter::OpenChannelCommand(open_channel),
+                    myself.clone().get_cell(),
+                )
+                .await
+                {
+                    error!("Failed to open channel: {}", err);
                 }
-            },
+            }
+
+            NetworkActorCommand::ControlPcnChannel(c) => {
+                state
+                    .send_command_to_channel(c.channel_id, c.command)
+                    .await?
+            }
         };
         Ok(())
     }
@@ -278,6 +286,20 @@ impl NetworkActorState {
         match self.get_peer_session(peer_id) {
             Some(session) => self.send_message_to_session(session, message).await,
             None => Err(Error::PeerNotFound(peer_id.clone())),
+        }
+    }
+
+    async fn send_command_to_channel(
+        &self,
+        channel_id: Hash256,
+        command: ChannelCommand,
+    ) -> crate::Result<()> {
+        match self.channels.get(&channel_id) {
+            Some(actor) => {
+                actor.send_message(ChannelActorMessage::Command(command))?;
+                Ok(())
+            }
+            None => Err(Error::ChannelNotFound(channel_id)),
         }
     }
 
