@@ -376,10 +376,16 @@ impl Handle {
         Self { actor }
     }
 
-    async fn emit_event(&self, event: NetworkServiceEvent) {
+    fn send_actor_message(&self, message: NetworkActorMessage) {
         // If we are closing the whole network service, we may have already stopped the network actor.
         // In that case the send_message will fail.
-        let _ = self.actor.send_message(NetworkActorMessage::Event(
+        // Ideally, we should close tentacle network service first, then stop the network actor.
+        // But ractor provides only api for `post_stop` instead of `pre_stop`.
+        let _ = self.actor.send_message(message);
+    }
+
+    fn emit_event(&self, event: NetworkServiceEvent) {
+        self.send_actor_message(NetworkActorMessage::Event(
             NetworkActorEvent::NetworkServiceEvent(event),
         ));
     }
@@ -407,11 +413,9 @@ impl ServiceProtocol for Handle {
         );
 
         if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
-            self.actor
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::PeerConnected(peer_id, context.session.clone()),
-                ))
-                .expect("network actor alive");
+            self.send_actor_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::PeerConnected(peer_id, context.session.clone()),
+            ));
         } else {
             warn!("Peer connected without remote pubkey {:?}", context.session);
         }
@@ -424,11 +428,9 @@ impl ServiceProtocol for Handle {
         );
 
         if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
-            self.actor
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::PeerDisconnected(peer_id, context.session.clone()),
-                ))
-                .expect("network actor alive");
+            self.send_actor_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::PeerDisconnected(peer_id, context.session.clone()),
+            ));
         } else {
             warn!(
                 "Peer disconnected without remote pubkey {:?}",
@@ -447,11 +449,9 @@ impl ServiceProtocol for Handle {
 
         let msg = unwrap_or_return!(PCNMessage::from_molecule_slice(&data), "parse message");
         if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
-            self.actor
-                .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::PeerMessage(peer_id, context.session.clone(), msg),
-                ))
-                .expect("network actor alive");
+            self.send_actor_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::PeerMessage(peer_id, context.session.clone(), msg),
+            ));
         } else {
             warn!(
                 "Received message from a peer without remote pubkey {:?}",
@@ -466,12 +466,10 @@ impl ServiceProtocol for Handle {
 #[async_trait]
 impl ServiceHandle for Handle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        self.emit_event(NetworkServiceEvent::ServiceError(error))
-            .await;
+        self.emit_event(NetworkServiceEvent::ServiceError(error));
     }
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        self.emit_event(NetworkServiceEvent::ServiceEvent(event))
-            .await;
+        self.emit_event(NetworkServiceEvent::ServiceEvent(event));
     }
 }
 
