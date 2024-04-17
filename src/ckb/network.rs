@@ -37,7 +37,7 @@ use crate::{unwrap_or_return, Error};
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 #[serde_as]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
@@ -126,7 +126,10 @@ impl NetworkActor {
                 session_id,
                 message,
             }) => {
-                debug!("Sending message to session {:?}", session_id);
+                debug!(
+                    "SendPcnMessageToSession command received: Sending message to session {:?}",
+                    session_id
+                );
                 state
                     .control
                     .send_message_to(session_id, PCN_PROTOCOL_ID, message.to_molecule_bytes())
@@ -134,7 +137,10 @@ impl NetworkActor {
             }
 
             NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
-                debug!("Sending message to peer {:?}", &peer_id);
+                debug!(
+                    "SendPcnMessage command received: sending message to peer {:?}",
+                    &peer_id
+                );
                 match state.peers.get(&peer_id) {
                     Some(actor) => {
                         actor
@@ -152,16 +158,19 @@ impl NetworkActor {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 // TODO: If we are already connected to the peer, skip connecting.
-                debug!("Dialing {}", &addr);
+                debug!("ConnectPeer command received, dialing {}", &addr);
                 state
                     .control
                     .dial(addr.clone(), TargetProtocol::All)
                     .await?
+                // TODO: note that the dial function does not return error immediately even if dial fails.
+                // Tentacle sends an event by calling handle_error function instead, which
+                // may receive errors like DialerError.
             }
 
             NetworkActorCommand::ControlPcnChannel(c) => match c {
                 ChannelCommand::OpenChannel(open_channel) => {
-                    debug!("Openning channel {:?}", &open_channel);
+                    debug!("OpenChannel command received: {:?}", &open_channel);
                     let peer_actor = state.peers.get(&open_channel.peer_id).cloned();
                     match peer_actor {
                         None => {
@@ -343,7 +352,6 @@ impl Actor for NetworkActor {
                 }
             },
             NetworkActorMessage::Command(command, sender) => {
-                debug!("Handling command");
                 let result = self.handle_command(myself, state, command).await;
                 if let Some(sender) = sender {
                     sender.send(result).await.expect("receiver not closed");

@@ -47,7 +47,6 @@ async fn handle_request(
                 .send(command)
                 .await
                 .expect("send command");
-            debug!("Waiting for command to be processed");
             match receiver.recv().await {
                 Some(Ok(_)) => StatusCode::OK,
                 Some(Err(err)) => {
