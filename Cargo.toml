@@ -62,6 +62,7 @@ secp256k1 = { version = "0.28.0", features = ["serde"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
 ractor = "0.9.7"
 
+
 [profile.release]
 panic = "abort"
 

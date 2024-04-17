@@ -156,25 +156,3 @@ union PCNMessage {
     RevokeAndAck,
     RemoveTlc,
 }
-
-
-array PaymentHash [byte; 32];
-option PaymentHashOpt (PaymentHash);
-option ExpiryTimeOpt (Duration);
-
-option AmountOpt (Uint64);
-option SiPrefixOpt (byte);
-
-table Duration {
-    seconds: Uint64,
-    nanos: Uint64,
-}
-
-table RawCkbInvoice {
-    currency: byte,
-    amount: AmountOpt,
-    prefix: SiPrefixOpt,
-    payment_hash: PaymentHashOpt,
-    description: BytesOpt,
-    expiry_time: ExpiryTimeOpt,
-}

@@ -1,0 +1,68 @@
+import blockchain;
+
+array PaymentHash [byte; 32];
+array Signature [byte; 64];
+option ExpiryTimeOpt (Duration);
+
+option AmountOpt (Uint64);
+option SiPrefixOpt (byte);
+option FeatureOpt (Uint32);
+
+table Duration {
+    seconds: Uint64,
+    nanos: Uint64,
+}
+
+table FinalHtlcTimeout {
+    attr_id: byte,
+    value: Uint64,
+}
+
+table FinalHtlcMinimumCltvExpiry {
+    attr_id: byte,
+    value: Uint64,
+}
+
+table ExpiryTime {
+    attr_id: byte,
+    value: Duration,
+}
+
+table Description {
+    attr_id: byte,
+    value: Bytes,
+}
+
+table FallbackAddr {
+    attr_id: byte,
+    value: Bytes,
+}
+
+table Feature {
+    attr_id: byte,
+    value: Uint64,
+}
+
+union InvoiceAttr {
+    ExpiryTime,
+    Description,
+    FinalHtlcTimeout,
+    FinalHtlcMinimumCltvExpiry,
+    FallbackAddr,
+    Feature,
+}
+
+vector InvoiceAttrsVec <InvoiceAttr>;
+
+table RawInvoiceData {
+    payment_hash: PaymentHash,
+    signature: Signature,
+    attrs: InvoiceAttrsVec,
+}
+
+table RawCkbInvoice {
+    currency: byte,
+    amount: AmountOpt,
+    prefix: SiPrefixOpt,
+    data: RawInvoiceData,
+}
