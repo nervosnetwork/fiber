@@ -37,7 +37,7 @@ use crate::{unwrap_or_return, Error};
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 #[serde_as]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
@@ -84,7 +84,7 @@ pub enum NetworkActorMessage {
     Command(
         NetworkActorCommand,
         // TODO: we may need to refine the following type according to each commands.
-        Option<oneshot::Sender<crate::Result<()>>>,
+        Option<mpsc::Sender<crate::Result<()>>>,
     ),
     Event(NetworkActorEvent),
 }
@@ -345,9 +345,8 @@ impl Actor for NetworkActor {
             NetworkActorMessage::Command(command, sender) => {
                 debug!("Handling command");
                 let result = self.handle_command(myself, state, command).await;
-                debug!("Command result: {:?}", result);
                 if let Some(sender) = sender {
-                    sender.send(result).expect("receiver not closed");
+                    sender.send(result).await.expect("receiver not closed");
                 }
             }
         }
