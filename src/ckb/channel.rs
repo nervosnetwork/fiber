@@ -183,7 +183,7 @@ impl Actor for ChannelActor {
             ChannelInitializationParameter::OpenChannelCommand(open_channel) => {
                 info!("Trying to open a channel to {:?}", &open_channel.peer_id);
 
-                let channel = open_channel.create_channel()?;
+                let mut channel = open_channel.create_channel()?;
 
                 let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
                 let message = PCNMessage::OpenChannel(OpenChannel {
@@ -230,6 +230,8 @@ impl Actor for ChannelActor {
                         }),
                     ))
                     .expect("network actor alive");
+                channel.state =
+                    ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
                 self.peer
                     .send_message(PeerActorMessage::ChannelCreated(channel.id(), myself))
                     .expect("peer actor alive");
@@ -322,8 +324,8 @@ pub enum ProcessingChannelError {
     InvalidChainHash(Hash256),
     #[error("Unsupported operation: {0}")]
     Unsupported(String),
-    #[error("Invalid state")]
-    InvalidState,
+    #[error("Invalid state: ")]
+    InvalidState(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
     #[error("Unimplemented operation: {0}")]
@@ -511,7 +513,11 @@ impl ChannelActorState {
         }
 
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
-            return Err(ProcessingChannelError::InvalidState);
+            return Err(ProcessingChannelError::InvalidState(format!(
+                "{0:?} expected, {1:?} given",
+                ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT,),
+                self.state
+            )));
         }
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
         let counterparty_pubkeys = (&accept_channel).into();
@@ -520,7 +526,9 @@ impl ChannelActorState {
             selected_contest_delay: accept_channel.to_self_delay as u64,
         });
 
-        debug!("OpenChannel: {:?}", &accept_channel);
+        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+
+        debug!("AcceptChannel message {:?} for channel openning processed successfully", &accept_channel);
         Ok(())
     }
 
@@ -572,7 +580,10 @@ impl ChannelActorState {
                         self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
                     }
                     _ => {
-                        return Err(ProcessingChannelError::InvalidState);
+                        return Err(ProcessingChannelError::InvalidState(
+                            "received ChannelReady message, but we're not ready for ChannelReady"
+                                .to_string(),
+                        ));
                     }
                 }
                 debug!("ChannelReady: {:?}", &channel_ready);
