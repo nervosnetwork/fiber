@@ -507,6 +507,13 @@ impl TryFrom<molecule_pcn::ChannelReady> for ChannelReady {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum TxCollaborationMsg {
+    TxAdd(TxAdd),
+    TxRemove(TxRemove),
+    TxComplete(TxComplete),
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxAdd {

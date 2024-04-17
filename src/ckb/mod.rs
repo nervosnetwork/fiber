@@ -16,6 +16,6 @@ pub mod gen;
 
 pub mod channel;
 
-mod types;
+pub mod types;
 
 pub mod serde_utils;

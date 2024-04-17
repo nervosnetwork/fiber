@@ -18,7 +18,7 @@ use super::{
     peer::PeerActorMessage,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey,
+        Pubkey, TxCollaborationMsg,
     },
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -261,10 +261,34 @@ impl Actor for ChannelActor {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum FundingTxInput {
+    TxAdd(Transaction),
+    TxRemove(Transaction),
+}
+
+impl Eq for FundingTxInput {}
+
+impl PartialEq for FundingTxInput {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (FundingTxInput::TxAdd(tx1), FundingTxInput::TxAdd(tx2)) => {
+                tx1.as_bytes() == tx2.as_bytes()
+            }
+            (FundingTxInput::TxRemove(tx1), FundingTxInput::TxRemove(tx2)) => {
+                tx1.as_bytes() == tx2.as_bytes()
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelActorState {
     pub state: ChannelState,
     pub temp_id: Hash256,
+
+    pub funding_tx_inputs: Vec<FundingTxInput>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -312,6 +336,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     AcceptChannel(AcceptChannel),
+    TxCollaborationMsg(TxCollaborationMsg),
     CommitmentSigned(CommitmentSigned),
     ChannelReady(ChannelReady),
 }
@@ -343,6 +368,14 @@ bitflags! {
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct CollaboratingFundingTxFlags: u32 {
+        const AWAITING_REMOTE_TX_COLLABORATION_MSG = 1;
+        const PREPARING_LOCAL_TX_COLLABORATION_MSG = 1 << 1;
+        const AWAITING_REMOTE_TX_COMPLETE = 1 << 2;
+        const COLLABRATION_COMPLETED = 1 << 3;
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
@@ -363,6 +396,8 @@ bitflags! {
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
+    /// We're collaborating with the other party on the funding transaction.
+    CollaboratingFundingTx(CollaboratingFundingTxFlags),
     /// We have sent `funding_created` and are awaiting a `funding_signed` to advance to
     /// `AwaitingChannelReady`. Note that this is nonsense for an inbound channel as we immediately generate
     /// `funding_signed` upon receipt of `funding_created`, so simply skip this state.
@@ -444,6 +479,7 @@ impl ChannelActorState {
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            funding_tx_inputs: vec![],
             was_initially_inbound: true,
             total_value: counterparty_value,
             temp_id: temp_channel_id,
@@ -483,6 +519,7 @@ impl ChannelActorState {
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
+            funding_tx_inputs: vec![],
             was_initially_inbound: false,
             total_value: value,
             temp_id: new_channel_id.into(),
@@ -528,7 +565,73 @@ impl ChannelActorState {
 
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
 
-        debug!("AcceptChannel message {:?} for channel openning processed successfully", &accept_channel);
+        debug!(
+            "AcceptChannel message {:?} for channel openning processed successfully",
+            &accept_channel
+        );
+        Ok(())
+    }
+
+    pub fn handle_tx_collaboration_msg(
+        &mut self,
+        msg: TxCollaborationMsg,
+    ) -> ProcessingChannelResult {
+        debug!("Processing TxAdd: {:?}", &msg);
+        match self.state {
+            // Starting transaction collaboration
+            ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
+                // Only the initator should start sending tx_add messages.
+                if !self.was_initially_inbound || !matches!(msg, TxCollaborationMsg::TxAdd(_)) {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Tx collaboration message received. It must be a TxAdd message from the initator of the channel (we are the {}, and this message is {:?})", if self.was_initially_inbound {"acceptor"} else {"initator"}, &msg),
+                    ));
+                }
+                self.state = ChannelState::CollaboratingFundingTx(
+                    CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+                );
+            }
+            // Alternate sending messages.
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
+            ) => {
+                self.state = ChannelState::CollaboratingFundingTx(
+                    CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+                );
+            }
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
+            ) => {
+                if matches!(msg, TxCollaborationMsg::TxComplete(_)) {
+                    self.state = ChannelState::CollaboratingFundingTx(
+                        CollaboratingFundingTxFlags::COLLABRATION_COMPLETED,
+                    );
+                } else {
+                    self.state = ChannelState::CollaboratingFundingTx(
+                        CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+                    );
+                }
+            }
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(
+                    "TxAdd message received, but we're not in the funding negotiation phase or expecting remote transaction collabration messages"
+                        .to_string(),
+                ));
+            }
+        }
+        match msg {
+            TxCollaborationMsg::TxAdd(msg) => {
+                self.funding_tx_inputs.push(FundingTxInput::TxAdd(msg.tx));
+            }
+            TxCollaborationMsg::TxRemove(msg) => {
+                self.funding_tx_inputs
+                    .push(FundingTxInput::TxRemove(msg.tx));
+            }
+            TxCollaborationMsg::TxComplete(msg) => {
+                self.state = ChannelState::CollaboratingFundingTx(
+                    CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
+                );
+            }
+        }
         Ok(())
     }
 
@@ -564,6 +667,7 @@ impl ChannelActorState {
             ChannelEvent::AcceptChannel(accept_channel) => {
                 self.handle_accept_channel_message(accept_channel)
             }
+            ChannelEvent::TxCollaborationMsg(msg) => self.handle_tx_collaboration_msg(msg),
             ChannelEvent::CommitmentSigned(commitment_signed) => {
                 self.handle_commitment_signed_message(commitment_signed)
             }
