@@ -1,4 +1,5 @@
 mod config;
+mod utils;
 pub use config::CkbConfig;
 
 mod network;

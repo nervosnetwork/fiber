@@ -3,10 +3,19 @@ use super::gen::{
     invoice::{RawCkbInvoice, RawCkbInvoiceBuilder},
 };
 use crate::ckb::gen::invoice::*;
+use crate::ckb::utils::{ar_decode, ar_encode};
+use bech32::{encode, FromBase32, ToBase32, Variant};
 use ckb_types::prelude::{Pack, Unpack};
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
+use nom::{branch::alt, combinator::opt};
+use nom::{
+    bytes::{complete::take_while1, streaming::tag},
+    IResult,
+};
 use serde::{Deserialize, Serialize};
+use std::{num::ParseIntError, str::FromStr};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -31,16 +40,45 @@ impl From<u8> for Currency {
     }
 }
 
+impl ToString for Currency {
+    fn to_string(&self) -> String {
+        match self {
+            Currency::Ckb => "ckb".to_string(),
+            Currency::CkbTestNet => "ckt".to_string(),
+        }
+    }
+}
+
+impl FromStr for Currency {
+    type Err = InvoiceParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ckb" => Ok(Self::Ckb),
+            "ckt" => Ok(Self::CkbTestNet),
+            _ => Err(InvoiceParseError::UnknownCurrency),
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Copy, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum SiPrefix {
     /// 10^-3
     Milli,
     /// 10^-6
     Micro,
-    /// 10^-9
-    Nano,
-    /// 10^-12
-    Pico,
+    /// 10^3
+    Kilo,
+}
+
+impl ToString for SiPrefix {
+    fn to_string(&self) -> String {
+        match self {
+            SiPrefix::Milli => "m".to_string(),
+            SiPrefix::Micro => "u".to_string(),
+            SiPrefix::Kilo => "k".to_string(),
+        }
+    }
 }
 
 impl From<u8> for SiPrefix {
@@ -48,9 +86,21 @@ impl From<u8> for SiPrefix {
         match byte {
             0 => Self::Milli,
             1 => Self::Micro,
-            2 => Self::Nano,
-            3 => Self::Pico,
+            2 => Self::Kilo,
             _ => panic!("Invalid value for SiPrefix"),
+        }
+    }
+}
+
+impl FromStr for SiPrefix {
+    type Err = InvoiceParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "m" => Ok(Self::Milli),
+            "u" => Ok(Self::Micro),
+            "k" => Ok(Self::Kilo),
+            _ => Err(InvoiceParseError::UnknownSiPrefix),
         }
     }
 }
@@ -77,6 +127,107 @@ pub struct CkbInvoice {
     pub amount: Option<u64>,
     pub prefix: Option<SiPrefix>,
     pub data: InvoiceData,
+}
+
+impl ToString for CkbInvoice {
+    fn to_string(&self) -> String {
+        let hrp = format!(
+            "ln{}{}{}",
+            self.currency.to_string(),
+            self.amount
+                .map_or_else(|| "".to_string(), |x| x.to_string()),
+            self.prefix
+                .map_or_else(|| "".to_string(), |x| x.to_string()),
+        );
+        let invoice_data = RawInvoiceData::from(self.clone().data);
+        let compressd = ar_encode(invoice_data.as_slice()).unwrap();
+        let mut base32 = Vec::with_capacity(compressd.len());
+        compressd.write_base32(&mut base32).unwrap();
+        encode(&hrp, base32, Variant::Bech32m).unwrap()
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub enum InvoiceParseError {
+    Bech32Error(bech32::Error),
+    ParseAmountError(ParseIntError),
+    //MalformedSignature(secp256k1::Error),
+    BadPrefix,
+    UnknownCurrency,
+    UnknownSiPrefix,
+    MalformedHRP,
+    TooShortDataPart,
+    UnexpectedEndOfTaggedFields,
+    PaddingError,
+    IntegerOverflowError,
+    InvalidSegWitProgramLength,
+    InvalidPubKeyHashLength,
+    InvalidScriptHashLength,
+    InvalidRecoveryId,
+    InvalidSliceLength(String),
+    /// Not an error, but used internally to signal that a part of the invoice should be ignored
+    /// according to BOLT11
+    Skip,
+}
+
+impl FromStr for CkbInvoice {
+    type Err = InvoiceParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (hrp, data, var) = bech32::decode(s).unwrap();
+
+        if var == bech32::Variant::Bech32 {
+            return Err(InvoiceParseError::Bech32Error(
+                bech32::Error::InvalidChecksum,
+            ));
+        }
+
+        if data.len() < 104 {
+            return Err(InvoiceParseError::TooShortDataPart);
+        }
+        let (currency, amount, prefix) = parse_hrp(&hrp)?;
+        let data = Vec::<u8>::from_base32(&data).unwrap();
+        let decoded_data = ar_decode(&data).unwrap();
+        let invoice_data = RawInvoiceData::from_slice(&decoded_data).unwrap();
+        let invoice = CkbInvoice {
+            currency,
+            amount,
+            prefix,
+            data: invoice_data.try_into().unwrap(),
+        };
+        Ok(invoice)
+    }
+}
+
+fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
+    let (input, _) = tag("ln")(input)?;
+    let (input, currency) = alt((tag("ckb"), tag("ckt")))(input)?;
+    let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
+    let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
+    Ok((input, (currency, amount, si)))
+}
+
+fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceParseError> {
+    match nom_scan_hrp(input) {
+        Ok((left, (currency, amount, si_prefix))) => {
+            if !left.is_empty() {
+                return Err(InvoiceParseError::MalformedHRP);
+            }
+            let currency =
+                Currency::from_str(currency).map_err(|_| InvoiceParseError::UnknownCurrency)?;
+            let amount = amount
+                .map(|x| {
+                    x.parse()
+                        .map_err(|err| InvoiceParseError::ParseAmountError(err))
+                })
+                .transpose()?;
+            let si_prefix = si_prefix
+                .map(|x| SiPrefix::from_str(x).map_err(|_| InvoiceParseError::UnknownSiPrefix))
+                .transpose()?;
+            Ok((currency, amount, si_prefix))
+        }
+        Err(_) => Err(InvoiceParseError::MalformedHRP),
+    }
 }
 
 impl From<Attribute> for InvoiceAttr {
@@ -216,12 +367,11 @@ impl TryFrom<molecule_invoice::RawInvoiceData> for InvoiceData {
 mod tests {
     use super::*;
 
-    use bech32::{decode, encode, FromBase32, ToBase32, Variant};
     fn mock_invoice() -> CkbInvoice {
         CkbInvoice {
             currency: Currency::Ckb,
             amount: Some(1280),
-            prefix: Some(SiPrefix::Milli),
+            prefix: Some(SiPrefix::Kilo),
             data: InvoiceData {
                 payment_hash: [0u8; 32],
                 signature: [0u8; 64],
@@ -235,33 +385,119 @@ mod tests {
             },
         }
     }
+
+    #[test]
+    fn test_parse_hrp() {
+        let res = parse_hrp("lnckb1280k");
+        assert_eq!(res, Ok((Currency::Ckb, Some(1280), Some(SiPrefix::Kilo))));
+
+        let res = parse_hrp("lnckb");
+        assert_eq!(res, Ok((Currency::Ckb, None, None)));
+
+        let res = parse_hrp("lnckt1023");
+        assert_eq!(res, Ok((Currency::CkbTestNet, Some(1023), None)));
+
+        let res = parse_hrp("lnckt1023u");
+        assert_eq!(
+            res,
+            Ok((Currency::CkbTestNet, Some(1023), Some(SiPrefix::Micro)))
+        );
+
+        let res = parse_hrp("lncktk");
+        assert_eq!(res, Ok((Currency::CkbTestNet, None, Some(SiPrefix::Kilo))));
+
+        let res = parse_hrp("xnckb");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("lxckb");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("lnckt");
+        assert_eq!(res, Ok((Currency::CkbTestNet, None, None)));
+
+        let res = parse_hrp("lnxkt");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("lncktt");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("lnckt1x24");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("lnckt000k");
+        assert_eq!(
+            res,
+            Ok((Currency::CkbTestNet, Some(0), Some(SiPrefix::Kilo)))
+        );
+
+        let res =
+            parse_hrp("lnckt1024444444444444444444444444444444444444444444444444444444444444");
+        assert!(matches!(res, Err(InvoiceParseError::ParseAmountError(_))));
+
+        let res = parse_hrp("lnckt0x");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+
+        let res = parse_hrp("");
+        assert_eq!(res, Err(InvoiceParseError::MalformedHRP));
+    }
+
     #[test]
     fn test_ckb_invoice() {
         let ckb_invoice = mock_invoice();
-        let ckb_invoice_backup = ckb_invoice.clone();
-
-        let invoice_copy: RawCkbInvoice = ckb_invoice.into();
-        let ckb_invoice_rec: CkbInvoice = invoice_copy.try_into().unwrap();
-
-        assert_eq!(ckb_invoice_rec, ckb_invoice_backup);
+        let ckb_invoice_clone = ckb_invoice.clone();
+        let raw_invoice: RawCkbInvoice = ckb_invoice.into();
+        let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
+        assert_eq!(decoded_invoice, ckb_invoice_clone);
     }
 
     #[test]
     fn test_invoice_bc32m() {
         let invoice = mock_invoice();
-        let raw_invoice = RawCkbInvoice::from(invoice.clone());
-        let slice = raw_invoice.as_slice();
-        let mut base32 = Vec::with_capacity(slice.len());
-        slice.write_base32(&mut base32).unwrap();
-        let result = encode("hrp", base32, Variant::Bech32).unwrap();
-        eprintln!("invoice: {}", result);
-        eprintln!("invoice_len: {:?}", result.len());
-        let (msg, data, _) = decode(&result).unwrap();
-        assert_eq!(msg, "hrp".to_string());
-        // convert from base32 to slice
-        let data = Vec::<u8>::from_base32(&data).unwrap();
-        let slice = RawCkbInvoice::from_slice(&data).unwrap();
-        let decoded_invoice: CkbInvoice = slice.try_into().unwrap();
+
+        let address = invoice.to_string();
+        assert!(address.starts_with("lnckb1280k1"));
+
+        let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
+    }
+
+    #[test]
+    fn test_invoice_bc32m_not_same() {
+        let invoice = CkbInvoice {
+            currency: Currency::Ckb,
+            amount: Some(1280),
+            prefix: Some(SiPrefix::Kilo),
+            data: InvoiceData {
+                payment_hash: [0u8; 32],
+                signature: [0u8; 64],
+                attrs: vec![
+                    Attribute::FinalHtlcTimeout(5),
+                    Attribute::FinalHtlcMinimumCltvExpiry(12),
+                    Attribute::Description("description hello".to_string()),
+                    Attribute::ExpiryTime(Duration::from_secs(1024)),
+                    Attribute::FallbackAddr("address".to_string()),
+                ],
+            },
+        };
+
+        let address = invoice.to_string();
+        let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
+        assert_eq!(decoded_invoice, invoice);
+
+        let mock_invoice = mock_invoice();
+        let mock_address = mock_invoice.to_string();
+        assert_ne!(mock_address, address);
+    }
+
+    #[test]
+    fn test_compress() {
+        let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
+        let bytes = input.as_bytes();
+        let compressed = ar_encode(input.as_bytes()).unwrap();
+
+        let decompressed = ar_decode(&compressed).unwrap();
+        let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
+        assert_eq!(input, decompressed_str);
+        assert!(compressed.len() < bytes.len());
     }
 }
