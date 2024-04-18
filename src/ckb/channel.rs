@@ -13,8 +13,6 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use std::fmt::Debug;
 
-use crate::ckb::NetworkActorEvent;
-
 use super::{
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperBase64,
@@ -22,11 +20,14 @@ use super::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
     },
-    NetworkActorCommand, NetworkActorMessage,
+    NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
 
 pub enum ChannelActorMessage {
+    /// Command are the messages that are sent to the channel actor to perform some action.
+    /// It is normally generated from a user request.
     Command(ChannelCommand),
+    /// PeerMessage are the messages sent from the peer.
     PeerMessage(PCNMessage),
 }
 
@@ -403,13 +404,13 @@ impl Actor for ChannelActor {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = state.handle_peer_message(message) {
+                if let Err(error) = state.handle_peer_message(message, self.network.clone()) {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
@@ -701,13 +702,21 @@ impl ChannelActorState {
     pub fn handle_peer_message(
         &mut self,
         message: PCNMessage,
+        network: ActorRef<NetworkActorMessage>,
     ) -> Result<(), ProcessingChannelError> {
         match message {
             PCNMessage::OpenChannel(_) => {
                 panic!("OpenChannel message should be processed while prestarting")
             }
             PCNMessage::AcceptChannel(accept_channel) => {
-                self.handle_accept_channel_message(accept_channel)
+                self.handle_accept_channel_message(accept_channel)?;
+                self.fill_in_channel_id();
+                network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelAccepted(self.id(), self.temp_id),
+                    ))
+                    .expect("network actor alive");
+                Ok(())
             }
             PCNMessage::TxAdd(tx) => {
                 self.handle_tx_collaboration_msg(TxCollaborationMsg::TxAdd(tx))

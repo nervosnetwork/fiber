@@ -88,7 +88,10 @@ pub enum NetworkActorEvent {
     PeerMessage(PeerId, SessionContext, PCNMessage),
 
     /// Channel related events.
+    /// A new channel is created and the peer id and actor reference is given here.
     ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
+    /// A channel has been accepted. The two Hash256 are respectively newly agreed channel id and temp channel id.
+    ChannelAccepted(Hash256, Hash256),
 
     /// Network service events to be sent to outside observers.
     NetworkServiceEvent(NetworkServiceEvent),
@@ -181,7 +184,7 @@ impl NetworkActor {
                 debug!("Test message {:?}", test);
             }
 
-            _ => match state.channels.remove(&message.get_channel_id()) {
+            _ => match state.channels.get(&message.get_channel_id()) {
                 None => {
                     return Err(Error::ChannelNotFound(message.get_channel_id()));
                 }
@@ -328,9 +331,10 @@ impl NetworkActorState {
     fn on_channel_created(
         &mut self,
         id: Hash256,
-        _peer_id: PeerId,
+        peer_id: PeerId,
         actor: ActorRef<ChannelActorMessage>,
     ) {
+        debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
         self.channels.insert(id, actor);
     }
 }
@@ -407,6 +411,12 @@ impl Actor for NetworkActor {
                 }
                 NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
                     state.on_channel_created(channel_id, peer_id, actor)
+                }
+                NetworkActorEvent::ChannelAccepted(new, old) => {
+                    assert_ne!(new, old, "new and old channel id must be different");
+                    let channel = state.channels.remove(&old).expect("channel exists");
+                    state.channels.insert(new, channel);
+                    debug!("Channel accepted: {:?} -> {:?}", old, new);
                 }
                 NetworkActorEvent::PeerMessage(peer_id, session, message) => {
                     self.handle_peer_message(myself, state, peer_id, session, message)
