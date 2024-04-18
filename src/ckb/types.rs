@@ -1004,6 +1004,31 @@ pub enum PCNMessage {
     RemoveTlc(RemoveTlc),
 }
 
+impl PCNMessage {
+    pub fn get_channel_id(&self) -> Hash256 {
+        match &self {
+            PCNMessage::TestMessage(_) => unreachable!(),
+            PCNMessage::OpenChannel(open_channel) => open_channel.channel_id,
+            PCNMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
+            PCNMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
+            PCNMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
+            PCNMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+            PCNMessage::TxAdd(tx_add) => tx_add.channel_id,
+            PCNMessage::TxRemove(tx_remove) => tx_remove.channel_id,
+            PCNMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+            PCNMessage::TxAbort(tx_abort) => tx_abort.channel_id,
+            PCNMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
+            PCNMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
+            PCNMessage::Shutdown(shutdown) => shutdown.channel_id,
+            PCNMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            PCNMessage::AddTlc(add_tlc) => add_tlc.channel_id,
+            PCNMessage::TlcsSigned(tlcs_signed) => tlcs_signed.channel_id,
+            PCNMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+            PCNMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+        }
+    }
+}
+
 impl From<PCNMessage> for molecule_pcn::PCNMessageUnion {
     fn from(pcn_message: PCNMessage) -> Self {
         match pcn_message {

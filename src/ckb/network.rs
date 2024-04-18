@@ -181,21 +181,15 @@ impl NetworkActor {
                 debug!("Test message {:?}", test);
             }
 
-            PCNMessage::AcceptChannel(m) => match state.channels.remove(&m.channel_id) {
+            _ => match state.channels.remove(&message.get_channel_id()) {
                 None => {
-                    return Err(Error::ChannelNotFound(m.channel_id));
+                    return Err(Error::ChannelNotFound(message.get_channel_id()));
                 }
                 Some(c) => {
-                    c.send_message(ChannelActorMessage::PeerMessage(PCNMessage::AcceptChannel(
-                        m,
-                    )))
-                    .expect("channel actor alive");
+                    c.send_message(ChannelActorMessage::PeerMessage(message))
+                        .expect("channel actor alive");
                 }
             },
-
-            _ => {
-                error!("Message handling for {:?} unimplemented", message);
-            }
         };
         Ok(())
     }

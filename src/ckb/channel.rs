@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use molecule::prelude::Entity;
 use musig2::SecNonce;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
@@ -134,23 +134,6 @@ impl ChannelActor {
                 )),
             ))
             .expect("network actor alive");
-        Ok(())
-    }
-
-    pub fn handle_peer_message(
-        &self,
-        state: &mut ChannelActorState,
-        message: PCNMessage,
-    ) -> Result<(), ProcessingChannelError> {
-        match message {
-            PCNMessage::OpenChannel(_) => {
-                panic!("OpenChannel message should be processed while prestarting")
-            }
-            PCNMessage::AcceptChannel(accept_channel) => {
-                state.step(ChannelEvent::AcceptChannel(accept_channel))?;
-            }
-            _ => {}
-        }
         Ok(())
     }
 
@@ -426,7 +409,7 @@ impl Actor for ChannelActor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(state, message) {
+                if let Err(error) = state.handle_peer_message(message) {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
@@ -501,12 +484,6 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
     let mut result = [0u8; 32];
     hasher.finalize(&mut result);
     result
-}
-
-impl ChannelActorState {
-    pub fn id(&self) -> Hash256 {
-        self.id.unwrap_or(self.temp_id)
-    }
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -717,6 +694,62 @@ impl ChannelActorState {
         }
     }
 
+    pub fn id(&self) -> Hash256 {
+        self.id.unwrap_or(self.temp_id)
+    }
+
+    pub fn handle_peer_message(
+        &mut self,
+        message: PCNMessage,
+    ) -> Result<(), ProcessingChannelError> {
+        match message {
+            PCNMessage::OpenChannel(_) => {
+                panic!("OpenChannel message should be processed while prestarting")
+            }
+            PCNMessage::AcceptChannel(accept_channel) => {
+                self.handle_accept_channel_message(accept_channel)
+            }
+            PCNMessage::TxAdd(tx) => {
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxAdd(tx))
+            }
+            PCNMessage::TxRemove(tx) => {
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxRemove(tx))
+            }
+            PCNMessage::TxComplete(tx) => {
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
+            }
+            PCNMessage::CommitmentSigned(commitment_signed) => {
+                self.handle_commitment_signed_message(commitment_signed)
+            }
+            PCNMessage::ChannelReady(channel_ready) => {
+                match self.state {
+                    ChannelState::FundingNegotiated => {
+                        self.state = ChannelState::AwaitingChannelReady(
+                            AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
+                        );
+                    }
+                    ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::THEIR_CHANNEL_READY,
+                    ) => {
+                        self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                    }
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(
+                            "received ChannelReady message, but we're not ready for ChannelReady"
+                                .to_string(),
+                        ));
+                    }
+                }
+                debug!("ChannelReady: {:?}", &channel_ready);
+                Ok(())
+            }
+            _ => {
+                warn!("Received unsupported message: {:?}", &message);
+                Ok(())
+            }
+        }
+    }
+
     pub fn handle_accept_channel_message(
         &mut self,
         accept_channel: AcceptChannel,
@@ -839,40 +872,6 @@ impl ChannelActorState {
             derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
 
         self.id = Some(channel_id);
-    }
-
-    pub fn step(&mut self, event: ChannelEvent) -> ProcessingChannelResult {
-        match event {
-            ChannelEvent::AcceptChannel(accept_channel) => {
-                self.handle_accept_channel_message(accept_channel)
-            }
-            ChannelEvent::TxCollaborationMsg(msg) => self.handle_tx_collaboration_msg(msg),
-            ChannelEvent::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_message(commitment_signed)
-            }
-            ChannelEvent::ChannelReady(channel_ready) => {
-                match self.state {
-                    ChannelState::FundingNegotiated => {
-                        self.state = ChannelState::AwaitingChannelReady(
-                            AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
-                        );
-                    }
-                    ChannelState::AwaitingChannelReady(
-                        AwaitingChannelReadyFlags::THEIR_CHANNEL_READY,
-                    ) => {
-                        self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
-                    }
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(
-                            "received ChannelReady message, but we're not ready for ChannelReady"
-                                .to_string(),
-                        ));
-                    }
-                }
-                debug!("ChannelReady: {:?}", &channel_ready);
-                Ok(())
-            }
-        }
     }
 
     pub fn is_funded(&self) -> bool {
