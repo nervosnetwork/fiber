@@ -1,6 +1,7 @@
 import blockchain;
 
 array PaymentHash [byte; 32];
+array PaymentSecret [byte; 32];
 array Signature [byte; 64];
 option ExpiryTimeOpt (Duration);
 
@@ -43,6 +44,16 @@ table Feature {
     value: Uint64,
 }
 
+table UdtScript {
+    attr_id: byte,
+    value: Script,
+}
+
+table PayeePublicKey {
+    attr_id: byte,
+    value: Bytes,
+}
+
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -50,12 +61,15 @@ union InvoiceAttr {
     FinalHtlcMinimumCltvExpiry,
     FallbackAddr,
     Feature,
+    UdtScript,
+    PayeePublicKey,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;
 
 table RawInvoiceData {
     payment_hash: PaymentHash,
+    payment_secret: PaymentSecret,
     signature: Signature,
     attrs: InvoiceAttrsVec,
 }

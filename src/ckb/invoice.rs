@@ -1,11 +1,10 @@
-use super::gen::{
-    invoice as molecule_invoice,
-    invoice::{RawCkbInvoice, RawCkbInvoiceBuilder},
-};
-use crate::ckb::gen::invoice::*;
-use crate::ckb::utils::{ar_decode, ar_encode};
+use super::gen::{invoice as gen_invoice, invoice::*};
+use crate::ckb::utils::{ar_decompress, ar_encompress};
 use bech32::{encode, FromBase32, ToBase32, Variant};
-use ckb_types::prelude::{Pack, Unpack};
+use ckb_types::{
+    packed::Script,
+    prelude::{Pack, Unpack},
+};
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
 use nom::{branch::alt, combinator::opt};
@@ -15,14 +14,7 @@ use nom::{
 };
 use serde::{Deserialize, Serialize};
 use std::{num::ParseIntError, str::FromStr};
-
 use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Molecule error: {0}")]
-    Molecule(#[from] molecule::error::VerificationError),
-}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
@@ -112,12 +104,15 @@ pub enum Attribute {
     ExpiryTime(Duration),
     Description(String),
     FallbackAddr(String),
+    UdtScript(Script),
+    PayeePublicKey([u8; 33]),
     Feature(u64),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct InvoiceData {
     pub payment_hash: [u8; 32],
+    pub payment_secret: [u8; 32],
     pub signature: [u8; 64],
     pub attrs: Vec<Attribute>,
 }
@@ -140,10 +135,39 @@ impl ToString for CkbInvoice {
                 .map_or_else(|| "".to_string(), |x| x.to_string()),
         );
         let invoice_data = RawInvoiceData::from(self.clone().data);
-        let compressd = ar_encode(invoice_data.as_slice()).unwrap();
-        let mut base32 = Vec::with_capacity(compressd.len());
-        compressd.write_base32(&mut base32).unwrap();
+        let compressed = ar_encompress(invoice_data.as_slice()).unwrap();
+        let mut base32 = Vec::with_capacity(compressed.len());
+        compressed.write_base32(&mut base32).unwrap();
         encode(&hrp, base32, Variant::Bech32m).unwrap()
+    }
+}
+
+impl FromStr for CkbInvoice {
+    type Err = InvoiceParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (hrp, data, var) = bech32::decode(s).unwrap();
+
+        if var == bech32::Variant::Bech32 {
+            return Err(InvoiceParseError::Bech32Error(
+                bech32::Error::InvalidChecksum,
+            ));
+        }
+
+        if data.len() < 104 {
+            return Err(InvoiceParseError::TooShortDataPart);
+        }
+        let (currency, amount, prefix) = parse_hrp(&hrp)?;
+        let data = Vec::<u8>::from_base32(&data).unwrap();
+        let decompressed = ar_decompress(&data).unwrap();
+        let invoice_data = RawInvoiceData::from_slice(&decompressed).unwrap();
+        let invoice = CkbInvoice {
+            currency,
+            amount,
+            prefix,
+            data: invoice_data.try_into().unwrap(),
+        };
+        Ok(invoice)
     }
 }
 
@@ -165,38 +189,8 @@ pub enum InvoiceParseError {
     InvalidScriptHashLength,
     InvalidRecoveryId,
     InvalidSliceLength(String),
-    /// Not an error, but used internally to signal that a part of the invoice should be ignored
     /// according to BOLT11
     Skip,
-}
-
-impl FromStr for CkbInvoice {
-    type Err = InvoiceParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (hrp, data, var) = bech32::decode(s).unwrap();
-
-        if var == bech32::Variant::Bech32 {
-            return Err(InvoiceParseError::Bech32Error(
-                bech32::Error::InvalidChecksum,
-            ));
-        }
-
-        if data.len() < 104 {
-            return Err(InvoiceParseError::TooShortDataPart);
-        }
-        let (currency, amount, prefix) = parse_hrp(&hrp)?;
-        let data = Vec::<u8>::from_base32(&data).unwrap();
-        let decoded_data = ar_decode(&data).unwrap();
-        let invoice_data = RawInvoiceData::from_slice(&decoded_data).unwrap();
-        let invoice = CkbInvoice {
-            currency,
-            amount,
-            prefix,
-            data: invoice_data.try_into().unwrap(),
-        };
-        Ok(invoice)
-    }
 }
 
 fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
@@ -236,7 +230,7 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::ExpiryTime(x) => {
                 let seconds = x.as_secs();
                 let nanos = x.subsec_nanos() as u64;
-                let value = molecule_invoice::Duration::new_builder()
+                let value = gen_invoice::Duration::new_builder()
                     .seconds(seconds.pack())
                     .nanos(nanos.pack())
                     .build();
@@ -261,6 +255,12 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::Feature(value) => {
                 InvoiceAttrUnion::Feature(Feature::new_builder().value(value.pack()).build())
             }
+            Attribute::UdtScript(script) => {
+                InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script).build())
+            }
+            Attribute::PayeePublicKey(pubkey) => InvoiceAttrUnion::PayeePublicKey(
+                PayeePublicKey::new_builder().value(pubkey.pack()).build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -291,6 +291,11 @@ impl From<InvoiceAttr> for Attribute {
                 Attribute::FallbackAddr(String::from_utf8(value).unwrap())
             }
             InvoiceAttrUnion::Feature(x) => Attribute::Feature(x.value().unpack()),
+            InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(x.value()),
+            InvoiceAttrUnion::PayeePublicKey(x) => {
+                let value: Vec<u8> = x.value().unpack();
+                Attribute::PayeePublicKey((&value[..]).try_into().unwrap())
+            }
         }
     }
 }
@@ -314,10 +319,15 @@ impl From<CkbInvoice> for RawCkbInvoice {
     }
 }
 
-impl TryFrom<molecule_invoice::RawCkbInvoice> for CkbInvoice {
+#[derive(Error, Debug)]
+pub enum Error {
+    #[error("Molecule error: {0}")]
+    Molecule(#[from] molecule::error::VerificationError),
+}
+impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
     type Error = Error;
 
-    fn try_from(invoice: molecule_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
+    fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
         Ok(CkbInvoice {
             currency: (u8::from(invoice.currency())).into(),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
@@ -327,10 +337,11 @@ impl TryFrom<molecule_invoice::RawCkbInvoice> for CkbInvoice {
     }
 }
 
-impl From<InvoiceData> for molecule_invoice::RawInvoiceData {
+impl From<InvoiceData> for gen_invoice::RawInvoiceData {
     fn from(data: InvoiceData) -> Self {
         RawInvoiceDataBuilder::default()
             .payment_hash(PaymentHash::from(data.payment_hash))
+            .payment_secret(PaymentSecret::from(data.payment_secret))
             .signature(Signature::from(data.signature))
             .attrs(
                 InvoiceAttrsVec::new_builder()
@@ -346,12 +357,13 @@ impl From<InvoiceData> for molecule_invoice::RawInvoiceData {
     }
 }
 
-impl TryFrom<molecule_invoice::RawInvoiceData> for InvoiceData {
+impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
     type Error = Error;
 
-    fn try_from(data: molecule_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
+    fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
             payment_hash: data.payment_hash().into(),
+            payment_secret: data.payment_secret().into(),
             signature: data.signature().into(),
             attrs: data
                 .attrs()
@@ -362,10 +374,13 @@ impl TryFrom<molecule_invoice::RawInvoiceData> for InvoiceData {
     }
 }
 
-// write test for invoices
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn random_u8_array(num: usize) -> Vec<u8> {
+        (0..num).map(|_| rand::random::<u8>()).collect()
+    }
 
     fn mock_invoice() -> CkbInvoice {
         CkbInvoice {
@@ -373,14 +388,17 @@ mod tests {
             amount: Some(1280),
             prefix: Some(SiPrefix::Kilo),
             data: InvoiceData {
-                payment_hash: [0u8; 32],
-                signature: [0u8; 64],
+                payment_hash: random_u8_array(32).try_into().unwrap(),
+                payment_secret: random_u8_array(32).try_into().unwrap(),
+                signature: random_u8_array(64).try_into().unwrap(),
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
                     Attribute::Description("description".to_string()),
                     Attribute::ExpiryTime(Duration::from_secs(1024)),
                     Attribute::FallbackAddr("address".to_string()),
+                    Attribute::UdtScript(Script::default()),
+                    Attribute::PayeePublicKey(random_u8_array(33).try_into().unwrap()),
                 ],
             },
         }
@@ -456,6 +474,7 @@ mod tests {
 
         let address = invoice.to_string();
         assert!(address.starts_with("lnckb1280k1"));
+        //eprintln!("now got address: {}", address);
 
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
@@ -469,6 +488,7 @@ mod tests {
             prefix: Some(SiPrefix::Kilo),
             data: InvoiceData {
                 payment_hash: [0u8; 32],
+                payment_secret: [0u8; 32],
                 signature: [0u8; 64],
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
@@ -493,9 +513,9 @@ mod tests {
     fn test_compress() {
         let input = "hrp1gyqsqqq5qqqqq9gqqqqp6qqqqq0qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq2qqqqqqqqqqqyvqsqqqsqqqqqvqqqqq8";
         let bytes = input.as_bytes();
-        let compressed = ar_encode(input.as_bytes()).unwrap();
+        let compressed = ar_encompress(input.as_bytes()).unwrap();
 
-        let decompressed = ar_decode(&compressed).unwrap();
+        let decompressed = ar_decompress(&compressed).unwrap();
         let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
         assert_eq!(input, decompressed_str);
         assert!(compressed.len() < bytes.len());

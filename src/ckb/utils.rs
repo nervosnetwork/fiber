@@ -3,7 +3,7 @@ use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use std::io::{Cursor, Result as IoResult};
 
 /// Encodes bytes and returns the compressed form
-pub(crate) fn ar_encode(data: &[u8]) -> IoResult<Vec<u8>> {
+pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut compressed_writer = BitWriter::new(Cursor::new(vec![]));
     let mut encoder = ArithmeticEncoder::new(48);
@@ -23,7 +23,7 @@ pub(crate) fn ar_encode(data: &[u8]) -> IoResult<Vec<u8>> {
 }
 
 /// Decompresses the data
-pub(crate) fn ar_decode(data: &[u8]) -> IoResult<Vec<u8>> {
+pub(crate) fn ar_decompress(data: &[u8]) -> IoResult<Vec<u8>> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut input_reader = BitReader::<_, MSB>::new(data);
     let mut decoder = ArithmeticDecoder::new(48);
