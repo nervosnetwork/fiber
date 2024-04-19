@@ -1,6 +1,8 @@
+#![allow(dead_code)]
 use super::gen::{invoice as gen_invoice, invoice::*};
 use crate::ckb::utils::{ar_decompress, ar_encompress};
 use bech32::{encode, FromBase32, ToBase32, Variant};
+use bitcoin::secp256k1::PublicKey;
 use ckb_types::{
     packed::Script,
     prelude::{Pack, Unpack},
@@ -97,7 +99,7 @@ impl FromStr for SiPrefix {
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Attribute {
     FinalHtlcTimeout(u64),
     FinalHtlcMinimumCltvExpiry(u64),
@@ -105,7 +107,7 @@ pub enum Attribute {
     Description(String),
     FallbackAddr(String),
     UdtScript(Script),
-    PayeePublicKey([u8; 33]),
+    PayeePublicKey(PublicKey),
     Feature(u64),
 }
 
@@ -259,7 +261,9 @@ impl From<Attribute> for InvoiceAttr {
                 InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script).build())
             }
             Attribute::PayeePublicKey(pubkey) => InvoiceAttrUnion::PayeePublicKey(
-                PayeePublicKey::new_builder().value(pubkey.pack()).build(),
+                PayeePublicKey::new_builder()
+                    .value(pubkey.serialize().pack())
+                    .build(),
             ),
         };
         InvoiceAttr::new_builder().set(a).build()
@@ -294,7 +298,7 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(x.value()),
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
-                Attribute::PayeePublicKey((&value[..]).try_into().unwrap())
+                Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
             }
         }
     }
@@ -316,6 +320,124 @@ impl From<CkbInvoice> for RawCkbInvoice {
             )
             .data(InvoiceData::from(invoice.data).into())
             .build()
+    }
+}
+
+/// Errors that may occur when constructing a new [`RawBolt11Invoice`] or [`Bolt11Invoice`]
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum CreationError {
+    /// Duplicated attribute key
+    DuplicatedAttributeKey(String),
+
+    /// No payment hash
+    NoPaymentHash,
+
+    /// No payment secret
+    NoPaymentSecret,
+
+    /// No signature
+    NoSignature,
+}
+
+pub struct InvoiceBuilder {
+    currency: Currency,
+    amount: Option<u64>,
+    prefix: Option<SiPrefix>,
+    payment_hash: Option<[u8; 32]>,
+    payment_secret: Option<[u8; 32]>,
+    signature: Option<[u8; 64]>,
+    attrs: Vec<Attribute>,
+}
+
+impl InvoiceBuilder {
+    pub fn new() -> Self {
+        Self {
+            currency: Currency::Ckb,
+            amount: None,
+            prefix: None,
+            payment_hash: None,
+            payment_secret: None,
+            signature: None,
+            attrs: Vec::new(),
+        }
+    }
+
+    pub fn currency(mut self, currency: Currency) -> Self {
+        self.currency = currency;
+        self
+    }
+
+    pub fn amount(mut self, amount: Option<u64>) -> Self {
+        self.amount = amount;
+        self
+    }
+
+    pub fn prefix(mut self, prefix: Option<SiPrefix>) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    pub fn payment_hash(mut self, payment_hash: [u8; 32]) -> Self {
+        self.payment_hash = Some(payment_hash);
+        self
+    }
+
+    pub fn payment_secret(mut self, payment_secret: [u8; 32]) -> Self {
+        self.payment_secret = Some(payment_secret);
+        self
+    }
+
+    pub fn signature(mut self, signature: [u8; 64]) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    pub fn add_attr(mut self, attr: Attribute) -> Self {
+        self.attrs.push(attr);
+        self
+    }
+
+    /// Sets the payee's public key.
+    pub fn payee_pub_key(self, pub_key: PublicKey) -> Self {
+        self.add_attr(Attribute::PayeePublicKey(pub_key.into()))
+    }
+
+    /// Sets the expiry time, dropping the subsecond part (which is not representable in BOLT 11
+    /// invoices).
+    pub fn expiry_time(self, expiry_time: Duration) -> Self {
+        self.add_attr(Attribute::ExpiryTime(expiry_time))
+    }
+
+    /// Adds a fallback address.
+    pub fn fallback(self, fallback: String) -> Self {
+        self.add_attr(Attribute::FallbackAddr(fallback))
+    }
+
+    pub fn build_raw(self) -> Result<CkbInvoice, CreationError> {
+        self.check_duplicated_attrs()?;
+        Ok(CkbInvoice {
+            currency: self.currency,
+            amount: self.amount,
+            prefix: self.prefix,
+            data: InvoiceData {
+                payment_hash: self.payment_hash.ok_or(CreationError::NoPaymentHash)?,
+                payment_secret: self.payment_secret.ok_or(CreationError::NoPaymentSecret)?,
+                signature: self.signature.ok_or(CreationError::NoSignature)?,
+                attrs: self.attrs,
+            },
+        })
+    }
+
+    fn check_duplicated_attrs(&self) -> Result<(), CreationError> {
+        // check is there any duplicate attribute key set
+        for (i, attr) in self.attrs.iter().enumerate() {
+            for other in self.attrs.iter().skip(i + 1) {
+                if std::mem::discriminant(attr) == std::mem::discriminant(other) {
+                    return Err(CreationError::DuplicatedAttributeKey(format!("{:?}", attr)));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -376,10 +498,18 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::key::{KeyPair, Secp256k1};
+
     use super::*;
 
     fn random_u8_array(num: usize) -> Vec<u8> {
         (0..num).map(|_| rand::random::<u8>()).collect()
+    }
+
+    fn gen_rand_public_key() -> PublicKey {
+        let secp = Secp256k1::new();
+        let key_pair = KeyPair::new(&secp, &mut rand::thread_rng());
+        PublicKey::from_keypair(&key_pair)
     }
 
     fn mock_invoice() -> CkbInvoice {
@@ -398,7 +528,7 @@ mod tests {
                     Attribute::ExpiryTime(Duration::from_secs(1024)),
                     Attribute::FallbackAddr("address".to_string()),
                     Attribute::UdtScript(Script::default()),
-                    Attribute::PayeePublicKey(random_u8_array(33).try_into().unwrap()),
+                    Attribute::PayeePublicKey(gen_rand_public_key()),
                 ],
             },
         }
@@ -474,7 +604,6 @@ mod tests {
 
         let address = invoice.to_string();
         assert!(address.starts_with("lnckb1280k1"));
-        //eprintln!("now got address: {}", address);
 
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
@@ -519,5 +648,90 @@ mod tests {
         let decompressed_str = std::str::from_utf8(&decompressed).unwrap();
         assert_eq!(input, decompressed_str);
         assert!(compressed.len() < bytes.len());
+    }
+
+    #[test]
+    fn test_invoice_builder() {
+        let gen_payment_hash = random_u8_array(32).try_into().unwrap();
+        let gen_payment_secret = random_u8_array(32).try_into().unwrap();
+        let gen_signature = random_u8_array(64).try_into().unwrap();
+        let invoice = InvoiceBuilder::new()
+            .currency(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(gen_payment_hash)
+            .payment_secret(gen_payment_secret)
+            .signature(gen_signature)
+            .fallback("address".to_string())
+            .expiry_time(Duration::from_secs(1024))
+            .payee_pub_key(gen_rand_public_key())
+            .add_attr(Attribute::FinalHtlcTimeout(5))
+            .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+            .add_attr(Attribute::Description("description".to_string()))
+            .add_attr(Attribute::UdtScript(Script::default()))
+            .build_raw()
+            .unwrap();
+
+        let address = invoice.to_string();
+
+        assert_eq!(invoice, address.parse::<CkbInvoice>().unwrap());
+
+        assert_eq!(invoice.currency, Currency::Ckb);
+        assert_eq!(invoice.amount, Some(1280));
+        assert_eq!(invoice.prefix, Some(SiPrefix::Kilo));
+        assert_eq!(invoice.data.payment_hash, gen_payment_hash);
+        assert_eq!(invoice.data.payment_secret, gen_payment_secret);
+        assert_eq!(invoice.data.payment_hash, gen_payment_hash);
+        assert_eq!(invoice.data.payment_secret, gen_payment_secret);
+        assert_eq!(invoice.data.signature, gen_signature);
+        assert_eq!(invoice.data.attrs.len(), 7);
+    }
+
+    #[test]
+    fn test_invoice_builder_duplicated_attr() {
+        let gen_payment_hash = random_u8_array(32).try_into().unwrap();
+        let gen_payment_secret = random_u8_array(32).try_into().unwrap();
+        let gen_signature = random_u8_array(64).try_into().unwrap();
+        let invoice = InvoiceBuilder::new()
+            .currency(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(gen_payment_hash)
+            .payment_secret(gen_payment_secret)
+            .signature(gen_signature)
+            .add_attr(Attribute::FinalHtlcTimeout(5))
+            .add_attr(Attribute::FinalHtlcTimeout(6))
+            .build_raw();
+
+        assert_eq!(
+            invoice.err(),
+            Some(CreationError::DuplicatedAttributeKey(format!(
+                "{:?}",
+                Attribute::FinalHtlcTimeout(5)
+            )))
+        );
+    }
+
+    #[test]
+    fn test_invoice_builder_missing() {
+        let invoice = InvoiceBuilder::new()
+            .currency(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_secret(random_u8_array(32).try_into().unwrap())
+            .signature(random_u8_array(64).try_into().unwrap())
+            .build_raw();
+
+        assert_eq!(invoice.err(), Some(CreationError::NoPaymentHash));
+
+        let invoice = InvoiceBuilder::new()
+            .currency(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(random_u8_array(32).try_into().unwrap())
+            .signature(random_u8_array(64).try_into().unwrap())
+            .build_raw();
+
+        assert_eq!(invoice.err(), Some(CreationError::NoPaymentSecret));
     }
 }
