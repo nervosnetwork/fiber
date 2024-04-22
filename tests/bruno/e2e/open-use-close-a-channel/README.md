@@ -9,7 +9,7 @@ The whole process is something like:
 3. Send `open_channel` from NODE3 to NODE1 (thus NODE3 is the opener and NODE1 the acceptor)
 4. NODE1 automatically accepts channel and replies `accept_channel` message
 5. NODE1 sends a `tx_add` to NODE3 to fund part of the funding transaction
-6. NODE3 sends a `tx_add` to NODE3 to fund part of the funding transaction
+6. NODE3 sends a `tx_add` to NODE1 to fund part of the funding transaction
 7. NODE1 sends a `tx_remove` to NODE3 to remove part of the funding from the funding transaction
 8. NODE3 sends a `tx_complete` to NODE1 to express his intention of complete the funding process
 9. NODE1 sends a `tx_complete` to NODE3 to express his intention of complete the funding process

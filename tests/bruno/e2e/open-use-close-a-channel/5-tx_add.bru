@@ -1,0 +1,43 @@
+meta {
+  name: add a tx input
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{NODE3_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "ControlPcnChannel": {
+        "channel_id": "0x80118d4f35c6c1aafea499f71b37bda4cea12c513ef416e4c5befad30054e8e3",
+        "command": {
+          "TxCollaborationCommand": {
+            "TxAdd": {
+              "transaction": "0x440000000c00000040000000340000001c0000002000000024000000280000002c0000003000000000000000000000000000000000000000040000000400000004000000"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // TODO: current interface requires us to set the amount of our contribution to the 
+  // channel in the AcceptChannel message. This seems to make automatic accepting channel impossible
+  // We need to change current behaviour of automatically accepting channel and update this file.
+}

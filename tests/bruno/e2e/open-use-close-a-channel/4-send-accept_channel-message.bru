@@ -1,0 +1,41 @@
+meta {
+  name: accept a channel from a peer
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE3_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "SendPcnMessage": {
+        "peer_id": "{{NODE1_PEERID}}",
+        "message": {
+          "TestMessage": {
+            "bytes": "aGVsbG8gd29ybGQK"
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // TODO: current interface requires us to set the amount of our contribution to the 
+  // channel in the AcceptChannel message. This seems to make automatic accepting channel impossible
+  // We need to change current behaviour of automatically accepting channel and update this file.
+}

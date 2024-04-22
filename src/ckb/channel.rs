@@ -18,7 +18,7 @@ use std::fmt::Debug;
 
 use super::{
     network::{OpenChannelCommand, PCNMessageWithPeerId},
-    serde_utils::EntityWrapperBase64,
+    serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
         Pubkey, Signature, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
@@ -65,8 +65,7 @@ pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct TxCommand {
-    pub channel_id: Hash256,
-    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
+    #[serde_as(as = "EntityWrapperHex<Transaction>")]
     pub transaction: Transaction,
 }
 
@@ -865,7 +864,7 @@ impl ChannelActorState {
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
 
         debug!(
-            "AcceptChannel message {:?} for channel openning processed successfully",
+            "Successfully processed AcceptChannel message {:?}",
             &accept_channel
         );
         Ok(())
@@ -1006,6 +1005,11 @@ impl ChannelActorState {
             derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
 
         self.id = Some(channel_id);
+        debug!(
+            "Channel Id changed from {:?} to {:?}",
+            &self.temp_id,
+            &self.id.unwrap()
+        );
     }
 
     pub fn is_funded(&self) -> bool {
