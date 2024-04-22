@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -18,12 +18,10 @@ headers {
 body:json {
   {
     "request": {
-      "Command": {
-        "OpenChannel": {
-          "peer_id": "{{NODE1_PEERID}}",
-          "total_value": 100,
-          "to_self_value": 50
-        }
+      "OpenChannel": {
+        "peer_id": "{{NODE1_PEERID}}",
+        "total_value": 100,
+        "to_self_value": 50
       }
     }
   }

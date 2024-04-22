@@ -4,7 +4,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -17,9 +17,7 @@ headers {
 body:json {
   {
     "request": {
-      "Command": {
-        "ConnectPeer": "/ip4/127.127.127.127/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKbb2qJygwNs2wk41h8"
-      }
+      "ConnectPeer": "/ip4/127.127.127.127/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKbb2qJygwNs2wk41h8"
     }
   }
   
