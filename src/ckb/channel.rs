@@ -143,47 +143,74 @@ impl ChannelActor {
         &self,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
-        match state.state {
-            ChannelState::CollaboratingFundingTx(
-                CollaboratingFundingTxFlags::COLLABRATION_COMPLETED,
-            )
-            | ChannelState::SigningCommitment(_) => {
-                let (tx, partial_signature) = state.build_and_sign_funding_tx()?;
-                debug!(
-                    "Build a funding tx ({:?}) with partial signature {:?}",
-                    &tx, &partial_signature
-                );
-
-                let commitment_signed = CommitmentSigned {
-                    channel_id: state.id(),
-                    partial_signature,
-                    next_local_nonce: state.next_musig_nonce().public_nonce(),
-                };
-                debug!(
-                    "Sending built commitment_signed message: {:?}",
-                    &commitment_signed
-                );
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                            peer_id: state.peer_id.clone(),
-                            message: PCNMessage::CommitmentSigned(commitment_signed),
-                        }),
-                    ))
-                    .expect("network actor alive");
-
-                let mut new_flags = SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                if let ChannelState::SigningCommitment(old_flags) = state.state {
-                    new_flags = new_flags | old_flags;
-                }
-                state.state = ChannelState::SigningCommitment(new_flags);
-                Ok(())
+        let flags = match state.state {
+            ChannelState::CollaboratingFundingTx(flags)
+                if !flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed command in state {:?}, as collaboration is not completed yet.",
+                    &state.state
+                )));
             }
-            _ => Err(ProcessingChannelError::InvalidState(format!(
-                "Unable to send commitment signed message in state {:?}",
-                &state.state
-            ))),
-        }
+            ChannelState::CollaboratingFundingTx(_) => {
+                debug!(
+                    "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
+                    &state.state
+                );
+                SigningCommitmentFlags::empty()
+            }
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed command in state {:?}, as we have already sent our commitment_signed message.",
+                    &state.state
+                )));
+            }
+            ChannelState::SigningCommitment(flags) => {
+                debug!(
+                    "Processing commitment_signed command in from SigningCommitment state {:?}",
+                    &state.state
+                );
+                flags
+            }
+
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to send commitment signed message in state {:?}",
+                    &state.state
+                )));
+            }
+        };
+
+        let (tx, partial_signature) = state.build_and_sign_funding_tx()?;
+        debug!(
+            "Build a funding tx ({:?}) with partial signature {:?}",
+            &tx, &partial_signature
+        );
+
+        let commitment_signed = CommitmentSigned {
+            channel_id: state.id(),
+            partial_signature,
+            next_local_nonce: state.next_musig_nonce().public_nonce(),
+        };
+        debug!(
+            "Sending built commitment_signed message: {:?}",
+            &commitment_signed
+        );
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                    peer_id: state.peer_id.clone(),
+                    message: PCNMessage::CommitmentSigned(commitment_signed),
+                }),
+            ))
+            .expect("network actor alive");
+
+        state.state = ChannelState::SigningCommitment(
+            flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT,
+        );
+        Ok(())
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
@@ -994,30 +1021,54 @@ impl ChannelActorState {
         &mut self,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
-        match self.state {
-            ChannelState::CollaboratingFundingTx(
-                CollaboratingFundingTxFlags::COLLABRATION_COMPLETED,
-            )
-            | ChannelState::SigningCommitment(_) => {
-                let _tx =
-                    self.verify_remote_funding_tx_signature(commitment_signed.partial_signature)?;
-
-                let mut new_flags = SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
-                if let ChannelState::SigningCommitment(old_flags) = self.state {
-                    new_flags = new_flags | old_flags;
-                }
-                self.state = ChannelState::SigningCommitment(new_flags);
+        let flags = match self.state {
+            ChannelState::CollaboratingFundingTx(flags)
+                if !flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed command in state {:?}, as collaboration is not completed yet.",
+                    &self.state
+                )));
+            }
+            ChannelState::CollaboratingFundingTx(_) => {
+                debug!(
+                    "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
+                    &self.state
+                );
+                SigningCommitmentFlags::empty()
+            }
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed message in state {:?}, as we have already received our commitment_signed message.",
+                    &self.state
+                )));
+            }
+            ChannelState::SigningCommitment(flags) => {
+                debug!(
+                    "Processing commitment_signed command in from SigningCommitment state {:?}",
+                    &self.state
+                );
+                flags
             }
 
             _ => {
-                return Err(ProcessingChannelError::InvalidState(
-                    "CommitmentSigned message received with invalid phase".to_string(),
-                ));
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to send commitment signed message in state {:?}",
+                    &self.state
+                )));
             }
-        }
+        };
+
+        let _tx = self.verify_remote_funding_tx_signature(commitment_signed.partial_signature)?;
+
         debug!(
             "Successfuly handled commitment signed message: {:?}",
             &commitment_signed
+        );
+        self.state = ChannelState::SigningCommitment(
+            flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
         );
         Ok(())
     }
