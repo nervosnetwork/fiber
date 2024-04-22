@@ -371,7 +371,7 @@ impl Actor for ChannelActor {
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelCreated(
-                            *channel_id,
+                            state.id(),
                             self.peer_id.clone(),
                             myself,
                         ),
@@ -434,6 +434,12 @@ impl Actor for ChannelActor {
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
                 channel.state =
                     ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
+                debug!(
+                    "Channel to peer {:?} with id {:?} created: {:?}",
+                    &self.peer_id,
+                    &channel.id(),
+                    &channel
+                );
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelCreated(
@@ -685,6 +691,11 @@ impl ChannelActorState {
         let channel_id = derive_channel_id_from_revocation_keys(
             &holder_pubkeys.revocation_basepoint,
             &counterparty_pubkeys.revocation_basepoint,
+        );
+
+        debug!(
+            "Generated channel id ({:?}) for temporary channel {:?}",
+            &channel_id, &temp_channel_id
         );
 
         Self {
