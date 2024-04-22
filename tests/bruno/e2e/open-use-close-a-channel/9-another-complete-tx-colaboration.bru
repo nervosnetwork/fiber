@@ -1,7 +1,7 @@
 meta {
-  name: add another tx input
+  name: another complete tx colaboration
   type: http
-  seq: 6
+  seq: 9
 }
 
 post {
@@ -22,9 +22,7 @@ body:json {
         "channel_id": "0x80118d4f35c6c1aafea499f71b37bda4cea12c513ef416e4c5befad30054e8e3",
         "command": {
           "TxCollaborationCommand": {
-            "TxAdd": {
-              "transaction": "0x4d0000000c00000040000000340000001c0000002000000024000000280000002c000000300000000000000000000000000000000000000004000000040000000d000000080000000100000000"
-            }
+            "TxComplete": {}
           }
         }
       }

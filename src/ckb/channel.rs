@@ -74,9 +74,7 @@ pub type TxAddCommand = TxCommand;
 pub type TxRemoveCommand = TxCommand;
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct TxCompleteCommand {
-    pub channel_id: Hash256,
-}
+pub struct TxCompleteCommand {}
 
 impl OpenChannelCommand {
     pub fn create_channel(&self) -> Result<ChannelActorState, ProcessingChannelError> {
@@ -192,12 +190,12 @@ impl ChannelActor {
         state: &mut ChannelActorState,
         command: TxCollaborationCommand,
     ) -> Result<(), ProcessingChannelError> {
+        debug!("Handling tx collaboration command: {:?}", &command);
         match state.state {
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
                 if state.is_acceptor {
                     return Err(ProcessingChannelError::InvalidState(format!(
-                        "{0:?} expected, {1:?} given",
-                        ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT,),
+                        "sending a tx collaboration command while in while we're not the initiator of the channel negotiation, state: {:?}",
                         state.state
                     )));
                 } else if let TxCollaborationCommand::TxAdd(ref tx) = command.clone() {
@@ -219,9 +217,18 @@ impl ChannelActor {
             | ChannelState::CollaboratingFundingTx(
                 CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
             ) => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "trying to send a message to remote while in {:?} which means we are waiting for remote to send message", state.state
-                )));
+                match command {
+                    TxCollaborationCommand::TxComplete(_) => {
+                        self.send_tx_collaboration_command(state, command)?;
+                        state.state = ChannelState::CollaboratingFundingTx(
+                            CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COMPLETE,
+                        );
+                    }
+                    _ => return Err(ProcessingChannelError::InvalidState(format!(
+                        "trying to send a message to remote while in {:?} which means we are waiting for remote to send message", state.state
+                    )))
+                }
+
             }
             ChannelState::CollaboratingFundingTx(
                 CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
@@ -856,8 +863,7 @@ impl ChannelActorState {
 
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
             return Err(ProcessingChannelError::InvalidState(format!(
-                "{0:?} expected, {1:?} given",
-                ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
+                "accepting a channel while in state {:?}, expecting NegotiatingFundingFlags::OUR_INIT_SENT",
                 self.state
             )));
         }
@@ -881,7 +887,7 @@ impl ChannelActorState {
         &mut self,
         msg: TxCollaborationMsg,
     ) -> ProcessingChannelResult {
-        debug!("Processing TxAdd: {:?}", &msg);
+        debug!("Processing tx collaboration message: {:?}", &msg);
         match self.state {
             // Starting transaction collaboration
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
@@ -916,11 +922,16 @@ impl ChannelActorState {
                     );
                 }
             }
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+            ) if matches!(msg, TxCollaborationMsg::TxComplete(_)) => {
+                debug!("TxComplete message received, finishing tx collaboration");
+            }
             _ => {
-                return Err(ProcessingChannelError::InvalidState(
-                    "TxAdd message received, but we're not in the funding negotiation phase or expecting remote transaction collabration messages"
-                        .to_string(),
-                ));
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "TxAdd message received, but we're in {:?}",
+                    self.state
+                )));
             }
         }
         match msg {
@@ -1579,7 +1590,12 @@ impl TxCreationKeys {
 
 #[cfg(test)]
 mod tests {
-    use ckb_types::{packed::Transaction, prelude::IntoTransactionView};
+    use ckb_types::{
+        packed::Transaction,
+        prelude::IntoTransactionView,
+        prelude::{Pack, PackVec},
+    };
+    use molecule::prelude::{Builder, Entity};
 
     use crate::ckb::types::Privkey;
 
@@ -1596,7 +1612,9 @@ mod tests {
 
     #[test]
     fn test_deserialize_transaction() {
-        let tx = Transaction::default();
+        let tx_builder = Transaction::new_builder();
+        let tx_builder = tx_builder.witnesses(vec![vec![0u8].pack()].pack());
+        let tx = tx_builder.build();
         let tx_view = tx.into_view();
         dbg!(tx_view);
     }
