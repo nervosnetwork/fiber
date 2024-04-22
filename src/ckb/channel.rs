@@ -18,7 +18,7 @@ use super::{
     serde_utils::EntityWrapperBase64,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
+        Pubkey, Signature, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -83,7 +83,6 @@ impl OpenChannelCommand {
         Ok(ChannelActorState::new_outbound_channel(
             &seed,
             self.total_value,
-            self.to_self_value,
             DEFAULT_TO_SELF_DELAY,
         ))
     }
@@ -145,7 +144,7 @@ impl ChannelActor {
     ) -> Result<(), ProcessingChannelError> {
         match state.state {
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
-                if state.was_initially_inbound {
+                if state.is_acceptor {
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "{0:?} expected, {1:?} given",
                         ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT,),
@@ -444,7 +443,7 @@ pub struct ChannelActorState {
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
-    pub was_initially_inbound: bool,
+    pub is_acceptor: bool,
 
     pub total_value: u64,
     pub to_self_value: u64,
@@ -522,6 +521,13 @@ bitflags! {
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct SigningCommitmentFlags: u32 {
+        const OUR_COMMITMENT_SIGNED_SENT = 1;
+        const THEIR_COMMITMENT_SIGNED_SENT = 1 << 1;
+        const COMMITMENT_SIGNED_SENT = SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT.bits() | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT.bits();
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
@@ -547,7 +553,7 @@ pub enum ChannelState {
     /// We have sent `funding_created` and are awaiting a `funding_signed` to advance to
     /// `AwaitingChannelReady`. Note that this is nonsense for an inbound channel as we immediately generate
     /// `funding_signed` upon receipt of `funding_created`, so simply skip this state.
-    FundingNegotiated,
+    SigningCommitment(SigningCommitmentFlags),
     /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
     /// funding transaction to confirm.
     AwaitingChannelReady(AwaitingChannelReadyFlags),
@@ -626,7 +632,7 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             funding_tx_inputs: vec![],
-            was_initially_inbound: true,
+            is_acceptor: true,
             total_value: counterparty_value,
             temp_id: temp_channel_id,
             id: Some(channel_id),
@@ -647,17 +653,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn new_outbound_channel(
-        seed: &[u8],
-        value: u64,
-        to_self_value: u64,
-        to_self_delay: u64,
-    ) -> Self {
-        assert!(
-            to_self_value <= value,
-            "to_self_value must be less than or equal to value"
-        );
-
+    pub fn new_outbound_channel(seed: &[u8], value: u64, to_self_delay: u64) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
         let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
@@ -666,11 +662,11 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             funding_tx: None,
             funding_tx_inputs: vec![],
-            was_initially_inbound: false,
+            is_acceptor: false,
             total_value: value,
             temp_id: new_channel_id.into(),
             id: None,
-            to_self_value,
+            to_self_value: value,
             signer,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
@@ -717,11 +713,19 @@ impl ChannelActorState {
                 self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_message(commitment_signed)
+                self.handle_commitment_signed_message(commitment_signed)?;
+                if let ChannelState::SigningCommitment(flags) = self.state {
+                    if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
+                        // TODO: maybe we should send ouor commitment_signed message here.
+                        debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
+                    }
+                }
+                {}
+                Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
                 match self.state {
-                    ChannelState::FundingNegotiated => {
+                    ChannelState::SigningCommitment(_) => {
                         self.state = ChannelState::AwaitingChannelReady(
                             AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
                         );
@@ -791,9 +795,9 @@ impl ChannelActorState {
             // Starting transaction collaboration
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT) => {
                 // Only the initator should start sending tx_add messages.
-                if !self.was_initially_inbound || !matches!(msg, TxCollaborationMsg::TxAdd(_)) {
+                if !self.is_acceptor || !matches!(msg, TxCollaborationMsg::TxAdd(_)) {
                     return Err(ProcessingChannelError::InvalidState(format!(
-                        "Tx collaboration message received. It must be a TxAdd message from the initator of the channel (we are the {}, and this message is {:?})", if self.was_initially_inbound {"acceptor"} else {"initator"}, &msg),
+                        "Tx collaboration message received. It must be a TxAdd message from the initator of the channel (we are the {}, and this message is {:?})", if self.is_acceptor {"acceptor"} else {"initator"}, &msg),
                     ));
                 }
                 self.state = ChannelState::CollaboratingFundingTx(
@@ -848,7 +852,30 @@ impl ChannelActorState {
         &mut self,
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
-        debug!("CommitmentSigned: {:?}", &commitment_signed);
+        match self.state {
+            ChannelState::CollaboratingFundingTx(
+                CollaboratingFundingTxFlags::COLLABRATION_COMPLETED,
+            )
+            | ChannelState::SigningCommitment(_) => {
+                let _tx = self.build_and_verify_funding_tx(false, &commitment_signed.signature)?;
+
+                let mut new_flags = SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
+                if let ChannelState::SigningCommitment(old_flags) = self.state {
+                    new_flags = new_flags | old_flags;
+                }
+                self.state = ChannelState::SigningCommitment(new_flags);
+            }
+
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(
+                    "CommitmentSigned message received with invalid phase".to_string(),
+                ));
+            }
+        }
+        debug!(
+            "Successfuly handled commitment signed message: {:?}",
+            &commitment_signed
+        );
         Ok(())
     }
 
@@ -916,14 +943,61 @@ impl ChannelActorState {
     pub fn build_commitment_tx(
         &self,
         commitment_number: u64,
-        keys: &TxCreationKeys,
         local: bool,
     ) -> CommitmentTransaction {
         let directed_channel_parameters = self.must_get_directed_channel_parameters(local);
         // 1. Get transaction inputs from direct channel parameters.
         // 2. Assemble transaction outputs from current chanenl information.
-        // 3. Sign the transaction with the private key.
         todo!("build_commitment_tx");
+    }
+
+    pub fn build_and_verify_commitment_tx(
+        &self,
+        commitment_number: u64,
+        local: bool,
+        signature: &Signature,
+    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
+        let commitment_tx = self.build_commitment_tx(commitment_number, local);
+        todo!("Verify commitment tx")
+    }
+
+    pub fn build_and_verify_funding_tx(
+        &self,
+        local: bool,
+        signature: &Signature,
+    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
+        let commitment_tx = self.build_funding_tx(local);
+        todo!("Verify funding tx")
+    }
+
+    pub fn build_funding_tx(&self, local: bool) -> Transaction {
+        let (commitment_number, broadcaster_pubkeys, counter_signatory_pubkeys) = if local {
+            (
+                self.holder_commitment_number,
+                self.holder_channel_parameters.pubkeys.clone(),
+                self.counterparty_channel_parameters
+                    .as_ref()
+                    .unwrap()
+                    .pubkeys
+                    .clone(),
+            )
+        } else {
+            (
+                self.counterparty_commitment_number,
+                self.counterparty_channel_parameters
+                    .as_ref()
+                    .unwrap()
+                    .pubkeys
+                    .clone(),
+                self.holder_channel_parameters.pubkeys.clone(),
+            )
+        };
+        todo!(
+            "Building funding tx with {} {:?} {:?}",
+            commitment_number,
+            broadcaster_pubkeys,
+            counter_signatory_pubkeys
+        );
     }
 
     pub fn must_get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -932,7 +1006,7 @@ impl ChannelActorState {
             .expect("Counterparty channel parameters")
     }
 
-    pub fn must_get_fouded_channel_parameters(&self) -> FundedChannelParameters<'_> {
+    pub fn must_get_funded_channel_parameters(&self) -> FundedChannelParameters<'_> {
         FundedChannelParameters {
             holder: &self.holder_channel_parameters,
             counterparty: self.must_get_counterparty_channel_parameters(),
@@ -945,7 +1019,7 @@ impl ChannelActorState {
         holder_is_broadcaster: bool,
     ) -> DirectedChannelTransactionParameters<'_> {
         DirectedChannelTransactionParameters {
-            inner: self.must_get_fouded_channel_parameters(),
+            inner: self.must_get_funded_channel_parameters(),
             holder_is_broadcaster,
         }
     }

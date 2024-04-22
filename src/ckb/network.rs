@@ -59,7 +59,6 @@ pub struct OpenChannelCommand {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub total_value: u64,
-    pub to_self_value: u64,
 }
 
 impl NetworkActorMessage {
