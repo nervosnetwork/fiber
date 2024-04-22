@@ -35,3 +35,8 @@ body:json {
 assert {
   res.status: eq 200
 }
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+}
