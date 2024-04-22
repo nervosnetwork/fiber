@@ -1139,31 +1139,52 @@ impl ChannelActorState {
         self.funding_tx.as_ref().expect("Channel is not funded")
     }
 
+    pub fn should_holder_go_first(&self) -> bool {
+        let holder_pubkey = self.holder_channel_parameters.pubkeys.funding_pubkey;
+        let counterparty_pubkey = self
+            .counterparty_channel_parameters
+            .as_ref()
+            .expect("Counterparty pubkeys")
+            .pubkeys
+            .funding_pubkey;
+        holder_pubkey <= counterparty_pubkey
+    }
+
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self
             .holder_channel_parameters
             .pubkeys
             .funding_pubkey
             .clone();
-        let counterparty_pubkey = self
+        let counter_signatory_pubkey = self
             .counterparty_channel_parameters
             .as_ref()
             .expect("Counterparty pubkeys")
             .pubkeys
             .funding_pubkey
             .clone();
-        KeyAggContext::new(vec![holder_pubkey, counterparty_pubkey]).expect("Valid pubkeys")
+        let keys = if self.should_holder_go_first() {
+            vec![holder_pubkey, counter_signatory_pubkey]
+        } else {
+            vec![counter_signatory_pubkey, holder_pubkey]
+        };
+        KeyAggContext::new(keys).expect("Valid pubkeys")
     }
 
     pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
-        AggNonce::sum(vec![
-            self.signer.musig_nonce.public_nonce(),
-            self.counterparty_channel_parameters
-                .as_ref()
-                .unwrap()
-                .nonce
-                .clone(),
-        ])
+        let holder_nonce = self.signer.musig_nonce.public_nonce();
+        let counter_signatory_nonce = self
+            .counterparty_channel_parameters
+            .as_ref()
+            .expect("Counterparty pubkeys")
+            .nonce
+            .clone();
+        let nonces = if self.should_holder_go_first() {
+            vec![holder_nonce, counter_signatory_nonce]
+        } else {
+            vec![counter_signatory_nonce, holder_nonce]
+        };
+        AggNonce::sum(nonces)
     }
 
     pub fn build_commitment_tx(
@@ -1193,14 +1214,18 @@ impl ChannelActorState {
         let funding_tx = self.build_funding_tx(true);
         let message = funding_tx.as_slice();
         debug!(
-            "Built funding transaction {:?} and message to sign {:?}",
-            &funding_tx, &message
+            "Signing funding transaction {:?} with message {:?}",
+            &funding_tx,
+            hex::encode(&message)
         );
-        let partial_signature = sign_partial(
-            &self.get_musig2_agg_context(),
+        let key_agg_ctx = self.get_musig2_agg_context();
+        let aggregated_nonce = self.get_musig2_agg_pubnonce();
+        let secnonce = self.signer.musig_nonce.clone();
+        let partial_signature: PartialSignature = sign_partial(
+            &key_agg_ctx,
             self.signer.funding_key,
-            self.signer.musig_nonce.clone(),
-            &self.get_musig2_agg_pubnonce(),
+            secnonce.clone(),
+            &aggregated_nonce,
             message,
         )?;
         debug!("Funding tx signed successfully: {:?}", &partial_signature);
@@ -1214,8 +1239,10 @@ impl ChannelActorState {
         let funding_tx = self.build_funding_tx(false);
         let message = funding_tx.as_slice();
         debug!(
-            "Built funding transaction {:?} and message to sign {:?}",
-            &funding_tx, &message
+            "Verifying signature {:?}, for funding transaction {:?} with message {:?}",
+            &signature,
+            &funding_tx,
+            hex::encode(&message)
         );
 
         verify_partial(
