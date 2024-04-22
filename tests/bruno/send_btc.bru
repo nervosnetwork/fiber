@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE3_RPC_URL}}/cch
   body: json
   auth: none
 }
@@ -18,10 +18,8 @@ headers {
 body:json {
   {
     "request": {
-      "CchCommand": {
-        "SendBTC": {
-          "btc_pay_req": "lnbcrt10u1pjl6r4npp5gdw9ha2cnwfj3pnnf5nj4dprm7srkprakgueaxkhrs0kyjp9st0qdqqcqzzsxqyz5vqsp567m6wxsnmgl5cgsxs0g8ffz0tg3tajkw4q6j0q7gj3wqnpxcqums9qyysgq2vht3tcxemehylp0arnvjnqnal9pnxtdfkxxxm2hxqxxljv5et98wse4clcv36r4u9fxnqr4vl0qztazuyq4s9ald85yj30l4vzlu4qq3nkstp"
-        }
+      "SendBTC": {
+        "btc_pay_req": "lnbcrt10u1pjl6r4npp5gdw9ha2cnwfj3pnnf5nj4dprm7srkprakgueaxkhrs0kyjp9st0qdqqcqzzsxqyz5vqsp567m6wxsnmgl5cgsxs0g8ffz0tg3tajkw4q6j0q7gj3wqnpxcqums9qyysgq2vht3tcxemehylp0arnvjnqnal9pnxtdfkxxxm2hxqxxljv5et98wse4clcv36r4u9fxnqr4vl0qztazuyq4s9ald85yj30l4vzlu4qq3nkstp"
       }
     }
   }

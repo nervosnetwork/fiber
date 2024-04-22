@@ -13,58 +13,55 @@ pub type NetworkActorCommandWithReply =
 use crate::{cch::CchCommand, ckb::NetworkActorCommand};
 
 #[derive(Debug, Deserialize)]
-pub enum HttpRequest {
-    Command(NetworkActorCommand),
-    CchCommand(CchCommand),
-}
-
-#[derive(Debug, Deserialize)]
-pub struct HttpBody {
+pub struct HttpBody<T> {
     pub id: Option<u64>,
-    pub request: HttpRequest,
+    pub request: T,
 }
 
-pub struct AppState {
-    pub ckb_command_sender: Option<mpsc::Sender<NetworkActorCommandWithReply>>,
-    pub cch_command_sender: Option<mpsc::Sender<CchCommand>>,
+type CkbRpcRequest = HttpBody<NetworkActorCommand>;
+type CchRpcRequest = HttpBody<CchCommand>;
+
+pub struct CkbRpcState {
+    pub ckb_command_sender: mpsc::Sender<NetworkActorCommandWithReply>,
 }
 
-async fn handle_request(
-    State(state): State<Arc<AppState>>,
-    Json(http_request): Json<HttpBody>,
+pub struct CchRpcState {
+    pub cch_command_sender: mpsc::Sender<CchCommand>,
+}
+
+async fn serve_ckb_rpc(
+    State(state): State<Arc<CkbRpcState>>,
+    Json(http_request): Json<CkbRpcRequest>,
 ) -> impl IntoResponse {
     debug!("Received http request: {:?}", http_request);
-    let payload = http_request.request;
-    match (
-        payload,
-        &state.ckb_command_sender,
-        &state.cch_command_sender,
-    ) {
-        (HttpRequest::Command(command), Some(ckb_command_sender), _) => {
-            let (sender, mut receiver) = mpsc::channel(1);
-            let command = (command, Some(sender));
-            ckb_command_sender
-                .send(command)
-                .await
-                .expect("send command");
-            match receiver.recv().await {
-                Some(Ok(_)) => StatusCode::OK,
-                Some(Err(err)) => {
-                    error!("Error processing command: {:?}", err);
-                    StatusCode::BAD_REQUEST
-                }
-                None => StatusCode::INTERNAL_SERVER_ERROR,
-            }
+    let (sender, mut receiver) = mpsc::channel(1);
+    let command = (http_request.request, Some(sender));
+    state
+        .ckb_command_sender
+        .send(command)
+        .await
+        .expect("send command");
+    match receiver.recv().await {
+        Some(Ok(_)) => StatusCode::OK,
+        Some(Err(err)) => {
+            error!("Error processing command: {:?}", err);
+            StatusCode::BAD_REQUEST
         }
-        (HttpRequest::CchCommand(command), _, Some(cch_command_sender)) => {
-            cch_command_sender
-                .send(command)
-                .await
-                .expect("send command");
-            StatusCode::OK
-        }
-        _ => StatusCode::NOT_FOUND,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+async fn serve_cch_rpc(
+    State(state): State<Arc<CchRpcState>>,
+    Json(http_request): Json<CchRpcRequest>,
+) -> impl IntoResponse {
+    debug!("Received http request: {:?}", http_request);
+    state
+        .cch_command_sender
+        .send(http_request.request)
+        .await
+        .expect("send command");
+    StatusCode::OK
 }
 
 pub async fn start_rpc<F>(
@@ -75,13 +72,19 @@ pub async fn start_rpc<F>(
 ) where
     F: Future<Output = ()> + Send + 'static,
 {
-    let app_state = Arc::new(AppState {
-        ckb_command_sender,
-        cch_command_sender,
-    });
-    let app = Router::new()
-        .route("/", post(handle_request))
-        .with_state(app_state);
+    let mut app = Router::new();
+    if let Some(ckb_command_sender) = ckb_command_sender {
+        let ckb_router = Router::new()
+            .route("/", post(serve_ckb_rpc))
+            .with_state(Arc::new(CkbRpcState { ckb_command_sender }));
+        app = app.nest("/ckb", ckb_router);
+    }
+    if let Some(cch_command_sender) = cch_command_sender {
+        let cch_router = Router::new()
+            .route("/", post(serve_cch_rpc))
+            .with_state(Arc::new(CchRpcState { cch_command_sender }));
+        app = app.nest("/cch", cch_router);
+    }
 
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let listener = tokio::net::TcpListener::bind(listening_addr)
