@@ -156,9 +156,7 @@ impl ChannelActor {
                         CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                     );
                     self.send_tx_collaboration_command(state, command)?;
-                    state
-                        .funding_tx_inputs
-                        .push(FundingTxInput::TxAdd(tx.clone().transaction));
+                    state.add_tx_to_funding_tx(tx.clone().transaction)?;
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
                         "the first message after AcceptChannel must be TxAdd, but we got {:?})",
@@ -186,15 +184,11 @@ impl ChannelActor {
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 );
                 match command {
-                    TxCollaborationCommand::TxAdd(tx) => {
-                        state
-                            .funding_tx_inputs
-                            .push(FundingTxInput::TxAdd(tx.transaction));
+                    TxCollaborationCommand::TxAdd(tx_add) => {
+                        state.add_tx_to_funding_tx(tx_add.transaction)?;
                     }
-                    TxCollaborationCommand::TxRemove(tx) => {
-                        state
-                            .funding_tx_inputs
-                            .push(FundingTxInput::TxRemove(tx.transaction));
+                    TxCollaborationCommand::TxRemove(tx_remove) => {
+                        state.remove_tx_from_funding_tx(tx_remove.transaction)?;
                     }
                     TxCollaborationCommand::TxComplete(_) => {
                         state.state = ChannelState::CollaboratingFundingTx(
@@ -425,24 +419,19 @@ impl Actor for ChannelActor {
 }
 
 #[derive(Clone, Debug)]
-pub enum FundingTxInput {
-    TxAdd(Transaction),
-    TxRemove(Transaction),
-}
+pub struct FundingTxInput(Transaction);
 
 impl Eq for FundingTxInput {}
 
 impl PartialEq for FundingTxInput {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (FundingTxInput::TxAdd(tx1), FundingTxInput::TxAdd(tx2)) => {
-                tx1.as_bytes() == tx2.as_bytes()
-            }
-            (FundingTxInput::TxRemove(tx1), FundingTxInput::TxRemove(tx2)) => {
-                tx1.as_bytes() == tx2.as_bytes()
-            }
-            _ => false,
-        }
+        self.0.as_bytes() == other.0.as_bytes()
+    }
+}
+
+impl From<Transaction> for FundingTxInput {
+    fn from(tx: Transaction) -> Self {
+        Self(tx)
     }
 }
 
@@ -841,11 +830,10 @@ impl ChannelActorState {
         }
         match msg {
             TxCollaborationMsg::TxAdd(msg) => {
-                self.funding_tx_inputs.push(FundingTxInput::TxAdd(msg.tx));
+                self.add_tx_to_funding_tx(msg.tx)?;
             }
             TxCollaborationMsg::TxRemove(msg) => {
-                self.funding_tx_inputs
-                    .push(FundingTxInput::TxRemove(msg.tx));
+                self.remove_tx_from_funding_tx(msg.tx)?;
             }
             TxCollaborationMsg::TxComplete(msg) => {
                 self.state = ChannelState::CollaboratingFundingTx(
@@ -861,6 +849,30 @@ impl ChannelActorState {
         commitment_signed: CommitmentSigned,
     ) -> ProcessingChannelResult {
         debug!("CommitmentSigned: {:?}", &commitment_signed);
+        Ok(())
+    }
+
+    pub fn add_tx_to_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
+        let tx = tx.into();
+        for otx in self.funding_tx_inputs.iter() {
+            if otx == &tx {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Trying to repeatedly add a transaction".to_string(),
+                ));
+            }
+        }
+        self.funding_tx_inputs.push(tx);
+        Ok(())
+    }
+
+    pub fn remove_tx_from_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
+        let tx = tx.into();
+        let index = self.funding_tx_inputs.iter().position(|x| x == &tx).ok_or(
+            ProcessingChannelError::InvalidParameter(
+                "Trying to remove a tx that is not added".to_string(),
+            ),
+        )?;
+        self.funding_tx_inputs.remove(index);
         Ok(())
     }
 
