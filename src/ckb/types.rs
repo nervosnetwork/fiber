@@ -1,12 +1,13 @@
 use super::gen::pcn::{self as molecule_pcn, Byte66, SignatureVec};
 use super::serde_utils::{EntityWrapperBase64, WrapperHex};
+use anyhow::anyhow;
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
-use musig2::{BinaryEncoding, PubNonce};
+use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
 use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -200,6 +201,8 @@ pub enum Error {
     Molecule(#[from] molecule::error::VerificationError),
     #[error("Musig2 error: {0}")]
     Musig2(String),
+    #[error("Error: {0}")]
+    AnyHow(#[from] anyhow::Error),
 }
 
 impl From<Pubkey> for molecule_pcn::Pubkey {
@@ -418,14 +421,29 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
-    pub signature: Signature,
+    pub partial_signature: PartialSignature,
+    pub next_local_nonce: PubNonce,
 }
 
 impl From<CommitmentSigned> for molecule_pcn::CommitmentSigned {
     fn from(commitment_signed: CommitmentSigned) -> Self {
         molecule_pcn::CommitmentSigned::new_builder()
             .channel_id(commitment_signed.channel_id.into())
-            .signature(commitment_signed.signature.into())
+            .partial_signature(
+                MByte32::new_builder()
+                    .set(
+                        commitment_signed
+                            .partial_signature
+                            .serialize()
+                            .into_iter()
+                            .map(Byte::new)
+                            .collect::<Vec<_>>()
+                            .try_into()
+                            .unwrap(),
+                    )
+                    .build(),
+            )
+            .next_local_nonce((&commitment_signed.next_local_nonce).into())
             .build()
     }
 }
@@ -436,7 +454,14 @@ impl TryFrom<molecule_pcn::CommitmentSigned> for CommitmentSigned {
     fn try_from(commitment_signed: molecule_pcn::CommitmentSigned) -> Result<Self, Self::Error> {
         Ok(CommitmentSigned {
             channel_id: commitment_signed.channel_id().into(),
-            signature: commitment_signed.signature().try_into()?,
+            partial_signature: PartialSignature::from_slice(
+                commitment_signed.partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            next_local_nonce: commitment_signed
+                .next_local_nonce()
+                .try_into()
+                .map_err(|e| anyhow!(format!("{e:?}")))?,
         })
     }
 }

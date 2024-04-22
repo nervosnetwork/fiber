@@ -46,7 +46,8 @@ table AcceptChannel {
 
 table CommitmentSigned {
     channel_id:     Byte32,
-    signature:      Signature,
+	partial_signature: Byte32,
+    next_local_nonce:  Byte66,
 }
 
 table TxSignatures {
