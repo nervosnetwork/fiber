@@ -322,7 +322,7 @@ impl Actor for ChannelActor {
                     .chain(peer_id.as_bytes().iter().cloned())
                     .collect::<Vec<u8>>();
 
-                let state = ChannelActorState::new_inbound_channel(
+                let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     &seed,
                     peer_id.clone(),
@@ -370,13 +370,10 @@ impl Actor for ChannelActor {
 
                 self.network
                     .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelCreated(
-                            state.id(),
-                            self.peer_id.clone(),
-                            myself,
-                        ),
+                        NetworkActorEvent::ChannelCreated(state.id(), self.peer_id.clone(), myself),
                     ))
                     .expect("peer actor alive");
+                state.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
                 Ok(state)
             }
             ChannelInitializationParameter::OpenChannelCommand(open_channel) => {
@@ -699,7 +696,7 @@ impl ChannelActorState {
         );
 
         Self {
-            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+            state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             peer_id,
             funding_tx: None,
             funding_tx_inputs: vec![],
@@ -860,10 +857,11 @@ impl ChannelActorState {
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "{0:?} expected, {1:?} given",
-                ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT,),
+                ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT),
                 self.state
             )));
         }
+
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
         let counterparty_pubkeys = (&accept_channel).into();
         self.counterparty_channel_parameters = Some(ChannelParametersOneParty {
@@ -871,8 +869,6 @@ impl ChannelActorState {
             nonce: accept_channel.next_local_nonce.clone(),
             selected_contest_delay: accept_channel.to_self_delay as u64,
         });
-
-        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
