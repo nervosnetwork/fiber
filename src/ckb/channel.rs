@@ -3,7 +3,10 @@ use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::packed::{OutPoint, Transaction};
 use log::{debug, error, info, warn};
 use molecule::prelude::Entity;
-use musig2::{PartialSignature, SecNonce};
+use musig2::{
+    errors::{SigningError, VerifyError},
+    sign_partial, verify_partial, AggNonce, KeyAggContext, PartialSignature, PubNonce, SecNonce,
+};
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::serde_as;
@@ -142,18 +145,42 @@ impl ChannelActor {
     pub fn handle_commitment_signed_command(
         &self,
         state: &mut ChannelActorState,
-    ) -> Result<CommitmentSigned, ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
         match state.state {
             ChannelState::CollaboratingFundingTx(
                 CollaboratingFundingTxFlags::COLLABRATION_COMPLETED,
             )
             | ChannelState::SigningCommitment(_) => {
-                let (_tx, partial_signature) = state.build_and_sign_funding_tx()?;
-                Ok(CommitmentSigned {
+                let (tx, partial_signature) = state.build_and_sign_funding_tx()?;
+                debug!(
+                    "Build a funding tx ({:?}) with partial signature {:?}",
+                    &tx, &partial_signature
+                );
+
+                let commitment_signed = CommitmentSigned {
                     channel_id: state.id(),
                     partial_signature,
                     next_local_nonce: state.next_musig_nonce().public_nonce(),
-                })
+                };
+                debug!(
+                    "Sending built commitment_signed message: {:?}",
+                    &commitment_signed
+                );
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                            peer_id: state.peer_id.clone(),
+                            message: PCNMessage::CommitmentSigned(commitment_signed),
+                        }),
+                    ))
+                    .expect("network actor alive");
+
+                let mut new_flags = SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+                if let ChannelState::SigningCommitment(old_flags) = state.state {
+                    new_flags = new_flags | old_flags;
+                }
+                state.state = ChannelState::SigningCommitment(new_flags);
+                Ok(())
             }
             _ => Err(ProcessingChannelError::InvalidState(
                 "Unable to send commitment signed message".to_string(),
@@ -239,18 +266,7 @@ impl ChannelActor {
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::CommitmentSigned() => {
-                let commitment_signed = self.handle_commitment_signed_command(state)?;
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                            peer_id: state.peer_id.clone(),
-                            message: PCNMessage::CommitmentSigned(commitment_signed),
-                        }),
-                    ))
-                    .expect("network actor alive");
-                Ok(())
-            }
+            ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
         }
     }
 }
@@ -284,6 +300,7 @@ impl Actor for ChannelActor {
                     to_self_delay,
                     first_per_commitment_point,
                     second_per_commitment_point,
+                    next_local_nonce,
                     ..
                 } = &open_channel;
 
@@ -313,6 +330,7 @@ impl Actor for ChannelActor {
                     *funding_amount,
                     *to_self_delay,
                     counterpart_pubkeys,
+                    next_local_nonce.clone(),
                     first_per_commitment_point.clone(),
                     second_per_commitment_point.clone(),
                 );
@@ -539,6 +557,10 @@ pub enum ProcessingChannelError {
     Unimplemented(String),
     #[error("Failed to send command: {0}")]
     CommanderSendingError(#[from] TrySendError<NetworkActorCommand>),
+    #[error("Musig2 VerifyError: {0}")]
+    Musig2VerifyError(#[from] VerifyError),
+    #[error("Musig2 SigningError: {0}")]
+    Musig2SigningError(#[from] SigningError),
 }
 
 bitflags! {
@@ -653,6 +675,7 @@ impl ChannelActorState {
         counterparty_value: u64,
         counterparty_delay: u64,
         counterparty_pubkeys: ChannelPublicKeys,
+        counterparty_nonce: PubNonce,
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
@@ -677,11 +700,13 @@ impl ChannelActorState {
             to_self_value: 0,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
+                nonce: signer.musig_nonce.public_nonce(),
                 selected_contest_delay: counterparty_delay as u64,
             },
             signer,
             counterparty_channel_parameters: Some(ChannelParametersOneParty {
                 pubkeys: counterparty_pubkeys,
+                nonce: counterparty_nonce,
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
@@ -699,6 +724,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
+        let nonce = signer.musig_nonce.public_nonce();
         let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
@@ -714,6 +740,7 @@ impl ChannelActorState {
             signer,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
+                nonce,
                 selected_contest_delay: to_self_delay,
             },
             counterparty_channel_parameters: None,
@@ -831,6 +858,7 @@ impl ChannelActorState {
         let counterparty_pubkeys = (&accept_channel).into();
         self.counterparty_channel_parameters = Some(ChannelParametersOneParty {
             pubkeys: counterparty_pubkeys,
+            nonce: accept_channel.next_local_nonce.clone(),
             selected_contest_delay: accept_channel.to_self_delay as u64,
         });
 
@@ -915,7 +943,7 @@ impl ChannelActorState {
             )
             | ChannelState::SigningCommitment(_) => {
                 let _tx =
-                    self.build_and_verify_funding_tx(false, &commitment_signed.partial_signature)?;
+                    self.verify_remote_funding_tx_signature(commitment_signed.partial_signature)?;
 
                 let mut new_flags = SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 if let ChannelState::SigningCommitment(old_flags) = self.state {
@@ -998,6 +1026,33 @@ impl ChannelActorState {
         self.funding_tx.as_ref().expect("Channel is not funded")
     }
 
+    pub fn get_musig2_agg_context(&self) -> KeyAggContext {
+        let holder_pubkey = self
+            .holder_channel_parameters
+            .pubkeys
+            .funding_pubkey
+            .clone();
+        let counterparty_pubkey = self
+            .counterparty_channel_parameters
+            .as_ref()
+            .expect("Counterparty pubkeys")
+            .pubkeys
+            .funding_pubkey
+            .clone();
+        KeyAggContext::new(vec![holder_pubkey, counterparty_pubkey]).expect("Valid pubkeys")
+    }
+
+    pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
+        AggNonce::sum(vec![
+            self.signer.musig_nonce.public_nonce(),
+            self.counterparty_channel_parameters
+                .as_ref()
+                .unwrap()
+                .nonce
+                .clone(),
+        ])
+    }
+
     pub fn build_commitment_tx(
         &self,
         commitment_number: u64,
@@ -1023,17 +1078,43 @@ impl ChannelActorState {
         &self,
     ) -> Result<(Transaction, PartialSignature), ProcessingChannelError> {
         let funding_tx = self.build_funding_tx(true);
-        let bytes = funding_tx.as_bytes();
-        todo!("Verify funding tx")
+        let message = funding_tx.as_slice();
+        debug!(
+            "Built funding transaction {:?} and message to sign {:?}",
+            &funding_tx, &message
+        );
+        let partial_signature = sign_partial(
+            &self.get_musig2_agg_context(),
+            self.signer.funding_key,
+            self.signer.musig_nonce.clone(),
+            &self.get_musig2_agg_pubnonce(),
+            message,
+        )?;
+        debug!("Funding tx signed successfully: {:?}", &partial_signature);
+        Ok((funding_tx, partial_signature))
     }
 
-    pub fn build_and_verify_funding_tx(
+    pub fn verify_remote_funding_tx_signature(
         &self,
-        local: bool,
-        signature: &PartialSignature,
-    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
-        let commitment_tx = self.build_funding_tx(local);
-        todo!("Verify funding tx");
+        signature: PartialSignature,
+    ) -> Result<Transaction, ProcessingChannelError> {
+        let funding_tx = self.build_funding_tx(false);
+        let message = funding_tx.as_slice();
+        debug!(
+            "Built funding transaction {:?} and message to sign {:?}",
+            &funding_tx, &message
+        );
+
+        verify_partial(
+            &self.get_musig2_agg_context(),
+            signature,
+            &self.get_musig2_agg_pubnonce(),
+            self.get_counterparty_funding_pubkey(),
+            &self.must_get_counterparty_channel_parameters().nonce,
+            message,
+        )?;
+        debug!("Funding tx signature verified successfully");
+        Ok(funding_tx)
     }
 
     pub fn build_funding_tx(&self, local: bool) -> Transaction {
@@ -1060,6 +1141,15 @@ impl ChannelActorState {
         };
         // TODO: Building funding here;
         Transaction::default()
+    }
+
+    pub fn get_counterparty_funding_pubkey(&self) -> &Pubkey {
+        &self
+            .counterparty_channel_parameters
+            .as_ref()
+            .expect("Counterparty channel parameters")
+            .pubkeys
+            .funding_pubkey
     }
 
     pub fn must_get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -1189,6 +1279,7 @@ impl CommitmentTransaction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelParametersOneParty {
     pub pubkeys: ChannelPublicKeys,
+    pub nonce: PubNonce,
     pub selected_contest_delay: u64,
 }
 
@@ -1342,6 +1433,7 @@ pub struct InMemorySigner {
     /// Holder HTLC secret key used in commitment transaction HTLC outputs.
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
+    // TODO: use rust's ownership to make sure musig_nonce is used once.
     pub musig_nonce: SecNonce,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
@@ -1476,6 +1568,8 @@ impl TxCreationKeys {
 
 #[cfg(test)]
 mod tests {
+    use ckb_types::{packed::Transaction, prelude::IntoTransactionView};
+
     use crate::ckb::types::Privkey;
 
     use super::{derive_private_key, derive_public_key};
@@ -1487,5 +1581,12 @@ mod tests {
         let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
         let derived_pubkey = derive_public_key(&privkey.pubkey(), &per_commitment_point);
         assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+    }
+
+    #[test]
+    fn test_deserialize_transaction() {
+        let tx = Transaction::default();
+        let tx_view = tx.into_view();
+        dbg!(tx_view);
     }
 }

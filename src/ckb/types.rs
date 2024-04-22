@@ -7,6 +7,7 @@ use ckb_types::{
 };
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
+use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
 use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
@@ -44,6 +45,18 @@ impl From<&PubNonce> for Byte66 {
 
 #[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Privkey(pub SecretKey);
+
+impl From<Privkey> for Scalar {
+    fn from(pk: Privkey) -> Self {
+        pk.0.into()
+    }
+}
+
+impl From<&Privkey> for Scalar {
+    fn from(pk: &Privkey) -> Self {
+        pk.0.into()
+    }
+}
 
 impl From<Privkey> for SecretKey {
     fn from(pk: Privkey) -> Self {
@@ -163,6 +176,18 @@ impl Privkey {
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(pub PublicKey);
+
+impl Into<Point> for Pubkey {
+    fn into(self) -> Point {
+        PublicKey::from(self.0).into()
+    }
+}
+
+impl Into<Point> for &Pubkey {
+    fn into(self) -> Point {
+        (*self).into()
+    }
+}
 
 impl From<Pubkey> for PublicKey {
     fn from(pk: Pubkey) -> Self {
