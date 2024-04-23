@@ -16,6 +16,8 @@ pub use errors::{Error, Result};
 
 pub mod actors;
 
+pub mod tasks;
+
 pub mod macros {
     #[macro_export]
     macro_rules! unwrap_or_return {
