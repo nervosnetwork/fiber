@@ -1,8 +1,16 @@
 #![allow(dead_code)]
-use super::gen::{invoice as gen_invoice, invoice::*};
+use super::{
+    gen::invoice::{self as gen_invoice, *},
+    utils::{construct_invoice_preimage, BytesToBase32},
+};
 use crate::ckb::utils::{ar_decompress, ar_encompress};
-use bech32::{encode, u5, FromBase32, ToBase32, Variant};
-use bitcoin::secp256k1::PublicKey;
+use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
+use bitcoin::hashes::{sha256, Hash};
+
+use bitcoin::secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, PublicKey,
+};
 use ckb_types::{
     packed::Script,
     prelude::{Pack, Unpack},
@@ -15,7 +23,7 @@ use nom::{
     IResult,
 };
 use serde::{Deserialize, Serialize};
-use std::{num::ParseIntError, str::FromStr};
+use std::{cmp::Ordering, num::ParseIntError, str::FromStr};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -55,7 +63,7 @@ impl FromStr for Currency {
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Copy, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum SiPrefix {
     /// 10^-3
     Milli,
@@ -115,16 +123,40 @@ pub enum Attribute {
 pub struct InvoiceData {
     pub payment_hash: [u8; 32],
     pub payment_secret: [u8; 32],
-    pub signature: [u8; 64],
     pub attrs: Vec<Attribute>,
 }
 
+/// Represents a syntactically and semantically correct lightning BOLT11 invoice.
+///
+/// There are three ways to construct a `CkbInvoice`:
+///  1. using [`CkbInvoiceBuilder`]
+///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CkbInvoice {
     pub currency: Currency,
     pub amount: Option<u64>,
     pub prefix: Option<SiPrefix>,
+    pub signature: Option<InvoiceSignature>,
     pub data: InvoiceData,
+}
+
+/// Recoverable signature
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceSignature(pub RecoverableSignature);
+
+impl PartialOrd for InvoiceSignature {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InvoiceSignature {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .serialize_compact()
+            .1
+            .cmp(&other.0.serialize_compact().1)
+    }
 }
 
 impl CkbInvoice {
@@ -146,12 +178,65 @@ impl CkbInvoice {
         compressed.write_base32(&mut base32).unwrap();
         base32
     }
+
+    fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    fn build_signature<F>(&mut self, sign_function: F) -> Result<(), SignOrCreationError>
+    where
+        F: FnOnce(&Message) -> RecoverableSignature,
+    {
+        let hrp = self.hrp_part();
+        let data = self.data_part();
+        let preimage = construct_invoice_preimage(hrp.as_bytes(), &data);
+        let mut hash: [u8; 32] = Default::default();
+        hash.copy_from_slice(&sha256::Hash::hash(&preimage)[..]);
+        let message = Message::from_slice(&hash).unwrap();
+        let signature = sign_function(&message);
+        self.signature = Some(InvoiceSignature(signature));
+        Ok(())
+    }
+}
+
+impl ToBase32 for InvoiceSignature {
+    fn write_base32<W: WriteBase32>(&self, writer: &mut W) -> Result<(), <W as WriteBase32>::Err> {
+        let mut converter = BytesToBase32::new(writer);
+        let (recovery_id, signature) = self.0.serialize_compact();
+        converter.append(&signature[..])?;
+        converter.append_u8(recovery_id.to_i32() as u8)?;
+        converter.finalize()
+    }
+}
+
+impl InvoiceSignature {
+    fn from_base32(signature: &[u5]) -> Result<Self, InvoiceParseError> {
+        if signature.len() != 104 {
+            return Err(InvoiceParseError::InvalidSliceLength(
+                "InvoiceSignature::from_base32()".into(),
+            ));
+        }
+        let recoverable_signature_bytes = Vec::<u8>::from_base32(signature).unwrap();
+        let signature = &recoverable_signature_bytes[0..64];
+        let recovery_id = RecoveryId::from_i32(recoverable_signature_bytes[64] as i32).unwrap();
+
+        Ok(InvoiceSignature(
+            RecoverableSignature::from_compact(signature, recovery_id).unwrap(),
+        ))
+    }
 }
 
 impl ToString for CkbInvoice {
     fn to_string(&self) -> String {
         let hrp = self.hrp_part();
-        let data = self.data_part();
+        let mut data = self.data_part();
+        data.insert(
+            0,
+            u5::try_from_u8(if self.signature.is_some() { 1 } else { 0 }).unwrap(),
+        );
+        if let Some(signature) = &self.signature {
+            data.extend_from_slice(&signature.to_base32());
+        }
         encode(&hrp, data, Variant::Bech32m).unwrap()
     }
 }
@@ -172,13 +257,26 @@ impl FromStr for CkbInvoice {
             return Err(InvoiceParseError::TooShortDataPart);
         }
         let (currency, amount, prefix) = parse_hrp(&hrp)?;
-        let data = Vec::<u8>::from_base32(&data).unwrap();
-        let decompressed = ar_decompress(&data).unwrap();
-        let invoice_data = RawInvoiceData::from_slice(&decompressed).unwrap();
+        let is_signed = u5::from(data[0]).to_u8() == 1;
+        let data_end = if is_signed {
+            data.len() - 104
+        } else {
+            data.len()
+        };
+        let data_part = Vec::<u8>::from_base32(&data[1..data_end]).unwrap();
+        let data_part = ar_decompress(&data_part).unwrap();
+        let invoice_data = RawInvoiceData::from_slice(&data_part).unwrap();
+        let signature = if is_signed {
+            Some(InvoiceSignature::from_base32(&data[data.len() - 104..])?)
+        } else {
+            None
+        };
+
         let invoice = CkbInvoice {
             currency,
             amount,
             prefix,
+            signature,
             data: invoice_data.try_into().unwrap(),
         };
         Ok(invoice)
@@ -316,25 +414,6 @@ impl From<InvoiceAttr> for Attribute {
     }
 }
 
-impl From<CkbInvoice> for RawCkbInvoice {
-    fn from(invoice: CkbInvoice) -> Self {
-        RawCkbInvoiceBuilder::default()
-            .currency((invoice.currency as u8).into())
-            .amount(
-                AmountOpt::new_builder()
-                    .set(invoice.amount.map(|x| x.pack()))
-                    .build(),
-            )
-            .prefix(
-                SiPrefixOpt::new_builder()
-                    .set(invoice.prefix.map(|x| (x as u8).into()))
-                    .build(),
-            )
-            .data(InvoiceData::from(invoice.data).into())
-            .build()
-    }
-}
-
 /// Errors that may occur when constructing a new [`RawBolt11Invoice`] or [`Bolt11Invoice`]
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub enum CreationError {
@@ -415,19 +494,37 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::FallbackAddr(fallback))
     }
 
-    pub fn build(self) -> Result<CkbInvoice, CreationError> {
-        self.check_duplicated_attrs()?;
+    pub fn build(self) -> Result<CkbInvoice, SignOrCreationError> {
+        let convert_err = |e| SignOrCreationError::CreationError(e);
+
+        self.check_duplicated_attrs().map_err(convert_err)?;
         Ok(CkbInvoice {
             currency: self.currency,
             amount: self.amount,
             prefix: self.prefix,
+            signature: None,
             data: InvoiceData {
-                payment_hash: self.payment_hash.ok_or(CreationError::NoPaymentHash)?,
-                payment_secret: self.payment_secret.ok_or(CreationError::NoPaymentSecret)?,
-                signature: [0u8; 64],
+                payment_hash: self
+                    .payment_hash
+                    .ok_or(CreationError::NoPaymentHash)
+                    .map_err(convert_err)?,
+
+                payment_secret: self
+                    .payment_secret
+                    .ok_or(CreationError::NoPaymentSecret)
+                    .map_err(convert_err)?,
                 attrs: self.attrs,
             },
         })
+    }
+
+    pub fn build_with_sign<F>(self, sign_function: F) -> Result<CkbInvoice, SignOrCreationError>
+    where
+        F: FnOnce(&Message) -> RecoverableSignature,
+    {
+        let mut invoice = self.build()?;
+        invoice.build_signature(sign_function)?;
+        Ok(invoice)
     }
 
     fn check_duplicated_attrs(&self) -> Result<(), CreationError> {
@@ -443,6 +540,17 @@ impl InvoiceBuilder {
     }
 }
 
+/// When signing using a fallible method either an user-supplied `SignError` or a [`CreationError`]
+/// may occur.
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum SignOrCreationError {
+    /// An error occurred during signing
+    SignError,
+
+    /// An error occurred while building the transaction
+    CreationError(CreationError),
+}
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Molecule error: {0}")]
@@ -456,8 +564,52 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
             currency: (u8::from(invoice.currency())).into(),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
             prefix: invoice.prefix().to_opt().map(|x| u8::from(x).into()),
+            signature: invoice.signature().to_opt().map(|x| {
+                let vec_u8: Vec<u8> = x.as_bytes().into();
+                let vec_u5: Vec<u5> = vec_u8
+                    .iter()
+                    .map(|x| u5::try_from_u8(*x).unwrap())
+                    .collect();
+                InvoiceSignature::from_base32(&vec_u5).unwrap()
+            }),
             data: invoice.data().try_into()?,
         })
+    }
+}
+
+impl From<CkbInvoice> for RawCkbInvoice {
+    fn from(invoice: CkbInvoice) -> Self {
+        RawCkbInvoiceBuilder::default()
+            .currency((invoice.currency as u8).into())
+            .amount(
+                AmountOpt::new_builder()
+                    .set(invoice.amount.map(|x| x.pack()))
+                    .build(),
+            )
+            .prefix(
+                SiPrefixOpt::new_builder()
+                    .set(invoice.prefix.map(|x| (x as u8).into()))
+                    .build(),
+            )
+            .signature(
+                SignatureOpt::new_builder()
+                    .set({
+                        invoice.signature.map(|x| {
+                            let bytes: [u8; 104] = x
+                                .to_base32()
+                                .iter()
+                                .map(|x| x.to_u8())
+                                .collect::<Vec<_>>()
+                                .as_slice()
+                                .try_into()
+                                .unwrap();
+                            Signature::from(bytes)
+                        })
+                    })
+                    .build(),
+            )
+            .data(InvoiceData::from(invoice.data).into())
+            .build()
     }
 }
 
@@ -466,7 +618,6 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
         RawInvoiceDataBuilder::default()
             .payment_hash(PaymentHash::from(data.payment_hash))
             .payment_secret(PaymentSecret::from(data.payment_secret))
-            .signature(Signature::from(data.signature))
             .attrs(
                 InvoiceAttrsVec::new_builder()
                     .set(
@@ -488,7 +639,6 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
         Ok(InvoiceData {
             payment_hash: data.payment_hash().into(),
             payment_secret: data.payment_secret().into(),
-            signature: data.signature().into(),
             attrs: data
                 .attrs()
                 .into_iter()
@@ -500,7 +650,10 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::key::{KeyPair, Secp256k1};
+    use bitcoin::{
+        key::{KeyPair, Secp256k1},
+        secp256k1::SecretKey,
+    };
 
     use super::*;
 
@@ -514,15 +667,21 @@ mod tests {
         PublicKey::from_keypair(&key_pair)
     }
 
-    fn mock_invoice() -> CkbInvoice {
+    fn gen_rand_private_key() -> SecretKey {
+        let secp = Secp256k1::new();
+        let key_pair = KeyPair::new(&secp, &mut rand::thread_rng());
+        SecretKey::from_keypair(&key_pair)
+    }
+
+    fn mock_invoice_no_sign() -> CkbInvoice {
         CkbInvoice {
             currency: Currency::Ckb,
             amount: Some(1280),
             prefix: Some(SiPrefix::Kilo),
+            signature: None,
             data: InvoiceData {
                 payment_hash: random_u8_array(32).try_into().unwrap(),
                 payment_secret: random_u8_array(32).try_into().unwrap(),
-                signature: random_u8_array(64).try_into().unwrap(),
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -534,6 +693,14 @@ mod tests {
                 ],
             },
         }
+    }
+
+    fn mock_invoice() -> CkbInvoice {
+        let private_key = gen_rand_private_key();
+        let mut invoice = mock_invoice_no_sign();
+        let _ = invoice
+            .build_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+        invoice
     }
 
     #[test]
@@ -592,12 +759,27 @@ mod tests {
     }
 
     #[test]
+    fn test_signature() {
+        let private_key = gen_rand_private_key();
+        let signature = Secp256k1::new()
+            .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
+        let signature = InvoiceSignature(signature);
+        let base32 = signature.to_base32();
+        assert_eq!(base32.len(), 104);
+
+        let decoded_signature = InvoiceSignature::from_base32(&base32).unwrap();
+        assert_eq!(decoded_signature, signature);
+    }
+
+    #[test]
     fn test_ckb_invoice() {
         let ckb_invoice = mock_invoice();
         let ckb_invoice_clone = ckb_invoice.clone();
         let raw_invoice: RawCkbInvoice = ckb_invoice.into();
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
         assert_eq!(decoded_invoice, ckb_invoice_clone);
+        let address = ckb_invoice_clone.to_string();
+        assert!(address.starts_with("lnckb1280k1"));
     }
 
     #[test]
@@ -609,18 +791,22 @@ mod tests {
 
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
+        assert_eq!(decoded_invoice.is_signed(), true);
     }
 
     #[test]
     fn test_invoice_bc32m_not_same() {
+        let private_key = gen_rand_private_key();
+        let signature = Secp256k1::new()
+            .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
         let invoice = CkbInvoice {
             currency: Currency::Ckb,
             amount: Some(1280),
             prefix: Some(SiPrefix::Kilo),
+            signature: Some(InvoiceSignature(signature)),
             data: InvoiceData {
                 payment_hash: [0u8; 32],
                 payment_secret: [0u8; 32],
-                signature: [0u8; 64],
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -656,6 +842,8 @@ mod tests {
     fn test_invoice_builder() {
         let gen_payment_hash = random_u8_array(32).try_into().unwrap();
         let gen_payment_secret = random_u8_array(32).try_into().unwrap();
+        let private_key = gen_rand_private_key();
+
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
@@ -669,7 +857,7 @@ mod tests {
             .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
             .add_attr(Attribute::Description("description".to_string()))
             .add_attr(Attribute::UdtScript(Script::default()))
-            .build()
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
 
         let address = invoice.to_string();
@@ -690,6 +878,7 @@ mod tests {
     fn test_invoice_builder_duplicated_attr() {
         let gen_payment_hash = random_u8_array(32).try_into().unwrap();
         let gen_payment_secret = random_u8_array(32).try_into().unwrap();
+        let private_key = gen_rand_private_key();
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
@@ -698,35 +887,48 @@ mod tests {
             .payment_secret(gen_payment_secret)
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .add_attr(Attribute::FinalHtlcTimeout(6))
-            .build();
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
         assert_eq!(
             invoice.err(),
-            Some(CreationError::DuplicatedAttributeKey(format!(
-                "{:?}",
-                Attribute::FinalHtlcTimeout(5)
-            )))
+            Some(SignOrCreationError::CreationError(
+                CreationError::DuplicatedAttributeKey(format!(
+                    "{:?}",
+                    Attribute::FinalHtlcTimeout(5)
+                ),),
+            ),)
         );
     }
 
     #[test]
     fn test_invoice_builder_missing() {
+        let private_key = gen_rand_private_key();
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_secret(random_u8_array(32).try_into().unwrap())
-            .build();
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
-        assert_eq!(invoice.err(), Some(CreationError::NoPaymentHash));
+        assert_eq!(
+            invoice.err(),
+            Some(SignOrCreationError::CreationError(
+                CreationError::NoPaymentHash
+            ))
+        );
 
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(random_u8_array(32).try_into().unwrap())
-            .build();
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
-        assert_eq!(invoice.err(), Some(CreationError::NoPaymentSecret));
+        assert_eq!(
+            invoice.err(),
+            Some(SignOrCreationError::CreationError(
+                CreationError::NoPaymentSecret
+            ))
+        );
     }
 }

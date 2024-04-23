@@ -2,8 +2,9 @@ import blockchain;
 
 array PaymentHash [byte; 32];
 array PaymentSecret [byte; 32];
-array Signature [byte; 64];
+array Signature [byte; 104];
 option ExpiryTimeOpt (Duration);
+option SignatureOpt (Signature);
 
 option AmountOpt (Uint64);
 option SiPrefixOpt (byte);
@@ -70,7 +71,6 @@ vector InvoiceAttrsVec <InvoiceAttr>;
 table RawInvoiceData {
     payment_hash: PaymentHash,
     payment_secret: PaymentSecret,
-    signature: Signature,
     attrs: InvoiceAttrsVec,
 }
 
@@ -78,5 +78,6 @@ table RawCkbInvoice {
     currency: byte,
     amount: AmountOpt,
     prefix: SiPrefixOpt,
+    signature: SignatureOpt,
     data: RawInvoiceData,
 }

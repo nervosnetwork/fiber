@@ -279,6 +279,7 @@ version = "0.30.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1945a5048598e4189e239d3f809b19bdad4845c4b2ba400d304d2dcf26d2c462"
 dependencies = [
+ "base64 0.13.1",
  "bech32 0.9.1",
  "bitcoin-private",
  "bitcoin_hashes",

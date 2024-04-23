@@ -1182,14 +1182,15 @@ impl ::core::default::Default for Signature {
     }
 }
 impl Signature {
-    const DEFAULT_VALUE: [u8; 64] = [
+    const DEFAULT_VALUE: [u8; 104] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 104;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
+    pub const ITEM_COUNT: usize = 104;
     pub fn nth0(&self) -> Byte {
         Byte::new_unchecked(self.0.slice(0..1))
     }
@@ -1382,6 +1383,126 @@ impl Signature {
     pub fn nth63(&self) -> Byte {
         Byte::new_unchecked(self.0.slice(63..64))
     }
+    pub fn nth64(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(64..65))
+    }
+    pub fn nth65(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(65..66))
+    }
+    pub fn nth66(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(66..67))
+    }
+    pub fn nth67(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(67..68))
+    }
+    pub fn nth68(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(68..69))
+    }
+    pub fn nth69(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(69..70))
+    }
+    pub fn nth70(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(70..71))
+    }
+    pub fn nth71(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(71..72))
+    }
+    pub fn nth72(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(72..73))
+    }
+    pub fn nth73(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(73..74))
+    }
+    pub fn nth74(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(74..75))
+    }
+    pub fn nth75(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(75..76))
+    }
+    pub fn nth76(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(76..77))
+    }
+    pub fn nth77(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(77..78))
+    }
+    pub fn nth78(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(78..79))
+    }
+    pub fn nth79(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(79..80))
+    }
+    pub fn nth80(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(80..81))
+    }
+    pub fn nth81(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(81..82))
+    }
+    pub fn nth82(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(82..83))
+    }
+    pub fn nth83(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(83..84))
+    }
+    pub fn nth84(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(84..85))
+    }
+    pub fn nth85(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(85..86))
+    }
+    pub fn nth86(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(86..87))
+    }
+    pub fn nth87(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(87..88))
+    }
+    pub fn nth88(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(88..89))
+    }
+    pub fn nth89(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(89..90))
+    }
+    pub fn nth90(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(90..91))
+    }
+    pub fn nth91(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(91..92))
+    }
+    pub fn nth92(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(92..93))
+    }
+    pub fn nth93(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(93..94))
+    }
+    pub fn nth94(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(94..95))
+    }
+    pub fn nth95(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(95..96))
+    }
+    pub fn nth96(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(96..97))
+    }
+    pub fn nth97(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(97..98))
+    }
+    pub fn nth98(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(98..99))
+    }
+    pub fn nth99(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(99..100))
+    }
+    pub fn nth100(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(100..101))
+    }
+    pub fn nth101(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(101..102))
+    }
+    pub fn nth102(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(102..103))
+    }
+    pub fn nth103(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(103..104))
+    }
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
@@ -1476,6 +1597,46 @@ impl molecule::prelude::Entity for Signature {
             self.nth61(),
             self.nth62(),
             self.nth63(),
+            self.nth64(),
+            self.nth65(),
+            self.nth66(),
+            self.nth67(),
+            self.nth68(),
+            self.nth69(),
+            self.nth70(),
+            self.nth71(),
+            self.nth72(),
+            self.nth73(),
+            self.nth74(),
+            self.nth75(),
+            self.nth76(),
+            self.nth77(),
+            self.nth78(),
+            self.nth79(),
+            self.nth80(),
+            self.nth81(),
+            self.nth82(),
+            self.nth83(),
+            self.nth84(),
+            self.nth85(),
+            self.nth86(),
+            self.nth87(),
+            self.nth88(),
+            self.nth89(),
+            self.nth90(),
+            self.nth91(),
+            self.nth92(),
+            self.nth93(),
+            self.nth94(),
+            self.nth95(),
+            self.nth96(),
+            self.nth97(),
+            self.nth98(),
+            self.nth99(),
+            self.nth100(),
+            self.nth101(),
+            self.nth102(),
+            self.nth103(),
         ])
     }
 }
@@ -1503,9 +1664,9 @@ impl<'r> ::core::fmt::Display for SignatureReader<'r> {
     }
 }
 impl<'r> SignatureReader<'r> {
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 104;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
+    pub const ITEM_COUNT: usize = 104;
     pub fn nth0(&self) -> ByteReader<'r> {
         ByteReader::new_unchecked(&self.as_slice()[0..1])
     }
@@ -1698,6 +1859,126 @@ impl<'r> SignatureReader<'r> {
     pub fn nth63(&self) -> ByteReader<'r> {
         ByteReader::new_unchecked(&self.as_slice()[63..64])
     }
+    pub fn nth64(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[64..65])
+    }
+    pub fn nth65(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[65..66])
+    }
+    pub fn nth66(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[66..67])
+    }
+    pub fn nth67(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[67..68])
+    }
+    pub fn nth68(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[68..69])
+    }
+    pub fn nth69(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[69..70])
+    }
+    pub fn nth70(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[70..71])
+    }
+    pub fn nth71(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[71..72])
+    }
+    pub fn nth72(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[72..73])
+    }
+    pub fn nth73(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[73..74])
+    }
+    pub fn nth74(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[74..75])
+    }
+    pub fn nth75(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[75..76])
+    }
+    pub fn nth76(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[76..77])
+    }
+    pub fn nth77(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[77..78])
+    }
+    pub fn nth78(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[78..79])
+    }
+    pub fn nth79(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[79..80])
+    }
+    pub fn nth80(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[80..81])
+    }
+    pub fn nth81(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[81..82])
+    }
+    pub fn nth82(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[82..83])
+    }
+    pub fn nth83(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[83..84])
+    }
+    pub fn nth84(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[84..85])
+    }
+    pub fn nth85(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[85..86])
+    }
+    pub fn nth86(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[86..87])
+    }
+    pub fn nth87(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[87..88])
+    }
+    pub fn nth88(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[88..89])
+    }
+    pub fn nth89(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[89..90])
+    }
+    pub fn nth90(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[90..91])
+    }
+    pub fn nth91(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[91..92])
+    }
+    pub fn nth92(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[92..93])
+    }
+    pub fn nth93(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[93..94])
+    }
+    pub fn nth94(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[94..95])
+    }
+    pub fn nth95(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[95..96])
+    }
+    pub fn nth96(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[96..97])
+    }
+    pub fn nth97(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[97..98])
+    }
+    pub fn nth98(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[98..99])
+    }
+    pub fn nth99(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[99..100])
+    }
+    pub fn nth100(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[100..101])
+    }
+    pub fn nth101(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[101..102])
+    }
+    pub fn nth102(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[102..103])
+    }
+    pub fn nth103(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[103..104])
+    }
     pub fn raw_data(&self) -> &'r [u8] {
         self.as_slice()
     }
@@ -1723,7 +2004,7 @@ impl<'r> molecule::prelude::Reader<'r> for SignatureReader<'r> {
         Ok(())
     }
 }
-pub struct SignatureBuilder(pub(crate) [Byte; 64]);
+pub struct SignatureBuilder(pub(crate) [Byte; 104]);
 impl ::core::fmt::Debug for SignatureBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
@@ -1796,14 +2077,54 @@ impl ::core::default::Default for SignatureBuilder {
             Byte::default(),
             Byte::default(),
             Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
         ])
     }
 }
 impl SignatureBuilder {
-    pub const TOTAL_SIZE: usize = 64;
+    pub const TOTAL_SIZE: usize = 104;
     pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 64;
-    pub fn set(mut self, v: [Byte; 64]) -> Self {
+    pub const ITEM_COUNT: usize = 104;
+    pub fn set(mut self, v: [Byte; 104]) -> Self {
         self.0 = v;
         self
     }
@@ -2063,6 +2384,166 @@ impl SignatureBuilder {
         self.0[63] = v;
         self
     }
+    pub fn nth64(mut self, v: Byte) -> Self {
+        self.0[64] = v;
+        self
+    }
+    pub fn nth65(mut self, v: Byte) -> Self {
+        self.0[65] = v;
+        self
+    }
+    pub fn nth66(mut self, v: Byte) -> Self {
+        self.0[66] = v;
+        self
+    }
+    pub fn nth67(mut self, v: Byte) -> Self {
+        self.0[67] = v;
+        self
+    }
+    pub fn nth68(mut self, v: Byte) -> Self {
+        self.0[68] = v;
+        self
+    }
+    pub fn nth69(mut self, v: Byte) -> Self {
+        self.0[69] = v;
+        self
+    }
+    pub fn nth70(mut self, v: Byte) -> Self {
+        self.0[70] = v;
+        self
+    }
+    pub fn nth71(mut self, v: Byte) -> Self {
+        self.0[71] = v;
+        self
+    }
+    pub fn nth72(mut self, v: Byte) -> Self {
+        self.0[72] = v;
+        self
+    }
+    pub fn nth73(mut self, v: Byte) -> Self {
+        self.0[73] = v;
+        self
+    }
+    pub fn nth74(mut self, v: Byte) -> Self {
+        self.0[74] = v;
+        self
+    }
+    pub fn nth75(mut self, v: Byte) -> Self {
+        self.0[75] = v;
+        self
+    }
+    pub fn nth76(mut self, v: Byte) -> Self {
+        self.0[76] = v;
+        self
+    }
+    pub fn nth77(mut self, v: Byte) -> Self {
+        self.0[77] = v;
+        self
+    }
+    pub fn nth78(mut self, v: Byte) -> Self {
+        self.0[78] = v;
+        self
+    }
+    pub fn nth79(mut self, v: Byte) -> Self {
+        self.0[79] = v;
+        self
+    }
+    pub fn nth80(mut self, v: Byte) -> Self {
+        self.0[80] = v;
+        self
+    }
+    pub fn nth81(mut self, v: Byte) -> Self {
+        self.0[81] = v;
+        self
+    }
+    pub fn nth82(mut self, v: Byte) -> Self {
+        self.0[82] = v;
+        self
+    }
+    pub fn nth83(mut self, v: Byte) -> Self {
+        self.0[83] = v;
+        self
+    }
+    pub fn nth84(mut self, v: Byte) -> Self {
+        self.0[84] = v;
+        self
+    }
+    pub fn nth85(mut self, v: Byte) -> Self {
+        self.0[85] = v;
+        self
+    }
+    pub fn nth86(mut self, v: Byte) -> Self {
+        self.0[86] = v;
+        self
+    }
+    pub fn nth87(mut self, v: Byte) -> Self {
+        self.0[87] = v;
+        self
+    }
+    pub fn nth88(mut self, v: Byte) -> Self {
+        self.0[88] = v;
+        self
+    }
+    pub fn nth89(mut self, v: Byte) -> Self {
+        self.0[89] = v;
+        self
+    }
+    pub fn nth90(mut self, v: Byte) -> Self {
+        self.0[90] = v;
+        self
+    }
+    pub fn nth91(mut self, v: Byte) -> Self {
+        self.0[91] = v;
+        self
+    }
+    pub fn nth92(mut self, v: Byte) -> Self {
+        self.0[92] = v;
+        self
+    }
+    pub fn nth93(mut self, v: Byte) -> Self {
+        self.0[93] = v;
+        self
+    }
+    pub fn nth94(mut self, v: Byte) -> Self {
+        self.0[94] = v;
+        self
+    }
+    pub fn nth95(mut self, v: Byte) -> Self {
+        self.0[95] = v;
+        self
+    }
+    pub fn nth96(mut self, v: Byte) -> Self {
+        self.0[96] = v;
+        self
+    }
+    pub fn nth97(mut self, v: Byte) -> Self {
+        self.0[97] = v;
+        self
+    }
+    pub fn nth98(mut self, v: Byte) -> Self {
+        self.0[98] = v;
+        self
+    }
+    pub fn nth99(mut self, v: Byte) -> Self {
+        self.0[99] = v;
+        self
+    }
+    pub fn nth100(mut self, v: Byte) -> Self {
+        self.0[100] = v;
+        self
+    }
+    pub fn nth101(mut self, v: Byte) -> Self {
+        self.0[101] = v;
+        self
+    }
+    pub fn nth102(mut self, v: Byte) -> Self {
+        self.0[102] = v;
+        self
+    }
+    pub fn nth103(mut self, v: Byte) -> Self {
+        self.0[103] = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for SignatureBuilder {
     type Entity = Signature;
@@ -2135,6 +2616,46 @@ impl molecule::prelude::Builder for SignatureBuilder {
         writer.write_all(self.0[61].as_slice())?;
         writer.write_all(self.0[62].as_slice())?;
         writer.write_all(self.0[63].as_slice())?;
+        writer.write_all(self.0[64].as_slice())?;
+        writer.write_all(self.0[65].as_slice())?;
+        writer.write_all(self.0[66].as_slice())?;
+        writer.write_all(self.0[67].as_slice())?;
+        writer.write_all(self.0[68].as_slice())?;
+        writer.write_all(self.0[69].as_slice())?;
+        writer.write_all(self.0[70].as_slice())?;
+        writer.write_all(self.0[71].as_slice())?;
+        writer.write_all(self.0[72].as_slice())?;
+        writer.write_all(self.0[73].as_slice())?;
+        writer.write_all(self.0[74].as_slice())?;
+        writer.write_all(self.0[75].as_slice())?;
+        writer.write_all(self.0[76].as_slice())?;
+        writer.write_all(self.0[77].as_slice())?;
+        writer.write_all(self.0[78].as_slice())?;
+        writer.write_all(self.0[79].as_slice())?;
+        writer.write_all(self.0[80].as_slice())?;
+        writer.write_all(self.0[81].as_slice())?;
+        writer.write_all(self.0[82].as_slice())?;
+        writer.write_all(self.0[83].as_slice())?;
+        writer.write_all(self.0[84].as_slice())?;
+        writer.write_all(self.0[85].as_slice())?;
+        writer.write_all(self.0[86].as_slice())?;
+        writer.write_all(self.0[87].as_slice())?;
+        writer.write_all(self.0[88].as_slice())?;
+        writer.write_all(self.0[89].as_slice())?;
+        writer.write_all(self.0[90].as_slice())?;
+        writer.write_all(self.0[91].as_slice())?;
+        writer.write_all(self.0[92].as_slice())?;
+        writer.write_all(self.0[93].as_slice())?;
+        writer.write_all(self.0[94].as_slice())?;
+        writer.write_all(self.0[95].as_slice())?;
+        writer.write_all(self.0[96].as_slice())?;
+        writer.write_all(self.0[97].as_slice())?;
+        writer.write_all(self.0[98].as_slice())?;
+        writer.write_all(self.0[99].as_slice())?;
+        writer.write_all(self.0[100].as_slice())?;
+        writer.write_all(self.0[101].as_slice())?;
+        writer.write_all(self.0[102].as_slice())?;
+        writer.write_all(self.0[103].as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -2306,6 +2827,170 @@ impl molecule::prelude::Builder for ExpiryTimeOptBuilder {
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
         ExpiryTimeOpt::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
+pub struct SignatureOpt(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for SignatureOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for SignatureOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for SignatureOpt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl ::core::default::Default for SignatureOpt {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        SignatureOpt::new_unchecked(v)
+    }
+}
+impl SignatureOpt {
+    const DEFAULT_VALUE: [u8; 0] = [];
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Signature> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Signature::new_unchecked(self.0.clone()))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> SignatureOptReader<'r> {
+        SignatureOptReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for SignatureOpt {
+    type Builder = SignatureOptBuilder;
+    const NAME: &'static str = "SignatureOpt";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        SignatureOpt(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        SignatureOptReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        SignatureOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_opt())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct SignatureOptReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for SignatureOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for SignatureOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for SignatureOptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl<'r> SignatureOptReader<'r> {
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<SignatureReader<'r>> {
+        if self.is_none() {
+            None
+        } else {
+            Some(SignatureReader::new_unchecked(self.as_slice()))
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for SignatureOptReader<'r> {
+    type Entity = SignatureOpt;
+    const NAME: &'static str = "SignatureOptReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        SignatureOptReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        if !slice.is_empty() {
+            SignatureReader::verify(&slice[..], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct SignatureOptBuilder(pub(crate) Option<Signature>);
+impl SignatureOptBuilder {
+    pub fn set(mut self, v: Option<Signature>) -> Self {
+        self.0 = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for SignatureOptBuilder {
+    type Entity = SignatureOpt;
+    const NAME: &'static str = "SignatureOptBuilder";
+    fn expected_length(&self) -> usize {
+        self.0
+            .as_ref()
+            .map(|ref inner| inner.as_slice().len())
+            .unwrap_or(0)
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        self.0
+            .as_ref()
+            .map(|ref inner| writer.write_all(inner.as_slice()))
+            .unwrap_or(Ok(()))
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        SignatureOpt::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -6015,7 +6700,6 @@ impl ::core::fmt::Display for RawInvoiceData {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "payment_secret", self.payment_secret())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6031,15 +6715,12 @@ impl ::core::default::Default for RawInvoiceData {
     }
 }
 impl RawInvoiceData {
-    const DEFAULT_VALUE: [u8; 152] = [
-        152, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 84, 0, 0, 0, 148, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 84] = [
+        84, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        4, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6068,17 +6749,11 @@ impl RawInvoiceData {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         PaymentSecret::new_unchecked(self.0.slice(start..end))
     }
-    pub fn signature(&self) -> Signature {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
-    }
     pub fn attrs(&self) -> InvoiceAttrsVec {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..end))
         } else {
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..))
@@ -6113,7 +6788,6 @@ impl molecule::prelude::Entity for RawInvoiceData {
         Self::new_builder()
             .payment_hash(self.payment_hash())
             .payment_secret(self.payment_secret())
-            .signature(self.signature())
             .attrs(self.attrs())
     }
 }
@@ -6138,7 +6812,6 @@ impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "payment_secret", self.payment_secret())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6148,7 +6821,7 @@ impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
     }
 }
 impl<'r> RawInvoiceDataReader<'r> {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6177,17 +6850,11 @@ impl<'r> RawInvoiceDataReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         PaymentSecretReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn signature(&self) -> SignatureReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn attrs(&self) -> InvoiceAttrsVecReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..])
@@ -6242,8 +6909,7 @@ impl<'r> molecule::prelude::Reader<'r> for RawInvoiceDataReader<'r> {
         }
         PaymentHashReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         PaymentSecretReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        SignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        InvoiceAttrsVecReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        InvoiceAttrsVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
@@ -6251,21 +6917,16 @@ impl<'r> molecule::prelude::Reader<'r> for RawInvoiceDataReader<'r> {
 pub struct RawInvoiceDataBuilder {
     pub(crate) payment_hash: PaymentHash,
     pub(crate) payment_secret: PaymentSecret,
-    pub(crate) signature: Signature,
     pub(crate) attrs: InvoiceAttrsVec,
 }
 impl RawInvoiceDataBuilder {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn payment_hash(mut self, v: PaymentHash) -> Self {
         self.payment_hash = v;
         self
     }
     pub fn payment_secret(mut self, v: PaymentSecret) -> Self {
         self.payment_secret = v;
-        self
-    }
-    pub fn signature(mut self, v: Signature) -> Self {
-        self.signature = v;
         self
     }
     pub fn attrs(mut self, v: InvoiceAttrsVec) -> Self {
@@ -6280,7 +6941,6 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.payment_hash.as_slice().len()
             + self.payment_secret.as_slice().len()
-            + self.signature.as_slice().len()
             + self.attrs.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6291,8 +6951,6 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
         offsets.push(total_size);
         total_size += self.payment_secret.as_slice().len();
         offsets.push(total_size);
-        total_size += self.signature.as_slice().len();
-        offsets.push(total_size);
         total_size += self.attrs.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
@@ -6300,7 +6958,6 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
         }
         writer.write_all(self.payment_hash.as_slice())?;
         writer.write_all(self.payment_secret.as_slice())?;
-        writer.write_all(self.signature.as_slice())?;
         writer.write_all(self.attrs.as_slice())?;
         Ok(())
     }
@@ -6333,6 +6990,7 @@ impl ::core::fmt::Display for RawCkbInvoice {
         write!(f, "{}: {}", "currency", self.currency())?;
         write!(f, ", {}: {}", "amount", self.amount())?;
         write!(f, ", {}: {}", "prefix", self.prefix())?;
+        write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "data", self.data())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6348,15 +7006,13 @@ impl ::core::default::Default for RawCkbInvoice {
     }
 }
 impl RawCkbInvoice {
-    const DEFAULT_VALUE: [u8; 173] = [
-        173, 0, 0, 0, 20, 0, 0, 0, 21, 0, 0, 0, 21, 0, 0, 0, 21, 0, 0, 0, 0, 152, 0, 0, 0, 20, 0,
-        0, 0, 52, 0, 0, 0, 84, 0, 0, 0, 148, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 109] = [
+        109, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 84, 0, 0,
+        0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 5;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6391,11 +7047,17 @@ impl RawCkbInvoice {
         let end = molecule::unpack_number(&slice[16..]) as usize;
         SiPrefixOpt::new_unchecked(self.0.slice(start..end))
     }
-    pub fn data(&self) -> RawInvoiceData {
+    pub fn signature(&self) -> SignatureOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
+        SignatureOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn data(&self) -> RawInvoiceData {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[20..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
+            let end = molecule::unpack_number(&slice[24..]) as usize;
             RawInvoiceData::new_unchecked(self.0.slice(start..end))
         } else {
             RawInvoiceData::new_unchecked(self.0.slice(start..))
@@ -6431,6 +7093,7 @@ impl molecule::prelude::Entity for RawCkbInvoice {
             .currency(self.currency())
             .amount(self.amount())
             .prefix(self.prefix())
+            .signature(self.signature())
             .data(self.data())
     }
 }
@@ -6456,6 +7119,7 @@ impl<'r> ::core::fmt::Display for RawCkbInvoiceReader<'r> {
         write!(f, "{}: {}", "currency", self.currency())?;
         write!(f, ", {}: {}", "amount", self.amount())?;
         write!(f, ", {}: {}", "prefix", self.prefix())?;
+        write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "data", self.data())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6465,7 +7129,7 @@ impl<'r> ::core::fmt::Display for RawCkbInvoiceReader<'r> {
     }
 }
 impl<'r> RawCkbInvoiceReader<'r> {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 5;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6500,11 +7164,17 @@ impl<'r> RawCkbInvoiceReader<'r> {
         let end = molecule::unpack_number(&slice[16..]) as usize;
         SiPrefixOptReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn data(&self) -> RawInvoiceDataReader<'r> {
+    pub fn signature(&self) -> SignatureOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
+        SignatureOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn data(&self) -> RawInvoiceDataReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[20..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
+            let end = molecule::unpack_number(&slice[24..]) as usize;
             RawInvoiceDataReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             RawInvoiceDataReader::new_unchecked(&self.as_slice()[start..])
@@ -6560,7 +7230,8 @@ impl<'r> molecule::prelude::Reader<'r> for RawCkbInvoiceReader<'r> {
         ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         AmountOptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         SiPrefixOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        RawInvoiceDataReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        SignatureOptReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        RawInvoiceDataReader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         Ok(())
     }
 }
@@ -6569,10 +7240,11 @@ pub struct RawCkbInvoiceBuilder {
     pub(crate) currency: Byte,
     pub(crate) amount: AmountOpt,
     pub(crate) prefix: SiPrefixOpt,
+    pub(crate) signature: SignatureOpt,
     pub(crate) data: RawInvoiceData,
 }
 impl RawCkbInvoiceBuilder {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 5;
     pub fn currency(mut self, v: Byte) -> Self {
         self.currency = v;
         self
@@ -6583,6 +7255,10 @@ impl RawCkbInvoiceBuilder {
     }
     pub fn prefix(mut self, v: SiPrefixOpt) -> Self {
         self.prefix = v;
+        self
+    }
+    pub fn signature(mut self, v: SignatureOpt) -> Self {
+        self.signature = v;
         self
     }
     pub fn data(mut self, v: RawInvoiceData) -> Self {
@@ -6598,6 +7274,7 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
             + self.currency.as_slice().len()
             + self.amount.as_slice().len()
             + self.prefix.as_slice().len()
+            + self.signature.as_slice().len()
             + self.data.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6610,6 +7287,8 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
         offsets.push(total_size);
         total_size += self.prefix.as_slice().len();
         offsets.push(total_size);
+        total_size += self.signature.as_slice().len();
+        offsets.push(total_size);
         total_size += self.data.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
@@ -6618,6 +7297,7 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
         writer.write_all(self.currency.as_slice())?;
         writer.write_all(self.amount.as_slice())?;
         writer.write_all(self.prefix.as_slice())?;
+        writer.write_all(self.signature.as_slice())?;
         writer.write_all(self.data.as_slice())?;
         Ok(())
     }
