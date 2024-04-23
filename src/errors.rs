@@ -2,7 +2,11 @@ use ractor::{MessagingErr, SpawnErr};
 use tentacle::{error::SendErrorKind, secio::PeerId};
 use thiserror::Error;
 
-use crate::ckb::{channel::{ChannelActorMessage, ProcessingChannelError}, types::Hash256, NetworkActorMessage};
+use crate::ckb::{
+    channel::{ChannelActorMessage, ProcessingChannelError},
+    types::Hash256,
+    NetworkActorMessage,
+};
 
 #[derive(Error, Debug)]
 pub enum Error {

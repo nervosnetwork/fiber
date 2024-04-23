@@ -1,6 +1,10 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_types::packed::{OutPoint, Transaction};
+use ckb_types::{
+    core::TransactionView,
+    packed::{OutPoint, Transaction},
+    prelude::IntoTransactionView,
+};
 use log::{debug, error, info, warn};
 use molecule::prelude::Entity;
 use musig2::{
@@ -549,7 +553,7 @@ pub struct ChannelActorState {
     pub peer_id: PeerId,
     pub temp_id: Hash256,
 
-    pub funding_tx_inputs: Vec<FundingTxInput>,
+    pub funding_tx: Option<TransactionView>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -573,7 +577,6 @@ pub struct ChannelActorState {
     pub counterparty_commitment_point: Option<Pubkey>,
     pub counterparty_prev_commitment_point: Option<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
-    pub funding_tx: Option<OutPoint>,
 }
 
 fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
@@ -753,7 +756,6 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             peer_id,
             funding_tx: None,
-            funding_tx_inputs: vec![],
             is_acceptor: true,
             total_value: counterparty_value,
             temp_id: temp_channel_id,
@@ -792,7 +794,6 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
-            funding_tx_inputs: vec![],
             is_acceptor: false,
             total_value: value,
             temp_id: new_channel_id.into(),
@@ -1074,26 +1075,14 @@ impl ChannelActorState {
     }
 
     pub fn add_tx_to_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
-        let tx = tx.into();
-        for otx in self.funding_tx_inputs.iter() {
-            if otx == &tx {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "Trying to repeatedly add a transaction".to_string(),
-                ));
-            }
-        }
-        self.funding_tx_inputs.push(tx);
+        // TODO check if the tx is valid
+        self.funding_tx = Some(tx.into_view());
         Ok(())
     }
 
     pub fn remove_tx_from_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
-        let tx = tx.into();
-        let index = self.funding_tx_inputs.iter().position(|x| x == &tx).ok_or(
-            ProcessingChannelError::InvalidParameter(
-                "Trying to remove a tx that is not added".to_string(),
-            ),
-        )?;
-        self.funding_tx_inputs.remove(index);
+        // TODO check if the tx is valid and removed inputs belong to the remote peer
+        self.funding_tx = Some(tx.into_view());
         Ok(())
     }
 
@@ -1135,8 +1124,14 @@ impl ChannelActorState {
         }
     }
 
-    pub fn must_get_funding_transaction(&self) -> &OutPoint {
-        self.funding_tx.as_ref().expect("Channel is not funded")
+    pub fn must_get_funding_transaction(&self) -> OutPoint {
+        self.funding_tx
+            .as_ref()
+            .expect("Funding transaction is present")
+            .output_pts()
+            .first()
+            .expect("Funding transaction output is present")
+            .clone()
     }
 
     pub fn should_holder_go_first(&self) -> bool {
@@ -1426,7 +1421,7 @@ pub struct ChannelParametersOneParty {
 pub struct FundedChannelParameters<'a> {
     pub holder: &'a ChannelParametersOneParty,
     pub counterparty: &'a ChannelParametersOneParty,
-    pub funding_outpoint: &'a OutPoint,
+    pub funding_outpoint: OutPoint,
 }
 
 /// Static channel fields used to build transactions given per-commitment fields, organized by
