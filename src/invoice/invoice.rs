@@ -30,12 +30,14 @@ pub enum Currency {
     CkbTestNet,
 }
 
-impl From<u8> for Currency {
-    fn from(byte: u8) -> Self {
+impl TryFrom<u8> for Currency {
+    type Error = InvoiceError;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
         match byte {
-            0 => Self::Ckb,
-            1 => Self::CkbTestNet,
-            _ => panic!("Invalid value for Currency"),
+            0 => Ok(Self::Ckb),
+            1 => Ok(Self::CkbTestNet),
+            _ => Err(InvoiceError::UnknownCurrency),
         }
     }
 }
@@ -343,7 +345,7 @@ impl FromStr for CkbInvoice {
             return Err(InvoiceError::TooShortDataPart);
         }
         let (currency, amount, prefix) = parse_hrp(&hrp)?;
-        let is_signed = u5::from(data[0]).to_u8() == 1;
+        let is_signed = data[0].to_u8() == 1;
         let data_end = if is_signed {
             data.len() - SIGNATURE_U5_SIZE
         } else {
@@ -424,7 +426,7 @@ fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), I
             let currency =
                 Currency::from_str(currency).map_err(|_| InvoiceError::UnknownCurrency)?;
             let amount = amount
-                .map(|x| x.parse().map_err(|err| InvoiceError::ParseAmountError(err)))
+                .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
                 .transpose()?;
             let si_prefix = si_prefix
                 .map(|x| SiPrefix::from_str(x).map_err(|_| InvoiceError::UnknownSiPrefix))
@@ -522,6 +524,12 @@ pub struct InvoiceBuilder {
     attrs: Vec<Attribute>,
 }
 
+impl Default for InvoiceBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InvoiceBuilder {
     pub fn new() -> Self {
         Self {
@@ -566,7 +574,7 @@ impl InvoiceBuilder {
 
     /// Sets the payee's public key.
     pub fn payee_pub_key(self, pub_key: PublicKey) -> Self {
-        self.add_attr(Attribute::PayeePublicKey(pub_key.into()))
+        self.add_attr(Attribute::PayeePublicKey(pub_key))
     }
 
     /// Sets the expiry time
@@ -623,7 +631,7 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
 
     fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
         Ok(CkbInvoice {
-            currency: (u8::from(invoice.currency())).into(),
+            currency: (u8::from(invoice.currency())).try_into().unwrap(),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
             prefix: invoice.prefix().to_opt().map(|x| u8::from(x).into()),
             signature: invoice.signature().to_opt().map(|x| {
@@ -671,7 +679,7 @@ impl From<CkbInvoice> for RawCkbInvoice {
                     })
                     .build(),
             )
-            .data(InvoiceData::from(invoice.data).into())
+            .data(invoice.data.into())
             .build()
     }
 }
