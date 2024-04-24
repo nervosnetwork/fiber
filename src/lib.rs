@@ -10,6 +10,7 @@ pub use cch::{start_cch, CchConfig};
 
 pub mod rpc;
 pub use rpc::{start_rpc, RpcConfig};
+pub mod invoice;
 
 mod errors;
 pub use errors::{Error, Result};

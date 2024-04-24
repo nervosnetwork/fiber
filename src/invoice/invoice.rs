@@ -1,15 +1,12 @@
 #![allow(dead_code)]
-use super::{
-    gen::invoice::{self as gen_invoice, *},
-    utils::{construct_invoice_preimage, BytesToBase32},
-};
-use crate::ckb::utils::{ar_decompress, ar_encompress};
+use crate::ckb::gen::invoice::{self as gen_invoice, *};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::{
     hashes::{sha256, Hash},
     key::Secp256k1,
     secp256k1,
 };
+use super::utils::{ar_decompress, ar_encompress, construct_invoice_preimage, BytesToBase32};
 
 use bitcoin::secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
