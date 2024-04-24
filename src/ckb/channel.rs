@@ -187,15 +187,19 @@ impl ChannelActor {
             }
         };
 
-        let (tx, partial_signature) = state.build_and_sign_funding_tx()?;
+        let PartiallySignedCommitmentTransaction {
+            inner: _inner,
+            tx,
+            signature,
+        } = state.build_and_sign_commitment_tx()?;
         debug!(
             "Build a funding tx ({:?}) with partial signature {:?}",
-            &tx, &partial_signature
+            &tx, &signature
         );
 
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
-            partial_signature,
+            partial_signature: signature,
             next_local_nonce: state.get_next_holder_nonce(),
         };
         debug!(
