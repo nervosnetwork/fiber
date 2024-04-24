@@ -592,8 +592,14 @@ pub struct ChannelActorState {
     pub id: Option<Hash256>,
 
     pub counterparty_nonce: Option<PubNonce>,
+    // The commitment point used in the first commitment transaction after funding transaction.
+    // We should use this commitment point if the funding channel is not created yet.
+    // Otherwise, use counterparty_commitment_point instead.
+    // We will ensure that counterparty_initial_commitment_point is always true after creating
+    // the first commitment transaction after funding transaction.
+    pub counterparty_initial_commitment_point: Option<Pubkey>,
+    // The commitment point that is going to be used in the following commitment transaction.
     pub counterparty_commitment_point: Option<Pubkey>,
-    pub counterparty_prev_commitment_point: Option<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
 }
 
@@ -793,7 +799,7 @@ impl ChannelActorState {
             counterparty_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_point: Some(counterparty_commitment_point),
-            counterparty_prev_commitment_point: Some(counterparty_prev_commitment_point),
+            counterparty_initial_commitment_point: Some(counterparty_prev_commitment_point),
         }
     }
 
@@ -826,7 +832,7 @@ impl ChannelActorState {
             counterparty_nonce: None,
             counterparty_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: None,
-            counterparty_prev_commitment_point: None,
+            counterparty_initial_commitment_point: None,
         }
     }
 }
@@ -878,12 +884,28 @@ impl ChannelActorState {
                 assert!(self.funding_tx.is_some());
                 assert!(self.id.is_some());
                 assert!(self.counterparty_commitment_point.is_some());
-                assert!(self.counterparty_prev_commitment_point.is_some());
+                assert!(self.counterparty_initial_commitment_point.is_some());
                 assert!(self.counterparty_channel_parameters.is_some());
                 true
             }
             _ => false,
         }
+    }
+
+    pub fn get_holder_commitment_point(&self) -> Pubkey {
+        self.signer
+            .get_commitment_point(self.holder_commitment_number)
+    }
+
+    /// The first commitment point for the first commitment transaction after funding transaction
+    /// is saved in `counterparty_initial_commitment_point`. Afterwards,
+    /// `counterparty_initial_commitment_point` should be set to None and
+    /// `counterparty_commitment_point` is used.
+    pub fn get_counterparty_commitment_point(&self) -> &Pubkey {
+        self.counterparty_initial_commitment_point
+            .as_ref()
+            .or(self.counterparty_commitment_point.as_ref())
+            .expect("Counterparty commitment point is present")
     }
 
     pub fn get_funding_transaction(&self) -> OutPoint {
@@ -1056,6 +1078,10 @@ impl ChannelActorState {
             pubkeys: counterparty_pubkeys,
             selected_contest_delay: accept_channel.to_self_delay as u64,
         });
+        self.counterparty_initial_commitment_point =
+            Some(accept_channel.first_per_commitment_point.clone());
+        self.counterparty_commitment_point =
+            Some(accept_channel.second_per_commitment_point.clone());
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
@@ -1204,7 +1230,7 @@ impl ChannelActorState {
 
         debug!("Updating peer next local nonce");
         self.counterparty_nonce = Some(commitment_signed.next_local_nonce);
-
+        self.counterparty_initial_commitment_point = None;
         self.state = ChannelState::SigningCommitment(
             flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
         );
@@ -1281,13 +1307,13 @@ impl ChannelActorState {
                 self.get_holder_channel_parameters(),
                 self.get_counterparty_channel_parameters(),
                 self.signer.get_commitment_point(commitment_number),
-                self.counterparty_commitment_point.unwrap(),
+                self.get_counterparty_commitment_point().clone(),
             )
         } else {
             (
                 self.get_counterparty_channel_parameters(),
                 self.get_holder_channel_parameters(),
-                self.counterparty_commitment_point.unwrap(),
+                self.get_counterparty_commitment_point().clone(),
                 self.signer.get_commitment_point(commitment_number),
             )
         };
