@@ -25,7 +25,7 @@ use super::{
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey, Signature, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
+        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -196,7 +196,7 @@ impl ChannelActor {
         let commitment_signed = CommitmentSigned {
             channel_id: state.id(),
             partial_signature,
-            next_local_nonce: state.next_musig_nonce().public_nonce(),
+            next_local_nonce: state.next_musig2_pubnonce(),
         };
         debug!(
             "Sending built commitment_signed message: {:?}",
@@ -211,6 +211,7 @@ impl ChannelActor {
             ))
             .expect("network actor alive");
 
+        state.holder_commitment_number = state.next_commitment_number(true);
         state.state = ChannelState::SigningCommitment(
             flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT,
         );
@@ -411,7 +412,7 @@ impl Actor for ChannelActor {
                     second_per_commitment_point: state
                         .signer
                         .get_commitment_point(commitment_number - 1),
-                    next_local_nonce: state.signer.musig_nonce.public_nonce(),
+                    next_local_nonce: state.get_holder_musig2_pubnonce(),
                 };
 
                 let command = PCNMessageWithPeerId {
@@ -461,14 +462,14 @@ impl Actor for ChannelActor {
                     revocation_basepoint: channel
                         .holder_channel_parameters
                         .pubkeys
-                        .revocation_basepoint,
-                    payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_point,
+                        .revocation_base_key,
+                    payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_base_key,
                     delayed_payment_basepoint: channel
                         .holder_channel_parameters
                         .pubkeys
-                        .delayed_payment_basepoint,
-                    tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_basepoint,
-                    next_local_nonce: channel.signer.musig_nonce.public_nonce(),
+                        .delayed_payment_base_key,
+                    tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_base_key,
+                    next_local_nonce: channel.get_holder_musig2_pubnonce(),
                 });
 
                 debug!(
@@ -743,8 +744,8 @@ impl ChannelActorState {
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
 
         let channel_id = derive_channel_id_from_revocation_keys(
-            &holder_pubkeys.revocation_basepoint,
-            &counterparty_pubkeys.revocation_basepoint,
+            &holder_pubkeys.revocation_base_key,
+            &counterparty_pubkeys.revocation_base_key,
         );
 
         debug!(
@@ -763,7 +764,7 @@ impl ChannelActorState {
             to_self_value: 0,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
-                nonce: signer.musig_nonce.public_nonce(),
+                nonce: signer.musig2_base_nonce.public_nonce(),
                 selected_contest_delay: counterparty_delay as u64,
             },
             signer,
@@ -787,7 +788,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let nonce = signer.musig_nonce.public_nonce();
+        let nonce = signer.musig2_base_nonce.public_nonce();
         let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
@@ -817,7 +818,7 @@ impl ChannelActorState {
         self.id.unwrap_or(self.temp_id)
     }
 
-    pub fn next_per_commitment_number(&self, local: bool) -> u64 {
+    pub fn next_commitment_number(&self, local: bool) -> u64 {
         if local {
             self.holder_commitment_number + 1
         } else {
@@ -825,9 +826,14 @@ impl ChannelActorState {
         }
     }
 
-    pub fn next_musig_nonce(&self) -> SecNonce {
+    pub fn next_musig2_secnonce(&self) -> SecNonce {
         self.signer
-            .derive_misig_nonce(self.next_per_commitment_number(true))
+            .derive_musig2_nonce(self.next_commitment_number(true))
+    }
+
+    // TODO: make sure we only send this nonce to the counterparty once.
+    pub fn next_musig2_pubnonce(&self) -> PubNonce {
+        self.next_musig2_secnonce().public_nonce()
     }
 
     pub fn handle_peer_message(
@@ -1062,12 +1068,17 @@ impl ChannelActorState {
             }
         };
 
-        let _tx = self.verify_remote_funding_tx_signature(commitment_signed.partial_signature)?;
+        let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
         debug!(
-            "Successfuly handled commitment signed message: {:?}",
-            &commitment_signed
+            "Successfuly handled commitment signed message: {:?}, tx: {:?}",
+            &commitment_signed, &tx
         );
+
+        debug!("Updating peer next local nonce");
+        self.counterparty_channel_parameters.as_mut().unwrap().nonce =
+            commitment_signed.next_local_nonce;
+
         self.state = ChannelState::SigningCommitment(
             flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
         );
@@ -1097,8 +1108,8 @@ impl ChannelActorState {
             .as_ref()
             .unwrap()
             .pubkeys
-            .revocation_basepoint;
-        let holder_revocation = &self.holder_channel_parameters.pubkeys.revocation_basepoint;
+            .revocation_base_key;
+        let holder_revocation = &self.holder_channel_parameters.pubkeys.revocation_base_key;
         let channel_id =
             derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
 
@@ -1134,7 +1145,7 @@ impl ChannelActorState {
             .clone()
     }
 
-    pub fn should_holder_go_first(&self) -> bool {
+    fn should_holder_go_first(&self) -> bool {
         let holder_pubkey = self.holder_channel_parameters.pubkeys.funding_pubkey;
         let counterparty_pubkey = self
             .counterparty_channel_parameters
@@ -1166,8 +1177,17 @@ impl ChannelActorState {
         KeyAggContext::new(keys).expect("Valid pubkeys")
     }
 
+    pub fn get_holder_musig2_secnonce(&self) -> SecNonce {
+        self.signer
+            .derive_musig2_nonce(self.holder_commitment_number)
+    }
+
+    pub fn get_holder_musig2_pubnonce(&self) -> PubNonce {
+        self.get_holder_musig2_secnonce().public_nonce()
+    }
+
     pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
-        let holder_nonce = self.signer.musig_nonce.public_nonce();
+        let holder_nonce = self.get_holder_musig2_pubnonce();
         let counter_signatory_nonce = self
             .counterparty_channel_parameters
             .as_ref()
@@ -1182,25 +1202,123 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    pub fn build_commitment_tx(
-        &self,
-        commitment_number: u64,
-        local: bool,
-    ) -> CommitmentTransaction {
-        let directed_channel_parameters = self.must_get_directed_channel_parameters(local);
-        // 1. Get transaction inputs from direct channel parameters.
-        // 2. Assemble transaction outputs from current chanenl information.
-        todo!("build_commitment_tx");
+    pub fn get_amounts_for_both_party(&self, local: bool) -> (u64, u64) {
+        // TODO: consider transaction fee here.
+        // TODO: exclude all the timelocked values here.
+        if local {
+            (self.to_self_value, self.total_value - self.to_self_value)
+        } else {
+            (self.total_value - self.to_self_value, self.to_self_value)
+        }
+    }
+
+    pub fn get_tlcs_for_commitment_tx(&self) -> Vec<TLCOutputInCommitment> {
+        // TODO: get tlc outputs for commitment transaction
+        vec![]
+    }
+
+    pub fn build_commitment_tx(&self, local: bool) -> CommitmentTransaction {
+        let (to_broadcaster_value, to_countersignatory_value) =
+            self.get_amounts_for_both_party(local);
+
+        let commitment_number = if local {
+            self.holder_commitment_number
+        } else {
+            self.counterparty_commitment_number
+        };
+        debug!(
+            "Building commitment transaction #{} for {}",
+            commitment_number,
+            if local { "us" } else { "them" },
+        );
+        let (
+            broadcaster,
+            countersignatory,
+            broadcaster_commitment_point,
+            countersignatory_commitment_point,
+        ) = if local {
+            (
+                &self.holder_channel_parameters,
+                self.counterparty_channel_parameters.as_ref().unwrap(),
+                self.signer.get_commitment_point(commitment_number),
+                self.counterparty_commitment_point.unwrap(),
+            )
+        } else {
+            (
+                self.counterparty_channel_parameters.as_ref().unwrap(),
+                &self.holder_channel_parameters,
+                self.counterparty_commitment_point.unwrap(),
+                self.signer.get_commitment_point(commitment_number),
+            )
+        };
+        let tx_creation_keys = TxCreationKeys {
+            broadcaster_delayed_payment_key: derive_delayed_payment_pubkey(
+                broadcaster.delayed_payment_base_key(),
+                &broadcaster_commitment_point,
+            ),
+            countersignatory_payment_key: derive_payment_pubkey(
+                countersignatory.payment_base_key(),
+                &countersignatory_commitment_point,
+            ),
+            countersignatory_revocation_key: derive_revocation_pubkey(
+                countersignatory.revocation_base_key(),
+                &countersignatory_commitment_point,
+            ),
+            broadcaster_tlc_key: derive_tlc_pubkey(
+                broadcaster.tlc_base_key(),
+                &broadcaster_commitment_point,
+            ),
+            countersignatory_tlc_key: derive_tlc_pubkey(
+                countersignatory.tlc_base_key(),
+                &countersignatory_commitment_point,
+            ),
+        };
+
+        let tlcs = self.get_tlcs_for_commitment_tx();
+
+        CommitmentTransaction {
+            commitment_number,
+            to_broadcaster_value,
+            to_countersignatory_value,
+            tlcs,
+            keys: tx_creation_keys,
+        }
+    }
+
+    pub fn get_verify_context(&self) -> VerifyContext {
+        VerifyContext {
+            key_agg_ctx: self.get_musig2_agg_context(),
+            aggnonce: self.get_musig2_agg_pubnonce(),
+            pubkey: *self.get_counterparty_funding_pubkey(),
+            pubnonce: self
+                .must_get_counterparty_channel_parameters()
+                .nonce
+                .clone(),
+        }
     }
 
     pub fn build_and_verify_commitment_tx(
         &self,
-        commitment_number: u64,
-        local: bool,
-        signature: &Signature,
-    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
-        let commitment_tx = self.build_commitment_tx(commitment_number, local);
-        todo!("Verify commitment tx")
+        signature: PartialSignature,
+    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        let commitment_tx = self.build_commitment_tx(false);
+        commitment_tx.verify(signature, self.get_verify_context())
+    }
+
+    pub fn get_sign_context(&self) -> SignContext {
+        SignContext {
+            key_agg_ctx: self.get_musig2_agg_context(),
+            aggnonce: self.get_musig2_agg_pubnonce(),
+            seckey: self.signer.funding_key.clone(),
+            secnonce: self.get_holder_musig2_secnonce(),
+        }
+    }
+
+    pub fn build_and_sign_commitment_tx(
+        &self,
+    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        let commitment_tx = self.build_commitment_tx(true);
+        commitment_tx.sign(self.get_sign_context())
     }
 
     pub fn build_and_sign_funding_tx(
@@ -1215,7 +1333,7 @@ impl ChannelActorState {
         );
         let key_agg_ctx = self.get_musig2_agg_context();
         let aggregated_nonce = self.get_musig2_agg_pubnonce();
-        let secnonce = self.signer.musig_nonce.clone();
+        let secnonce = self.signer.musig2_base_nonce.clone();
         let partial_signature: PartialSignature = sign_partial(
             &key_agg_ctx,
             self.signer.funding_key,
@@ -1225,31 +1343,6 @@ impl ChannelActorState {
         )?;
         debug!("Funding tx signed successfully: {:?}", &partial_signature);
         Ok((funding_tx, partial_signature))
-    }
-
-    pub fn verify_remote_funding_tx_signature(
-        &self,
-        signature: PartialSignature,
-    ) -> Result<Transaction, ProcessingChannelError> {
-        let funding_tx = self.build_funding_tx(false);
-        let message = funding_tx.as_slice();
-        debug!(
-            "Verifying signature {:?}, for funding transaction {:?} with message {:?}",
-            &signature,
-            &funding_tx,
-            hex::encode(&message)
-        );
-
-        verify_partial(
-            &self.get_musig2_agg_context(),
-            signature,
-            &self.get_musig2_agg_pubnonce(),
-            self.get_counterparty_funding_pubkey(),
-            &self.must_get_counterparty_channel_parameters().nonce,
-            message,
-        )?;
-        debug!("Funding tx signature verified successfully");
-        Ok(funding_tx)
     }
 
     pub fn build_funding_tx(&self, local: bool) -> Transaction {
@@ -1336,78 +1429,98 @@ pub struct CommitmentTransaction {
     pub keys: TxCreationKeys,
 }
 
-/// A wrapper on CommitmentTransaction indicating that the derived fields (the built bitcoin
-/// transaction and the transaction creation keys) are trusted.
-///
-/// See trust() and verify() functions on CommitmentTransaction.
-///
-/// This structure implements Deref.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct TrustedCommitmentTransaction<'a> {
-    inner: &'a CommitmentTransaction,
+/// A wrapper on CommitmentTransaction that has a verified ckb transaction built
+/// along with it.
+#[derive(Clone, Debug)]
+pub struct VerifiedCommitmentTransaction {
+    pub inner: CommitmentTransaction,
+    pub tx: TransactionView,
+}
+
+/// A wrapper on CommitmentTransaction that has a partial signature along with
+/// the ckb transaction.
+#[derive(Clone, Debug)]
+pub struct PartiallySignedCommitmentTransaction {
+    inner: CommitmentTransaction,
+    tx: TransactionView,
+    signature: PartialSignature,
+}
+
+pub struct VerifyContext {
+    pub key_agg_ctx: KeyAggContext,
+    pub aggnonce: AggNonce,
+    pub pubkey: Pubkey,
+    pub pubnonce: PubNonce,
+}
+
+pub struct SignContext {
+    key_agg_ctx: KeyAggContext,
+    aggnonce: AggNonce,
+    seckey: Privkey,
+    secnonce: SecNonce,
 }
 
 impl CommitmentTransaction {
-    pub fn build_tx(&self) -> Transaction {
-        unimplemented!("build_tx");
+    pub fn gen_tx(&self) -> TransactionView {
+        // TODO: implement build transaction here.
+        Transaction::default().into_view()
     }
 
-    fn internal_rebuild_transaction(
-        &self,
-        keys: &TxCreationKeys,
-        channel_parameters: &DirectedChannelTransactionParameters,
-        broadcaster_funding_pubkey: &Pubkey,
-        countersignatory_funding_pubkey: &Pubkey,
-    ) -> Result<Transaction, ProcessingChannelError> {
-        unimplemented!("internal_rebuild_transaction");
-    }
+    pub fn sign(
+        self,
+        sign_ctx: SignContext,
+    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        let tx = self.gen_tx();
+        let message = tx.hash();
 
-    /// Trust our pre-built transaction and derived transaction creation public keys.
-    ///
-    /// Applies a wrapper which allows access to these fields.
-    ///
-    /// This should only be used if you fully trust the builder of this object.  It should not
-    /// be used by an external signer - instead use the verify function.
-    pub fn trust(&self) -> TrustedCommitmentTransaction {
-        TrustedCommitmentTransaction { inner: self }
-    }
-
-    /// Verify our pre-built transaction and derived transaction creation public keys.
-    ///
-    /// Applies a wrapper which allows access to these fields.
-    ///
-    /// An external validating signer must call this method before signing
-    /// or using the built transaction.
-    pub fn verify(
-        &self,
-        channel_parameters: &DirectedChannelTransactionParameters,
-        broadcaster_keys: &ChannelPublicKeys,
-        countersignatory_keys: &ChannelPublicKeys,
-    ) -> Result<TrustedCommitmentTransaction, ProcessingChannelError> {
-        // This is the only field of the key cache that we trust
-        let per_commitment_point = &self.keys.per_commitment_point;
-        let keys = TxCreationKeys::from_channel_static_keys(
-            per_commitment_point,
-            broadcaster_keys,
-            countersignatory_keys,
-        );
-        if keys != self.keys {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "Key mismatch".to_string(),
-            ));
-        }
-        let tx = self.internal_rebuild_transaction(
-            &keys,
-            channel_parameters,
-            &broadcaster_keys.funding_pubkey,
-            &countersignatory_keys.funding_pubkey,
+        let SignContext {
+            key_agg_ctx,
+            aggnonce,
+            seckey,
+            secnonce,
+        } = sign_ctx;
+        let signature = sign_partial(
+            &key_agg_ctx,
+            seckey,
+            secnonce,
+            &aggnonce,
+            message.as_slice(),
         )?;
-        if self.build_tx().as_bytes() != tx.as_bytes() {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "Transaction mismatch".to_string(),
-            ));
-        }
-        Ok(TrustedCommitmentTransaction { inner: self })
+        Ok(PartiallySignedCommitmentTransaction {
+            inner: self,
+            tx,
+            signature,
+        })
+    }
+
+    pub fn verify(
+        self,
+        signature: PartialSignature,
+        verify_ctx: VerifyContext,
+    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        let tx = self.gen_tx();
+        let message = tx.hash();
+
+        let VerifyContext {
+            key_agg_ctx,
+            aggnonce,
+            pubkey,
+            pubnonce: nonce,
+        } = verify_ctx;
+
+        verify_partial(
+            &key_agg_ctx,
+            signature,
+            &aggnonce,
+            pubkey,
+            &nonce,
+            message.as_slice(),
+        )?;
+        Ok(PartiallySignedCommitmentTransaction {
+            inner: self,
+            tx,
+            signature,
+        })
     }
 }
 
@@ -1416,6 +1529,28 @@ pub struct ChannelParametersOneParty {
     pub pubkeys: ChannelPublicKeys,
     pub nonce: PubNonce,
     pub selected_contest_delay: u64,
+}
+
+impl ChannelParametersOneParty {
+    pub fn funding_pubkey(&self) -> &Pubkey {
+        &self.pubkeys.funding_pubkey
+    }
+
+    pub fn payment_base_key(&self) -> &Pubkey {
+        &self.pubkeys.payment_base_key
+    }
+
+    pub fn delayed_payment_base_key(&self) -> &Pubkey {
+        &self.pubkeys.delayed_payment_base_key
+    }
+
+    pub fn revocation_base_key(&self) -> &Pubkey {
+        &self.pubkeys.revocation_base_key
+    }
+
+    pub fn tlc_base_key(&self) -> &Pubkey {
+        &self.pubkeys.tlc_base_key
+    }
 }
 
 pub struct FundedChannelParameters<'a> {
@@ -1446,28 +1581,28 @@ pub struct ChannelPublicKeys {
     /// revocation keys. This is combined with the per-commitment-secret generated by the
     /// counterparty to create a secret which the counterparty can reveal to revoke previous
     /// states.
-    pub revocation_basepoint: Pubkey,
+    pub revocation_base_key: Pubkey,
     /// The public key on which the non-broadcaster (ie the countersignatory) receives an immediately
     /// spendable primary channel balance on the broadcaster's commitment transaction. This key is
     /// static across every commitment transaction.
-    pub payment_point: Pubkey,
+    pub payment_base_key: Pubkey,
     /// The base point which is used (with derive_public_key) to derive a per-commitment payment
     /// public key which receives non-HTLC-encumbered funds which are only available for spending
     /// after some delay (or can be claimed via the revocation path).
-    pub delayed_payment_basepoint: Pubkey,
+    pub delayed_payment_base_key: Pubkey,
     /// The base point which is used (with derive_public_key) to derive a per-commitment public key
     /// which is used to encumber HTLC-in-flight outputs.
-    pub tlc_basepoint: Pubkey,
+    pub tlc_base_key: Pubkey,
 }
 
 impl From<&OpenChannel> for ChannelPublicKeys {
     fn from(value: &OpenChannel) -> Self {
         ChannelPublicKeys {
             funding_pubkey: value.funding_pubkey.clone(),
-            revocation_basepoint: value.revocation_basepoint.clone(),
-            payment_point: value.payment_basepoint.clone(),
-            delayed_payment_basepoint: value.delayed_payment_basepoint.clone(),
-            tlc_basepoint: value.tlc_basepoint.clone(),
+            revocation_base_key: value.revocation_basepoint.clone(),
+            payment_base_key: value.payment_basepoint.clone(),
+            delayed_payment_base_key: value.delayed_payment_basepoint.clone(),
+            tlc_base_key: value.tlc_basepoint.clone(),
         }
     }
 }
@@ -1476,10 +1611,10 @@ impl From<&AcceptChannel> for ChannelPublicKeys {
     fn from(value: &AcceptChannel) -> Self {
         ChannelPublicKeys {
             funding_pubkey: value.funding_pubkey.clone(),
-            revocation_basepoint: value.revocation_basepoint.clone(),
-            payment_point: value.payment_basepoint.clone(),
-            delayed_payment_basepoint: value.delayed_payment_basepoint.clone(),
-            tlc_basepoint: value.tlc_basepoint.clone(),
+            revocation_base_key: value.revocation_basepoint.clone(),
+            payment_base_key: value.payment_basepoint.clone(),
+            delayed_payment_base_key: value.delayed_payment_basepoint.clone(),
+            tlc_base_key: value.tlc_basepoint.clone(),
         }
     }
 }
@@ -1524,27 +1659,22 @@ pub struct TLCOutputInCommitment {
 /// pre-calculated keys.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct TxCreationKeys {
-    /// The broadcaster's per-commitment public key which was used to derive the other keys.
-    pub per_commitment_point: Pubkey,
+    /// Broadcaster's Payment Key (which isn't allowed to be spent from for some delay)
+    pub broadcaster_delayed_payment_key: Pubkey,
+    /// Countersignatory's payment key, used to receiving balance that should go to
+    /// the countersignatory immediately.
+    pub countersignatory_payment_key: Pubkey,
     /// The revocation key which is used to allow the broadcaster of the commitment
     /// transaction to provide their counterparty the ability to punish them if they broadcast
     /// an old state.
-    pub revocation_key: Pubkey,
+    pub countersignatory_revocation_key: Pubkey,
     /// Broadcaster's HTLC Key
-    pub broadcaster_htlc_key: Pubkey,
+    pub broadcaster_tlc_key: Pubkey,
     /// Countersignatory's HTLC Key
-    pub countersignatory_htlc_key: Pubkey,
-    /// Broadcaster's Payment Key (which isn't allowed to be spent from for some delay)
-    pub broadcaster_delayed_payment_key: Pubkey,
+    pub countersignatory_tlc_key: Pubkey,
 }
 
-pub fn derive_public_key(basepoint: &Pubkey, per_commitment_point: &Pubkey) -> Pubkey {
-    // TODO: Currently we only copy the input pubkey. We need to actually derive new public keys
-    // from the per_commitment_point.
-    basepoint.clone()
-}
-
-pub fn derive_private_key(secret: &Privkey, per_commitment_point: &Pubkey) -> Privkey {
+pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
     // TODO: Currently we only copy the input secret. We need to actually derive new private keys
     // from the per_commitment_point.
     secret.clone()
@@ -1569,9 +1699,25 @@ pub struct InMemorySigner {
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
     // TODO: use rust's ownership to make sure musig_nonce is used once.
-    pub musig_nonce: SecNonce,
+    pub musig2_base_nonce: SecNonce,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
+}
+
+pub fn derive_revocation_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
+    base_key.clone()
+}
+
+pub fn derive_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
+    base_key.clone()
+}
+
+pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
+    base_key.clone()
+}
+
+pub fn derive_tlc_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
+    base_key.clone()
 }
 
 impl InMemorySigner {
@@ -1599,7 +1745,7 @@ impl InMemorySigner {
             key_derive(payment_key.as_ref(), b"delayed payment base key");
         let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
         let misig_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
-        let misig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
+        let musig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
 
         Self {
             funding_key,
@@ -1607,7 +1753,7 @@ impl InMemorySigner {
             payment_key,
             delayed_payment_base_key,
             tlc_base_key,
-            musig_nonce: misig_nonce,
+            musig2_base_nonce: musig_nonce,
             commitment_seed,
         }
     }
@@ -1615,10 +1761,10 @@ impl InMemorySigner {
     fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelPublicKeys {
         ChannelPublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_basepoint: self.derive_revocation_key(commitment_number).pubkey(),
-            payment_point: self.derive_payment_key(commitment_number).pubkey(),
-            delayed_payment_basepoint: self.derive_delayed_payment_key(commitment_number).pubkey(),
-            tlc_basepoint: self.derive_tlc_key(commitment_number).pubkey(),
+            revocation_base_key: self.derive_revocation_key(commitment_number).pubkey(),
+            payment_base_key: self.derive_payment_key(commitment_number).pubkey(),
+            delayed_payment_base_key: self.derive_delayed_payment_key(commitment_number).pubkey(),
+            tlc_base_key: self.derive_tlc_key(commitment_number).pubkey(),
         }
     }
 
@@ -1650,54 +1796,9 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_misig_nonce(&self, new_commitment_number: u64) -> SecNonce {
+    pub fn derive_musig2_nonce(&self, _new_commitment_number: u64) -> SecNonce {
         // TODO: generate new musig nonce here
-        self.musig_nonce.clone()
-    }
-}
-
-impl TxCreationKeys {
-    /// Create per-state keys from channel base points and the per-commitment point.
-    /// Key set is asymmetric and can't be used as part of counter-signatory set of transactions.
-    pub fn derive_new(
-        per_commitment_point: &Pubkey,
-        broadcaster_delayed_payment_base: &Pubkey,
-        broadcaster_tlc_base: &Pubkey,
-        countersignatory_revocation_base: &Pubkey,
-        countersignatory_tlc_base: &Pubkey,
-    ) -> TxCreationKeys {
-        TxCreationKeys {
-            per_commitment_point: per_commitment_point.clone(),
-            revocation_key: derive_public_key(
-                countersignatory_revocation_base,
-                per_commitment_point,
-            ),
-            broadcaster_htlc_key: derive_public_key(broadcaster_tlc_base, per_commitment_point),
-            countersignatory_htlc_key: derive_public_key(
-                countersignatory_tlc_base,
-                per_commitment_point,
-            ),
-            broadcaster_delayed_payment_key: derive_public_key(
-                broadcaster_delayed_payment_base,
-                per_commitment_point,
-            ),
-        }
-    }
-
-    /// Generate per-state keys from channel static keys.
-    /// Key set is asymmetric and can't be used as part of counter-signatory set of transactions.
-    pub fn from_channel_static_keys(
-        per_commitment_point: &Pubkey,
-        broadcaster_keys: &ChannelPublicKeys,
-        countersignatory_keys: &ChannelPublicKeys,
-    ) -> TxCreationKeys {
-        TxCreationKeys::derive_new(
-            &per_commitment_point,
-            &broadcaster_keys.delayed_payment_basepoint,
-            &broadcaster_keys.tlc_basepoint,
-            &countersignatory_keys.revocation_basepoint,
-            &countersignatory_keys.tlc_basepoint,
-        )
+        self.musig2_base_nonce.clone()
     }
 }
 
