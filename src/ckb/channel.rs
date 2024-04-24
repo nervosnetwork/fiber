@@ -954,24 +954,6 @@ impl ChannelActorState {
             .pubkeys
             .funding_pubkey
     }
-
-    pub fn get_funded_channel_parameters(&self) -> FundedChannelParameters<'_> {
-        FundedChannelParameters {
-            holder: &self.get_holder_channel_parameters(),
-            counterparty: self.get_counterparty_channel_parameters(),
-            funding_outpoint: self.get_funding_transaction(),
-        }
-    }
-
-    pub fn get_directed_channel_parameters(
-        &self,
-        holder_is_broadcaster: bool,
-    ) -> DirectedChannelTransactionParameters<'_> {
-        DirectedChannelTransactionParameters {
-            inner: self.get_funded_channel_parameters(),
-            holder_is_broadcaster,
-        }
-    }
 }
 
 // State transition handlers for the channel actor state.
@@ -1496,6 +1478,11 @@ impl CommitmentTransaction {
             &aggnonce,
             message.as_slice(),
         )?;
+        debug!(
+            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &signature,
+        );
+
         Ok(PartiallySignedCommitmentTransaction {
             inner: self,
             tx,
@@ -1511,6 +1498,10 @@ impl CommitmentTransaction {
         let tx = self.gen_tx();
         let message = tx.hash();
 
+        debug!(
+            "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
+            &signature, &tx, &message
+        );
         let VerifyContext {
             key_agg_ctx,
             aggnonce,
@@ -1560,24 +1551,6 @@ impl ChannelParametersOneParty {
     pub fn tlc_base_key(&self) -> &Pubkey {
         &self.pubkeys.tlc_base_key
     }
-}
-
-pub struct FundedChannelParameters<'a> {
-    pub holder: &'a ChannelParametersOneParty,
-    pub counterparty: &'a ChannelParametersOneParty,
-    pub funding_outpoint: OutPoint,
-}
-
-/// Static channel fields used to build transactions given per-commitment fields, organized by
-/// broadcaster/countersignatory.
-///
-/// This is derived from the holder/counterparty-organized ChannelTransactionParameters via the
-/// as_holder_broadcastable and as_counterparty_broadcastable functions.
-pub struct DirectedChannelTransactionParameters<'a> {
-    /// The holder's channel static parameters
-    inner: FundedChannelParameters<'a>,
-    /// Whether the holder is the broadcaster
-    holder_is_broadcaster: bool,
 }
 
 /// One counterparty's public keys which do not change over the life of a channel.
