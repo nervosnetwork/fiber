@@ -1,4 +1,6 @@
-#![allow(dead_code)]
+use super::utils::{
+    ar_decompress, ar_encompress, construct_invoice_preimage, nom_scan_hrp, BytesToBase32,
+};
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::{
@@ -6,7 +8,6 @@ use bitcoin::{
     key::Secp256k1,
     secp256k1,
 };
-use super::utils::{ar_decompress, ar_encompress, construct_invoice_preimage, BytesToBase32};
 
 use bitcoin::secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
@@ -18,14 +19,10 @@ use ckb_types::{
 };
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
-use nom::{branch::alt, combinator::opt};
-use nom::{
-    bytes::{complete::take_while1, streaming::tag},
-    IResult,
-};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, num::ParseIntError, str::FromStr};
-use thiserror::Error;
+
+const SIGNATURE_U5_SIZE: usize = 104;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
@@ -172,6 +169,8 @@ impl CkbInvoice {
         )
     }
 
+    // Use the lostless compression algorithm to compress the invoice data.
+    // To make sure the final encoded invoice address is shorter
     fn data_part(&self) -> Vec<u5> {
         let invoice_data = RawInvoiceData::from(self.data.clone());
         let compressed = ar_encompress(invoice_data.as_slice()).unwrap();
@@ -180,7 +179,7 @@ impl CkbInvoice {
         base32
     }
 
-    fn is_signed(&self) -> bool {
+    pub fn is_signed(&self) -> bool {
         self.signature.is_some()
     }
 
@@ -217,7 +216,7 @@ impl CkbInvoice {
 
     /// Checks if the signature is valid for the included payee public key or if none exists if it's
     /// valid for the recovered signature (which should always be true?).
-    pub fn validate_signature(&self) -> bool {
+    fn validate_signature(&self) -> bool {
         if self.signature.is_none() {
             return true;
         }
@@ -225,7 +224,7 @@ impl CkbInvoice {
         let included_pub_key = self.payee_pub_key();
 
         let mut recovered_pub_key = Option::None;
-        if recovered_pub_key.is_none() {
+        if included_pub_key.is_none() {
             let recovered = match self.recover_payee_pub_key() {
                 Ok(pk) => pk,
                 Err(_) => return false,
@@ -243,7 +242,6 @@ impl CkbInvoice {
         let secp_context = Secp256k1::new();
         let verification_result =
             secp_context.verify_ecdsa(&hash, &signature.0.to_standard(), pub_key);
-
         match verification_result {
             Ok(()) => true,
             Err(_) => false,
@@ -296,7 +294,7 @@ impl ToBase32 for InvoiceSignature {
 
 impl InvoiceSignature {
     fn from_base32(signature: &[u5]) -> Result<Self, InvoiceError> {
-        if signature.len() != 104 {
+        if signature.len() != SIGNATURE_U5_SIZE {
             return Err(InvoiceError::InvalidSliceLength(
                 "InvoiceSignature::from_base32()".into(),
             ));
@@ -312,6 +310,11 @@ impl InvoiceSignature {
 }
 
 impl ToString for CkbInvoice {
+    ///   hrp: ln{currency}{amount}{prefix}
+    ///   data: compressed(InvoiceData) + signature
+    ///   signature: 64 bytes + 1 byte recovery id = Vec<u8>
+    ///     if signature is present: bech32m(hrp, 1 + data + signature)
+    ///     else if signature is not present: bech32m(hrp, 0 + data)
     fn to_string(&self) -> String {
         let hrp = self.hrp_part();
         let mut data = self.data_part();
@@ -330,27 +333,31 @@ impl FromStr for CkbInvoice {
     type Err = InvoiceError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (hrp, data, var) = bech32::decode(s).unwrap();
+        let (hrp, data, var) = bech32::decode(s).map_err(InvoiceError::Bech32Error)?;
 
         if var == bech32::Variant::Bech32 {
             return Err(InvoiceError::Bech32Error(bech32::Error::InvalidChecksum));
         }
 
-        if data.len() < 104 {
+        if data.len() < SIGNATURE_U5_SIZE {
             return Err(InvoiceError::TooShortDataPart);
         }
         let (currency, amount, prefix) = parse_hrp(&hrp)?;
         let is_signed = u5::from(data[0]).to_u8() == 1;
         let data_end = if is_signed {
-            data.len() - 104
+            data.len() - SIGNATURE_U5_SIZE
         } else {
             data.len()
         };
-        let data_part = Vec::<u8>::from_base32(&data[1..data_end]).unwrap();
+        let data_part =
+            Vec::<u8>::from_base32(&data[1..data_end]).map_err(InvoiceError::Bech32Error)?;
         let data_part = ar_decompress(&data_part).unwrap();
-        let invoice_data = RawInvoiceData::from_slice(&data_part).unwrap();
+        let invoice_data = RawInvoiceData::from_slice(&data_part)
+            .map_err(|err| InvoiceError::MoleculeError(VerificationError(err)))?;
         let signature = if is_signed {
-            Some(InvoiceSignature::from_base32(&data[data.len() - 104..])?)
+            Some(InvoiceSignature::from_base32(
+                &data[data.len() - SIGNATURE_U5_SIZE..],
+            )?)
         } else {
             None
         };
@@ -362,13 +369,25 @@ impl FromStr for CkbInvoice {
             signature,
             data: invoice_data.try_into().unwrap(),
         };
+        invoice.check_signature()?;
         Ok(invoice)
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(Debug)]
+pub struct VerificationError(molecule::error::VerificationError);
+
+impl PartialEq for VerificationError {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+impl Eq for VerificationError {}
+
+#[derive(PartialEq, Eq, Debug)]
 pub enum InvoiceError {
     Bech32Error(bech32::Error),
+    MoleculeError(VerificationError),
     ParseAmountError(ParseIntError),
     BadPrefix,
     UnknownCurrency,
@@ -394,14 +413,6 @@ pub enum InvoiceError {
     SignError,
     /// according to BOLT11
     Skip,
-}
-
-fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
-    let (input, _) = tag("ln")(input)?;
-    let (input, currency) = alt((tag("ckb"), tag("ckt")))(input)?;
-    let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
-    let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
-    Ok((input, (currency, amount, si)))
 }
 
 fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
@@ -548,7 +559,7 @@ impl InvoiceBuilder {
         self
     }
 
-    pub fn add_attr(mut self, attr: Attribute) -> Self {
+    fn add_attr(mut self, attr: Attribute) -> Self {
         self.attrs.push(attr);
         self
     }
@@ -558,8 +569,8 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::PayeePublicKey(pub_key.into()))
     }
 
-    /// Sets the expiry time, dropping the subsecond part (which is not representable in BOLT 11
-    /// invoices).
+    /// Sets the expiry time
+    /// dropping the subsecond part (which is not representable in BOLT 11 invoices).
     pub fn expiry_time(self, expiry_time: Duration) -> Self {
         self.add_attr(Attribute::ExpiryTime(expiry_time))
     }
@@ -607,13 +618,8 @@ impl InvoiceBuilder {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("Molecule error: {0}")]
-    Molecule(#[from] molecule::error::VerificationError),
-}
 impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
-    type Error = Error;
+    type Error = molecule::error::VerificationError;
 
     fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
         Ok(CkbInvoice {
@@ -621,12 +627,13 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
             prefix: invoice.prefix().to_opt().map(|x| u8::from(x).into()),
             signature: invoice.signature().to_opt().map(|x| {
-                let vec_u8: Vec<u8> = x.as_bytes().into();
-                let vec_u5: Vec<u5> = vec_u8
-                    .iter()
-                    .map(|x| u5::try_from_u8(*x).unwrap())
-                    .collect();
-                InvoiceSignature::from_base32(&vec_u5).unwrap()
+                InvoiceSignature::from_base32(
+                    &x.as_bytes()
+                        .into_iter()
+                        .map(|x| u5::try_from_u8(x).unwrap())
+                        .collect::<Vec<u5>>(),
+                )
+                .unwrap()
             }),
             data: invoice.data().try_into()?,
         })
@@ -651,7 +658,7 @@ impl From<CkbInvoice> for RawCkbInvoice {
                 SignatureOpt::new_builder()
                     .set({
                         invoice.signature.map(|x| {
-                            let bytes: [u8; 104] = x
+                            let bytes: [u8; SIGNATURE_U5_SIZE] = x
                                 .to_base32()
                                 .iter()
                                 .map(|x| x.to_u8())
@@ -689,7 +696,7 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
 }
 
 impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
-    type Error = Error;
+    type Error = molecule::error::VerificationError;
 
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
@@ -738,8 +745,9 @@ mod tests {
         )
     }
 
-    fn mock_invoice_no_sign() -> CkbInvoice {
-        CkbInvoice {
+    fn mock_invoice() -> CkbInvoice {
+        let (public_key, private_key) = gen_rand_keypair();
+        let mut invoice = CkbInvoice {
             currency: Currency::Ckb,
             amount: Some(1280),
             prefix: Some(SiPrefix::Kilo),
@@ -754,17 +762,13 @@ mod tests {
                     Attribute::ExpiryTime(Duration::from_secs(1024)),
                     Attribute::FallbackAddr("address".to_string()),
                     Attribute::UdtScript(Script::default()),
-                    Attribute::PayeePublicKey(gen_rand_public_key()),
+                    Attribute::PayeePublicKey(public_key),
                 ],
             },
-        }
-    }
-
-    fn mock_invoice() -> CkbInvoice {
-        let private_key = gen_rand_private_key();
-        let mut invoice = mock_invoice_no_sign();
-        let _ = invoice
-            .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+        };
+        invoice
+            .update_signature(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
         invoice
     }
 
@@ -830,7 +834,7 @@ mod tests {
             .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
         let signature = InvoiceSignature(signature);
         let base32 = signature.to_base32();
-        assert_eq!(base32.len(), 104);
+        assert_eq!(base32.len(), SIGNATURE_U5_SIZE);
 
         let decoded_signature = InvoiceSignature::from_base32(&base32).unwrap();
         assert_eq!(decoded_signature, signature);
@@ -850,6 +854,8 @@ mod tests {
     #[test]
     fn test_invoice_bc32m() {
         let invoice = mock_invoice();
+        assert_eq!(invoice.is_signed(), true);
+        assert_eq!(invoice.check_signature(), Ok(()));
 
         let address = invoice.to_string();
         assert!(address.starts_with("lnckb1280k1"));
@@ -857,6 +863,47 @@ mod tests {
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
         assert_eq!(decoded_invoice.is_signed(), true);
+    }
+
+    #[test]
+    fn test_invoice_from_str_err() {
+        let invoice = mock_invoice();
+
+        let address = invoice.to_string();
+        assert!(address.starts_with("lnckb1280k1"));
+
+        let mut wrong = address.clone();
+        wrong.push_str("1");
+        let decoded_invoice = wrong.parse::<CkbInvoice>();
+        assert_eq!(
+            decoded_invoice.err(),
+            Some(InvoiceError::Bech32Error(bech32::Error::InvalidLength))
+        );
+
+        let mut wrong = address.clone();
+        // modify the values of wrong
+        wrong.replace_range(10..12, "hi");
+        let decoded_invoice = wrong.parse::<CkbInvoice>();
+        assert_eq!(
+            decoded_invoice.err(),
+            Some(InvoiceError::Bech32Error(bech32::Error::InvalidChar('i')))
+        );
+
+        let mut wrong = address.clone();
+        // modify the values of wrong
+        wrong.replace_range(10..12, "aa");
+        let decoded_invoice = wrong.parse::<CkbInvoice>();
+        assert_eq!(
+            decoded_invoice.err(),
+            Some(InvoiceError::Bech32Error(bech32::Error::InvalidChecksum))
+        );
+
+        wrong = wrong.replace("1280", "1281");
+        let decoded_invoice = wrong.parse::<CkbInvoice>();
+        assert_eq!(
+            decoded_invoice.err(),
+            Some(InvoiceError::Bech32Error(bech32::Error::InvalidChecksum))
+        );
     }
 
     #[test]

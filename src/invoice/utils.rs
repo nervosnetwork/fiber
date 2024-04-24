@@ -1,9 +1,15 @@
 use arcode::bitbit::{BitReader, BitWriter, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bech32::{u5, FromBase32, WriteBase32};
+use nom::{branch::alt, combinator::opt};
+use nom::{
+    bytes::{complete::take_while1, streaming::tag},
+    IResult,
+};
 use std::io::{Cursor, Result as IoResult};
 
 /// Encodes bytes and returns the compressed form
+/// This is used for encoding the invoice data, to make the final Invoice encoded address shorter
 pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
     let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
     let mut compressed_writer = BitWriter::new(Cursor::new(vec![]));
@@ -17,9 +23,6 @@ pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
     encoder.finish_encode(&mut compressed_writer)?;
     compressed_writer.pad_to_byte()?;
 
-    // retrieves the bytes from the writer.
-    // This will be cleaner when bitbit updates.
-    // Not necessary if using files or a stream
     Ok(compressed_writer.get_ref().get_ref().clone())
 }
 
@@ -41,7 +44,10 @@ pub(crate) fn ar_decompress(data: &[u8]) -> IoResult<Vec<u8>> {
 }
 
 /// Construct the invoice's HRP and signatureless data into a preimage to be hashed.
-pub fn construct_invoice_preimage(hrp_bytes: &[u8], data_without_signature: &[u5]) -> Vec<u8> {
+pub(crate) fn construct_invoice_preimage(
+    hrp_bytes: &[u8],
+    data_without_signature: &[u5],
+) -> Vec<u8> {
     let mut preimage = Vec::<u8>::from(hrp_bytes);
 
     let mut data_part = Vec::from(data_without_signature);
@@ -149,4 +155,12 @@ impl<'a, W: WriteBase32> Drop for BytesToBase32<'a, W> {
         self.inner_finalize()
             .expect("Unhandled error when finalizing conversion on drop. User finalize to handle.")
     }
+}
+
+pub(crate) fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
+    let (input, _) = tag("ln")(input)?;
+    let (input, currency) = alt((tag("ckb"), tag("ckt")))(input)?;
+    let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
+    let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
+    Ok((input, (currency, amount, si)))
 }

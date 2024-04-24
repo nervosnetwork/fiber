@@ -21,7 +21,7 @@ lightning-persister = { version = "0.0.121" }
 lightning-background-processor = { version = "0.0.121", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.121" }
 base64 = "0.13.0"
-bitcoin = { version = "0.30.2", features = ["serde", "rand", "base64"]  }
+bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
 bitcoin-bech32 = "0.12"
 bech32 = "0.8"
 libc = "0.2"
