@@ -458,17 +458,17 @@ impl Actor for ChannelActor {
                     second_per_commitment_point: channel
                         .signer
                         .get_commitment_point(commitment_number + 1),
-                    funding_pubkey: channel.holder_channel_parameters.pubkeys.funding_pubkey,
+                    funding_pubkey: channel.holder_channel_parameters().pubkeys.funding_pubkey,
                     revocation_basepoint: channel
-                        .holder_channel_parameters
+                        .holder_channel_parameters()
                         .pubkeys
                         .revocation_base_key,
-                    payment_basepoint: channel.holder_channel_parameters.pubkeys.payment_base_key,
+                    payment_basepoint: channel.holder_channel_parameters().pubkeys.payment_base_key,
                     delayed_payment_basepoint: channel
-                        .holder_channel_parameters
+                        .holder_channel_parameters()
                         .pubkeys
                         .delayed_payment_base_key,
-                    tlc_basepoint: channel.holder_channel_parameters.pubkeys.tlc_base_key,
+                    tlc_basepoint: channel.holder_channel_parameters().pubkeys.tlc_base_key,
                     next_local_nonce: channel.get_holder_musig2_pubnonce(),
                 });
 
@@ -734,7 +734,7 @@ impl ChannelActorState {
         peer_id: PeerId,
         counterparty_value: u64,
         counterparty_delay: u64,
-        counterparty_pubkeys: ChannelPublicKeys,
+        counterparty_pubkeys: ChannelBasePublicKeys,
         counterparty_nonce: PubNonce,
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
@@ -816,6 +816,14 @@ impl ChannelActorState {
 
     pub fn id(&self) -> Hash256 {
         self.id.unwrap_or(self.temp_id)
+    }
+
+    pub fn holder_channel_parameters(&self) -> &ChannelParametersOneParty {
+        &self.holder_channel_parameters
+    }
+
+    pub fn counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
+        self.counterparty_channel_parameters.as_ref().unwrap()
     }
 
     pub fn next_commitment_number(&self, local: bool) -> u64 {
@@ -1104,12 +1112,10 @@ impl ChannelActorState {
             "Counterparty pubkeys is required to derive actual channel id"
         );
         let counterparty_revocation = &self
-            .counterparty_channel_parameters
-            .as_ref()
-            .unwrap()
+            .counterparty_channel_parameters()
             .pubkeys
             .revocation_base_key;
-        let holder_revocation = &self.holder_channel_parameters.pubkeys.revocation_base_key;
+        let holder_revocation = &self.holder_channel_parameters().pubkeys.revocation_base_key;
         let channel_id =
             derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
 
@@ -1146,11 +1152,9 @@ impl ChannelActorState {
     }
 
     fn should_holder_go_first(&self) -> bool {
-        let holder_pubkey = self.holder_channel_parameters.pubkeys.funding_pubkey;
+        let holder_pubkey = self.holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
-            .counterparty_channel_parameters
-            .as_ref()
-            .expect("Counterparty pubkeys")
+            .counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey;
         holder_pubkey <= counterparty_pubkey
@@ -1158,21 +1162,19 @@ impl ChannelActorState {
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self
-            .holder_channel_parameters
+            .holder_channel_parameters()
             .pubkeys
             .funding_pubkey
             .clone();
-        let counter_signatory_pubkey = self
-            .counterparty_channel_parameters
-            .as_ref()
-            .expect("Counterparty pubkeys")
+        let counterparty_pubkey = self
+            .counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey
             .clone();
         let keys = if self.should_holder_go_first() {
-            vec![holder_pubkey, counter_signatory_pubkey]
+            vec![holder_pubkey, counterparty_pubkey]
         } else {
-            vec![counter_signatory_pubkey, holder_pubkey]
+            vec![counterparty_pubkey, holder_pubkey]
         };
         KeyAggContext::new(keys).expect("Valid pubkeys")
     }
@@ -1188,16 +1190,11 @@ impl ChannelActorState {
 
     pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
         let holder_nonce = self.get_holder_musig2_pubnonce();
-        let counter_signatory_nonce = self
-            .counterparty_channel_parameters
-            .as_ref()
-            .expect("Counterparty pubkeys")
-            .nonce
-            .clone();
+        let counterparty_nonce = self.counterparty_channel_parameters().nonce.clone();
         let nonces = if self.should_holder_go_first() {
-            vec![holder_nonce, counter_signatory_nonce]
+            vec![holder_nonce, counterparty_nonce]
         } else {
-            vec![counter_signatory_nonce, holder_nonce]
+            vec![counterparty_nonce, holder_nonce]
         };
         AggNonce::sum(nonces)
     }
@@ -1238,15 +1235,15 @@ impl ChannelActorState {
             countersignatory_commitment_point,
         ) = if local {
             (
-                &self.holder_channel_parameters,
-                self.counterparty_channel_parameters.as_ref().unwrap(),
+                self.holder_channel_parameters(),
+                self.counterparty_channel_parameters(),
                 self.signer.get_commitment_point(commitment_number),
                 self.counterparty_commitment_point.unwrap(),
             )
         } else {
             (
-                self.counterparty_channel_parameters.as_ref().unwrap(),
-                &self.holder_channel_parameters,
+                self.counterparty_channel_parameters(),
+                self.holder_channel_parameters(),
                 self.counterparty_commitment_point.unwrap(),
                 self.signer.get_commitment_point(commitment_number),
             )
@@ -1290,10 +1287,7 @@ impl ChannelActorState {
             key_agg_ctx: self.get_musig2_agg_context(),
             aggnonce: self.get_musig2_agg_pubnonce(),
             pubkey: *self.get_counterparty_funding_pubkey(),
-            pubnonce: self
-                .must_get_counterparty_channel_parameters()
-                .nonce
-                .clone(),
+            pubnonce: self.counterparty_channel_parameters().nonce.clone(),
         }
     }
 
@@ -1346,25 +1340,17 @@ impl ChannelActorState {
     }
 
     pub fn build_funding_tx(&self, local: bool) -> Transaction {
-        let (_commitment_number, _broadcaster_pubkeys, _counter_signatory_pubkeys) = if local {
+        let (_commitment_number, _broadcaster_pubkeys, _countersignatory_pubkeys) = if local {
             (
                 self.holder_commitment_number,
-                self.holder_channel_parameters.pubkeys.clone(),
-                self.counterparty_channel_parameters
-                    .as_ref()
-                    .unwrap()
-                    .pubkeys
-                    .clone(),
+                self.holder_channel_parameters().pubkeys.clone(),
+                self.counterparty_channel_parameters().pubkeys.clone(),
             )
         } else {
             (
                 self.counterparty_commitment_number,
-                self.counterparty_channel_parameters
-                    .as_ref()
-                    .unwrap()
-                    .pubkeys
-                    .clone(),
-                self.holder_channel_parameters.pubkeys.clone(),
+                self.counterparty_channel_parameters().pubkeys.clone(),
+                self.holder_channel_parameters().pubkeys.clone(),
             )
         };
         // TODO: Building funding here;
@@ -1373,23 +1359,15 @@ impl ChannelActorState {
 
     pub fn get_counterparty_funding_pubkey(&self) -> &Pubkey {
         &self
-            .counterparty_channel_parameters
-            .as_ref()
-            .expect("Counterparty channel parameters")
+            .counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey
     }
 
-    pub fn must_get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
-        self.counterparty_channel_parameters
-            .as_ref()
-            .expect("Counterparty channel parameters")
-    }
-
     pub fn must_get_funded_channel_parameters(&self) -> FundedChannelParameters<'_> {
         FundedChannelParameters {
-            holder: &self.holder_channel_parameters,
-            counterparty: self.must_get_counterparty_channel_parameters(),
+            holder: &self.holder_channel_parameters(),
+            counterparty: self.counterparty_channel_parameters(),
             funding_outpoint: self.must_get_funding_transaction(),
         }
     }
@@ -1526,7 +1504,7 @@ impl CommitmentTransaction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelParametersOneParty {
-    pub pubkeys: ChannelPublicKeys,
+    pub pubkeys: ChannelBasePublicKeys,
     pub nonce: PubNonce,
     pub selected_contest_delay: u64,
 }
@@ -1573,7 +1551,7 @@ pub struct DirectedChannelTransactionParameters<'a> {
 
 /// One counterparty's public keys which do not change over the life of a channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ChannelPublicKeys {
+pub struct ChannelBasePublicKeys {
     /// The public key which is used to sign all commitment transactions, as it appears in the
     /// on-chain channel lock-in 2-of-2 multisig output.
     pub funding_pubkey: Pubkey,
@@ -1595,9 +1573,9 @@ pub struct ChannelPublicKeys {
     pub tlc_base_key: Pubkey,
 }
 
-impl From<&OpenChannel> for ChannelPublicKeys {
+impl From<&OpenChannel> for ChannelBasePublicKeys {
     fn from(value: &OpenChannel) -> Self {
-        ChannelPublicKeys {
+        ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey.clone(),
             revocation_base_key: value.revocation_basepoint.clone(),
             payment_base_key: value.payment_basepoint.clone(),
@@ -1607,9 +1585,9 @@ impl From<&OpenChannel> for ChannelPublicKeys {
     }
 }
 
-impl From<&AcceptChannel> for ChannelPublicKeys {
+impl From<&AcceptChannel> for ChannelBasePublicKeys {
     fn from(value: &AcceptChannel) -> Self {
-        ChannelPublicKeys {
+        ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey.clone(),
             revocation_base_key: value.revocation_basepoint.clone(),
             payment_base_key: value.payment_basepoint.clone(),
@@ -1621,7 +1599,7 @@ impl From<&AcceptChannel> for ChannelPublicKeys {
 
 pub struct CounterpartyChannelTransactionParameters {
     /// Counter-party public keys
-    pub pubkeys: ChannelPublicKeys,
+    pub pubkeys: ChannelBasePublicKeys,
     /// The contest delay selected by the counterparty, which applies to holder-broadcast transactions
     pub selected_contest_delay: u16,
 }
@@ -1758,8 +1736,8 @@ impl InMemorySigner {
         }
     }
 
-    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelPublicKeys {
-        ChannelPublicKeys {
+    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelBasePublicKeys {
+        ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
             revocation_base_key: self.derive_revocation_key(commitment_number).pubkey(),
             payment_base_key: self.derive_payment_key(commitment_number).pubkey(),
