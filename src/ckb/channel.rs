@@ -41,6 +41,8 @@ pub enum ChannelActorMessage {
 #[derive(Clone, Debug, Deserialize)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
+    // TODO: maybe we should automatically send commitment_signed message after receiving
+    // tx_complete event.
     CommitmentSigned(),
 }
 
@@ -1016,7 +1018,7 @@ impl ChannelActorState {
                 self.handle_commitment_signed_message(commitment_signed)?;
                 if let ChannelState::SigningCommitment(flags) = self.state {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
-                        // TODO: maybe we should send ouor commitment_signed message here.
+                        // TODO: maybe we should send our commitment_signed message here.
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
                     }
                 }
