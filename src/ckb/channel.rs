@@ -8,8 +8,10 @@ use ckb_types::{
 use log::{debug, error, info, warn};
 use molecule::prelude::Entity;
 use musig2::{
+    aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
-    sign_partial, verify_partial, AggNonce, KeyAggContext, PartialSignature, PubNonce, SecNonce,
+    sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
+    PubNonce, SecNonce,
 };
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
@@ -25,7 +27,7 @@ use super::{
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove,
+        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -218,9 +220,19 @@ impl ChannelActor {
             .expect("network actor alive");
 
         state.holder_commitment_number = state.get_next_commitment_number(true);
-        state.state = ChannelState::SigningCommitment(
-            flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT,
-        );
+        let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+        state.state = ChannelState::SigningCommitment(flags);
+        if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
+            state.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+            if state.should_holder_send_tx_signatures_first() {
+                let msg = state.handle_tx_signatures(None)?;
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(msg),
+                    ))
+                    .expect("network actor alive");
+            }
+        }
         Ok(())
     }
 
@@ -635,6 +647,8 @@ pub enum ProcessingChannelError {
     Unsupported(String),
     #[error("Invalid state: ")]
     InvalidState(String),
+    #[error("Repeated processing message: {0}")]
+    RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
     #[error("Unimplemented operation: {0}")]
@@ -672,6 +686,13 @@ bitflags! {
     }
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct AwaitingTxSignaturesFlags: u32 {
+        const OUR_TX_SIGNATURES_SENT = 1;
+        const THEIR_TX_SIGNATURES_SENT = 1 << 1;
+        const TX_SIGNATURES_SENT = AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT.bits() | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT.bits();
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     pub struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
@@ -694,10 +715,11 @@ pub enum ChannelState {
     NegotiatingFunding(NegotiatingFundingFlags),
     /// We're collaborating with the other party on the funding transaction.
     CollaboratingFundingTx(CollaboratingFundingTxFlags),
-    /// We have sent `funding_created` and are awaiting a `funding_signed` to advance to
-    /// `AwaitingChannelReady`. Note that this is nonsense for an inbound channel as we immediately generate
-    /// `funding_signed` upon receipt of `funding_created`, so simply skip this state.
+    /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
     SigningCommitment(SigningCommitmentFlags),
+    /// We've received and sent `commitment_signed` and are now waiting for both
+    /// party to collaborate on creating a valid funding transaction.
+    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
     /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
     /// funding transaction to confirm.
     AwaitingChannelReady(AwaitingChannelReadyFlags),
@@ -860,7 +882,7 @@ impl ChannelActorState {
             .public_nonce()
     }
 
-    pub fn get_counterparty_nonce<'a>(&'a self) -> impl Borrow<PubNonce> + 'a {
+    pub fn get_counterparty_nonce(&self) -> &PubNonce {
         self.counterparty_nonce.as_ref().unwrap()
     }
 
@@ -931,7 +953,7 @@ impl ChannelActorState {
             .pubkeys
             .funding_pubkey
             .clone();
-        let keys = if self.should_holder_go_first() {
+        let keys = if self.should_holders_pubkey_go_first_in_musig2() {
             vec![holder_pubkey, counterparty_pubkey]
         } else {
             vec![counterparty_pubkey, holder_pubkey]
@@ -952,8 +974,7 @@ impl ChannelActorState {
         let holder_nonce = self.get_holder_nonce();
         let holder_nonce = holder_nonce.borrow();
         let counterparty_nonce = self.get_counterparty_nonce();
-        let counterparty_nonce = counterparty_nonce.borrow();
-        let nonces = if self.should_holder_go_first() {
+        let nonces = if self.should_holders_pubkey_go_first_in_musig2() {
             vec![holder_nonce, counterparty_nonce]
         } else {
             vec![counterparty_nonce, holder_nonce]
@@ -981,6 +1002,41 @@ impl ChannelActorState {
             .get_counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey
+    }
+}
+
+impl From<&ChannelActorState> for Musig2Context {
+    fn from(value: &ChannelActorState) -> Self {
+        Musig2Context {
+            key_agg_ctx: value.get_musig2_agg_context(),
+            agg_nonce: value.get_musig2_agg_pubnonce(),
+            holder_seckey: value.signer.funding_key.clone(),
+            holder_secnonce: value.get_holder_musig2_secnonce(),
+            counterparty_pubkey: value.get_counterparty_funding_pubkey().clone(),
+            counterparty_pubnonce: value.get_counterparty_nonce().clone(),
+        }
+    }
+}
+
+impl From<&ChannelActorState> for Musig2SignContext {
+    fn from(value: &ChannelActorState) -> Self {
+        Musig2SignContext {
+            key_agg_ctx: value.get_musig2_agg_context(),
+            agg_nonce: value.get_musig2_agg_pubnonce(),
+            seckey: value.signer.funding_key.clone(),
+            secnonce: value.get_holder_musig2_secnonce(),
+        }
+    }
+}
+
+impl From<&ChannelActorState> for Musig2VerifyContext {
+    fn from(value: &ChannelActorState) -> Self {
+        Musig2VerifyContext {
+            key_agg_ctx: value.get_musig2_agg_context(),
+            agg_nonce: value.get_musig2_agg_pubnonce(),
+            pubkey: value.get_counterparty_funding_pubkey().clone(),
+            pubnonce: value.get_counterparty_nonce().clone(),
+        }
     }
 }
 
@@ -1023,6 +1079,23 @@ impl ChannelActorState {
                     }
                 }
                 {}
+                Ok(())
+            }
+            PCNMessage::TxSignatures(tx_signatures) => {
+                // We're the one who send tx_signature first, and we received a tx_signature message.
+                // This means that the tx_signature procedure is now completed. Just change state,
+                // and exit.
+                if self.should_holder_send_tx_signatures_first() {
+                    self.state =
+                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    return Ok(());
+                };
+                let msg = self.handle_tx_signatures(tx_signatures.witnesses.into())?;
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(msg),
+                    ))
+                    .expect("network actor alive");
                 Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
@@ -1239,6 +1312,102 @@ impl ChannelActorState {
         Ok(())
     }
 
+    // TODO: currently witnesses in the tx_signatures molecule message are a list of bytes.
+    // It is unclear how can we compose two partial sets witnesses into a complete
+    // set of witnesses.
+    pub fn handle_tx_signatures(
+        &mut self,
+        // If partial_witnesses is given, we must combine them to make a full list of witnesses.
+        // Otherwise, we are the one to start send the tx_signatures. We can just creat a partial
+        // set of witnesses, and sent them to the peer.
+        partial_witnesses: Option<Vec<Vec<u8>>>,
+    ) -> Result<PCNMessageWithPeerId, ProcessingChannelError> {
+        let flags = match self.state {
+            ChannelState::AwaitingTxSignatures(flags)
+                if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
+                    && partial_witnesses.is_some() =>
+            {
+                return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                    "tx_signatures partial witnesses {:?}",
+                    partial_witnesses.unwrap()
+                )));
+            }
+            ChannelState::AwaitingTxSignatures(flags)
+                if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT)
+                    && partial_witnesses.is_none() =>
+            {
+                return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                    "We have already sent our tx_signatures"
+                )));
+            }
+            ChannelState::SigningCommitment(flags)
+                if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) =>
+            {
+                AwaitingTxSignaturesFlags::empty()
+            }
+            ChannelState::AwaitingTxSignatures(flags) => flags,
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to build and sign funding tx in state {:?}",
+                    &self.state
+                )));
+            }
+        };
+
+        let funding_tx = self
+            .funding_tx
+            .as_ref()
+            .ok_or(ProcessingChannelError::InvalidState(
+                "Funding transaction is not present".to_string(),
+            ))?;
+
+        let msg = match partial_witnesses {
+            Some(_partial_witnesses) => {
+                // TODO: filling the whole witnesses here.
+                let full_witnesses: Vec<ckb_types::packed::Bytes> = vec![];
+                let full_witnesses_u8 = full_witnesses
+                    .iter()
+                    .map(|w| w.as_slice().to_vec())
+                    .collect();
+
+                let funding_tx = funding_tx
+                    .as_advanced_builder()
+                    .set_witnesses(full_witnesses)
+                    .build();
+                self.funding_tx = Some(funding_tx.clone());
+                self.state = ChannelState::AwaitingTxSignatures(
+                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
+                );
+
+                PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::TxSignatures(TxSignatures {
+                        channel_id: self.get_id(),
+                        witnesses: full_witnesses_u8,
+                        tx_hash: funding_tx.hash().into(),
+                    }),
+                }
+            }
+            None => {
+                // TODO: creating partial witnesses here.
+                let partial_witnesses = vec![];
+                self.state = ChannelState::AwaitingTxSignatures(
+                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
+                );
+
+                PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::TxSignatures(TxSignatures {
+                        channel_id: self.get_id(),
+                        witnesses: partial_witnesses,
+                        tx_hash: funding_tx.hash().into(),
+                    }),
+                }
+            }
+        };
+        Ok(msg)
+    }
+
     pub fn add_tx_to_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
         // TODO check if the tx is valid
         self.funding_tx = Some(tx.into_view());
@@ -1276,13 +1445,21 @@ impl ChannelActorState {
         );
     }
 
-    fn should_holder_go_first(&self) -> bool {
+    fn should_holders_pubkey_go_first_in_musig2(&self) -> bool {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
             .get_counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey;
         holder_pubkey <= counterparty_pubkey
+    }
+
+    fn should_holder_send_tx_signatures_first(&self) -> bool {
+        // TODO: 我们会定义出资金额较少的一方必须先发送
+        // tx_signatures 消息, 在金额相同的情况下, 按 funding_pubkey
+        // 排序较小的先发送, 这样可以避免双方同时等待对方 tx_signatures
+        // 消息导致的死锁问题.
+        self.should_holders_pubkey_go_first_in_musig2()
     }
 
     pub fn build_commitment_tx(&self, local: bool) -> CommitmentTransaction {
@@ -1353,79 +1530,19 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_verify_context(&self) -> VerifyContext {
-        VerifyContext {
-            key_agg_ctx: self.get_musig2_agg_context(),
-            aggnonce: self.get_musig2_agg_pubnonce(),
-            pubkey: *self.get_counterparty_funding_pubkey(),
-            pubnonce: self.get_counterparty_nonce().borrow().clone(),
-        }
-    }
-
     pub fn build_and_verify_commitment_tx(
         &self,
         signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let commitment_tx = self.build_commitment_tx(false);
-        commitment_tx.verify(signature, self.get_verify_context())
-    }
-
-    pub fn get_sign_context(&self) -> SignContext {
-        SignContext {
-            key_agg_ctx: self.get_musig2_agg_context(),
-            aggnonce: self.get_musig2_agg_pubnonce(),
-            seckey: self.signer.funding_key.clone(),
-            secnonce: self.get_holder_musig2_secnonce(),
-        }
+        commitment_tx.verify(signature, self.into())
     }
 
     pub fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let commitment_tx = self.build_commitment_tx(true);
-        commitment_tx.sign(self.get_sign_context())
-    }
-
-    pub fn build_and_sign_funding_tx(
-        &self,
-    ) -> Result<(Transaction, PartialSignature), ProcessingChannelError> {
-        let funding_tx = self.build_funding_tx(true);
-        let message = funding_tx.as_slice();
-        debug!(
-            "Signing funding transaction {:?} with message {:?}",
-            &funding_tx,
-            hex::encode(&message)
-        );
-        let key_agg_ctx = self.get_musig2_agg_context();
-        let aggregated_nonce = self.get_musig2_agg_pubnonce();
-        let secnonce = self.signer.musig2_base_nonce.clone();
-        let partial_signature: PartialSignature = sign_partial(
-            &key_agg_ctx,
-            self.signer.funding_key,
-            secnonce.clone(),
-            &aggregated_nonce,
-            message,
-        )?;
-        debug!("Funding tx signed successfully: {:?}", &partial_signature);
-        Ok((funding_tx, partial_signature))
-    }
-
-    pub fn build_funding_tx(&self, local: bool) -> Transaction {
-        let (_commitment_number, _broadcaster_pubkeys, _countersignatory_pubkeys) = if local {
-            (
-                self.holder_commitment_number,
-                self.get_holder_channel_parameters().pubkeys.clone(),
-                self.get_counterparty_channel_parameters().pubkeys.clone(),
-            )
-        } else {
-            (
-                self.counterparty_commitment_number,
-                self.get_counterparty_channel_parameters().pubkeys.clone(),
-                self.get_holder_channel_parameters().pubkeys.clone(),
-            )
-        };
-        // TODO: Building funding here;
-        Transaction::default()
+        commitment_tx.sign(self.into())
     }
 }
 
@@ -1453,14 +1570,6 @@ pub struct CommitmentTransaction {
     pub keys: TxCreationKeys,
 }
 
-/// A wrapper on CommitmentTransaction that has a verified ckb transaction built
-/// along with it.
-#[derive(Clone, Debug)]
-pub struct VerifiedCommitmentTransaction {
-    pub inner: CommitmentTransaction,
-    pub tx: TransactionView,
-}
-
 /// A wrapper on CommitmentTransaction that has a partial signature along with
 /// the ckb transaction.
 #[derive(Clone, Debug)]
@@ -1470,18 +1579,99 @@ pub struct PartiallySignedCommitmentTransaction {
     signature: PartialSignature,
 }
 
-pub struct VerifyContext {
+pub struct Musig2Context {
     pub key_agg_ctx: KeyAggContext,
-    pub aggnonce: AggNonce,
+    pub agg_nonce: AggNonce,
+    pub holder_seckey: Privkey,
+    pub holder_secnonce: SecNonce,
+    pub counterparty_pubkey: Pubkey,
+    pub counterparty_pubnonce: PubNonce,
+}
+
+impl Musig2Context {
+    pub fn split(self) -> (Musig2SignContext, Musig2VerifyContext) {
+        let Musig2Context {
+            key_agg_ctx,
+            agg_nonce,
+            holder_seckey,
+            holder_secnonce,
+            counterparty_pubkey,
+            counterparty_pubnonce,
+        } = self;
+        (
+            Musig2SignContext {
+                key_agg_ctx: key_agg_ctx.clone(),
+                agg_nonce: agg_nonce.clone(),
+                seckey: holder_seckey,
+                secnonce: holder_secnonce,
+            },
+            Musig2VerifyContext {
+                key_agg_ctx,
+                agg_nonce,
+                pubkey: counterparty_pubkey,
+                pubnonce: counterparty_pubnonce,
+            },
+        )
+    }
+
+    pub fn create_signature(
+        self,
+        message: &[u8],
+        partial_signature: PartialSignature,
+        partial_signature_given_first: bool,
+    ) -> Result<CompactSignature, ProcessingChannelError> {
+        let (sign_ctx, verify_ctx) = self.split();
+        verify_ctx.verify(partial_signature, message)?;
+        let partial_signature_2 = sign_ctx.sign(message)?;
+        Ok(aggregate_partial_signatures(
+            &verify_ctx.key_agg_ctx,
+            &verify_ctx.agg_nonce,
+            if partial_signature_given_first {
+                vec![partial_signature, partial_signature_2]
+            } else {
+                vec![partial_signature_2, partial_signature]
+            },
+            message,
+        )?)
+    }
+}
+
+pub struct Musig2VerifyContext {
+    pub key_agg_ctx: KeyAggContext,
+    pub agg_nonce: AggNonce,
     pub pubkey: Pubkey,
     pub pubnonce: PubNonce,
 }
 
-pub struct SignContext {
+impl Musig2VerifyContext {
+    pub fn verify(&self, signature: PartialSignature, message: &[u8]) -> ProcessingChannelResult {
+        Ok(verify_partial(
+            &self.key_agg_ctx,
+            signature,
+            &self.agg_nonce,
+            self.pubkey,
+            &self.pubnonce,
+            message,
+        )?)
+    }
+}
+pub struct Musig2SignContext {
     key_agg_ctx: KeyAggContext,
-    aggnonce: AggNonce,
+    agg_nonce: AggNonce,
     seckey: Privkey,
     secnonce: SecNonce,
+}
+
+impl Musig2SignContext {
+    pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
+        Ok(sign_partial(
+            &self.key_agg_ctx,
+            self.seckey,
+            self.secnonce,
+            &self.agg_nonce,
+            message,
+        )?)
+    }
 }
 
 impl CommitmentTransaction {
@@ -1492,24 +1682,12 @@ impl CommitmentTransaction {
 
     pub fn sign(
         self,
-        sign_ctx: SignContext,
+        sign_ctx: Musig2SignContext,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let tx = self.gen_tx();
         let message = tx.hash();
 
-        let SignContext {
-            key_agg_ctx,
-            aggnonce,
-            seckey,
-            secnonce,
-        } = sign_ctx;
-        let signature = sign_partial(
-            &key_agg_ctx,
-            seckey,
-            secnonce,
-            &aggnonce,
-            message.as_slice(),
-        )?;
+        let signature = sign_ctx.sign(message.as_slice())?;
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
             &tx, &message, &signature,
@@ -1525,35 +1703,40 @@ impl CommitmentTransaction {
     pub fn verify(
         self,
         signature: PartialSignature,
-        verify_ctx: VerifyContext,
+        verify_ctx: Musig2VerifyContext,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let tx = self.gen_tx();
         let message = tx.hash();
-
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
             &signature, &tx, &message
         );
-        let VerifyContext {
-            key_agg_ctx,
-            aggnonce,
-            pubkey,
-            pubnonce: nonce,
-        } = verify_ctx;
-
-        verify_partial(
-            &key_agg_ctx,
-            signature,
-            &aggnonce,
-            pubkey,
-            &nonce,
-            message.as_slice(),
-        )?;
+        verify_ctx.verify(signature, message.as_slice())?;
         Ok(PartiallySignedCommitmentTransaction {
             inner: self,
             tx,
             signature,
         })
+    }
+
+    pub fn create_transaction(
+        &self,
+        ctx: Musig2Context,
+        partial_signature: PartialSignature,
+        partial_signature_given_first: bool,
+        set_signature: impl Fn(
+            TransactionView,
+            CompactSignature,
+        ) -> Result<Transaction, ProcessingChannelError>,
+    ) -> Result<Transaction, ProcessingChannelError> {
+        let tx: TransactionView = self.gen_tx();
+        let message = tx.hash();
+        let signature = ctx.create_signature(
+            message.as_slice(),
+            partial_signature,
+            partial_signature_given_first,
+        )?;
+        set_signature(tx, signature)
     }
 }
 
@@ -1827,14 +2010,14 @@ mod tests {
 
     use crate::ckb::types::Privkey;
 
-    use super::{derive_private_key, derive_public_key};
+    use super::{derive_private_key, derive_tlc_pubkey};
 
     #[test]
     fn test_derive_private_and_public_keys() {
         let privkey = Privkey::from(&[1; 32]);
         let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
         let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
-        let derived_pubkey = derive_public_key(&privkey.pubkey(), &per_commitment_point);
+        let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
         assert_eq!(derived_privkey.pubkey(), derived_pubkey);
     }
 
