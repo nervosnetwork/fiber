@@ -2072,9 +2072,7 @@ mod tests {
     };
     use molecule::prelude::{Builder, Entity};
 
-    use crate::ckb::types::Privkey;
-
-    use super::{derive_private_key, derive_tlc_pubkey};
+    use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey};
 
     #[test]
     fn test_derive_private_and_public_keys() {

@@ -76,6 +76,7 @@ impl NetworkActorMessage {
 pub enum NetworkServiceEvent {
     ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
+    NetworkStarted(PeerId, Multiaddr),
     PeerConnected(Multiaddr),
     PeerDisConnected(Multiaddr),
 }
@@ -150,6 +151,10 @@ pub struct NetworkActor {
 }
 
 impl NetworkActor {
+    pub fn new(event_sender: mpsc::Sender<NetworkServiceEvent>) -> Self {
+        Self { event_sender }
+    }
+
     pub async fn on_service_event(&self, event: NetworkServiceEvent) {
         let _ = self.event_sender.send(event).await;
     }
@@ -424,6 +429,15 @@ impl Actor for NetworkActor {
         );
 
         let control = service.control().to_owned();
+
+        myself
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::NetworkStarted(
+                    my_peer_id.clone(),
+                    listen_addr,
+                )),
+            ))
+            .expect("network actor myself alive");
 
         tracker.spawn(async move {
             service.run().await;

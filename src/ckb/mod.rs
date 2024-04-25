@@ -17,3 +17,6 @@ pub mod channel;
 pub mod types;
 
 pub mod serde_utils;
+
+#[cfg(test)]
+pub mod test_utils;
