@@ -21,7 +21,7 @@ use crate::{
     CkbConfig, NetworkServiceEvent,
 };
 
-use super::{NetworkActor, NetworkActorMessage};
+use super::{NetworkActor, NetworkActorCommand, NetworkActorMessage};
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -97,7 +97,7 @@ impl NetworkNode {
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let network_actor = Actor::spawn_linked(
-            Some("network actor".to_string()),
+            Some(format!("network actor at {:?}", base_dir.as_ref())),
             NetworkActor::new(event_sender),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
@@ -125,6 +125,45 @@ impl NetworkNode {
             event_emitter: event_receiver,
         }
     }
+
+    pub async fn connect_to(mut self, other: &Self) {
+        let peer_addr = other.listening_addr.clone();
+        let peer_id = other.peer_id.clone();
+        println!(
+            "Trying to connect to {:?} from {:?}",
+            other.listening_addr, &self.listening_addr
+        );
+
+        self.network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ConnectPeer(peer_addr.clone()),
+            ))
+            .expect("self alive");
+
+        loop {
+            select! {
+                event = self.event_emitter.recv() => {
+                    match event {
+                        None => panic!("Event emitter unexpectedly stopped"),
+                        Some(NetworkServiceEvent::PeerConnected(id, addr)) => {
+                            println!("Connected to peer ({:?}) addr {:?}", id, addr);
+                            // Don't use peer address to determine if peers are connected to each other here,
+                            // as there are mutilple address strings representing the same address.
+                            if id == peer_id {
+                                break;
+                            }
+                        }
+                        Some(event) => {
+                            println!("Some event happend while waiting for peer connection {:?}", event);
+                        }
+                    }
+                }
+                _ = sleep(Duration::from_secs(5)) => {
+                    panic!("Waiting for peer connection timeout");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -136,5 +175,12 @@ mod tests {
         dbg!("start network node");
         let node = NetworkNode::new().await;
         dbg!("network node started", &node);
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_other_node() {
+        let node_a = NetworkNode::new().await;
+        let node_b = NetworkNode::new().await;
+        node_a.connect_to(&node_b).await;
     }
 }

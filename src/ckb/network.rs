@@ -77,8 +77,8 @@ pub enum NetworkServiceEvent {
     ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
     NetworkStarted(PeerId, Multiaddr),
-    PeerConnected(Multiaddr),
-    PeerDisConnected(Multiaddr),
+    PeerConnected(PeerId, Multiaddr),
+    PeerDisConnected(PeerId, Multiaddr),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -328,13 +328,13 @@ impl NetworkActorState {
         }
     }
 
-    fn on_peer_connected(&mut self, id: &PeerId, session: SessionContext) {
+    fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
         debug!("Peer connected: {:?}", &id);
         let sessions = self.peers.entry(id.clone()).or_insert_with(HashSet::new);
         sessions.insert(session.id);
     }
 
-    fn on_peer_disconnected(&mut self, id: &PeerId, session: SessionContext) {
+    fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
         debug!("Peer disconnected: {:?}", &id);
         if let Some(sessions) = self.peers.get_mut(id) {
             sessions.remove(&session.id);
@@ -467,10 +467,26 @@ impl Actor for NetworkActor {
                     self.on_service_event(e).await;
                 }
                 NetworkActorEvent::PeerConnected(id, session) => {
-                    state.on_peer_connected(&id, session)
+                    state.on_peer_connected(&id, &session);
+                    // Also send an PeerConnected event to outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::PeerConnected(id, session.address),
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
                 NetworkActorEvent::PeerDisconnected(id, session) => {
-                    state.on_peer_disconnected(&id, session)
+                    state.on_peer_disconnected(&id, &session);
+                    // Also send an PeerDisconnected event to outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::PeerDisConnected(id, session.address),
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
                 NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
                     state.on_channel_created(channel_id, peer_id, actor)
