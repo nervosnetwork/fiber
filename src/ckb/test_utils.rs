@@ -126,7 +126,19 @@ impl NetworkNode {
         }
     }
 
-    pub async fn connect_to(mut self, other: &Self) {
+    pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let new = Self::new().await;
+            for node in nodes.iter_mut() {
+                node.connect_to(&new).await;
+            }
+            nodes.push(new);
+        }
+        nodes
+    }
+
+    pub async fn connect_to(&mut self, other: &Self) {
         let peer_addr = other.listening_addr.clone();
         let peer_id = other.peer_id.clone();
         println!(
@@ -179,8 +191,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_to_other_node() {
-        let node_a = NetworkNode::new().await;
+        let mut node_a = NetworkNode::new().await;
         let node_b = NetworkNode::new().await;
         node_a.connect_to(&node_b).await;
+    }
+
+    #[tokio::test]
+    async fn test_create_two_interconnected_nodes() {
+        let _two_nodes = NetworkNode::new_n_interconnected_nodes(2).await;
     }
 }
