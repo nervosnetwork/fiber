@@ -1,3 +1,4 @@
+use ckb_types::packed::{OutPoint, Transaction};
 use log::{debug, error, info, warn};
 use ractor::{async_trait as rasync_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
@@ -24,7 +25,7 @@ use tentacle::{
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
-use super::channel::{ChannelActorMessage, ChannelCommandWithId};
+use super::channel::{ChannelActorMessage, ChannelCommandWithId, ChannelEvent};
 use super::types::Hash256;
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
@@ -79,6 +80,8 @@ pub enum NetworkServiceEvent {
     PeerDisConnected(Multiaddr),
 }
 
+/// Events that can be sent to the network actor. Except for NetworkServiceEvent,
+/// all events are processed by the network actor.
 #[derive(Debug)]
 pub enum NetworkActorEvent {
     /// Network eventss to be processed by this actor.
@@ -92,7 +95,14 @@ pub enum NetworkActorEvent {
     /// A channel has been accepted. The two Hash256 are respectively newly agreed channel id and temp channel id.
     ChannelAccepted(Hash256, Hash256),
 
+    /// Both parties are now able to broadcast a valid funding transaction.
+    FundingTransactionPending(Transaction, OutPoint, Hash256),
+
+    /// A funding transaction has been confirmed.
+    FundingTransactionConfirmed(OutPoint),
+
     /// Network service events to be sent to outside observers.
+    /// We will not do any processing on these events.
     NetworkServiceEvent(NetworkServiceEvent),
 }
 
@@ -266,6 +276,8 @@ pub struct NetworkActorState {
     control: ServiceAsyncControl,
     peers: HashMap<PeerId, HashSet<SessionId>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
+    // Channels in this hashmap are pending for funding transaction confirmation.
+    pending_channels: HashMap<OutPoint, Hash256>,
 }
 
 impl NetworkActorState {
@@ -336,6 +348,43 @@ impl NetworkActorState {
         debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
         self.channels.insert(id, actor);
     }
+
+    async fn on_funding_transaction_pending(
+        &mut self,
+        transaction: Transaction,
+        outpoint: OutPoint,
+        channel_id: Hash256,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(old) = self.pending_channels.remove(&outpoint) {
+            if old != channel_id {
+                panic!("Trying to associate a new channel id {:?} with the same outpoint {:?} when old channel id is {:?}. Rejecting.", channel_id, outpoint, old);
+            }
+        }
+        self.pending_channels.insert(outpoint.clone(), channel_id);
+        // TODO: try to broadcast the transaction to the network.
+        debug!(
+            "Funding transaction (outpoint {:?}) for channel {:?} is now ready. We can broadcast transaction {:?} now.",
+            &outpoint, &channel_id, &transaction
+        );
+        Ok(())
+    }
+
+    async fn on_funding_transaction_confirmed(
+        &mut self,
+        outpoint: OutPoint,
+    ) -> Result<(), ActorProcessingErr> {
+        let channel_id = self
+            .pending_channels
+            .remove(&outpoint)
+            .expect("channel id exists");
+        let channel = self.channels.get(&channel_id).expect("channel exists");
+        channel
+            .send_message(ChannelActorMessage::Event(
+                ChannelEvent::FundingTransactionConfirmed(),
+            ))
+            .expect("channel actor alive");
+        Ok(())
+    }
 }
 
 #[rasync_trait]
@@ -386,6 +435,7 @@ impl Actor for NetworkActor {
             control,
             peers: Default::default(),
             channels: Default::default(),
+            pending_channels: Default::default(),
         })
     }
 
@@ -420,6 +470,14 @@ impl Actor for NetworkActor {
                 NetworkActorEvent::PeerMessage(peer_id, session, message) => {
                     self.handle_peer_message(myself, state, peer_id, session, message)
                         .await?
+                }
+                NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                    state
+                        .on_funding_transaction_pending(transaction, outpoint, channel_id)
+                        .await?
+                }
+                NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
+                    state.on_funding_transaction_confirmed(outpoint).await?
                 }
             },
             NetworkActorMessage::Command(command, sender) => {

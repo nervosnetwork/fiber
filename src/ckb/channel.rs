@@ -36,6 +36,8 @@ pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
     /// It is normally generated from a user request.
     Command(ChannelCommand),
+    /// Some system events associated to a channel, such as the funding transaction confirmed.
+    Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
     PeerMessage(PCNMessage),
 }
@@ -225,12 +227,7 @@ impl ChannelActor {
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
             state.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
             if state.should_holder_send_tx_signatures_first() {
-                let msg = state.handle_tx_signatures(None)?;
-                self.network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(msg),
-                    ))
-                    .expect("network actor alive");
+                state.handle_tx_signatures(self.network.clone(), None)?;
             }
         }
         Ok(())
@@ -554,6 +551,22 @@ impl Actor for ChannelActor {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
+            ChannelActorMessage::Event(e) => match e {
+                ChannelEvent::FundingTransactionConfirmed() => {
+                    state.state =
+                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                                peer_id: state.peer_id.clone(),
+                                message: PCNMessage::ChannelReady(ChannelReady {
+                                    channel_id: state.get_id(),
+                                }),
+                            }),
+                        ))
+                        .expect("network actor alive");
+                }
+            },
         }
         Ok(())
     }
@@ -631,10 +644,7 @@ pub struct ClosedChannel {}
 
 #[derive(Debug)]
 pub enum ChannelEvent {
-    AcceptChannel(AcceptChannel),
-    TxCollaborationMsg(TxCollaborationMsg),
-    CommitmentSigned(CommitmentSigned),
-    ChannelReady(ChannelReady),
+    FundingTransactionConfirmed(),
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
@@ -933,13 +943,18 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_transaction(&self) -> OutPoint {
-        self.funding_tx
-            .as_ref()
-            .expect("Funding transaction is present")
-            .output_pts()
-            .first()
-            .expect("Funding transaction output is present")
-            .clone()
+        // TODO: we should use the actual funding transaction and outpoint here.
+        // We don't have a valid funding transaction yet, so we just use a bogus one.
+
+        OutPoint::default()
+
+        // self.funding_tx
+        //     .as_ref()
+        //     .expect("Funding transaction is present")
+        //     .output_pts()
+        //     .first()
+        //     .expect("Funding transaction output is present")
+        //     .clone()
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
@@ -1086,38 +1101,58 @@ impl ChannelActorState {
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
                 if self.should_holder_send_tx_signatures_first() {
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                Transaction::default(),
+                                self.get_funding_transaction(),
+                                self.get_id(),
+                            ),
+                        ))
+                        .expect("network actor alive");
+
                     self.state =
                         ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    // TODO: Although we should really wait for the funding transaction to be confirmed,
+                    // we have not integrated ckb rpc yet. So we will just send a
+                    // FundingTransactionConfirmed notification here.
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionConfirmed(
+                                self.get_funding_transaction(),
+                            ),
+                        ))
+                        .expect("network actor alive");
                     return Ok(());
                 };
-                let msg = self.handle_tx_signatures(tx_signatures.witnesses.into())?;
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(msg),
-                    ))
-                    .expect("network actor alive");
+                self.handle_tx_signatures(network, Some(tx_signatures.witnesses))?;
                 Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
-                match self.state {
-                    ChannelState::SigningCommitment(_) => {
-                        self.state = ChannelState::AwaitingChannelReady(
-                            AwaitingChannelReadyFlags::OUR_CHANNEL_READY,
-                        );
+                let flags = match self.state {
+                    ChannelState::AwaitingTxSignatures(flags) => {
+                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
+                            AwaitingChannelReadyFlags::empty()
+                        } else {
+                            return Err(ProcessingChannelError::InvalidState(format!(
+                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
+                                self.state
+                            )));
+                        }
                     }
-                    ChannelState::AwaitingChannelReady(
-                        AwaitingChannelReadyFlags::THEIR_CHANNEL_READY,
-                    ) => {
-                        self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
-                    }
+                    ChannelState::AwaitingChannelReady(flags) => flags,
                     _ => {
-                        return Err(ProcessingChannelError::InvalidState(
-                            "received ChannelReady message, but we're not ready for ChannelReady"
-                                .to_string(),
-                        ));
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}", self.state
+                        )));
                     }
-                }
-                debug!("ChannelReady: {:?}", &channel_ready);
+                };
+                let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
+                self.state = ChannelState::AwaitingChannelReady(flags);
+                debug!(
+                    "ChannelReady: {:?}, current state: {:?}",
+                    &channel_ready, &self.state
+                );
                 Ok(())
             }
             _ => {
@@ -1317,11 +1352,14 @@ impl ChannelActorState {
     // set of witnesses.
     pub fn handle_tx_signatures(
         &mut self,
-        // If partial_witnesses is given, we must combine them to make a full list of witnesses.
-        // Otherwise, we are the one to start send the tx_signatures. We can just creat a partial
-        // set of witnesses, and sent them to the peer.
+        network: ActorRef<NetworkActorMessage>,
+        // If partial_witnesses is given, then it is the counterparty that send a message
+        // to us, and we must combine them to make a full list of witnesses.
+        // Otherwise, we are the one who is to start send the tx_signatures.
+        // We can just create a partial set of witnesses, and sent them to the peer.
         partial_witnesses: Option<Vec<Vec<u8>>>,
-    ) -> Result<PCNMessageWithPeerId, ProcessingChannelError> {
+    ) -> ProcessingChannelResult {
+        dbg!(&self.peer_id, self.state, partial_witnesses.as_ref());
         let flags = match self.state {
             ChannelState::AwaitingTxSignatures(flags)
                 if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
@@ -1354,6 +1392,13 @@ impl ChannelActorState {
             }
         };
 
+        let flags = if partial_witnesses.is_some() {
+            flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT
+        } else {
+            flags
+        };
+        self.state = ChannelState::AwaitingTxSignatures(flags);
+
         let funding_tx = self
             .funding_tx
             .as_ref()
@@ -1378,6 +1423,19 @@ impl ChannelActorState {
                 self.state = ChannelState::AwaitingTxSignatures(
                     flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
                 );
+
+                // Since we have received a valid tx_signatures message, we're now sure that
+                // we can broadcast a valid transaction to the network, i.e. we can wait for
+                // the funding transaction to be confirmed.
+                network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::FundingTransactionPending(
+                            Transaction::default(),
+                            self.get_funding_transaction(),
+                            self.get_id(),
+                        ),
+                    ))
+                    .expect("network actor alive");
 
                 PCNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
@@ -1405,7 +1463,13 @@ impl ChannelActorState {
                 }
             }
         };
-        Ok(msg)
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(msg),
+            ))
+            .expect("network actor alive");
+        dbg!(&self.peer_id, self.state);
+        Ok(())
     }
 
     pub fn add_tx_to_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
