@@ -1,7 +1,13 @@
-use std::time::Duration;
+use std::{
+    env,
+    ffi::OsStr,
+    mem::ManuallyDrop,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use ractor::{Actor, ActorRef};
-use tempfile::TempDir;
+use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::{
     select,
@@ -16,6 +22,45 @@ use crate::{
 };
 
 use super::{NetworkActor, NetworkActorMessage};
+
+static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
+
+#[derive(Debug)]
+pub struct TempDir(ManuallyDrop<OldTempDir>);
+
+impl TempDir {
+    fn new<S: AsRef<OsStr>>(prefix: S) -> Self {
+        Self(ManuallyDrop::new(
+            OldTempDir::with_prefix(prefix).expect("create temp directory"),
+        ))
+    }
+}
+
+impl AsRef<Path> for TempDir {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let retain = env::var(RETAIN_VAR);
+        if let Ok(_) = retain {
+            println!(
+                "Keeping temp directory {:?}, as environment variable {RETAIN_VAR} set",
+                self.as_ref()
+            );
+        } else {
+            println!(
+                "Deleting temp directory {:?}. To keep this directory, set environment variable {RETAIN_VAR} to anything",
+                self.as_ref()
+            );
+            unsafe {
+                ManuallyDrop::drop(&mut self.0);
+            }
+        }
+    }
+}
 
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
@@ -42,9 +87,9 @@ pub struct NetworkNode {
 
 impl NetworkNode {
     pub async fn new() -> Self {
-        let base_dir = TempDir::with_prefix("ckb-pcn-node-test").expect("create temp dir");
+        let base_dir = TempDir::new("ckb-pcn-node-test");
         let ckb_config = CkbConfig {
-            base_dir: Some(base_dir.path().into()),
+            base_dir: Some(PathBuf::from(base_dir.as_ref())),
             ..Default::default()
         };
 
