@@ -13,7 +13,7 @@ use musig2::{
     sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
     PubNonce, SecNonce,
 };
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
+use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
 use serde::Deserialize;
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
@@ -665,6 +665,8 @@ pub enum ProcessingChannelError {
     Unimplemented(String),
     #[error("Failed to send command: {0}")]
     CommanderSendingError(#[from] TrySendError<NetworkActorCommand>),
+    #[error("Failed to spawn actor: {0}")]
+    SpawnErr(#[from] SpawnErr),
     #[error("Musig2 VerifyError: {0}")]
     Musig2VerifyError(#[from] VerifyError),
     #[error("Musig2 SigningError: {0}")]
@@ -2072,6 +2074,14 @@ mod tests {
     };
     use molecule::prelude::{Builder, Entity};
 
+    use crate::{
+        ckb::{
+            network::OpenChannelCommand, test_utils::NetworkNode, NetworkActorCommand,
+            NetworkActorMessage,
+        },
+        NetworkServiceEvent,
+    };
+
     use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey};
 
     #[test]
@@ -2090,5 +2100,34 @@ mod tests {
         let tx = tx_builder.build();
         let tx_view = tx.into_view();
         dbg!(tx_view);
+    }
+
+    #[tokio::test]
+    async fn test_open_channel_to_peer() {
+        let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        let open_channel_command = OpenChannelCommand {
+            peer_id: node_b.peer_id.clone(),
+            total_value: 1000,
+        };
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::OpenChannel(open_channel_command),
+            ))
+            .expect("node_a alive");
+        node_a
+            .wait_till_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, &peer_id);
+                    assert_eq!(&peer_id, &node_b.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
     }
 }

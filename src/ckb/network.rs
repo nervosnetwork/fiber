@@ -25,8 +25,10 @@ use tentacle::{
 use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
-use super::channel::{ChannelActorMessage, ChannelCommandWithId, ChannelEvent};
-use super::types::Hash256;
+use super::channel::{
+    ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
+};
+use super::types::{Hash256, OpenChannel};
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
     types::PCNMessage,
@@ -79,6 +81,7 @@ pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, Multiaddr),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
+    ChannelCreated(PeerId, Hash256),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -161,7 +164,6 @@ impl NetworkActor {
 
     pub async fn handle_peer_message(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState,
         peer_id: PeerId,
         session: SessionContext,
@@ -173,27 +175,9 @@ impl NetworkActor {
         );
 
         match message {
-            PCNMessage::OpenChannel(o) => {
-                let id = o.channel_id;
-                if state.channels.contains_key(&id) {
-                    error!("Received duplicated open channel request");
-                    return Ok(());
-                }
-                let channel_user_id = state.channels.len();
-
-                Actor::spawn_linked(
-                    Some("channel".to_string()),
-                    ChannelActor::new(peer_id.clone(), myself.clone()),
-                    ChannelInitializationParameter::OpenChannelMessage(
-                        peer_id.clone(),
-                        channel_user_id,
-                        o,
-                    ),
-                    myself.clone().get_cell(),
-                )
-                .await?;
+            PCNMessage::OpenChannel(open_channel) => {
+                state.create_inbound_channel(peer_id, open_channel).await?;
             }
-
             PCNMessage::TestMessage(test) => {
                 debug!("Test message {:?}", test);
             }
@@ -213,7 +197,6 @@ impl NetworkActor {
 
     pub async fn handle_command(
         &self,
-        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
@@ -252,16 +235,7 @@ impl NetworkActor {
             }
 
             NetworkActorCommand::OpenChannel(open_channel) => {
-                if let Err(err) = Actor::spawn_linked(
-                    Some("channel".to_string()),
-                    ChannelActor::new(open_channel.peer_id.clone(), myself.clone()),
-                    ChannelInitializationParameter::OpenChannelCommand(open_channel),
-                    myself.clone().get_cell(),
-                )
-                .await
-                {
-                    error!("Failed to open channel: {}", err);
-                }
+                state.create_outbound_channel(open_channel).await?;
             }
 
             NetworkActorCommand::ControlPcnChannel(c) => {
@@ -276,6 +250,7 @@ impl NetworkActor {
 
 pub struct NetworkActorState {
     peer_id: PeerId,
+    network: ActorRef<NetworkActorMessage>,
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
@@ -286,6 +261,49 @@ pub struct NetworkActorState {
 }
 
 impl NetworkActorState {
+    pub async fn create_outbound_channel(
+        &mut self,
+        open_channel: OpenChannelCommand,
+    ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
+        let network = self.network.clone();
+        Ok(Actor::spawn_linked(
+            None,
+            ChannelActor::new(open_channel.peer_id.clone(), network.clone()),
+            ChannelInitializationParameter::OpenChannelCommand(open_channel),
+            network.clone().get_cell(),
+        )
+        .await?
+        .0)
+    }
+
+    pub async fn create_inbound_channel(
+        &mut self,
+        peer_id: PeerId,
+        open_channel: OpenChannel,
+    ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
+        let network = self.network.clone();
+        let id = open_channel.channel_id;
+        if let Some(channel) = self.channels.get(&id) {
+            warn!("A channel of id {:?} is already created, returning it", &id);
+            return Ok(channel.clone());
+        }
+        let channel_user_id = self.channels.len();
+
+        let channel = Actor::spawn_linked(
+            None,
+            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelInitializationParameter::OpenChannelMessage(
+                peer_id.clone(),
+                channel_user_id,
+                open_channel,
+            ),
+            network.clone().get_cell(),
+        )
+        .await?
+        .0;
+        Ok(channel)
+    }
+
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peers
             .get(peer_id)
@@ -347,7 +365,7 @@ impl NetworkActorState {
     fn on_channel_created(
         &mut self,
         id: Hash256,
-        peer_id: PeerId,
+        peer_id: &PeerId,
         actor: ActorRef<ChannelActorMessage>,
     ) {
         debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
@@ -446,6 +464,7 @@ impl Actor for NetworkActor {
 
         Ok(NetworkActorState {
             peer_id: my_peer_id,
+            network: myself,
             control,
             peers: Default::default(),
             channels: Default::default(),
@@ -489,7 +508,15 @@ impl Actor for NetworkActor {
                         .expect("myself alive");
                 }
                 NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
-                    state.on_channel_created(channel_id, peer_id, actor)
+                    state.on_channel_created(channel_id, &peer_id, actor);
+                    // Also send an PeerDisconnected event to outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
                 NetworkActorEvent::ChannelAccepted(new, old) => {
                     assert_ne!(new, old, "new and old channel id must be different");
@@ -498,7 +525,7 @@ impl Actor for NetworkActor {
                     debug!("Channel accepted: {:?} -> {:?}", old, new);
                 }
                 NetworkActorEvent::PeerMessage(peer_id, session, message) => {
-                    self.handle_peer_message(myself, state, peer_id, session, message)
+                    self.handle_peer_message(state, peer_id, session, message)
                         .await?
                 }
                 NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
@@ -511,7 +538,7 @@ impl Actor for NetworkActor {
                 }
             },
             NetworkActorMessage::Command(command, sender) => {
-                let result = self.handle_command(myself, state, command).await;
+                let result = self.handle_command(state, command).await;
                 if let Some(sender) = sender {
                     sender.send(result).await.expect("receiver not closed");
                 }

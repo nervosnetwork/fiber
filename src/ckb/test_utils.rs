@@ -152,26 +152,33 @@ impl NetworkNode {
             ))
             .expect("self alive");
 
+        self.wait_till_event(|event| match event {
+            NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id => true,
+            _ => false,
+        })
+        .await;
+    }
+
+    pub async fn wait_till_event<F>(&mut self, event_filter: F)
+    where
+        F: Fn(NetworkServiceEvent) -> bool,
+    {
         loop {
             select! {
                 event = self.event_emitter.recv() => {
                     match event {
                         None => panic!("Event emitter unexpectedly stopped"),
-                        Some(NetworkServiceEvent::PeerConnected(id, addr)) => {
-                            println!("Connected to peer ({:?}) addr {:?}", id, addr);
-                            // Don't use peer address to determine if peers are connected to each other here,
-                            // as there are mutilple address strings representing the same address.
-                            if id == peer_id {
+                        Some(event) => {
+                            println!("Recevied event when waiting for specific event: {:?}", &event);
+                            if event_filter(event) {
+                                println!("Event matched, exiting waiting for event loop");
                                 break;
                             }
-                        }
-                        Some(event) => {
-                            println!("Some event happend while waiting for peer connection {:?}", event);
                         }
                     }
                 }
                 _ = sleep(Duration::from_secs(5)) => {
-                    panic!("Waiting for peer connection timeout");
+                    panic!("Waiting for event timeout");
                 }
             }
         }
