@@ -1,4 +1,4 @@
-use super::gen::pcn::{self as molecule_pcn, Byte66, SignatureVec};
+use super::gen::pcn::{self as molecule_pcn, PubNonce as Byte66, SignatureVec};
 use super::serde_utils::{EntityWrapperBase64, WrapperHex};
 use anyhow::anyhow;
 use ckb_types::{
@@ -29,17 +29,7 @@ impl From<&Byte66> for PubNonce {
 
 impl From<&PubNonce> for Byte66 {
     fn from(value: &PubNonce) -> Self {
-        Self::new_builder()
-            .set(
-                value
-                    .to_bytes()
-                    .into_iter()
-                    .map(Byte::new)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-            )
-            .build()
+        Byte66::from_slice(&value.to_bytes()).expect("valid pubnonce serialized to 66 bytes")
     }
 }
 

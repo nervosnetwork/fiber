@@ -995,8 +995,8 @@ impl molecule::prelude::Builder for SignatureBuilder {
     }
 }
 #[derive(Clone)]
-pub struct Byte66(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Byte66 {
+pub struct PubNonce(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for PubNonce {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1005,25 +1005,25 @@ impl ::core::fmt::LowerHex for Byte66 {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for Byte66 {
+impl ::core::fmt::Debug for PubNonce {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for Byte66 {
+impl ::core::fmt::Display for PubNonce {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl ::core::default::Default for Byte66 {
+impl ::core::default::Default for PubNonce {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Byte66::new_unchecked(v)
+        PubNonce::new_unchecked(v)
     }
 }
-impl Byte66 {
+impl PubNonce {
     const DEFAULT_VALUE: [u8; 66] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -1233,15 +1233,15 @@ impl Byte66 {
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
-    pub fn as_reader<'r>(&'r self) -> Byte66Reader<'r> {
-        Byte66Reader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> PubNonceReader<'r> {
+        PubNonceReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for Byte66 {
-    type Builder = Byte66Builder;
-    const NAME: &'static str = "Byte66";
+impl molecule::prelude::Entity for PubNonce {
+    type Builder = PubNonceBuilder;
+    const NAME: &'static str = "PubNonce";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Byte66(data)
+        PubNonce(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -1250,10 +1250,10 @@ impl molecule::prelude::Entity for Byte66 {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte66Reader::from_slice(slice).map(|reader| reader.to_entity())
+        PubNonceReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        Byte66Reader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        PubNonceReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -1330,8 +1330,8 @@ impl molecule::prelude::Entity for Byte66 {
     }
 }
 #[derive(Clone, Copy)]
-pub struct Byte66Reader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for Byte66Reader<'r> {
+pub struct PubNonceReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PubNonceReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -1340,19 +1340,19 @@ impl<'r> ::core::fmt::LowerHex for Byte66Reader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for Byte66Reader<'r> {
+impl<'r> ::core::fmt::Debug for PubNonceReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for Byte66Reader<'r> {
+impl<'r> ::core::fmt::Display for PubNonceReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl<'r> Byte66Reader<'r> {
+impl<'r> PubNonceReader<'r> {
     pub const TOTAL_SIZE: usize = 66;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 66;
@@ -1558,14 +1558,14 @@ impl<'r> Byte66Reader<'r> {
         self.as_slice()
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for Byte66Reader<'r> {
-    type Entity = Byte66;
-    const NAME: &'static str = "Byte66Reader";
+impl<'r> molecule::prelude::Reader<'r> for PubNonceReader<'r> {
+    type Entity = PubNonce;
+    const NAME: &'static str = "PubNonceReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        Byte66Reader(slice)
+        PubNonceReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -1579,15 +1579,15 @@ impl<'r> molecule::prelude::Reader<'r> for Byte66Reader<'r> {
         Ok(())
     }
 }
-pub struct Byte66Builder(pub(crate) [Byte; 66]);
-impl ::core::fmt::Debug for Byte66Builder {
+pub struct PubNonceBuilder(pub(crate) [Byte; 66]);
+impl ::core::fmt::Debug for PubNonceBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
     }
 }
-impl ::core::default::Default for Byte66Builder {
+impl ::core::default::Default for PubNonceBuilder {
     fn default() -> Self {
-        Byte66Builder([
+        PubNonceBuilder([
             Byte::default(),
             Byte::default(),
             Byte::default(),
@@ -1657,7 +1657,7 @@ impl ::core::default::Default for Byte66Builder {
         ])
     }
 }
-impl Byte66Builder {
+impl PubNonceBuilder {
     pub const TOTAL_SIZE: usize = 66;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 66;
@@ -1930,9 +1930,9 @@ impl Byte66Builder {
         self
     }
 }
-impl molecule::prelude::Builder for Byte66Builder {
-    type Entity = Byte66;
-    const NAME: &'static str = "Byte66Builder";
+impl molecule::prelude::Builder for PubNonceBuilder {
+    type Entity = PubNonce;
+    const NAME: &'static str = "PubNonceBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -2009,7 +2009,7 @@ impl molecule::prelude::Builder for Byte66Builder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Byte66::new_unchecked(inner.into())
+        PubNonce::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -3097,11 +3097,11 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[72..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_local_nonce(&self) -> Byte66 {
+    pub fn next_local_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[72..]) as usize;
         let end = molecule::unpack_number(&slice[76..]) as usize;
-        Byte66::new_unchecked(self.0.slice(start..end))
+        PubNonce::new_unchecked(self.0.slice(start..end))
     }
     pub fn channel_flags(&self) -> Byte {
         let slice = self.as_slice();
@@ -3361,11 +3361,11 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[72..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_local_nonce(&self) -> Byte66Reader<'r> {
+    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[72..]) as usize;
         let end = molecule::unpack_number(&slice[76..]) as usize;
-        Byte66Reader::new_unchecked(&self.as_slice()[start..end])
+        PubNonceReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn channel_flags(&self) -> ByteReader<'r> {
         let slice = self.as_slice();
@@ -3441,7 +3441,7 @@ impl<'r> molecule::prelude::Reader<'r> for OpenChannelReader<'r> {
         PubkeyReader::verify(&slice[offsets[14]..offsets[15]], compatible)?;
         PubkeyReader::verify(&slice[offsets[15]..offsets[16]], compatible)?;
         PubkeyReader::verify(&slice[offsets[16]..offsets[17]], compatible)?;
-        Byte66Reader::verify(&slice[offsets[17]..offsets[18]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[17]..offsets[18]], compatible)?;
         ByteReader::verify(&slice[offsets[18]..offsets[19]], compatible)?;
         Ok(())
     }
@@ -3465,7 +3465,7 @@ pub struct OpenChannelBuilder {
     pub(crate) tlc_basepoint: Pubkey,
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
-    pub(crate) next_local_nonce: Byte66,
+    pub(crate) next_local_nonce: PubNonce,
     pub(crate) channel_flags: Byte,
 }
 impl OpenChannelBuilder {
@@ -3538,7 +3538,7 @@ impl OpenChannelBuilder {
         self.second_per_commitment_point = v;
         self
     }
-    pub fn next_local_nonce(mut self, v: Byte66) -> Self {
+    pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
         self.next_local_nonce = v;
         self
     }
@@ -3829,14 +3829,14 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[56..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_local_nonce(&self) -> Byte66 {
+    pub fn next_local_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[60..]) as usize;
-            Byte66::new_unchecked(self.0.slice(start..end))
+            PubNonce::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte66::new_unchecked(self.0.slice(start..))
+            PubNonce::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AcceptChannelReader<'r> {
@@ -4043,14 +4043,14 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[56..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_local_nonce(&self) -> Byte66Reader<'r> {
+    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[60..]) as usize;
-            Byte66Reader::new_unchecked(&self.as_slice()[start..end])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte66Reader::new_unchecked(&self.as_slice()[start..])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -4113,7 +4113,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
         PubkeyReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
         PubkeyReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
         PubkeyReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
-        Byte66Reader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
         Ok(())
     }
 }
@@ -4132,7 +4132,7 @@ pub struct AcceptChannelBuilder {
     pub(crate) tlc_basepoint: Pubkey,
     pub(crate) first_per_commitment_point: Pubkey,
     pub(crate) second_per_commitment_point: Pubkey,
-    pub(crate) next_local_nonce: Byte66,
+    pub(crate) next_local_nonce: PubNonce,
 }
 impl AcceptChannelBuilder {
     pub const FIELD_COUNT: usize = 14;
@@ -4188,7 +4188,7 @@ impl AcceptChannelBuilder {
         self.second_per_commitment_point = v;
         self
     }
-    pub fn next_local_nonce(mut self, v: Byte66) -> Self {
+    pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
         self.next_local_nonce = v;
         self
     }
@@ -4343,14 +4343,14 @@ impl CommitmentSigned {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_local_nonce(&self) -> Byte66 {
+    pub fn next_local_nonce(&self) -> PubNonce {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte66::new_unchecked(self.0.slice(start..end))
+            PubNonce::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte66::new_unchecked(self.0.slice(start..))
+            PubNonce::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> CommitmentSignedReader<'r> {
@@ -4444,14 +4444,14 @@ impl<'r> CommitmentSignedReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_local_nonce(&self) -> Byte66Reader<'r> {
+    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[16..]) as usize;
-            Byte66Reader::new_unchecked(&self.as_slice()[start..end])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte66Reader::new_unchecked(&self.as_slice()[start..])
+            PubNonceReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -4503,7 +4503,7 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Byte66Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
@@ -4511,7 +4511,7 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
 pub struct CommitmentSignedBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) partial_signature: Byte32,
-    pub(crate) next_local_nonce: Byte66,
+    pub(crate) next_local_nonce: PubNonce,
 }
 impl CommitmentSignedBuilder {
     pub const FIELD_COUNT: usize = 3;
@@ -4523,7 +4523,7 @@ impl CommitmentSignedBuilder {
         self.partial_signature = v;
         self
     }
-    pub fn next_local_nonce(mut self, v: Byte66) -> Self {
+    pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
         self.next_local_nonce = v;
         self
     }

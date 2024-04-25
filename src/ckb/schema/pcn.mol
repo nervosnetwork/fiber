@@ -1,7 +1,7 @@
 import blockchain;
 
 array Signature [byte; 64];
-array Byte66 [byte; 66];nonce
+array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 array Pubkey [byte; 33];
 vector SignatureVec <Signature>;
 
@@ -23,7 +23,7 @@ table OpenChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    next_local_nonce:            Byte66,
+    next_local_nonce:            PubNonce,
     channel_flags:               byte,
 }
 
@@ -41,13 +41,13 @@ table AcceptChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
-    next_local_nonce:            Byte66,
+    next_local_nonce:            PubNonce,
 }
 
 table CommitmentSigned {
     channel_id:     Byte32,
 	partial_signature: Byte32,
-    next_local_nonce:  Byte66,
+    next_local_nonce:  PubNonce,
 }
 
 table TxSignatures {
