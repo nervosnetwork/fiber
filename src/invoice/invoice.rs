@@ -1,6 +1,4 @@
-use super::utils::{
-    ar_decompress, ar_encompress, construct_invoice_preimage, nom_scan_hrp, BytesToBase32,
-};
+use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::{
@@ -14,7 +12,7 @@ use bitcoin::secp256k1::{
     Message, PublicKey,
 };
 use ckb_types::{
-    packed::Script,
+    packed::{Byte, Script},
     prelude::{Pack, Unpack},
 };
 use core::time::Duration;
@@ -666,15 +664,15 @@ impl From<CkbInvoice> for RawCkbInvoice {
                 SignatureOpt::new_builder()
                     .set({
                         invoice.signature.map(|x| {
-                            let bytes: [u8; SIGNATURE_U5_SIZE] = x
+                            let bytes: [Byte; SIGNATURE_U5_SIZE] = x
                                 .to_base32()
                                 .iter()
-                                .map(|x| x.to_u8())
+                                .map(|x| u8_to_byte(x.to_u8()))
                                 .collect::<Vec<_>>()
                                 .as_slice()
                                 .try_into()
                                 .unwrap();
-                            Signature::from(bytes)
+                            Signature::new_builder().set(bytes).build()
                         })
                     })
                     .build(),
@@ -687,8 +685,16 @@ impl From<CkbInvoice> for RawCkbInvoice {
 impl From<InvoiceData> for gen_invoice::RawInvoiceData {
     fn from(data: InvoiceData) -> Self {
         RawInvoiceDataBuilder::default()
-            .payment_hash(PaymentHash::from(data.payment_hash))
-            .payment_secret(PaymentSecret::from(data.payment_secret))
+            .payment_hash(
+                PaymentHash::new_builder()
+                    .set(u8_slice_to_bytes(&data.payment_hash).unwrap())
+                    .build(),
+            )
+            .payment_secret(
+                PaymentSecret::new_builder()
+                    .set(u8_slice_to_bytes(&data.payment_secret).unwrap())
+                    .build(),
+            )
             .attrs(
                 InvoiceAttrsVec::new_builder()
                     .set(
@@ -708,8 +714,8 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
-            payment_hash: data.payment_hash().into(),
-            payment_secret: data.payment_secret().into(),
+            payment_hash: bytes_to_u8_array(&data.payment_hash().as_bytes()),
+            payment_secret: bytes_to_u8_array(&data.payment_secret().as_bytes()),
             attrs: data
                 .attrs()
                 .into_iter()

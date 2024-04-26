@@ -1,6 +1,7 @@
 use arcode::bitbit::{BitReader, BitWriter, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bech32::{u5, FromBase32, WriteBase32};
+use ckb_types::packed::Byte;
 use nom::{branch::alt, combinator::opt};
 use nom::{
     bytes::{complete::take_while1, streaming::tag},
@@ -163,4 +164,25 @@ pub(crate) fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Op
     let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
     let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
     Ok((input, (currency, amount, si)))
+}
+
+/// FIXME: remove these 3 converters after updating molecule to 0.8.0
+pub(crate) fn u8_to_byte(u: u8) -> Byte {
+    Byte::new(u)
+}
+
+pub(crate) fn u8_slice_to_bytes(slice: &[u8]) -> Result<[Byte; 32], &'static str> {
+    let vec: Vec<Byte> = slice.iter().map(|&x| Byte::new(x)).collect();
+    let boxed_slice = vec.into_boxed_slice();
+    let boxed_array: Box<[Byte; 32]> = match boxed_slice.try_into() {
+        Ok(ba) => ba,
+        Err(_) => return Err("Slice length doesn't match array length"),
+    };
+    Ok(*boxed_array)
+}
+
+pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
+    let mut res = [0u8; 32];
+    res.copy_from_slice(array);
+    res
 }
