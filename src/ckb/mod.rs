@@ -21,5 +21,4 @@ pub mod serde_utils;
 #[cfg(test)]
 pub mod test_utils;
 
-mod types;
 
