@@ -5,11 +5,10 @@ use bitcoin::{
     hashes::{sha256, Hash},
     key::Secp256k1,
     secp256k1,
-};
-
-use bitcoin::secp256k1::{
-    ecdsa::{RecoverableSignature, RecoveryId},
-    Message, PublicKey,
+    secp256k1::{
+        ecdsa::{RecoverableSignature, RecoveryId},
+        Message, PublicKey,
+    },
 };
 use ckb_types::{
     packed::{Byte, Script},
@@ -129,6 +128,7 @@ pub struct InvoiceData {
 /// There are three ways to construct a `CkbInvoice`:
 ///  1. using [`CkbInvoiceBuilder`]
 ///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
+///
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CkbInvoice {
     pub currency: Currency,
@@ -395,7 +395,6 @@ pub enum InvoiceError {
     MalformedHRP,
     TooShortDataPart,
     UnexpectedEndOfTaggedFields,
-    PaddingError,
     IntegerOverflowError,
     InvalidSegWitProgramLength,
     InvalidPubKeyHashLength,
