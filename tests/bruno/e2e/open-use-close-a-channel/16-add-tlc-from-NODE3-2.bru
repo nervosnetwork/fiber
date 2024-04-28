@@ -1,11 +1,11 @@
 meta {
-  name: send commitment_signed message
+  name: add tlc from NODE3 2
   type: http
-  seq: 11
+  seq: 13
 }
 
 post {
-  url: {{NODE1_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -21,7 +21,11 @@ body:json {
       "ControlPcnChannel": {
         "channel_id": "0x80118d4f35c6c1aafea499f71b37bda4cea12c513ef416e4c5befad30054e8e3",
         "command": {
-          "CommitmentSigned": []
+          "AddTlc": {
+            "amount": 30,
+            "preimage": "0x0000000000000000000000000000000000000000000000000000000000000002",
+            "expiry": 40
+          }
         }
       }
     }
