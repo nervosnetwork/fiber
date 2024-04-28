@@ -190,6 +190,12 @@ impl From<[u8; 32]> for Hash256 {
     }
 }
 
+impl AsRef<[u8]> for Hash256 {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl From<&Hash256> for MByte32 {
     fn from(hash: &Hash256) -> Self {
         MByte32::new_builder()
