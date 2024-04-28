@@ -867,7 +867,7 @@ pub struct AddTlc {
     pub tlc_id: u64,
     pub amount: u64,
     pub payment_hash: Hash256,
-    pub expiry: u64,
+    pub expiry: LockTime,
 }
 
 impl From<AddTlc> for molecule_pcn::AddTlc {
@@ -877,7 +877,7 @@ impl From<AddTlc> for molecule_pcn::AddTlc {
             .tlc_id(add_tlc.tlc_id.pack())
             .amount(add_tlc.amount.pack())
             .payment_hash(add_tlc.payment_hash.into())
-            .expiry(add_tlc.expiry.pack())
+            .expiry(add_tlc.expiry.into())
             .build()
     }
 }
@@ -891,7 +891,7 @@ impl TryFrom<molecule_pcn::AddTlc> for AddTlc {
             tlc_id: add_tlc.tlc_id().unpack(),
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
-            expiry: add_tlc.expiry().unpack(),
+            expiry: add_tlc.expiry().try_into()?,
         })
     }
 }

@@ -20,14 +20,14 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::mpsc::error::TrySendError;
 
-use std::{borrow::Borrow, fmt::Debug};
+use std::{borrow::Borrow, collections::HashMap, fmt::Debug};
 
 use super::{
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
     types::{
-        AcceptChannel, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel, PCNMessage,
-        Privkey, Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
+        AcceptChannel, AddTlc, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel,
+        PCNMessage, Privkey, Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -48,6 +48,7 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
+    AddTlc(AddTlcCommand),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -55,6 +56,35 @@ pub enum TxCollaborationCommand {
     TxAdd(TxAddCommand),
     TxRemove(TxRemoveCommand),
     TxComplete(TxCompleteCommand),
+}
+
+#[derive(Copy, Clone, Debug, Deserialize)]
+pub struct AddTlcCommand {
+    amount: u64,
+    payment_hash: Hash256,
+    expiry: LockTime,
+}
+
+impl From<AddTlcCommand> for TLCOutput {
+    fn from(command: AddTlcCommand) -> Self {
+        TLCOutput {
+            received_id: None,
+            amount: command.amount,
+            payment_hash: command.payment_hash,
+            lock_time: command.expiry,
+        }
+    }
+}
+
+impl From<AddTlc> for TLCOutput {
+    fn from(command: AddTlc) -> Self {
+        TLCOutput {
+            received_id: Some(command.tlc_id),
+            amount: command.amount,
+            payment_hash: command.payment_hash,
+            lock_time: command.expiry,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -233,6 +263,16 @@ impl ChannelActor {
         Ok(())
     }
 
+    pub fn handle_add_tlc_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: AddTlcCommand,
+    ) -> ProcessingChannelResult {
+        let tlc = command.into();
+        state.add_tlc(self.network.clone(), tlc)?;
+        Ok(())
+    }
+
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
     // to present in the other function as well.
     pub fn handle_tx_collaboration_command(
@@ -339,6 +379,7 @@ impl ChannelActor {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
+            ChannelCommand::AddTlc(command) => self.handle_add_tlc_command(state, command),
         }
     }
 }
@@ -577,6 +618,7 @@ impl Actor for ChannelActor {
                     let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                     state.state = ChannelState::AwaitingChannelReady(flags);
                     if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                        state.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::ChannelReady(
@@ -638,6 +680,17 @@ pub struct ChannelActorState {
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
     pub id: Option<Hash256>,
+
+    // The id of our next offering tlc, must increment by 1 for each new offered tlc.
+    pub next_offering_tlc_id: u64,
+    // The id of our next receiving tlc, must increment by 1 for each new offered tlc.
+    pub next_receiving_tlc_id: u64,
+    // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
+    // will be removed from this map.
+    pub pending_offered_tlcs: HashMap<u64, TLCOutput>,
+    // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
+    // will be removed from this map.
+    pub pending_received_tlcs: HashMap<u64, TLCOutput>,
 
     pub counterparty_nonce: Option<PubNonce>,
     // The commitment point used in the first commitment transaction after funding transaction.
@@ -842,6 +895,10 @@ impl ChannelActorState {
             total_value: counterparty_value,
             temp_id: temp_channel_id,
             id: Some(channel_id),
+            next_offering_tlc_id: 0,
+            next_receiving_tlc_id: 0,
+            pending_offered_tlcs: Default::default(),
+            pending_received_tlcs: Default::default(),
             to_self_value: 0,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
@@ -878,6 +935,10 @@ impl ChannelActorState {
             total_value: value,
             temp_id: new_channel_id,
             id: None,
+            next_offering_tlc_id: 0,
+            next_receiving_tlc_id: 0,
+            pending_offered_tlcs: Default::default(),
+            pending_received_tlcs: Default::default(),
             to_self_value: value,
             signer,
             holder_channel_parameters: ChannelParametersOneParty {
@@ -1036,6 +1097,83 @@ impl ChannelActorState {
             .pubkeys
             .funding_pubkey
     }
+
+    pub fn add_tlc(
+        &mut self,
+        network: ActorRef<NetworkActorMessage>,
+        tlc: TLCOutput,
+    ) -> ProcessingChannelResult {
+        match self.state {
+            ChannelState::ChannelReady(_) => {
+                debug!("Adding tlc {:?} to channel {:?}", &tlc, &self.get_id());
+            }
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Invalid state {:?} for adding tlc",
+                    self.state
+                )))
+            }
+        }
+        match tlc.received_id() {
+            Some(id) => {
+                if let Some(current) = self.pending_received_tlcs.get(&id) {
+                    if current == &tlc {
+                        debug!(
+                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
+                            id, current,
+                        )
+                    } else {
+                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
+                            id,
+                            current,
+                            &tlc
+                        )));
+                    }
+                }
+                self.pending_received_tlcs.insert(id, tlc);
+                // TODO: here we didn't send any ack message to the peer.
+                // The peer may falsely believe that we have already processed this message,
+                // while we have crashed. We need a way to make sure that the peer will resend
+                // this message, and our processing of this message is idempotent.
+                Ok(())
+            }
+            None => {
+                // TODO: we are filling the user command with a new id here.
+                // The advantage of this is that we don't need to burden the users to 
+                // provide a next id for each tlc. The disadvantage is that users may
+                // inadvertently click the same button twice, and we will process the same
+                // twice, the frontend needs to prevent this kind of behaviour.
+                // Is this what we want?
+                let id = self.next_offering_tlc_id;
+                assert!(
+                    self.pending_offered_tlcs.get(&id).is_none(),
+                    "Must not have the same id in pending offered tlcs"
+                );
+                let current_offerint_tlc_id = self.next_offering_tlc_id;
+                self.pending_offered_tlcs.insert(id, tlc);
+                self.next_offering_tlc_id += 1;
+
+                let msg = PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::AddTlc(AddTlc {
+                        channel_id: self.get_id(),
+                        tlc_id: current_offerint_tlc_id,
+                        amount: tlc.amount,
+                        payment_hash: tlc.payment_hash,
+                        expiry: tlc.lock_time,
+                    }),
+                };
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(msg),
+                    ))
+                    .expect("network actor alive");
+
+                Ok(())
+            }
+        }
+    }
 }
 
 impl From<&ChannelActorState> for Musig2Context {
@@ -1163,6 +1301,7 @@ impl ChannelActorState {
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -1170,6 +1309,11 @@ impl ChannelActorState {
                         .expect("network actor alive");
                 }
 
+                Ok(())
+            }
+            PCNMessage::AddTlc(add_tlc) => {
+                let tlc = add_tlc.into();
+                self.add_tlc(network, tlc)?;
                 Ok(())
             }
             _ => {
@@ -1905,23 +2049,37 @@ pub struct CounterpartyChannelTransactionParameters {
     pub selected_contest_delay: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TLCOutputInCommitment {
-    /// Whether the HTLC was "offered" (ie outbound in relation to this commitment transaction).
-    /// Note that this is not the same as whether it is ountbound *from us*. To determine that you
-    /// need to compare this value to whether the commitment transaction in question is that of
-    /// the counterparty or our own.
-    pub offered: bool,
+/// A tlc output.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TLCOutput {
+    /// The id of a received TLC. Must be empty if this is an offered HTLC.
+    /// We will fill in the id when we send this tlc to the counterparty.
+    /// Otherwise must be the next sequence number of the counterparty.
+    pub received_id: Option<u64>,
     /// The value, in msat, of the HTLC. The value as it appears in the commitment transaction is
     /// this divided by 1000.
     pub amount: u64,
     /// The CLTV lock-time at which this HTLC expires.
-    pub lock_time: u32,
+    pub lock_time: LockTime,
     /// The hash of the preimage which unlocks this HTLC.
     pub payment_hash: Hash256,
-    /// The position within the commitment transactions' outputs. This may be None if the value is
-    /// below the dust limit (in which case no output appears in the commitment transaction and the
-    /// value is spent to additional transaction fees).
+}
+
+impl TLCOutput {
+    pub fn is_offered(&self) -> bool {
+        self.received_id.is_none()
+    }
+
+    pub fn received_id(&self) -> Option<u64> {
+        self.received_id
+    }
+}
+
+/// A tlc output in a commitment transaction, including both the tlc output
+/// and the index in the commitment transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TLCOutputInCommitment {
+    pub output: TLCOutput,
     pub transaction_output_index: Option<u32>,
 }
 
