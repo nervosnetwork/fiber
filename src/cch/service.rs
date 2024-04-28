@@ -85,11 +85,11 @@ impl CchService {
                     .allow_expired_btc_invoice
                     .then_some(self.config.order_expiry)
             })
-            .ok_or_else(|| CchError::BTCInvoiceExpired)?;
+            .ok_or(CchError::BTCInvoiceExpired)?;
 
         let amount_msat = invoice
             .amount_milli_satoshis()
-            .ok_or_else(|| CchError::BTCInvoiceMissingAmount)?;
+            .ok_or(CchError::BTCInvoiceMissingAmount)?;
 
         log::debug!("SendBTC expiry: {:?}", expiry);
         let (ratio_ckb_shannons, ratio_btc_msat) =

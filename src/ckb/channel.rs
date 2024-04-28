@@ -64,7 +64,7 @@ pub struct ChannelCommandWithId {
 }
 
 pub const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
-pub const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = 2 ^ 48 - 1;
+pub const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = (2 ^ 48) - 1;
 pub const DEFAULT_FEE_RATE: u64 = 0;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
@@ -258,16 +258,16 @@ impl ChannelActor {
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
                 if state.is_acceptor =>
             {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Acceptor tries to start sending tx collaboration message",
-                )));
+                return Err(ProcessingChannelError::InvalidState(
+                    "Acceptor tries to start sending tx collaboration message".to_string(),
+                ));
             }
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
                 if matches!(command, TxCollaborationCommand::TxRemove(_)) =>
             {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Trying to remove tx in the initial state",
-                )));
+                return Err(ProcessingChannelError::InvalidState(
+                    "Trying to remove tx in the initial state".to_string(),
+                ));
             }
             ChannelState::NegotiatingFunding(_) => {
                 debug!("Beginning processing tx collaboration command");
@@ -403,8 +403,8 @@ impl Actor for ChannelActor {
                     *to_self_delay,
                     counterpart_pubkeys,
                     next_local_nonce.clone(),
-                    first_per_commitment_point.clone(),
-                    second_per_commitment_point.clone(),
+                    *first_per_commitment_point,
+                    *second_per_commitment_point,
                 );
 
                 let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
@@ -757,12 +757,12 @@ fn derive_channel_id_from_revocation_keys(
     let preimage = if holder_revocation >= counterparty_revocation {
         counterparty_revocation
             .into_iter()
-            .chain(holder_revocation.into_iter())
+            .chain(holder_revocation)
             .collect::<Vec<_>>()
     } else {
         holder_revocation
             .into_iter()
-            .chain(counterparty_revocation.into_iter())
+            .chain(counterparty_revocation)
             .collect()
     };
     new_channel_id_from_seed(&preimage)
@@ -771,12 +771,12 @@ fn derive_channel_id_from_revocation_keys(
 pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64) -> [u8; 32] {
     // Note that here, we hold the same assumption to bolts for commitment number,
     // i.e. this number should be in the range [0, 2^48).
-    let mut res: [u8; 32] = commitment_seed.clone();
+    let mut res: [u8; 32] = *commitment_seed;
     for i in 0..48 {
         let bitpos = 47 - i;
         if commitment_number & (1 << bitpos) == (1 << bitpos) {
             res[bitpos / 8] ^= 1 << (bitpos & 7);
-            res = blake2b_256(&res);
+            res = blake2b_256(res);
         }
     }
     res
@@ -824,7 +824,7 @@ impl ChannelActorState {
             to_self_value: 0,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
-                selected_contest_delay: counterparty_delay as u64,
+                selected_contest_delay: counterparty_delay,
             },
             signer,
             counterparty_channel_parameters: Some(ChannelParametersOneParty {
@@ -855,7 +855,7 @@ impl ChannelActorState {
             funding_tx: None,
             is_acceptor: false,
             total_value: value,
-            temp_id: new_channel_id.into(),
+            temp_id: new_channel_id,
             id: None,
             to_self_value: value,
             signer,
@@ -960,16 +960,11 @@ impl ChannelActorState {
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
-        let holder_pubkey = self
-            .get_holder_channel_parameters()
-            .pubkeys
-            .funding_pubkey
-            .clone();
+        let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
             .get_counterparty_channel_parameters()
             .pubkeys
-            .funding_pubkey
-            .clone();
+            .funding_pubkey;
         let keys = if self.should_holders_pubkey_go_first_in_musig2() {
             vec![holder_pubkey, counterparty_pubkey]
         } else {
@@ -1027,9 +1022,9 @@ impl From<&ChannelActorState> for Musig2Context {
         Musig2Context {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            holder_seckey: value.signer.funding_key.clone(),
+            holder_seckey: value.signer.funding_key,
             holder_secnonce: value.get_holder_musig2_secnonce(),
-            counterparty_pubkey: value.get_counterparty_funding_pubkey().clone(),
+            counterparty_pubkey: *value.get_counterparty_funding_pubkey(),
             counterparty_pubnonce: value.get_counterparty_nonce().clone(),
         }
     }
@@ -1040,7 +1035,7 @@ impl From<&ChannelActorState> for Musig2SignContext {
         Musig2SignContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            seckey: value.signer.funding_key.clone(),
+            seckey: value.signer.funding_key,
             secnonce: value.get_holder_musig2_secnonce(),
         }
     }
@@ -1051,7 +1046,7 @@ impl From<&ChannelActorState> for Musig2VerifyContext {
         Musig2VerifyContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            pubkey: value.get_counterparty_funding_pubkey().clone(),
+            pubkey: *value.get_counterparty_funding_pubkey(),
             pubnonce: value.get_counterparty_nonce().clone(),
         }
     }
@@ -1188,12 +1183,11 @@ impl ChannelActorState {
         let counterparty_pubkeys = (&accept_channel).into();
         self.counterparty_channel_parameters = Some(ChannelParametersOneParty {
             pubkeys: counterparty_pubkeys,
-            selected_contest_delay: accept_channel.to_self_delay as u64,
+            selected_contest_delay: accept_channel.to_self_delay,
         });
         self.counterparty_initial_commitment_point =
-            Some(accept_channel.first_per_commitment_point.clone());
-        self.counterparty_commitment_point =
-            Some(accept_channel.second_per_commitment_point.clone());
+            Some(accept_channel.first_per_commitment_point);
+        self.counterparty_commitment_point = Some(accept_channel.second_per_commitment_point);
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
@@ -1224,16 +1218,16 @@ impl ChannelActorState {
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
                 if !self.is_acceptor =>
             {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Initiator received a tx collaboration message",
-                )));
+                return Err(ProcessingChannelError::InvalidState(
+                    "Initiator received a tx collaboration message".to_string(),
+                ));
             }
             ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
                 if matches!(msg, TxCollaborationMsg::TxRemove(_)) =>
             {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Recevied a TxRemove message from the start of tx collaboration"
-                )));
+                return Err(ProcessingChannelError::InvalidState(
+                    "Recevied a TxRemove message from the start of tx collaboration".to_string(),
+                ));
             }
             ChannelState::NegotiatingFunding(_) => {
                 debug!("Beginning processing tx collaboration message");
@@ -1376,9 +1370,9 @@ impl ChannelActorState {
                 if flags.contains(AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT)
                     && partial_witnesses.is_none() =>
             {
-                return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                    "We have already sent our tx_signatures"
-                )));
+                return Err(ProcessingChannelError::RepeatedProcessing(
+                    "We have already sent our tx_signatures".to_string(),
+                ));
             }
             ChannelState::SigningCommitment(flags)
                 if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) =>
@@ -1501,7 +1495,7 @@ impl ChannelActorState {
             .pubkeys
             .revocation_base_key;
         let channel_id =
-            derive_channel_id_from_revocation_keys(&holder_revocation, &counterparty_revocation);
+            derive_channel_id_from_revocation_keys(holder_revocation, counterparty_revocation);
 
         self.id = Some(channel_id);
         debug!(
@@ -1552,13 +1546,13 @@ impl ChannelActorState {
                 self.get_holder_channel_parameters(),
                 self.get_counterparty_channel_parameters(),
                 self.signer.get_commitment_point(commitment_number),
-                self.get_counterparty_commitment_point().clone(),
+                *self.get_counterparty_commitment_point(),
             )
         } else {
             (
                 self.get_counterparty_channel_parameters(),
                 self.get_holder_channel_parameters(),
-                self.get_counterparty_commitment_point().clone(),
+                *self.get_counterparty_commitment_point(),
                 self.signer.get_commitment_point(commitment_number),
             )
         };
@@ -1861,11 +1855,11 @@ pub struct ChannelBasePublicKeys {
 impl From<&OpenChannel> for ChannelBasePublicKeys {
     fn from(value: &OpenChannel) -> Self {
         ChannelBasePublicKeys {
-            funding_pubkey: value.funding_pubkey.clone(),
-            revocation_base_key: value.revocation_basepoint.clone(),
-            payment_base_key: value.payment_basepoint.clone(),
-            delayed_payment_base_key: value.delayed_payment_basepoint.clone(),
-            tlc_base_key: value.tlc_basepoint.clone(),
+            funding_pubkey: value.funding_pubkey,
+            revocation_base_key: value.revocation_basepoint,
+            payment_base_key: value.payment_basepoint,
+            delayed_payment_base_key: value.delayed_payment_basepoint,
+            tlc_base_key: value.tlc_basepoint,
         }
     }
 }
@@ -1873,11 +1867,11 @@ impl From<&OpenChannel> for ChannelBasePublicKeys {
 impl From<&AcceptChannel> for ChannelBasePublicKeys {
     fn from(value: &AcceptChannel) -> Self {
         ChannelBasePublicKeys {
-            funding_pubkey: value.funding_pubkey.clone(),
-            revocation_base_key: value.revocation_basepoint.clone(),
-            payment_base_key: value.payment_basepoint.clone(),
-            delayed_payment_base_key: value.delayed_payment_basepoint.clone(),
-            tlc_base_key: value.tlc_basepoint.clone(),
+            funding_pubkey: value.funding_pubkey,
+            revocation_base_key: value.revocation_basepoint,
+            payment_base_key: value.payment_basepoint,
+            delayed_payment_base_key: value.delayed_payment_basepoint,
+            tlc_base_key: value.tlc_basepoint,
         }
     }
 }
@@ -1940,7 +1934,7 @@ pub struct TxCreationKeys {
 pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
     // TODO: Currently we only copy the input secret. We need to actually derive new private keys
     // from the per_commitment_point.
-    secret.clone()
+    *secret
 }
 
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
@@ -1968,19 +1962,19 @@ pub struct InMemorySigner {
 }
 
 pub fn derive_revocation_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    base_key.clone()
+    *base_key
 }
 
 pub fn derive_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    base_key.clone()
+    *base_key
 }
 
 pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    base_key.clone()
+    *base_key
 }
 
 pub fn derive_tlc_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    base_key.clone()
+    *base_key
 }
 
 impl InMemorySigner {
@@ -2096,7 +2090,7 @@ mod tests {
     #[test]
     fn test_deserialize_transaction() {
         let tx_builder = Transaction::new_builder();
-        let tx_builder = tx_builder.witnesses(vec![vec![0u8].pack()].pack());
+        let tx_builder = tx_builder.witnesses(vec![[0u8].pack()].pack());
         let tx = tx_builder.build();
         let tx_view = tx.into_view();
         dbg!(tx_view);

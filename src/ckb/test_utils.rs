@@ -45,7 +45,7 @@ impl AsRef<Path> for TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let retain = env::var(RETAIN_VAR);
-        if let Ok(_) = retain {
+        if retain.is_ok() {
             println!(
                 "Keeping temp directory {:?}, as environment variable {RETAIN_VAR} set",
                 self.as_ref()

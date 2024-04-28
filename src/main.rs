@@ -9,7 +9,7 @@ use ckb_pcn_node::actors::RootActor;
 use ckb_pcn_node::cch::CchCommand;
 use ckb_pcn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
 use ckb_pcn_node::tasks::{
-    new_tokio_cancellation_token, new_tokio_task_tracker, cancel_tasks_and_wait_for_completion,
+    cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 

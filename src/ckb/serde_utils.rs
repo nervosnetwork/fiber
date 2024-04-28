@@ -12,7 +12,7 @@ where
 
     String::deserialize(deserializer)
         .and_then(|string| {
-            base64::decode(&string)
+            base64::decode(string)
                 .map_err(|err| Error::custom(format!("failed to decode base64: {:?}", err)))
         })
         .and_then(|vec| {

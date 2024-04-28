@@ -134,7 +134,7 @@ impl Config {
             .or(args.base_dir.map(|x| x.join(DEFAULT_CONFIG_FILE_NAME)))
             .unwrap_or(get_default_config_file());
 
-        let config_from_file = File::open(&config_file).map(BufReader::new).map(|f| {
+        let config_from_file = File::open(config_file).map(BufReader::new).map(|f| {
             serde_yaml::from_reader::<_, SerializedConfig>(f).expect("valid config file format")
         });
 
@@ -148,7 +148,7 @@ impl Config {
                 .as_ref()
                 .ok()
                 .and_then(|x| x.services.clone())
-                .unwrap_or(vec![])
+                .unwrap_or_default()
         } else {
             args.services
         };

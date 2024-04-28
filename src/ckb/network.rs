@@ -348,7 +348,7 @@ impl NetworkActorState {
 
     fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
         debug!("Peer connected: {:?}", &id);
-        let sessions = self.peers.entry(id.clone()).or_insert_with(HashSet::new);
+        let sessions = self.peers.entry(id.clone()).or_default();
         sessions.insert(session.id);
     }
 

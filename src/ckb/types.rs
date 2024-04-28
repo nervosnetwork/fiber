@@ -18,7 +18,7 @@ use thiserror::Error;
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
-    INSTANCE.get_or_init(|| Secp256k1::new())
+    INSTANCE.get_or_init(Secp256k1::new)
 }
 
 impl From<&Byte66> for PubNonce {
@@ -82,7 +82,7 @@ impl AsRef<[u8; 32]> for Privkey {
 }
 
 #[serde_as]
-#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq)]
+#[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
 pub struct Hash256(#[serde_as(as = "WrapperHex<[u8; 32]>")] [u8; 32]);
 
 impl From<[u8; 32]> for Hash256 {
@@ -135,20 +135,14 @@ impl ::core::fmt::LowerHex for Hash256 {
 
 impl ::core::fmt::Debug for Hash256 {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", "Hash256", self)
+        write!(f, "Hash256({:#x})", self)
     }
 }
 
 impl ::core::fmt::Display for Hash256 {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        let raw_data = hex::encode(&self.0);
-        write!(f, "{}(0x{})", "Hash256", raw_data)
-    }
-}
-
-impl ::core::default::Default for Hash256 {
-    fn default() -> Self {
-        Self([0; 32])
+        let raw_data = hex::encode(self.0);
+        write!(f, "Hash256(0x{})", raw_data)
     }
 }
 
@@ -167,15 +161,15 @@ impl Privkey {
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Pubkey(pub PublicKey);
 
-impl Into<Point> for Pubkey {
-    fn into(self) -> Point {
-        PublicKey::from(self.0).into()
+impl From<Pubkey> for Point {
+    fn from(val: Pubkey) -> Self {
+        PublicKey::from(val).into()
     }
 }
 
-impl Into<Point> for &Pubkey {
-    fn into(self) -> Point {
-        (*self).into()
+impl From<&Pubkey> for Point {
+    fn from(val: &Pubkey) -> Self {
+        (*val).into()
     }
 }
 
@@ -721,7 +715,7 @@ impl From<Shutdown> for molecule_pcn::Shutdown {
     fn from(shutdown: Shutdown) -> Self {
         molecule_pcn::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
-            .close_script(shutdown.close_script.into())
+            .close_script(shutdown.close_script)
             .build()
     }
 }
@@ -1250,6 +1244,6 @@ mod tests {
             &pk_str
         );
         let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
-        assert_eq!(pubkey, Pubkey::from(public_key))
+        assert_eq!(pubkey, public_key)
     }
 }

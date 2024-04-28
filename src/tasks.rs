@@ -6,6 +6,12 @@ pub struct TaskTrackerWithCancellation {
     token: CancellationToken,
 }
 
+impl Default for TaskTrackerWithCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskTrackerWithCancellation {
     pub fn new() -> Self {
         Self {

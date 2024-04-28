@@ -1,3 +1,4 @@
+#[allow(clippy::all)]
 pub mod pcn;
 
 // pcn module requires types from blockchain.
