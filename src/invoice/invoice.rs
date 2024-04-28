@@ -218,6 +218,10 @@ impl CkbInvoice {
         &self.data.payment_hash
     }
 
+    pub fn payment_hash_id(&self) -> String {
+        hex::encode(self.payment_hash())
+    }
+
     /// Checks if the signature is valid for the included payee public key or if none exists if it's
     /// valid for the recovered signature (which should always be true?).
     fn validate_signature(&self) -> bool {

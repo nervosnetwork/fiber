@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 pub type NetworkActorCommandWithReply =
     (NetworkActorCommand, Option<mpsc::Sender<crate::Result<()>>>);
 
-use crate::{cch::CchCommand, ckb::NetworkActorCommand};
+use crate::{cch::CchCommand, ckb::NetworkActorCommand, invoice::InvoiceCommand};
 
 #[derive(Debug, Deserialize)]
 pub struct HttpBody<T> {
@@ -20,6 +20,7 @@ pub struct HttpBody<T> {
 
 type CkbRpcRequest = HttpBody<NetworkActorCommand>;
 type CchRpcRequest = HttpBody<CchCommand>;
+type InvoiceRpcRequest = HttpBody<InvoiceCommand>;
 
 pub struct CkbRpcState {
     pub ckb_command_sender: mpsc::Sender<NetworkActorCommandWithReply>,
@@ -27,6 +28,10 @@ pub struct CkbRpcState {
 
 pub struct CchRpcState {
     pub cch_command_sender: mpsc::Sender<CchCommand>,
+}
+
+pub struct InvoiceRpcState {
+    pub invoice_command_sender: mpsc::Sender<InvoiceCommand>,
 }
 
 async fn serve_ckb_rpc(
@@ -64,10 +69,24 @@ async fn serve_cch_rpc(
     StatusCode::OK
 }
 
+async fn serve_invoice_rpc(
+    State(state): State<Arc<InvoiceRpcState>>,
+    Json(http_request): Json<InvoiceRpcRequest>,
+) -> impl IntoResponse {
+    debug!("Received http request: {:?}", http_request);
+    state
+        .invoice_command_sender
+        .send(http_request.request)
+        .await
+        .expect("send command");
+    StatusCode::OK
+}
+
 pub async fn start_rpc<F>(
     config: RpcConfig,
     ckb_command_sender: Option<mpsc::Sender<NetworkActorCommandWithReply>>,
     cch_command_sender: Option<mpsc::Sender<CchCommand>>,
+    invoice_command_sender: Option<mpsc::Sender<InvoiceCommand>>,
     shutdown_signal: F,
 ) where
     F: Future<Output = ()> + Send + 'static,
@@ -84,6 +103,14 @@ pub async fn start_rpc<F>(
             .route("/", post(serve_cch_rpc))
             .with_state(Arc::new(CchRpcState { cch_command_sender }));
         app = app.nest("/cch", cch_router);
+    }
+    if let Some(invoice_command_sender) = invoice_command_sender {
+        let invoice_router = Router::new()
+            .route("/", post(serve_invoice_rpc))
+            .with_state(Arc::new(InvoiceRpcState {
+                invoice_command_sender,
+            }));
+        app = app.nest("/invoice", invoice_router);
     }
 
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
