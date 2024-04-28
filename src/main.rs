@@ -66,16 +66,16 @@ pub async fn main() {
                         event = event_receiver.recv() => {
                             match event {
                                 None => {
-                                    debug!("Event receiver completed, event processing service");
+                                    debug!("Event receiver completed, stopping event processing service");
                                     break;
                                 }
                                 Some(event) => {
-                                    debug!("Received event: {:?}", event);
+                                    debug!("Received event from ckb service: {:?}", event);
                                 }
                             }
                         }
                         _ = token.cancelled() => {
-                            debug!("Cancellation received, event processing service");
+                            debug!("Cancellation received, stopping event processing service");
                             break;
                         }
                     }

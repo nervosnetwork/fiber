@@ -82,6 +82,7 @@ pub enum NetworkServiceEvent {
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
     ChannelCreated(PeerId, Hash256),
+    ChannelReady(PeerId, Hash256),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -98,6 +99,8 @@ pub enum NetworkActorEvent {
     ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
     /// A channel has been accepted. The two Hash256 are respectively newly agreed channel id and temp channel id.
     ChannelAccepted(Hash256, Hash256),
+    /// A channel is ready to use.
+    ChannelReady(Hash256, PeerId),
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
@@ -524,14 +527,41 @@ impl Actor for NetworkActor {
                     state.channels.insert(new, channel);
                     debug!("Channel accepted: {:?} -> {:?}", old, new);
                 }
+                NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
+                    info!(
+                        "Channel ({:?}) to peer {:?} is now ready",
+                        channel_id, peer_id
+                    );
+                    // Also send an PeerDisconnected event to outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelReady(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
                 NetworkActorEvent::PeerMessage(peer_id, session, message) => {
                     self.handle_peer_message(state, peer_id, session, message)
                         .await?
                 }
                 NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                    debug!(
+                        "Funding transaction pending for channel {:?}: {:?}",
+                        channel_id, outpoint
+                    );
                     state
-                        .on_funding_transaction_pending(transaction, outpoint, channel_id)
-                        .await?
+                        .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
+                        .await?;
+
+                    // TODO: Although we should really wait for the funding transaction to be confirmed,
+                    // we have not integrated ckb rpc yet. So we will just send a
+                    // FundingTransactionConfirmed notification here.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionConfirmed(outpoint),
+                        ))
+                        .expect("network actor alive");
                 }
                 NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
                     state.on_funding_transaction_confirmed(outpoint).await?
@@ -555,7 +585,7 @@ impl Actor for NetworkActor {
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
-        debug!("Network service shutdown");
+        debug!("Network service for {:?} shutdown", state.peer_id);
         Ok(())
     }
 }

@@ -553,8 +553,17 @@ impl Actor for ChannelActor {
             }
             ChannelActorMessage::Event(e) => match e {
                 ChannelEvent::FundingTransactionConfirmed() => {
-                    state.state =
-                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    let flags = match state.state {
+                        ChannelState::AwaitingChannelReady(flags) => flags,
+                        ChannelState::AwaitingTxSignatures(f)
+                            if f.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
+                        {
+                            AwaitingChannelReadyFlags::empty()
+                        }
+                        _ => {
+                            panic!("Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state);
+                        }
+                    };
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
@@ -565,6 +574,18 @@ impl Actor for ChannelActor {
                             }),
                         ))
                         .expect("network actor alive");
+                    let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
+                    state.state = ChannelState::AwaitingChannelReady(flags);
+                    if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::ChannelReady(
+                                    state.get_id(),
+                                    self.peer_id.clone(),
+                                ),
+                            ))
+                            .expect("network actor alive");
+                    }
                 }
             },
         }
@@ -1110,16 +1131,6 @@ impl ChannelActorState {
 
                     self.state =
                         ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
-                    // TODO: Although we should really wait for the funding transaction to be confirmed,
-                    // we have not integrated ckb rpc yet. So we will just send a
-                    // FundingTransactionConfirmed notification here.
-                    network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionConfirmed(
-                                self.get_funding_transaction(),
-                            ),
-                        ))
-                        .expect("network actor alive");
                     return Ok(());
                 };
                 self.handle_tx_signatures(network, Some(tx_signatures.witnesses))?;
@@ -1150,6 +1161,15 @@ impl ChannelActorState {
                     "ChannelReady: {:?}, current state: {:?}",
                     &channel_ready, &self.state
                 );
+
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
+                        ))
+                        .expect("network actor alive");
+                }
+
                 Ok(())
             }
             _ => {
