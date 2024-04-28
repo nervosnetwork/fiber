@@ -117,6 +117,12 @@ impl NetworkNode {
             }
         };
 
+        println!(
+            "Network node started for peer_id {:?} in directory {:?}",
+            &peer_id,
+            base_dir.as_ref()
+        );
+
         Self {
             base_dir,
             listening_addr,
@@ -152,16 +158,13 @@ impl NetworkNode {
             ))
             .expect("self alive");
 
-        self.wait_till_event(|event| match event {
-            NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id => true,
-            _ => false,
-        })
+        self.expect_event(|event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &peer_id))
         .await;
     }
 
-    pub async fn wait_till_event<F>(&mut self, event_filter: F)
+    pub async fn expect_event<F>(&mut self, event_filter: F)
     where
-        F: Fn(NetworkServiceEvent) -> bool,
+        F: Fn(&NetworkServiceEvent) -> bool,
     {
         loop {
             select! {
@@ -170,8 +173,8 @@ impl NetworkNode {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
                             println!("Recevied event when waiting for specific event: {:?}", &event);
-                            if event_filter(event) {
-                                println!("Event matched, exiting waiting for event loop");
+                            if event_filter(&event) {
+                                println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 break;
                             }
                         }

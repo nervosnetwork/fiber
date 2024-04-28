@@ -2134,10 +2134,10 @@ mod tests {
             ))
             .expect("node_a alive");
         node_a
-            .wait_till_event(|event| match event {
+            .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} create", &channel_id, &peer_id);
-                    assert_eq!(&peer_id, &node_b.peer_id);
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_b.peer_id);
                     true
                 }
                 _ => false,
