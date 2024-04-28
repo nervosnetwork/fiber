@@ -50,6 +50,7 @@ pub enum ChannelCommand {
     // tx_complete event.
     CommitmentSigned(),
     AddTlc(AddTlcCommand),
+    RemoveTlc(RemoveTlcCommand),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -331,6 +332,39 @@ impl ChannelActor {
         Ok(())
     }
 
+    pub fn handle_remove_tlc_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: RemoveTlcCommand,
+    ) -> ProcessingChannelResult {
+        state.check_state_for_tlc_update()?;
+        // Notes: state updating and message sending are not atomic.
+        match state.pending_received_tlcs.remove(&command.id) {
+            Some(tlc) => {
+                let msg = PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::RemoveTlc(RemoveTlc {
+                        channel_id: state.get_id(),
+                        tlc_id: tlc.id,
+                        reason: command.reason,
+                    }),
+                };
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(msg),
+                    ))
+                    .expect("network actor alive");
+                Ok(())
+            }
+            None => {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Trying to remove tlc with id {:?} that is not in pending received tlcs",
+                    command.id
+                )));
+            }
+        }
+    }
+
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
     // to present in the other function as well.
     pub fn handle_tx_collaboration_command(
@@ -438,6 +472,7 @@ impl ChannelActor {
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command) => self.handle_add_tlc_command(state, command),
+            ChannelCommand::RemoveTlc(command) => self.handle_remove_tlc_command(state, command),
         }
     }
 }
@@ -1336,6 +1371,25 @@ impl ChannelActorState {
                 // while we have crashed. We need a way to make sure that the peer will resend
                 // this message, and our processing of this message is idempotent.
                 Ok(())
+            }
+            PCNMessage::RemoveTlc(remove_tlc) => {
+                self.check_state_for_tlc_update()?;
+
+                match self.pending_offered_tlcs.get(&remove_tlc.tlc_id) {
+                    Some(current) => {
+                        debug!(
+                            "Removing tlc {:?} from channel {:?}",
+                            &current,
+                            &self.get_id()
+                        );
+                        // TODO: need pay the balance to the user.
+                        Ok(())
+                    }
+                    None => Err(ProcessingChannelError::InvalidParameter(format!(
+                        "TLC with id {:?} not found in pending_received_tlcs",
+                        remove_tlc.tlc_id
+                    ))),
+                }
             }
             _ => {
                 warn!("Received unsupported message: {:?}", &message);
