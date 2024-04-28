@@ -34,6 +34,7 @@ pub fn new_tokio_task_tracker() -> TaskTracker {
     TOKIO_TASK_TRACKER_WITH_CANCELLATION.tracker.clone()
 }
 
-pub async fn wait_for_tasks_to_finish() {
-    TOKIO_TASK_TRACKER_WITH_CANCELLATION.tracker.wait().await;
+/// Shutdown all tasks, and wait for their completion.
+pub async fn cancel_tasks_and_wait_for_completion() {
+    TOKIO_TASK_TRACKER_WITH_CANCELLATION.close().await;
 }
