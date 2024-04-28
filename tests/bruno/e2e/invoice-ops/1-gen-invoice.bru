@@ -1,0 +1,36 @@
+meta {
+  name: connect peer
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE3_RPC_URL}}/invoice
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+    {
+        "request": {
+            "NewInvoice": {
+                "btc_pay_req": "now"
+            }
+        }
+    }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Dialing a peer is async in tentacle. Sleep for some time to make sure
+  // we're connected to the peer.
+  await new Promise(r => setTimeout(r, 1000));
+}

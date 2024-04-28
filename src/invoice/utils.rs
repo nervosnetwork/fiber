@@ -194,6 +194,7 @@ pub(crate) fn rand_u8_vector(num: usize) -> Vec<u8> {
     (0..num).map(|_| rng.gen()).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn rand_sha256_hash() -> [u8; 32] {
     let mut rng = rand::thread_rng();
     let mut result = [0u8; 32];

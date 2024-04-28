@@ -1,11 +1,14 @@
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
+
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+
 use bitcoin::{
-    hashes::{sha256, Hash},
     key::Secp256k1,
-    secp256k1,
     secp256k1::{
+        self,
         ecdsa::{RecoverableSignature, RecoveryId},
         Message, PublicKey,
     },
@@ -113,13 +116,13 @@ pub enum Attribute {
     FallbackAddr(String),
     UdtScript(Script),
     PayeePublicKey(PublicKey),
+    PaymentPreimage([u8; 32]),
     Feature(u64),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct InvoiceData {
     pub payment_hash: [u8; 32],
-    pub payment_secret: [u8; 32],
     pub attrs: Vec<Attribute>,
 }
 
@@ -183,12 +186,12 @@ impl CkbInvoice {
         self.signature.is_some()
     }
 
-    pub fn hash(&self) -> [u8; 32] {
+    fn hash(&self) -> [u8; 32] {
         let hrp = self.hrp_part();
         let data = self.data_part();
         let preimage = construct_invoice_preimage(hrp.as_bytes(), &data);
         let mut hash: [u8; 32] = Default::default();
-        hash.copy_from_slice(&sha256::Hash::hash(&preimage)[..]);
+        hash.copy_from_slice(&Sha256::hash(&preimage).to_byte_array());
         hash
     }
 
@@ -216,6 +219,17 @@ impl CkbInvoice {
 
     pub fn payment_hash(&self) -> &[u8; 32] {
         &self.data.payment_hash
+    }
+
+    pub fn payment_preimage(&self) -> Option<&[u8; 32]> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::PaymentPreimage(preimage) => Some(preimage),
+                _ => None,
+            })
+            .next()
     }
 
     pub fn payment_hash_id(&self) -> String {
@@ -414,8 +428,8 @@ pub enum InvoiceError {
     DuplicatedAttributeKey(String),
     /// No payment hash
     NoPaymentHash,
-    /// No payment secret
-    NoPaymentSecret,
+    /// Both set payment_hash and payment_preimage
+    BothPaymenthashAndPreimage,
     /// An error occurred during signing
     SignError,
     /// according to BOLT11
@@ -481,6 +495,15 @@ impl From<Attribute> for InvoiceAttr {
                     .value(pubkey.serialize().pack())
                     .build(),
             ),
+            Attribute::PaymentPreimage(preimage) => InvoiceAttrUnion::PaymentPreimage(
+                PaymentPreimage::new_builder()
+                    .value(
+                        Preimage::new_builder()
+                            .set(u8_slice_to_bytes(&preimage).unwrap())
+                            .build(),
+                    )
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -516,6 +539,12 @@ impl From<InvoiceAttr> for Attribute {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
             }
+            InvoiceAttrUnion::PaymentPreimage(x) => {
+                let value: Vec<u8> = x.value().as_bytes().into();
+                let mut preimage = [0u8; 32];
+                preimage.copy_from_slice(&value);
+                Attribute::PaymentPreimage(preimage)
+            }
         }
     }
 }
@@ -524,9 +553,7 @@ pub struct InvoiceBuilder {
     currency: Currency,
     amount: Option<u64>,
     prefix: Option<SiPrefix>,
-    is_hodl: bool,
     payment_hash: Option<[u8; 32]>,
-    payment_secret: Option<[u8; 32]>,
     attrs: Vec<Attribute>,
 }
 
@@ -542,9 +569,7 @@ impl InvoiceBuilder {
             currency: Currency::Ckb,
             amount: None,
             prefix: None,
-            is_hodl: false,
             payment_hash: None,
-            payment_secret: None,
             attrs: Vec::new(),
         }
     }
@@ -569,14 +594,8 @@ impl InvoiceBuilder {
         self
     }
 
-    pub fn is_hodl(mut self, is_hodl: bool) -> Self {
-        self.is_hodl = is_hodl;
-        self
-    }
-
-    pub fn payment_secret(mut self, payment_secret: [u8; 32]) -> Self {
-        self.payment_secret = Some(payment_secret);
-        self
+    pub fn payment_preimage(self, payment_preimage: [u8; 32]) -> Self {
+        self.add_attr(Attribute::PaymentPreimage(payment_preimage))
     }
 
     fn add_attr(mut self, attr: Attribute) -> Self {
@@ -600,11 +619,27 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::FallbackAddr(fallback))
     }
 
+    fn get_payment_preimage(&self) -> Option<[u8; 32]> {
+        self.attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::PaymentPreimage(preimage) => Some(*preimage),
+                _ => None,
+            })
+            .next()
+    }
+
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let mut payment_hash = self.payment_hash;
-        if self.payment_hash.is_none() && self.is_hodl {
-            payment_hash = Some(rand_sha256_hash());
+        let preimage = self.get_payment_preimage();
+        if self.payment_hash.is_some() && preimage.is_some() {
+            return Err(InvoiceError::BothPaymenthashAndPreimage);
         }
+        if let Some(preimage) = preimage {
+            // Hash self.payment_preimage to payment_hash
+            payment_hash = Some(Sha256::hash(&preimage).to_byte_array());
+        }
+
         self.check_duplicated_attrs()?;
         Ok(CkbInvoice {
             currency: self.currency,
@@ -613,8 +648,6 @@ impl InvoiceBuilder {
             signature: None,
             data: InvoiceData {
                 payment_hash: payment_hash.ok_or(InvoiceError::NoPaymentHash)?,
-
-                payment_secret: self.payment_secret.ok_or(InvoiceError::NoPaymentSecret)?,
                 attrs: self.attrs,
             },
         })
@@ -708,11 +741,6 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
                     .set(u8_slice_to_bytes(&data.payment_hash).unwrap())
                     .build(),
             )
-            .payment_secret(
-                PaymentSecret::new_builder()
-                    .set(u8_slice_to_bytes(&data.payment_secret).unwrap())
-                    .build(),
-            )
             .attrs(
                 InvoiceAttrsVec::new_builder()
                     .set(
@@ -733,7 +761,6 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
             payment_hash: bytes_to_u8_array(&data.payment_hash().as_bytes()),
-            payment_secret: bytes_to_u8_array(&data.payment_secret().as_bytes()),
             attrs: data
                 .attrs()
                 .into_iter()
@@ -749,6 +776,8 @@ mod tests {
         key::{KeyPair, Secp256k1},
         secp256k1::SecretKey,
     };
+
+    use crate::invoice;
 
     use super::*;
 
@@ -782,7 +811,6 @@ mod tests {
             signature: None,
             data: InvoiceData {
                 payment_hash: rand_sha256_hash(),
-                payment_secret: rand_u8_vector(32).try_into().unwrap(),
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -946,7 +974,6 @@ mod tests {
             signature: Some(InvoiceSignature(signature)),
             data: InvoiceData {
                 payment_hash: [0u8; 32],
-                payment_secret: [0u8; 32],
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -981,7 +1008,6 @@ mod tests {
     #[test]
     fn test_invoice_builder() {
         let gen_payment_hash = rand_sha256_hash();
-        let gen_payment_secret = rand_u8_vector(32).try_into().unwrap();
         let (public_key, private_key) = gen_rand_keypair();
 
         let invoice = InvoiceBuilder::new()
@@ -989,7 +1015,6 @@ mod tests {
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
-            .payment_secret(gen_payment_secret)
             .fallback("address".to_string())
             .expiry_time(Duration::from_secs(1024))
             .payee_pub_key(public_key)
@@ -1007,17 +1032,14 @@ mod tests {
         assert_eq!(invoice.currency, Currency::Ckb);
         assert_eq!(invoice.amount, Some(1280));
         assert_eq!(invoice.prefix, Some(SiPrefix::Kilo));
-        assert_eq!(invoice.data.payment_hash, gen_payment_hash);
-        assert_eq!(invoice.data.payment_secret, gen_payment_secret);
-        assert_eq!(invoice.data.payment_hash, gen_payment_hash);
-        assert_eq!(invoice.data.payment_secret, gen_payment_secret);
+        assert_eq!(invoice.payment_hash(), &gen_payment_hash);
+        assert_eq!(invoice.payment_preimage(), None);
         assert_eq!(invoice.data.attrs.len(), 7);
     }
 
     #[test]
     fn test_invoice_signature_check() {
         let gen_payment_hash = rand_sha256_hash();
-        let gen_payment_secret = rand_u8_vector(32).try_into().unwrap();
         let (_, private_key) = gen_rand_keypair();
         let public_key = gen_rand_public_key();
 
@@ -1026,7 +1048,6 @@ mod tests {
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
-            .payment_secret(gen_payment_secret)
             .fallback("address".to_string())
             .expiry_time(Duration::from_secs(1024))
             .payee_pub_key(public_key)
@@ -1042,14 +1063,12 @@ mod tests {
     #[test]
     fn test_invoice_builder_duplicated_attr() {
         let gen_payment_hash = rand_sha256_hash();
-        let gen_payment_secret = rand_u8_vector(32).try_into().unwrap();
         let private_key = gen_rand_private_key();
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
-            .payment_secret(gen_payment_secret)
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .add_attr(Attribute::FinalHtlcTimeout(6))
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
@@ -1070,10 +1089,10 @@ mod tests {
             .currency(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
-            .payment_secret(rand_u8_vector(32).try_into().unwrap())
+            .payment_preimage(rand_u8_vector(32).try_into().unwrap())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
-        assert_eq!(invoice.err(), Some(InvoiceError::NoPaymentHash));
+        assert_eq!(invoice.err(), None);
 
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
@@ -1082,21 +1101,45 @@ mod tests {
             .payment_hash(rand_u8_vector(32).try_into().unwrap())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
-        assert_eq!(invoice.err(), Some(InvoiceError::NoPaymentSecret));
+        assert_eq!(invoice.err(), None);
     }
 
     #[test]
-    fn test_invoice_builder_hodl() {
+    fn test_invoice_builder_preimage() {
+        let preimage: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
         let private_key = gen_rand_private_key();
         let invoice = InvoiceBuilder::new()
             .currency(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
-            .payment_secret(rand_u8_vector(32).try_into().unwrap())
-            .is_hodl(true)
+            .payment_preimage(preimage)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
-
+        let clone_invoice = invoice.clone();
+        assert_eq!(invoice.payment_preimage(), Some(&preimage));
         assert_eq!(hex::encode(&invoice.payment_hash()).len(), 64);
+
+        let raw_invoice: RawCkbInvoice = invoice.into();
+        let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
+        assert_eq!(decoded_invoice, clone_invoice);
+    }
+
+    #[test]
+    fn test_invoice_builder_both_payment_hash_preimage() {
+        let preimage: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
+        let payment_hash: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
+        let private_key = gen_rand_private_key();
+        let invoice = InvoiceBuilder::new()
+            .currency(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(payment_hash)
+            .payment_preimage(preimage)
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+        assert_eq!(
+            invoice.err(),
+            Some(InvoiceError::BothPaymenthashAndPreimage)
+        );
     }
 }

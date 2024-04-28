@@ -578,8 +578,8 @@ impl molecule::prelude::Builder for PaymentHashBuilder {
     }
 }
 #[derive(Clone)]
-pub struct PaymentSecret(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for PaymentSecret {
+pub struct Preimage(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for Preimage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -588,25 +588,25 @@ impl ::core::fmt::LowerHex for PaymentSecret {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for PaymentSecret {
+impl ::core::fmt::Debug for Preimage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for PaymentSecret {
+impl ::core::fmt::Display for Preimage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl ::core::default::Default for PaymentSecret {
+impl ::core::default::Default for Preimage {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        PaymentSecret::new_unchecked(v)
+        Preimage::new_unchecked(v)
     }
 }
-impl PaymentSecret {
+impl Preimage {
     const DEFAULT_VALUE: [u8; 32] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0,
@@ -713,15 +713,15 @@ impl PaymentSecret {
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
-    pub fn as_reader<'r>(&'r self) -> PaymentSecretReader<'r> {
-        PaymentSecretReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> PreimageReader<'r> {
+        PreimageReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for PaymentSecret {
-    type Builder = PaymentSecretBuilder;
-    const NAME: &'static str = "PaymentSecret";
+impl molecule::prelude::Entity for Preimage {
+    type Builder = PreimageBuilder;
+    const NAME: &'static str = "Preimage";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        PaymentSecret(data)
+        Preimage(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -730,10 +730,10 @@ impl molecule::prelude::Entity for PaymentSecret {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PaymentSecretReader::from_slice(slice).map(|reader| reader.to_entity())
+        PreimageReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PaymentSecretReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        PreimageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -776,8 +776,8 @@ impl molecule::prelude::Entity for PaymentSecret {
     }
 }
 #[derive(Clone, Copy)]
-pub struct PaymentSecretReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for PaymentSecretReader<'r> {
+pub struct PreimageReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PreimageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -786,19 +786,19 @@ impl<'r> ::core::fmt::LowerHex for PaymentSecretReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for PaymentSecretReader<'r> {
+impl<'r> ::core::fmt::Debug for PreimageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for PaymentSecretReader<'r> {
+impl<'r> ::core::fmt::Display for PreimageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl<'r> PaymentSecretReader<'r> {
+impl<'r> PreimageReader<'r> {
     pub const TOTAL_SIZE: usize = 32;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 32;
@@ -902,14 +902,14 @@ impl<'r> PaymentSecretReader<'r> {
         self.as_slice()
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for PaymentSecretReader<'r> {
-    type Entity = PaymentSecret;
-    const NAME: &'static str = "PaymentSecretReader";
+impl<'r> molecule::prelude::Reader<'r> for PreimageReader<'r> {
+    type Entity = Preimage;
+    const NAME: &'static str = "PreimageReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        PaymentSecretReader(slice)
+        PreimageReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -923,15 +923,15 @@ impl<'r> molecule::prelude::Reader<'r> for PaymentSecretReader<'r> {
         Ok(())
     }
 }
-pub struct PaymentSecretBuilder(pub(crate) [Byte; 32]);
-impl ::core::fmt::Debug for PaymentSecretBuilder {
+pub struct PreimageBuilder(pub(crate) [Byte; 32]);
+impl ::core::fmt::Debug for PreimageBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
     }
 }
-impl ::core::default::Default for PaymentSecretBuilder {
+impl ::core::default::Default for PreimageBuilder {
     fn default() -> Self {
-        PaymentSecretBuilder([
+        PreimageBuilder([
             Byte::default(),
             Byte::default(),
             Byte::default(),
@@ -967,7 +967,7 @@ impl ::core::default::Default for PaymentSecretBuilder {
         ])
     }
 }
-impl PaymentSecretBuilder {
+impl PreimageBuilder {
     pub const TOTAL_SIZE: usize = 32;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 32;
@@ -1104,9 +1104,9 @@ impl PaymentSecretBuilder {
         self
     }
 }
-impl molecule::prelude::Builder for PaymentSecretBuilder {
-    type Entity = PaymentSecret;
-    const NAME: &'static str = "PaymentSecretBuilder";
+impl molecule::prelude::Builder for PreimageBuilder {
+    type Entity = Preimage;
+    const NAME: &'static str = "PreimageBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -1149,7 +1149,7 @@ impl molecule::prelude::Builder for PaymentSecretBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        PaymentSecret::new_unchecked(inner.into())
+        Preimage::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -5842,6 +5842,269 @@ impl molecule::prelude::Builder for PayeePublicKeyBuilder {
     }
 }
 #[derive(Clone)]
+pub struct PaymentPreimage(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for PaymentPreimage {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for PaymentPreimage {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for PaymentPreimage {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "attr_id", self.attr_id())?;
+        write!(f, ", {}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for PaymentPreimage {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        PaymentPreimage::new_unchecked(v)
+    }
+}
+impl PaymentPreimage {
+    const DEFAULT_VALUE: [u8; 45] = [
+        45, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn attr_id(&self) -> Byte {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn value(&self) -> Preimage {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Preimage::new_unchecked(self.0.slice(start..end))
+        } else {
+            Preimage::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> PaymentPreimageReader<'r> {
+        PaymentPreimageReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for PaymentPreimage {
+    type Builder = PaymentPreimageBuilder;
+    const NAME: &'static str = "PaymentPreimage";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        PaymentPreimage(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentPreimageReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        PaymentPreimageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .attr_id(self.attr_id())
+            .value(self.value())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct PaymentPreimageReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for PaymentPreimageReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for PaymentPreimageReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for PaymentPreimageReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "attr_id", self.attr_id())?;
+        write!(f, ", {}: {}", "value", self.value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> PaymentPreimageReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn attr_id(&self) -> ByteReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        ByteReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn value(&self) -> PreimageReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            PreimageReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            PreimageReader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for PaymentPreimageReader<'r> {
+    type Entity = PaymentPreimage;
+    const NAME: &'static str = "PaymentPreimageReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        PaymentPreimageReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        PreimageReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Debug, Default)]
+pub struct PaymentPreimageBuilder {
+    pub(crate) attr_id: Byte,
+    pub(crate) value: Preimage,
+}
+impl PaymentPreimageBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn attr_id(mut self, v: Byte) -> Self {
+        self.attr_id = v;
+        self
+    }
+    pub fn value(mut self, v: Preimage) -> Self {
+        self.value = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for PaymentPreimageBuilder {
+    type Entity = PaymentPreimage;
+    const NAME: &'static str = "PaymentPreimageBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.attr_id.as_slice().len()
+            + self.value.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.attr_id.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.value.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.attr_id.as_slice())?;
+        writer.write_all(self.value.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        PaymentPreimage::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct InvoiceAttr(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for InvoiceAttr {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -5875,7 +6138,7 @@ impl InvoiceAttr {
         0, 0, 0, 0, 41, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -5890,6 +6153,7 @@ impl InvoiceAttr {
             5 => Feature::new_unchecked(inner).into(),
             6 => UdtScript::new_unchecked(inner).into(),
             7 => PayeePublicKey::new_unchecked(inner).into(),
+            8 => PaymentPreimage::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -5946,7 +6210,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -5961,6 +6225,7 @@ impl<'r> InvoiceAttrReader<'r> {
             5 => FeatureReader::new_unchecked(inner).into(),
             6 => UdtScriptReader::new_unchecked(inner).into(),
             7 => PayeePublicKeyReader::new_unchecked(inner).into(),
+            8 => PaymentPreimageReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -5994,6 +6259,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             5 => FeatureReader::verify(inner_slice, compatible),
             6 => UdtScriptReader::verify(inner_slice, compatible),
             7 => PayeePublicKeyReader::verify(inner_slice, compatible),
+            8 => PaymentPreimageReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -6002,7 +6268,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -6038,6 +6304,7 @@ pub enum InvoiceAttrUnion {
     Feature(Feature),
     UdtScript(UdtScript),
     PayeePublicKey(PayeePublicKey),
+    PaymentPreimage(PaymentPreimage),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InvoiceAttrUnionReader<'r> {
@@ -6049,6 +6316,7 @@ pub enum InvoiceAttrUnionReader<'r> {
     Feature(FeatureReader<'r>),
     UdtScript(UdtScriptReader<'r>),
     PayeePublicKey(PayeePublicKeyReader<'r>),
+    PaymentPreimage(PaymentPreimageReader<'r>),
 }
 impl ::core::default::Default for InvoiceAttrUnion {
     fn default() -> Self {
@@ -6088,6 +6356,9 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
+            InvoiceAttrUnion::PaymentPreimage(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, PaymentPreimage::NAME, item)
+            }
         }
     }
 }
@@ -6124,6 +6395,9 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
+            InvoiceAttrUnionReader::PaymentPreimage(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, PaymentPreimage::NAME, item)
+            }
         }
     }
 }
@@ -6138,6 +6412,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::PayeePublicKey(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::PaymentPreimage(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -6152,6 +6427,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::PaymentPreimage(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -6193,6 +6469,11 @@ impl ::core::convert::From<UdtScript> for InvoiceAttrUnion {
 impl ::core::convert::From<PayeePublicKey> for InvoiceAttrUnion {
     fn from(item: PayeePublicKey) -> Self {
         InvoiceAttrUnion::PayeePublicKey(item)
+    }
+}
+impl ::core::convert::From<PaymentPreimage> for InvoiceAttrUnion {
+    fn from(item: PaymentPreimage) -> Self {
+        InvoiceAttrUnion::PaymentPreimage(item)
     }
 }
 impl<'r> ::core::convert::From<ExpiryTimeReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -6237,6 +6518,11 @@ impl<'r> ::core::convert::From<PayeePublicKeyReader<'r>> for InvoiceAttrUnionRea
         InvoiceAttrUnionReader::PayeePublicKey(item)
     }
 }
+impl<'r> ::core::convert::From<PaymentPreimageReader<'r>> for InvoiceAttrUnionReader<'r> {
+    fn from(item: PaymentPreimageReader<'r>) -> Self {
+        InvoiceAttrUnionReader::PaymentPreimage(item)
+    }
+}
 impl InvoiceAttrUnion {
     pub const NAME: &'static str = "InvoiceAttrUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -6249,6 +6535,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_bytes(),
             InvoiceAttrUnion::UdtScript(item) => item.as_bytes(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_bytes(),
+            InvoiceAttrUnion::PaymentPreimage(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -6261,6 +6548,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_slice(),
             InvoiceAttrUnion::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_slice(),
+            InvoiceAttrUnion::PaymentPreimage(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -6273,6 +6561,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => 5,
             InvoiceAttrUnion::UdtScript(_) => 6,
             InvoiceAttrUnion::PayeePublicKey(_) => 7,
+            InvoiceAttrUnion::PaymentPreimage(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -6285,6 +6574,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => "Feature",
             InvoiceAttrUnion::UdtScript(_) => "UdtScript",
             InvoiceAttrUnion::PayeePublicKey(_) => "PayeePublicKey",
+            InvoiceAttrUnion::PaymentPreimage(_) => "PaymentPreimage",
         }
     }
     pub fn as_reader<'r>(&'r self) -> InvoiceAttrUnionReader<'r> {
@@ -6297,6 +6587,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_reader().into(),
             InvoiceAttrUnion::UdtScript(item) => item.as_reader().into(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_reader().into(),
+            InvoiceAttrUnion::PaymentPreimage(item) => item.as_reader().into(),
         }
     }
 }
@@ -6312,6 +6603,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(item) => item.as_slice(),
             InvoiceAttrUnionReader::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnionReader::PayeePublicKey(item) => item.as_slice(),
+            InvoiceAttrUnionReader::PaymentPreimage(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -6324,6 +6616,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => 5,
             InvoiceAttrUnionReader::UdtScript(_) => 6,
             InvoiceAttrUnionReader::PayeePublicKey(_) => 7,
+            InvoiceAttrUnionReader::PaymentPreimage(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -6336,6 +6629,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => "Feature",
             InvoiceAttrUnionReader::UdtScript(_) => "UdtScript",
             InvoiceAttrUnionReader::PayeePublicKey(_) => "PayeePublicKey",
+            InvoiceAttrUnionReader::PaymentPreimage(_) => "PaymentPreimage",
         }
     }
 }
@@ -6699,7 +6993,6 @@ impl ::core::fmt::Display for RawInvoiceData {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
-        write!(f, ", {}: {}", "payment_secret", self.payment_secret())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6715,12 +7008,11 @@ impl ::core::default::Default for RawInvoiceData {
     }
 }
 impl RawInvoiceData {
-    const DEFAULT_VALUE: [u8; 84] = [
-        84, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 48] = [
+        48, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6743,17 +7035,11 @@ impl RawInvoiceData {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         PaymentHash::new_unchecked(self.0.slice(start..end))
     }
-    pub fn payment_secret(&self) -> PaymentSecret {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        PaymentSecret::new_unchecked(self.0.slice(start..end))
-    }
     pub fn attrs(&self) -> InvoiceAttrsVec {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..end))
         } else {
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..))
@@ -6787,7 +7073,6 @@ impl molecule::prelude::Entity for RawInvoiceData {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .payment_hash(self.payment_hash())
-            .payment_secret(self.payment_secret())
             .attrs(self.attrs())
     }
 }
@@ -6811,7 +7096,6 @@ impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
-        write!(f, ", {}: {}", "payment_secret", self.payment_secret())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6821,7 +7105,7 @@ impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
     }
 }
 impl<'r> RawInvoiceDataReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6844,17 +7128,11 @@ impl<'r> RawInvoiceDataReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         PaymentHashReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn payment_secret(&self) -> PaymentSecretReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        PaymentSecretReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn attrs(&self) -> InvoiceAttrsVecReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..])
@@ -6908,25 +7186,19 @@ impl<'r> molecule::prelude::Reader<'r> for RawInvoiceDataReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         PaymentHashReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        PaymentSecretReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        InvoiceAttrsVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        InvoiceAttrsVecReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct RawInvoiceDataBuilder {
     pub(crate) payment_hash: PaymentHash,
-    pub(crate) payment_secret: PaymentSecret,
     pub(crate) attrs: InvoiceAttrsVec,
 }
 impl RawInvoiceDataBuilder {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn payment_hash(mut self, v: PaymentHash) -> Self {
         self.payment_hash = v;
-        self
-    }
-    pub fn payment_secret(mut self, v: PaymentSecret) -> Self {
-        self.payment_secret = v;
         self
     }
     pub fn attrs(mut self, v: InvoiceAttrsVec) -> Self {
@@ -6940,7 +7212,6 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.payment_hash.as_slice().len()
-            + self.payment_secret.as_slice().len()
             + self.attrs.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6949,15 +7220,12 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
         offsets.push(total_size);
         total_size += self.payment_hash.as_slice().len();
         offsets.push(total_size);
-        total_size += self.payment_secret.as_slice().len();
-        offsets.push(total_size);
         total_size += self.attrs.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.payment_hash.as_slice())?;
-        writer.write_all(self.payment_secret.as_slice())?;
         writer.write_all(self.attrs.as_slice())?;
         Ok(())
     }
@@ -7006,11 +7274,10 @@ impl ::core::default::Default for RawCkbInvoice {
     }
 }
 impl RawCkbInvoice {
-    const DEFAULT_VALUE: [u8; 109] = [
-        109, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 84, 0, 0,
-        0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 73] = [
+        73, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 48, 0, 0,
+        0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 5;
     pub fn total_size(&self) -> usize {
