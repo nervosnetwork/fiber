@@ -1,6 +1,8 @@
 use super::gen::pcn::{self as molecule_pcn, PubNonce as Byte66, SignatureVec};
 use super::serde_utils::{EntityWrapperBase64, WrapperHex};
 use anyhow::anyhow;
+use ckb_sdk::{Since, SinceType};
+use ckb_types::packed::Uint64;
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
@@ -19,6 +21,103 @@ use thiserror::Error;
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
+}
+
+#[serde_as]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LockTime(u64);
+
+impl LockTime {
+    pub fn new(blocks: u64) -> Self {
+        LockTime(blocks)
+    }
+}
+
+impl From<LockTime> for Since {
+    fn from(lock_time: LockTime) -> Since {
+        Since::new(SinceType::BlockNumber, lock_time.0, true)
+    }
+}
+
+impl TryFrom<Since> for LockTime {
+    type Error = Error;
+
+    fn try_from(since: Since) -> Result<Self, Self::Error> {
+        if !since.is_relative() {
+            return Err(Error::from(anyhow!(
+                "Invalid lock time type: must be relative"
+            )));
+        }
+        since
+            .extract_metric()
+            .map(|(ty, value)| {
+                if ty == SinceType::BlockNumber {
+                    Ok(LockTime(value))
+                } else {
+                    Err(Error::from(anyhow!(
+                        "Invalid lock time type: must be blocknumber"
+                    )))
+                }
+            })
+            .unwrap_or_else(|| {
+                Err(Error::from(anyhow!(
+                    "Invalid lock time type: unable to extract metric"
+                )))
+            })
+    }
+}
+
+impl From<LockTime> for Uint64 {
+    fn from(lock_time: LockTime) -> Uint64 {
+        let b: [u8; 8] = lock_time.into();
+        Uint64::from_slice(&b).expect("valid locktime serialized to 8 bytes")
+    }
+}
+
+impl TryFrom<Uint64> for LockTime {
+    type Error = Error;
+
+    fn try_from(value: Uint64) -> Result<LockTime, Error> {
+        let b = value.as_slice();
+        LockTime::try_from(b)
+    }
+}
+
+impl From<u64> for LockTime {
+    fn from(value: u64) -> LockTime {
+        LockTime(value)
+    }
+}
+
+impl From<LockTime> for u64 {
+    fn from(lock_time: LockTime) -> u64 {
+        lock_time.0
+    }
+}
+
+impl From<[u8; 8]> for LockTime {
+    fn from(value: [u8; 8]) -> LockTime {
+        LockTime(u64::from_le_bytes(value))
+    }
+}
+
+impl From<LockTime> for [u8; 8] {
+    fn from(lock_time: LockTime) -> [u8; 8] {
+        lock_time.0.to_le_bytes()
+    }
+}
+
+impl TryFrom<&[u8]> for LockTime {
+    type Error = Error;
+
+    fn try_from(value: &[u8]) -> Result<LockTime, Error> {
+        if value.len() != 8 {
+            return Err(Error::from(anyhow!("Invalid lock time length")));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(value);
+        Ok(LockTime::from(bytes))
+    }
 }
 
 impl From<&Byte66> for PubNonce {
@@ -289,7 +388,7 @@ pub struct OpenChannel {
     pub max_tlc_value_in_flight: u64,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u64,
-    pub to_self_delay: u64,
+    pub to_self_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
     pub payment_basepoint: Pubkey,
@@ -313,7 +412,7 @@ impl From<OpenChannel> for molecule_pcn::OpenChannel {
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(open_channel.max_accept_tlcs.pack())
             .min_tlc_value(open_channel.min_tlc_value.pack())
-            .to_self_delay(open_channel.to_self_delay.pack())
+            .to_self_delay(open_channel.to_self_delay.into())
             .funding_pubkey(open_channel.funding_pubkey.into())
             .revocation_basepoint(open_channel.revocation_basepoint.into())
             .payment_basepoint(open_channel.payment_basepoint.into())
@@ -341,7 +440,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: open_channel.max_accept_tlcs().unpack(),
             min_tlc_value: open_channel.min_tlc_value().unpack(),
-            to_self_delay: open_channel.to_self_delay().unpack(),
+            to_self_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
             revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
             payment_basepoint: open_channel.payment_basepoint().try_into()?,
@@ -369,7 +468,7 @@ pub struct AcceptChannel {
     pub max_tlc_value_in_flight: u64,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u64,
-    pub to_self_delay: u64,
+    pub to_self_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
     pub payment_basepoint: Pubkey,
@@ -388,7 +487,7 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(accept_channel.max_accept_tlcs.pack())
             .min_tlc_value(accept_channel.min_tlc_value.pack())
-            .to_self_delay(accept_channel.to_self_delay.pack())
+            .to_self_delay(accept_channel.to_self_delay.into())
             .funding_pubkey(accept_channel.funding_pubkey.into())
             .revocation_basepoint(accept_channel.revocation_basepoint.into())
             .payment_basepoint(accept_channel.payment_basepoint.into())
@@ -411,7 +510,7 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: accept_channel.max_accept_tlcs().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
-            to_self_delay: accept_channel.to_self_delay().unpack(),
+            to_self_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
             revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
             payment_basepoint: accept_channel.payment_basepoint().try_into()?,

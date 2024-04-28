@@ -26,8 +26,8 @@ use super::{
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
     types::{
-        AcceptChannel, ChannelReady, CommitmentSigned, Hash256, OpenChannel, PCNMessage, Privkey,
-        Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
+        AcceptChannel, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel, PCNMessage,
+        Privkey, Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -70,7 +70,7 @@ pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u64 = 0;
-pub const DEFAULT_TO_SELF_DELAY: u64 = 10;
+pub const DEFAULT_TO_SELF_DELAY_BLOCKS: u64 = 10;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
@@ -95,7 +95,7 @@ impl OpenChannelCommand {
             &seed,
             self.peer_id.clone(),
             self.total_value,
-            DEFAULT_TO_SELF_DELAY,
+            LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
         ))
     }
 }
@@ -469,7 +469,7 @@ impl Actor for ChannelActor {
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    to_self_delay: DEFAULT_TO_SELF_DELAY,
+                    to_self_delay: LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
                     channel_flags: 0,
                     first_per_commitment_point: channel
                         .signer
@@ -814,7 +814,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         counterparty_value: u64,
-        counterparty_delay: u64,
+        counterparty_delay: LockTime,
         counterparty_pubkeys: ChannelBasePublicKeys,
         counterparty_nonce: PubNonce,
         counterparty_commitment_point: Pubkey,
@@ -864,7 +864,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u64,
-        to_self_delay: u64,
+        to_self_delay: LockTime,
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -1375,7 +1375,6 @@ impl ChannelActorState {
         // We can just create a partial set of witnesses, and sent them to the peer.
         partial_witnesses: Option<Vec<Vec<u8>>>,
     ) -> ProcessingChannelResult {
-        dbg!(&self.peer_id, self.state, partial_witnesses.as_ref());
         let flags = match self.state {
             ChannelState::AwaitingTxSignatures(flags)
                 if flags.contains(AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT)
@@ -1423,7 +1422,7 @@ impl ChannelActorState {
             ))?;
 
         let msg = match partial_witnesses {
-            Some(_partial_witnesses) => {
+            Some(ref _partial_witnesses) => {
                 // TODO: filling the whole witnesses here.
                 let full_witnesses: Vec<ckb_types::packed::Bytes> = vec![];
                 let full_witnesses_u8 = full_witnesses
@@ -1479,12 +1478,15 @@ impl ChannelActorState {
                 }
             }
         };
+        debug!(
+            "Handled tx_signatures, peer: {:?}, previous witnesses: {:?}, messge to send: {:?}",
+            &self.peer_id, &partial_witnesses, &msg
+        );
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendPcnMessage(msg),
             ))
             .expect("network actor alive");
-        dbg!(&self.peer_id, self.state);
         Ok(())
     }
 
@@ -1823,7 +1825,7 @@ impl CommitmentTransaction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChannelParametersOneParty {
     pub pubkeys: ChannelBasePublicKeys,
-    pub selected_contest_delay: u64,
+    pub selected_contest_delay: LockTime,
 }
 
 impl ChannelParametersOneParty {
