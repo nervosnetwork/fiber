@@ -27,7 +27,8 @@ use super::{
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel,
-        PCNMessage, Privkey, Pubkey, TxAdd, TxCollaborationMsg, TxComplete, TxRemove, TxSignatures,
+        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, TxAdd, TxCollaborationMsg,
+        TxComplete, TxRemove, TxSignatures,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -63,6 +64,12 @@ pub struct AddTlcCommand {
     amount: u64,
     preimage: Option<Hash256>,
     expiry: LockTime,
+}
+
+#[derive(Copy, Clone, Debug, Deserialize)]
+pub struct RemoveTlcCommand {
+    id: u64,
+    reason: RemoveTlcReason,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -280,6 +287,8 @@ impl ChannelActor {
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> ProcessingChannelResult {
+        state.check_state_for_tlc_update()?;
+
         // TODO: we are filling the user command with a new id here.
         // The advantage of this is that we don't need to burden the users to
         // provide a next id for each tlc. The disadvantage is that users may
@@ -291,13 +300,32 @@ impl ChannelActor {
             state.pending_offered_tlcs.get(&id).is_none(),
             "Must not have the same id in pending offered tlcs"
         );
-        let tlc = (id, command).into();
+        let tlc = TLC::from((id, command));
 
-        state.handle_add_tlc(self.network.clone(), tlc)?;
-        // Be especially careful while updating the state here.
-        // We may believe that the tlc is added to the state, but it may
-        // be not the case for the peer (e.g. packet loss), and he may falsely
-        // believe that we are skipping some tlc ids.
+        // TODO: Note that since we are message sending is async,
+        // we can't guarantee anything about the order of message sending
+        // and state updating. And any of these may fail while the other succeedes.
+        // We may need to handle all these possibilities.
+        // To make things worse, we currently don't have a way to ACK all the messages.
+
+        // Send tlc update message to peer.
+        let msg = PCNMessageWithPeerId {
+            peer_id: self.peer_id.clone(),
+            message: PCNMessage::AddTlc(AddTlc {
+                channel_id: state.get_id(),
+                tlc_id: tlc.id,
+                amount: tlc.amount,
+                payment_hash: tlc.payment_hash,
+                expiry: tlc.lock_time,
+            }),
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(msg),
+            ))
+            .expect("network actor alive");
+
+        // Update the state for this tlc.
         state.pending_offered_tlcs.insert(id, tlc);
         state.next_offering_tlc_id += 1;
         Ok(())
@@ -1128,15 +1156,9 @@ impl ChannelActorState {
             .funding_pubkey
     }
 
-    pub fn handle_add_tlc(
-        &self,
-        network: ActorRef<NetworkActorMessage>,
-        tlc: TLC,
-    ) -> ProcessingChannelResult {
+    pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady(_) => {
-                debug!("Adding tlc {:?} to channel {:?}", &tlc, &self.get_id());
-            }
+            ChannelState::ChannelReady(_) => Ok(()),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Invalid state {:?} for adding tlc",
@@ -1144,46 +1166,6 @@ impl ChannelActorState {
                 )))
             }
         }
-        if tlc.is_offered {
-            let msg = PCNMessageWithPeerId {
-                peer_id: self.peer_id.clone(),
-                message: PCNMessage::AddTlc(AddTlc {
-                    channel_id: self.get_id(),
-                    tlc_id: tlc.id,
-                    amount: tlc.amount,
-                    payment_hash: tlc.payment_hash,
-                    expiry: tlc.lock_time,
-                }),
-            };
-            // TODO: Note that since we are message sending is async,
-            // we can't guarantee anything about the order of message sending
-            // and state updating. And any of these may fail while the other succeedes.
-            // We may need to handle all these possibilities.
-            // To make things worse, we currently don't have a way to ACK all the messages.
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendPcnMessage(msg),
-                ))
-                .expect("network actor alive");
-        } else {
-            let id = tlc.id;
-            if let Some(current) = self.pending_received_tlcs.get(&id) {
-                if current == &tlc {
-                    debug!(
-                        "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
-                        id, current,
-                    )
-                } else {
-                    return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                                "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
-                                id,
-                                current,
-                                &tlc
-                            )));
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1323,8 +1305,31 @@ impl ChannelActorState {
                 Ok(())
             }
             PCNMessage::AddTlc(add_tlc) => {
-                let tlc = add_tlc.into();
-                self.handle_add_tlc(network, tlc)?;
+                self.check_state_for_tlc_update()?;
+
+                let tlc = TLC::from(add_tlc);
+                let id = tlc.id;
+
+                match self.pending_received_tlcs.get(&id) {
+                    Some(current) if current == &tlc => {
+                        debug!(
+                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
+                            id, current,
+                        )
+                    }
+                    Some(current) => {
+                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                                    "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
+                                    id,
+                                    current,
+                                    &tlc
+                                )));
+                    }
+                    None => {
+                        debug!("Adding tlc {:?} to channel {:?}", &tlc, &self.get_id());
+                    }
+                }
+
                 self.pending_received_tlcs.insert(tlc.id, tlc);
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
