@@ -61,7 +61,7 @@ impl InvoiceService {
         &mut self,
         command: InvoiceCommand,
         response: Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
-    ) -> Result<(), InvoiceError> {
+    ) -> Result<(), anyhow::Error> {
         log::debug!("InvoiceCommand received: {:?}", command);
         match command {
             InvoiceCommand::NewInvoice(params) => {
@@ -69,7 +69,6 @@ impl InvoiceService {
                 let response = response.expect("response channel");
                 match res {
                     Ok(invoice) => {
-                        let _ = self.invoices_db.insert_invoice(invoice.clone());
                         let _ = response.send(Ok(invoice)).await;
                     }
                     Err(err) => {
@@ -108,6 +107,9 @@ impl InvoiceService {
         };
 
         let invoice = invoice_builder.build();
+        if let Ok(invoice) = &invoice {
+            self.invoices_db.insert_invoice(invoice.clone())?;
+        }
         eprintln!("invoice: {:?}", invoice);
         invoice
     }
@@ -116,7 +118,7 @@ impl InvoiceService {
         &mut self,
         invoice: String,
         response: Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
-    ) -> Result<(), InvoiceError> {
+    ) -> Result<(), anyhow::Error> {
         Ok(())
     }
 }

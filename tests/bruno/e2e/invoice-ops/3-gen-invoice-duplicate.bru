@@ -1,0 +1,42 @@
+meta {
+  name: connect peer
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{NODE3_RPC_URL}}/invoice
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+    {
+        "request": {
+            "NewInvoice": {
+                "amount": 100,
+                "currency": "ckb",
+                "description": "test invoice",
+                "expiry": 3600,
+                "payment_hash": "c2760ab3f357ca40811e73ced6e1199da7e1bbe612255aa5972df1711f27a8ee",
+                "final_cltv": 40,
+                "final_htlc_minimum_msat": 1000
+            }
+        }
+    }
+}
+
+assert {
+  res.status: eq 400
+}
+
+script:post-response {
+  // Dialing a peer is async in tentacle. Sleep for some time to make sure
+  // we're connected to the peer.
+  await new Promise(r => setTimeout(r, 1000));
+}

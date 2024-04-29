@@ -1,7 +1,8 @@
+use super::errors::VerificationError;
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
+use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
-
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::{
@@ -19,9 +20,7 @@ use ckb_types::{
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
-use std::{cmp::Ordering, num::ParseIntError, str::FromStr};
-use thiserror::Error;
+use std::{cmp::Ordering, str::FromStr};
 
 const SIGNATURE_U5_SIZE: usize = 104;
 
@@ -395,65 +394,6 @@ impl FromStr for CkbInvoice {
         invoice.check_signature()?;
         Ok(invoice)
     }
-}
-
-#[derive(Error, Debug)]
-pub struct VerificationError(molecule::error::VerificationError);
-
-impl PartialEq for VerificationError {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
-}
-impl Eq for VerificationError {}
-impl Display for VerificationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Error, PartialEq, Debug)]
-pub enum InvoiceError {
-    #[error("Bech32 error: {0}")]
-    Bech32Error(bech32::Error),
-    #[error("Molecule error: {0}")]
-    MoleculeError(VerificationError),
-    #[error("Failed to parse amount: {0}")]
-    ParseAmountError(ParseIntError),
-    #[error("Unknown prefix")]
-    BadPrefix,
-    #[error("Unknown currency")]
-    UnknownCurrency,
-    #[error("Unknown si prefix")]
-    UnknownSiPrefix,
-    #[error("Malformed HRP")]
-    MalformedHRP,
-    #[error("Too short data part")]
-    TooShortDataPart,
-    #[error("Unexpected end of tagged fields")]
-    UnexpectedEndOfTaggedFields,
-    #[error("Integer overflow error")]
-    IntegerOverflowError,
-    #[error("Invalid recovery id")]
-    InvalidRecoveryId,
-    #[error("Invalid slice length: {0}")]
-    InvalidSliceLength(String),
-    #[error("Invalid signature")]
-    InvalidSignature,
-    /// Duplicated attribute key
-    #[error("Duplicated attribute key: {0}")]
-    DuplicatedAttributeKey(String),
-    /// No payment hash
-    #[error("No payment hash")]
-    NoPaymentHash,
-    /// Both set payment_hash and payment_preimage
-    #[error("Both payment_hash and payment_preimage are set")]
-    BothPaymenthashAndPreimage,
-    /// An error occurred during signing
-    #[error("Sign error")]
-    SignError,
-    #[error("Hex decode error: {0}")]
-    HexDecodeError(#[from] hex::FromHexError),
 }
 
 fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
