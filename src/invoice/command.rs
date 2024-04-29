@@ -1,7 +1,5 @@
 use serde::Deserialize;
-use serde_with::serde_as;
 
-#[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub enum InvoiceCommand {
     NewInvoice(NewInvoiceParams),
@@ -17,7 +15,6 @@ impl InvoiceCommand {
     }
 }
 
-#[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct NewInvoiceParams {
     pub amount: u64,

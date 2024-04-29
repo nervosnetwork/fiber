@@ -1,8 +1,6 @@
 mod config;
-pub use config::RpcConfig;
-use serde_json::json;
-
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
+pub use config::RpcConfig;
 use log::{debug, error, info};
 use serde::Deserialize;
 use std::{future::Future, sync::Arc};

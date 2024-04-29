@@ -7,6 +7,7 @@ use nom::{
     bytes::{complete::take_while1, streaming::tag},
     IResult,
 };
+#[cfg(test)]
 use rand::Rng;
 use std::io::{Cursor, Result as IoResult};
 
