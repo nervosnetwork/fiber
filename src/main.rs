@@ -1,4 +1,4 @@
-use ckb_pcn_node::invoice::{start_invoice, InvoiceCommand};
+use ckb_pcn_node::invoice::start_invoice;
 use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use log::{debug, error, info};
 use tentacle::multiaddr::Multiaddr;

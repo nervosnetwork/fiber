@@ -1,6 +1,7 @@
 use super::{InvoiceCommand, InvoicesDb, NewInvoiceParams};
 use crate::{invoice::*, rpc::InvoiceCommandWithReply};
 use anyhow::Result;
+use serde_json::json;
 use service::{invoice::Currency, utils::vec_to_u8_32};
 use std::{str::FromStr, time::Duration};
 use tokio::{select, sync::mpsc};
@@ -60,25 +61,29 @@ impl InvoiceService {
     async fn process_command(
         &mut self,
         command: InvoiceCommand,
-        response: Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
+        response: Option<mpsc::Sender<crate::Result<String>>>,
     ) -> Result<(), anyhow::Error> {
         log::debug!("InvoiceCommand received: {:?}", command);
-        match command {
-            InvoiceCommand::NewInvoice(params) => {
-                let res = self.new_invoice(params).await;
-                let response = response.expect("response channel");
-                match res {
-                    Ok(invoice) => {
-                        let _ = response.send(Ok(invoice)).await;
-                    }
-                    Err(err) => {
-                        let _ = response.send(Err(err.into())).await;
-                    }
-                }
-                Ok(())
+        let res = match command {
+            InvoiceCommand::NewInvoice(params) => self.new_invoice(params).await,
+            InvoiceCommand::ParseInvoice(params) => self.parse_invoice(params).await,
+        };
+        let response = response.expect("response channel");
+        match res {
+            Ok(invoice) => {
+                let data = json!({
+                    "invoice": json!(invoice),
+                    "encode_payment": invoice.to_string(),
+                    "payment_hash": invoice.payment_hash_id()
+                })
+                .to_string();
+                let _ = response.send(Ok(data)).await;
             }
-            InvoiceCommand::ParseInvoice(params) => self.parse_invoice(params, response).await,
+            Err(err) => {
+                let _ = response.send(Err(err.into())).await;
+            }
         }
+        Ok(())
     }
 
     async fn new_invoice(
@@ -114,11 +119,8 @@ impl InvoiceService {
         invoice
     }
 
-    async fn parse_invoice(
-        &mut self,
-        invoice: String,
-        response: Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
-    ) -> Result<(), anyhow::Error> {
-        Ok(())
+    async fn parse_invoice(&mut self, invoice: String) -> Result<CkbInvoice, InvoiceError> {
+        let decoded_invoice = invoice.parse::<CkbInvoice>()?;
+        Ok(decoded_invoice)
     }
 }

@@ -2,7 +2,6 @@ mod config;
 pub use config::RpcConfig;
 use serde_json::json;
 
-use crate::invoice::CkbInvoice;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use log::{debug, error, info};
 use serde::Deserialize;
@@ -12,10 +11,7 @@ use tokio::sync::mpsc;
 pub type NetworkActorCommandWithReply =
     (NetworkActorCommand, Option<mpsc::Sender<crate::Result<()>>>);
 
-pub type InvoiceCommandWithReply = (
-    InvoiceCommand,
-    Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
-);
+pub type InvoiceCommandWithReply = (InvoiceCommand, Option<mpsc::Sender<crate::Result<String>>>);
 
 use crate::{cch::CchCommand, ckb::NetworkActorCommand, invoice::InvoiceCommand};
 
@@ -87,15 +83,7 @@ async fn serve_invoice_rpc(
     let _ = state.invoice_command_sender.send(command).await;
     let res = receiver.recv().await;
     let result = match res {
-        Some(Ok(invoice)) => (
-            StatusCode::OK,
-            json!({
-                "invoice": json!(invoice),
-                "encode_payment": invoice.to_string(),
-                "payment_hash": invoice.payment_hash_id()
-            })
-            .to_string(),
-        ),
+        Some(Ok(data)) => (StatusCode::OK, data),
         Some(Err(err)) => {
             // status code 400 with err message
             (StatusCode::BAD_REQUEST, err.to_string())
