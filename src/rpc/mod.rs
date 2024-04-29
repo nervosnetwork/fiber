@@ -1,6 +1,8 @@
 mod config;
 pub use config::RpcConfig;
+use serde_json::json;
 
+use crate::invoice::CkbInvoice;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use log::{debug, error, info};
 use serde::Deserialize;
@@ -9,6 +11,11 @@ use tokio::sync::mpsc;
 
 pub type NetworkActorCommandWithReply =
     (NetworkActorCommand, Option<mpsc::Sender<crate::Result<()>>>);
+
+pub type InvoiceCommandWithReply = (
+    InvoiceCommand,
+    Option<mpsc::Sender<crate::Result<CkbInvoice>>>,
+);
 
 use crate::{cch::CchCommand, ckb::NetworkActorCommand, invoice::InvoiceCommand};
 
@@ -31,7 +38,7 @@ pub struct CchRpcState {
 }
 
 pub struct InvoiceRpcState {
-    pub invoice_command_sender: mpsc::Sender<InvoiceCommand>,
+    pub invoice_command_sender: mpsc::Sender<InvoiceCommandWithReply>,
 }
 
 async fn serve_ckb_rpc(
@@ -74,19 +81,33 @@ async fn serve_invoice_rpc(
     Json(http_request): Json<InvoiceRpcRequest>,
 ) -> impl IntoResponse {
     debug!("Received http request: {:?}", http_request);
-    state
-        .invoice_command_sender
-        .send(http_request.request)
-        .await
-        .expect("send command");
-    StatusCode::OK
+    let (sender, mut receiver) = mpsc::channel(1);
+    let command = (http_request.request, Some(sender));
+
+    let _ = state.invoice_command_sender.send(command).await;
+    let res = receiver.recv().await;
+    let result = match res {
+        Some(Ok(invoice)) => {
+            let json = json!({
+                "invoice": invoice.to_string(),
+                "payment_hash": invoice.payment_hash_id(),
+            });
+            (StatusCode::OK, json.to_string())
+        }
+        Some(Err(err)) => {
+            // status code 400 with err message
+            (StatusCode::BAD_REQUEST, err.to_string())
+        }
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "No response".to_string()),
+    };
+    result
 }
 
 pub async fn start_rpc<F>(
     config: RpcConfig,
     ckb_command_sender: Option<mpsc::Sender<NetworkActorCommandWithReply>>,
     cch_command_sender: Option<mpsc::Sender<CchCommand>>,
-    invoice_command_sender: Option<mpsc::Sender<InvoiceCommand>>,
+    invoice_command_sender: Option<mpsc::Sender<InvoiceCommandWithReply>>,
     shutdown_signal: F,
 ) where
     F: Future<Output = ()> + Send + 'static,

@@ -1,4 +1,5 @@
 use ckb_pcn_node::invoice::{start_invoice, InvoiceCommand};
+use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use log::{debug, error, info};
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -138,7 +139,8 @@ pub async fn main() {
 
     let invoice_command_sender = {
         const CHANNEL_SIZE: usize = 4000;
-        let (command_sender, command_receiver) = mpsc::channel::<InvoiceCommand>(CHANNEL_SIZE);
+        let (command_sender, command_receiver) =
+            mpsc::channel::<InvoiceCommandWithReply>(CHANNEL_SIZE);
         info!("Starting cch");
         start_invoice(
             command_receiver,

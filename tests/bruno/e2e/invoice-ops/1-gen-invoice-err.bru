@@ -23,7 +23,7 @@ body:json {
                 "currency": "ckb",
                 "description": "test invoice",
                 "expiry": 3600,
-                "payment_hash": "c2760ab3f357ca40811e73ced6e1199da7e1bbe612255aa5972df1711f27a8ee",
+                "payment_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
                 "final_cltv": 40,
                 "final_htlc_minimum_msat": 1000
             }
@@ -32,7 +32,7 @@ body:json {
 }
 
 assert {
-  res.status: eq 200
+  res.status: eq 400
 }
 
 script:post-response {

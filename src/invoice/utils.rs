@@ -188,6 +188,15 @@ pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
     res
 }
 
+pub(crate) fn vec_to_u8_32(vec: Vec<u8>) -> Result<[u8; 32], &'static str> {
+    let boxed_slice = vec.into_boxed_slice();
+    let boxed_array: Result<Box<[u8; 32]>, _> = boxed_slice.try_into();
+    match boxed_array {
+        Ok(ba) => Ok(*ba),
+        Err(_) => Err("Vector length doesn't match array length"),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn rand_u8_vector(num: usize) -> Vec<u8> {
     let mut rng = rand::thread_rng();

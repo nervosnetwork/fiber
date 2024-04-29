@@ -15,7 +15,7 @@ pub struct InvoicesDb {
 }
 
 impl InvoicesDb {
-    pub async fn insert_invoice(&mut self, invoice: CkbInvoice) -> Result<(), InvoiceDbError> {
+    pub fn insert_invoice(&mut self, invoice: CkbInvoice) -> Result<(), InvoiceDbError> {
         if self.invoices.contains_key(&invoice.payment_hash_id()) {
             return Err(InvoiceDbError::DuplicatedInvoice(invoice.payment_hash_id()));
         }

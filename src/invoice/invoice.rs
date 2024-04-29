@@ -4,7 +4,6 @@ use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-
 use bitcoin::{
     key::Secp256k1,
     secp256k1::{
@@ -20,7 +19,9 @@ use ckb_types::{
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::{cmp::Ordering, num::ParseIntError, str::FromStr};
+use thiserror::Error;
 
 const SIGNATURE_U5_SIZE: usize = 104;
 
@@ -396,7 +397,7 @@ impl FromStr for CkbInvoice {
     }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub struct VerificationError(molecule::error::VerificationError);
 
 impl PartialEq for VerificationError {
@@ -405,35 +406,54 @@ impl PartialEq for VerificationError {
     }
 }
 impl Eq for VerificationError {}
+impl Display for VerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(Error, PartialEq, Debug)]
 pub enum InvoiceError {
+    #[error("Bech32 error: {0}")]
     Bech32Error(bech32::Error),
+    #[error("Molecule error: {0}")]
     MoleculeError(VerificationError),
+    #[error("Failed to parse amount: {0}")]
     ParseAmountError(ParseIntError),
+    #[error("Unknown prefix")]
     BadPrefix,
+    #[error("Unknown currency")]
     UnknownCurrency,
+    #[error("Unknown si prefix")]
     UnknownSiPrefix,
+    #[error("Malformed HRP")]
     MalformedHRP,
+    #[error("Too short data part")]
     TooShortDataPart,
+    #[error("Unexpected end of tagged fields")]
     UnexpectedEndOfTaggedFields,
+    #[error("Integer overflow error")]
     IntegerOverflowError,
-    InvalidSegWitProgramLength,
-    InvalidPubKeyHashLength,
-    InvalidScriptHashLength,
+    #[error("Invalid recovery id")]
     InvalidRecoveryId,
+    #[error("Invalid slice length: {0}")]
     InvalidSliceLength(String),
+    #[error("Invalid signature")]
     InvalidSignature,
     /// Duplicated attribute key
+    #[error("Duplicated attribute key: {0}")]
     DuplicatedAttributeKey(String),
     /// No payment hash
+    #[error("No payment hash")]
     NoPaymentHash,
     /// Both set payment_hash and payment_preimage
+    #[error("Both payment_hash and payment_preimage are set")]
     BothPaymenthashAndPreimage,
     /// An error occurred during signing
+    #[error("Sign error")]
     SignError,
-    /// according to BOLT11
-    Skip,
+    #[error("Hex decode error: {0}")]
+    HexDecodeError(#[from] hex::FromHexError),
 }
 
 fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
@@ -559,14 +579,14 @@ pub struct InvoiceBuilder {
 
 impl Default for InvoiceBuilder {
     fn default() -> Self {
-        Self::new()
+        Self::new(Currency::Ckb)
     }
 }
 
 impl InvoiceBuilder {
-    pub fn new() -> Self {
+    pub fn new(currency: Currency) -> Self {
         Self {
-            currency: Currency::Ckb,
+            currency,
             amount: None,
             prefix: None,
             payment_hash: None,
@@ -596,6 +616,10 @@ impl InvoiceBuilder {
 
     pub fn payment_preimage(self, payment_preimage: [u8; 32]) -> Self {
         self.add_attr(Attribute::PaymentPreimage(payment_preimage))
+    }
+
+    pub fn description(self, description: &str) -> Self {
+        self.add_attr(Attribute::Description(description.to_string()))
     }
 
     fn add_attr(mut self, attr: Attribute) -> Self {
@@ -1010,8 +1034,7 @@ mod tests {
         let gen_payment_hash = rand_sha256_hash();
         let (public_key, private_key) = gen_rand_keypair();
 
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
@@ -1043,8 +1066,7 @@ mod tests {
         let (_, private_key) = gen_rand_keypair();
         let public_key = gen_rand_public_key();
 
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
@@ -1064,8 +1086,7 @@ mod tests {
     fn test_invoice_builder_duplicated_attr() {
         let gen_payment_hash = rand_sha256_hash();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
@@ -1085,8 +1106,7 @@ mod tests {
     #[test]
     fn test_invoice_builder_missing() {
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_preimage(rand_u8_vector(32).try_into().unwrap())
@@ -1094,8 +1114,7 @@ mod tests {
 
         assert_eq!(invoice.err(), None);
 
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(rand_u8_vector(32).try_into().unwrap())
@@ -1108,8 +1127,7 @@ mod tests {
     fn test_invoice_builder_preimage() {
         let preimage: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_preimage(preimage)
@@ -1122,6 +1140,7 @@ mod tests {
         let raw_invoice: RawCkbInvoice = invoice.into();
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
         assert_eq!(decoded_invoice, clone_invoice);
+        eprintln!("payment_hash: {:?}", decoded_invoice.payment_hash_id());
     }
 
     #[test]
@@ -1129,8 +1148,7 @@ mod tests {
         let preimage: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
         let payment_hash: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new()
-            .currency(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(payment_hash)

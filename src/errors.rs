@@ -26,6 +26,8 @@ pub enum Error {
     NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
     #[error("Failed to processing channel: {0}")]
     ChannelError(#[from] ProcessingChannelError),
+    #[error("Invoice error: {0:?}")]
+    InvoiceError(#[from] crate::invoice::InvoiceError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
