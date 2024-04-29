@@ -688,6 +688,7 @@ dependencies = [
  "chrono",
  "ckb-crypto",
  "ckb-hash 0.115.0",
+ "ckb-jsonrpc-types",
  "ckb-sdk",
  "ckb-types",
  "clap",

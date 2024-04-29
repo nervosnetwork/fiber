@@ -1,4 +1,5 @@
 use log::{debug, error, info};
+use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
 use tokio::{select, signal};
@@ -8,6 +9,7 @@ use std::str::FromStr;
 use ckb_pcn_node::actors::RootActor;
 use ckb_pcn_node::cch::CchCommand;
 use ckb_pcn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
+use ckb_pcn_node::ckb_chain::CkbChainActor;
 use ckb_pcn_node::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -31,6 +33,17 @@ pub async fn main() {
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
+
+    if let Some(ckb_chain_config) = config.ckb_chain {
+        let (_wallet_actor, _wallet_handle) = Actor::spawn_linked(
+            Some("ckb-chain".to_string()),
+            CkbChainActor {},
+            ckb_chain_config,
+            root_actor.get_cell(),
+        )
+        .await
+        .expect("start ckb-chain actor");
+    }
 
     let ckb_command_sender = match config.ckb {
         Some(ckb_config) => {
