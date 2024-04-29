@@ -87,13 +87,15 @@ async fn serve_invoice_rpc(
     let _ = state.invoice_command_sender.send(command).await;
     let res = receiver.recv().await;
     let result = match res {
-        Some(Ok(invoice)) => {
-            let json = json!({
-                "invoice": invoice.to_string(),
-                "payment_hash": invoice.payment_hash_id(),
-            });
-            (StatusCode::OK, json.to_string())
-        }
+        Some(Ok(invoice)) => (
+            StatusCode::OK,
+            json!({
+                "invoice": json!(invoice),
+                "encode_payment": invoice.to_string(),
+                "payment_hash": invoice.payment_hash_id()
+            })
+            .to_string(),
+        ),
         Some(Err(err)) => {
             // status code 400 with err message
             (StatusCode::BAD_REQUEST, err.to_string())

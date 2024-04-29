@@ -107,20 +107,45 @@ impl FromStr for SiPrefix {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CkbScript(pub Script);
+
+impl Serialize for CkbScript {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CkbScript {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        Ok(CkbScript(Script::from_slice(&bytes).unwrap()))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Attribute {
     FinalHtlcTimeout(u64),
     FinalHtlcMinimumCltvExpiry(u64),
     ExpiryTime(Duration),
     Description(String),
     FallbackAddr(String),
-    UdtScript(Script),
+    UdtScript(CkbScript),
     PayeePublicKey(PublicKey),
     PaymentPreimage([u8; 32]),
     Feature(u64),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceData {
     pub payment_hash: [u8; 32],
     pub attrs: Vec<Attribute>,
@@ -132,7 +157,7 @@ pub struct InvoiceData {
 ///  1. using [`CkbInvoiceBuilder`]
 ///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
 ///
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbInvoice {
     pub currency: Currency,
     pub amount: Option<u64>,
@@ -157,6 +182,34 @@ impl Ord for InvoiceSignature {
             .serialize_compact()
             .1
             .cmp(&other.0.serialize_compact().1)
+    }
+}
+
+impl Serialize for InvoiceSignature {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+    where
+        S: serde::Serializer,
+    {
+        let (recovery_id, signature) = self.0.serialize_compact();
+        let mut signature_bytes = signature.to_vec();
+        signature_bytes.push(recovery_id.to_i32() as u8);
+        signature_bytes.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InvoiceSignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let signature_bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        let recovery_id = RecoveryId::from_i32(signature_bytes[64] as i32).unwrap();
+        let signature = RecoverableSignature::from_compact(&signature_bytes[0..64], recovery_id)
+            .expect("Invalid signature bytes");
+        Ok(InvoiceSignature(signature))
     }
 }
 
@@ -448,7 +501,7 @@ impl From<Attribute> for InvoiceAttr {
                 InvoiceAttrUnion::Feature(Feature::new_builder().value(value.pack()).build())
             }
             Attribute::UdtScript(script) => {
-                InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script).build())
+                InvoiceAttrUnion::UdtScript(UdtScript::new_builder().value(script.0).build())
             }
             Attribute::PayeePublicKey(pubkey) => InvoiceAttrUnion::PayeePublicKey(
                 PayeePublicKey::new_builder()
@@ -494,7 +547,7 @@ impl From<InvoiceAttr> for Attribute {
                 Attribute::FallbackAddr(String::from_utf8(value).unwrap())
             }
             InvoiceAttrUnion::Feature(x) => Attribute::Feature(x.value().unpack()),
-            InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(x.value()),
+            InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(CkbScript(x.value())),
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
@@ -736,14 +789,12 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bitcoin::{
         key::{KeyPair, Secp256k1},
         secp256k1::SecretKey,
     };
-
-    use crate::invoice;
-
-    use super::*;
+    use serde_json::json;
 
     fn gen_rand_public_key() -> PublicKey {
         let secp = Secp256k1::new();
@@ -781,7 +832,7 @@ mod tests {
                     Attribute::Description("description".to_string()),
                     Attribute::ExpiryTime(Duration::from_secs(1024)),
                     Attribute::FallbackAddr("address".to_string()),
-                    Attribute::UdtScript(Script::default()),
+                    Attribute::UdtScript(CkbScript(Script::default())),
                     Attribute::PayeePublicKey(public_key),
                 ],
             },
@@ -984,7 +1035,7 @@ mod tests {
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
             .add_attr(Attribute::Description("description".to_string()))
-            .add_attr(Attribute::UdtScript(Script::default()))
+            .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
 
@@ -1016,7 +1067,7 @@ mod tests {
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
             .add_attr(Attribute::Description("description".to_string()))
-            .add_attr(Attribute::UdtScript(Script::default()))
+            .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
         assert_eq!(invoice.err(), Some(InvoiceError::InvalidSignature));
@@ -1081,6 +1132,9 @@ mod tests {
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
         assert_eq!(decoded_invoice, clone_invoice);
         eprintln!("payment_hash: {:?}", decoded_invoice.payment_hash_id());
+
+        let json_result = json!(decoded_invoice);
+        eprintln!("json result: {}", json_result);
     }
 
     #[test]
@@ -1099,5 +1153,14 @@ mod tests {
             invoice.err(),
             Some(InvoiceError::BothPaymenthashAndPreimage)
         );
+    }
+
+    #[test]
+    fn test_invoice_serialize() {
+        let invoice = mock_invoice();
+        let res = serde_json::to_string(&invoice);
+        assert_eq!(res.is_ok(), true);
+        let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
+        assert_eq!(decoded, invoice);
     }
 }
