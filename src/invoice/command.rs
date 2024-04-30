@@ -1,3 +1,4 @@
+use super::invoice::Currency;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -19,7 +20,7 @@ impl InvoiceCommand {
 pub struct NewInvoiceParams {
     pub amount: u64,
     pub description: Option<String>,
-    pub currency: String,
+    pub currency: Currency,
     pub payment_hash: Option<String>,
     pub payment_preimage: Option<String>,
     pub expiry: Option<u64>,

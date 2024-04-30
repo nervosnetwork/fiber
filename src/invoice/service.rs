@@ -90,9 +90,8 @@ impl InvoiceService {
         &mut self,
         new_invoice: NewInvoiceParams,
     ) -> Result<CkbInvoice, InvoiceError> {
-        eprintln!("new_invoice: {:?}", new_invoice);
-        let mut invoice_builder = InvoiceBuilder::new(Currency::from_str(&new_invoice.currency)?)
-            .amount(Some(new_invoice.amount));
+        let mut invoice_builder =
+            InvoiceBuilder::new(new_invoice.currency).amount(Some(new_invoice.amount));
         if let Some(description) = new_invoice.description {
             invoice_builder = invoice_builder.description(&description);
         };
@@ -115,7 +114,6 @@ impl InvoiceService {
         if let Ok(invoice) = &invoice {
             self.invoices_db.insert_invoice(invoice.clone())?;
         }
-        eprintln!("invoice: {:?}", invoice);
         invoice
     }
 

@@ -59,6 +59,6 @@ pub enum InvoiceError {
     SignError,
     #[error("Hex decode error: {0}")]
     HexDecodeError(#[from] hex::FromHexError),
-    #[error("Invoice DB error: {0:?}")]
+    #[error("Duplicated inovice found: {0}")]
     DuplicatedInvoice(String),
 }
