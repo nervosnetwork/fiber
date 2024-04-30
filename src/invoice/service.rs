@@ -2,7 +2,6 @@ use super::{InvoiceCommand, InvoicesDb, NewInvoiceParams};
 use crate::{invoice::*, rpc::InvoiceCommandWithReply};
 use anyhow::Result;
 use serde_json::json;
-use service::utils::vec_to_u8_32;
 use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -96,13 +95,9 @@ impl InvoiceService {
             invoice_builder = invoice_builder.description(&description);
         };
         if let Some(payment_hash) = new_invoice.payment_hash {
-            let vec = hex::decode(payment_hash)?;
-            let payment_hash: [u8; 32] = vec_to_u8_32(vec).unwrap();
             invoice_builder = invoice_builder.payment_hash(payment_hash);
         };
         if let Some(payment_preimage) = new_invoice.payment_preimage {
-            let vec = hex::decode(payment_preimage)?;
-            let payment_preimage: [u8; 32] = vec_to_u8_32(vec).unwrap();
             invoice_builder = invoice_builder.payment_preimage(payment_preimage);
         };
         if let Some(expiry) = new_invoice.expiry {
