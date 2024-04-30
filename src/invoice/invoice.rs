@@ -37,7 +37,7 @@ impl TryFrom<u8> for Currency {
         match byte {
             0 => Ok(Self::Ckb),
             1 => Ok(Self::CkbTestNet),
-            _ => Err(InvoiceError::UnknownCurrency),
+            _ => Err(InvoiceError::UnknownCurrency(byte.to_string())),
         }
     }
 }
@@ -58,7 +58,7 @@ impl FromStr for Currency {
         match s {
             "ckb" => Ok(Self::Ckb),
             "ckt" => Ok(Self::CkbTestNet),
-            _ => Err(InvoiceError::UnknownCurrency),
+            _ => Err(InvoiceError::UnknownCurrency(s.to_string())),
         }
     }
 }
@@ -455,8 +455,7 @@ fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), I
             if !left.is_empty() {
                 return Err(InvoiceError::MalformedHRP);
             }
-            let currency =
-                Currency::from_str(currency).map_err(|_| InvoiceError::UnknownCurrency)?;
+            let currency = Currency::from_str(currency)?;
             let amount = amount
                 .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
                 .transpose()?;
@@ -794,7 +793,6 @@ mod tests {
         key::{KeyPair, Secp256k1},
         secp256k1::SecretKey,
     };
-    use serde_json::json;
 
     fn gen_rand_public_key() -> PublicKey {
         let secp = Secp256k1::new();
@@ -1131,10 +1129,6 @@ mod tests {
         let raw_invoice: RawCkbInvoice = invoice.into();
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
         assert_eq!(decoded_invoice, clone_invoice);
-        eprintln!("payment_hash: {:?}", decoded_invoice.payment_hash_id());
-
-        let json_result = json!(decoded_invoice);
-        eprintln!("json result: {}", json_result);
     }
 
     #[test]
