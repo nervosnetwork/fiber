@@ -1,6 +1,7 @@
 use super::errors::VerificationError;
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
+use crate::ckb::serde_utils::EntityWrapperBase64;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::sha256::Hash as Sha256;
@@ -20,6 +21,7 @@ use ckb_types::{
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
 const SIGNATURE_U5_SIZE: usize = 104;
@@ -107,31 +109,11 @@ impl FromStr for SiPrefix {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CkbScript(pub Script);
+#[serde_as]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CkbScript(#[serde_as(as = "EntityWrapperBase64<Script>")] pub Script);
 
-impl Serialize for CkbScript {
-    fn serialize<S>(
-        &self,
-        serializer: S,
-    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.0.as_slice().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for CkbScript {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
-        Ok(CkbScript(Script::from_slice(&bytes).unwrap()))
-    }
-}
-
+#[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Attribute {
     FinalHtlcTimeout(u64),
@@ -453,7 +435,10 @@ fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), I
     match nom_scan_hrp(input) {
         Ok((left, (currency, amount, si_prefix))) => {
             if !left.is_empty() {
-                return Err(InvoiceError::MalformedHRP);
+                return Err(InvoiceError::MalformedHRP(format!(
+                    "{}, unexpected ending `{}`",
+                    input, left
+                )));
             }
             let currency = Currency::from_str(currency)?;
             let amount = amount
@@ -464,7 +449,7 @@ fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), I
                 .transpose()?;
             Ok((currency, amount, si_prefix))
         }
-        Err(_) => Err(InvoiceError::MalformedHRP),
+        Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),
     }
 }
 
@@ -862,22 +847,32 @@ mod tests {
         assert_eq!(res, Ok((Currency::CkbTestNet, None, Some(SiPrefix::Kilo))));
 
         let res = parse_hrp("xnckb");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert_eq!(res, Err(InvoiceError::MalformedHRP("xnckb".to_string())));
 
         let res = parse_hrp("lxckb");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert_eq!(res, Err(InvoiceError::MalformedHRP("lxckb".to_string())));
 
         let res = parse_hrp("lnckt");
         assert_eq!(res, Ok((Currency::CkbTestNet, None, None)));
 
         let res = parse_hrp("lnxkt");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert_eq!(res, Err(InvoiceError::MalformedHRP("lnxkt".to_string())));
 
         let res = parse_hrp("lncktt");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert_eq!(
+            res,
+            Err(InvoiceError::MalformedHRP(
+                "lncktt, unexpected ending `t`".to_string()
+            ))
+        );
 
         let res = parse_hrp("lnckt1x24");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert_eq!(
+            res,
+            Err(InvoiceError::MalformedHRP(
+                "lnckt1x24, unexpected ending `x24`".to_string()
+            ))
+        );
 
         let res = parse_hrp("lnckt000k");
         assert_eq!(
@@ -890,10 +885,10 @@ mod tests {
         assert!(matches!(res, Err(InvoiceError::ParseAmountError(_))));
 
         let res = parse_hrp("lnckt0x");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
 
         let res = parse_hrp("");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP));
+        assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
     }
 
     #[test]

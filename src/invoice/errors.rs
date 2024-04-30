@@ -25,14 +25,12 @@ pub enum InvoiceError {
     MoleculeError(VerificationError),
     #[error("Failed to parse amount: {0}")]
     ParseAmountError(ParseIntError),
-    #[error("Unknown prefix")]
-    BadPrefix,
     #[error("Unknown currency: {0}")]
     UnknownCurrency(String),
     #[error("Unknown si prefix")]
     UnknownSiPrefix,
-    #[error("Malformed HRP")]
-    MalformedHRP,
+    #[error("Parsing failed with malformed HRP: {0}")]
+    MalformedHRP(String),
     #[error("Too short data part")]
     TooShortDataPart,
     #[error("Unexpected end of tagged fields")]

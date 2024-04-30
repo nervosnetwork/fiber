@@ -2,8 +2,8 @@ use super::{InvoiceCommand, InvoicesDb, NewInvoiceParams};
 use crate::{invoice::*, rpc::InvoiceCommandWithReply};
 use anyhow::Result;
 use serde_json::json;
-use service::{invoice::Currency, utils::vec_to_u8_32};
-use std::{str::FromStr, time::Duration};
+use service::utils::vec_to_u8_32;
+use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -118,7 +118,6 @@ impl InvoiceService {
     }
 
     async fn parse_invoice(&mut self, invoice: String) -> Result<CkbInvoice, InvoiceError> {
-        let decoded_invoice = invoice.parse::<CkbInvoice>()?;
-        Ok(decoded_invoice)
+        Ok(invoice.parse::<CkbInvoice>()?)
     }
 }
