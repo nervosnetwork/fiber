@@ -65,6 +65,7 @@ impl FromStr for Currency {
     }
 }
 
+// FYI: https://en.wikipedia.org/wiki/International_System_of_Units
 #[derive(Eq, PartialEq, Debug, Clone, Copy, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum SiPrefix {
     /// 10^-3

@@ -7,6 +7,8 @@ option ExpiryTimeOpt (Duration);
 option SignatureOpt (Signature);
 
 option AmountOpt (Uint64);
+
+// SI prefix comes from: https://en.wikipedia.org/wiki/International_System_of_Units
 option SiPrefixOpt (byte);
 option FeatureOpt (Uint32);
 
