@@ -149,53 +149,6 @@ pub struct CkbInvoice {
     pub data: InvoiceData,
 }
 
-/// Recoverable signature
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvoiceSignature(pub RecoverableSignature);
-
-impl PartialOrd for InvoiceSignature {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for InvoiceSignature {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0
-            .serialize_compact()
-            .1
-            .cmp(&other.0.serialize_compact().1)
-    }
-}
-
-impl Serialize for InvoiceSignature {
-    fn serialize<S>(
-        &self,
-        serializer: S,
-    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
-    where
-        S: serde::Serializer,
-    {
-        let (recovery_id, signature) = self.0.serialize_compact();
-        let mut signature_bytes = signature.to_vec();
-        signature_bytes.push(recovery_id.to_i32() as u8);
-        signature_bytes.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for InvoiceSignature {
-    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let signature_bytes: Vec<u8> = Vec::deserialize(deserializer)?;
-        let recovery_id = RecoveryId::from_i32(signature_bytes[64] as i32).unwrap();
-        let signature = RecoverableSignature::from_compact(&signature_bytes[0..64], recovery_id)
-            .expect("Invalid signature bytes");
-        Ok(InvoiceSignature(signature))
-    }
-}
-
 impl CkbInvoice {
     fn hrp_part(&self) -> String {
         format!(
@@ -337,6 +290,56 @@ impl CkbInvoice {
         self.signature = Some(InvoiceSignature(signature));
         self.check_signature()?;
         Ok(())
+    }
+}
+
+/// Recoverable signature
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvoiceSignature(pub RecoverableSignature);
+
+impl PartialOrd for InvoiceSignature {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for InvoiceSignature {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0
+            .serialize_compact()
+            .1
+            .cmp(&other.0.serialize_compact().1)
+    }
+}
+
+impl Serialize for InvoiceSignature {
+    fn serialize<S>(
+        &self,
+        serializer: S,
+    ) -> Result<<S as serde::Serializer>::Ok, <S as serde::Serializer>::Error>
+    where
+        S: serde::Serializer,
+    {
+        let base32: Vec<u8> = self.to_base32().iter().map(|x| x.to_u8()).collect();
+        let hex = hex::encode(&base32);
+        hex.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for InvoiceSignature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, <D as serde::Deserializer<'de>>::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let signature_hex: String = String::deserialize(deserializer)?;
+        let signature_bytes = hex::decode(signature_hex).map_err(serde::de::Error::custom)?;
+        let signature = InvoiceSignature::from_base32(
+            &signature_bytes
+                .iter()
+                .map(|x| u5::try_from_u8(*x).unwrap())
+                .collect::<Vec<u5>>(),
+        );
+        signature.map_err(serde::de::Error::custom)
     }
 }
 
