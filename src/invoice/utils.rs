@@ -187,9 +187,7 @@ pub(crate) fn parse_hrp(
             let amount = amount
                 .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
                 .transpose()?;
-            let si_prefix = si_prefix
-                .map(|x| SiPrefix::from_str(x).map_err(|_| InvoiceError::UnknownSiPrefix))
-                .transpose()?;
+            let si_prefix = si_prefix.map(|x| SiPrefix::from_str(x)).transpose()?;
             Ok((currency, amount, si_prefix))
         }
         Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),

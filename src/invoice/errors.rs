@@ -26,8 +26,8 @@ pub enum InvoiceError {
     ParseAmountError(ParseIntError),
     #[error("Unknown currency: {0}")]
     UnknownCurrency(String),
-    #[error("Unknown si prefix")]
-    UnknownSiPrefix,
+    #[error("Unknown si prefix: {0}")]
+    UnknownSiPrefix(String),
     #[error("Parsing failed with malformed HRP: {0}")]
     MalformedHRP(String),
     #[error("Too short data part")]

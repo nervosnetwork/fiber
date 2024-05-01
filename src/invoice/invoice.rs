@@ -86,13 +86,15 @@ impl ToString for SiPrefix {
     }
 }
 
-impl From<u8> for SiPrefix {
-    fn from(byte: u8) -> Self {
+impl TryFrom<u8> for SiPrefix {
+    type Error = InvoiceError;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
         match byte {
-            0 => Self::Milli,
-            1 => Self::Micro,
-            2 => Self::Kilo,
-            _ => panic!("Invalid value for SiPrefix"),
+            0 => Ok(Self::Milli),
+            1 => Ok(Self::Micro),
+            2 => Ok(Self::Kilo),
+            _ => Err(InvoiceError::UnknownSiPrefix(format!("{}", byte))),
         }
     }
 }
@@ -105,7 +107,7 @@ impl FromStr for SiPrefix {
             "m" => Ok(Self::Milli),
             "u" => Ok(Self::Micro),
             "k" => Ok(Self::Kilo),
-            _ => Err(InvoiceError::UnknownSiPrefix),
+            _ => Err(InvoiceError::UnknownSiPrefix(s.to_string())),
         }
     }
 }
@@ -659,13 +661,17 @@ impl InvoiceBuilder {
 }
 
 impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
-    type Error = molecule::error::VerificationError;
+    type Error = InvoiceError;
 
     fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
         Ok(CkbInvoice {
             currency: (u8::from(invoice.currency())).try_into().unwrap(),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
-            prefix: invoice.prefix().to_opt().map(|x| u8::from(x).into()),
+            prefix: invoice
+                .prefix()
+                .to_opt()
+                .map(|x| u8::from(x).try_into())
+                .transpose()?,
             signature: invoice.signature().to_opt().map(|x| {
                 InvoiceSignature::from_base32(
                     &x.as_bytes()
@@ -675,7 +681,7 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
                 )
                 .unwrap()
             }),
-            data: invoice.data().try_into()?,
+            data: InvoiceData::try_from(invoice.data()).map_err(InvoiceError::MoleculeError)?,
         })
     }
 }
@@ -739,7 +745,7 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
 }
 
 impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
-    type Error = molecule::error::VerificationError;
+    type Error = VerificationError;
 
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
