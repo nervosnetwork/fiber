@@ -11,6 +11,10 @@ use nom::{
 use rand::Rng;
 use std::io::{Cursor, Result as IoResult};
 
+use super::invoice::{Currency, SiPrefix};
+use super::InvoiceError;
+use std::str::FromStr;
+
 /// Encodes bytes and returns the compressed form
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter
 pub(crate) fn ar_encompress(data: &[u8]) -> IoResult<Vec<u8>> {
@@ -160,12 +164,36 @@ impl<'a, W: WriteBase32> Drop for BytesToBase32<'a, W> {
     }
 }
 
-pub(crate) fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
+fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
     let (input, _) = tag("ln")(input)?;
     let (input, currency) = alt((tag("ckb"), tag("ckt")))(input)?;
     let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
     let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
     Ok((input, (currency, amount, si)))
+}
+
+pub(crate) fn parse_hrp(
+    input: &str,
+) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
+    match nom_scan_hrp(input) {
+        Ok((left, (currency, amount, si_prefix))) => {
+            if !left.is_empty() {
+                return Err(InvoiceError::MalformedHRP(format!(
+                    "{}, unexpected ending `{}`",
+                    input, left
+                )));
+            }
+            let currency = Currency::from_str(currency)?;
+            let amount = amount
+                .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
+                .transpose()?;
+            let si_prefix = si_prefix
+                .map(|x| SiPrefix::from_str(x).map_err(|_| InvoiceError::UnknownSiPrefix))
+                .transpose()?;
+            Ok((currency, amount, si_prefix))
+        }
+        Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),
+    }
 }
 
 /// FIXME: remove these 3 converters after updating molecule to 0.8.0

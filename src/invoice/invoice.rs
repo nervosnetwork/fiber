@@ -435,28 +435,6 @@ impl FromStr for CkbInvoice {
     }
 }
 
-fn parse_hrp(input: &str) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
-    match nom_scan_hrp(input) {
-        Ok((left, (currency, amount, si_prefix))) => {
-            if !left.is_empty() {
-                return Err(InvoiceError::MalformedHRP(format!(
-                    "{}, unexpected ending `{}`",
-                    input, left
-                )));
-            }
-            let currency = Currency::from_str(currency)?;
-            let amount = amount
-                .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
-                .transpose()?;
-            let si_prefix = si_prefix
-                .map(|x| SiPrefix::from_str(x).map_err(|_| InvoiceError::UnknownSiPrefix))
-                .transpose()?;
-            Ok((currency, amount, si_prefix))
-        }
-        Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),
-    }
-}
-
 impl From<Attribute> for InvoiceAttr {
     fn from(attr: Attribute) -> Self {
         let a = match attr {

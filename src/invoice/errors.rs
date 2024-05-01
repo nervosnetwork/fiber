@@ -10,7 +10,6 @@ impl PartialEq for VerificationError {
         false
     }
 }
-impl Eq for VerificationError {}
 impl Display for VerificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
