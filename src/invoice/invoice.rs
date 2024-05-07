@@ -600,8 +600,13 @@ impl InvoiceBuilder {
     }
 
     /// Adds a fallback address.
-    pub fn fallback(self, fallback: String) -> Self {
+    pub fn fallback_address(self, fallback: String) -> Self {
         self.add_attr(Attribute::FallbackAddr(fallback))
+    }
+
+    /// Adds a final cltv expiry.
+    pub fn final_cltv(self, final_cltv: u64) -> Self {
+        self.add_attr(Attribute::FinalHtlcMinimumCltvExpiry(final_cltv))
     }
 
     fn get_payment_preimage(&self) -> Option<[u8; 32]> {

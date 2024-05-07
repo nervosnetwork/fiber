@@ -104,6 +104,12 @@ impl InvoiceService {
             let duration: Duration = Duration::from_secs(expiry);
             invoice_builder = invoice_builder.expiry_time(duration);
         };
+        if let Some(fallback_address) = new_invoice.fallback_address {
+            invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(final_cltv) = new_invoice.final_cltv {
+            invoice_builder = invoice_builder.final_cltv(final_cltv);
+        };
 
         let invoice = invoice_builder.build();
         if let Ok(invoice) = &invoice {
