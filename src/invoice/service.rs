@@ -119,6 +119,6 @@ impl InvoiceService {
     }
 
     async fn parse_invoice(&mut self, invoice: String) -> Result<CkbInvoice, InvoiceError> {
-        Ok(invoice.parse::<CkbInvoice>()?)
+        invoice.parse::<CkbInvoice>()
     }
 }

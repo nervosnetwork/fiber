@@ -132,6 +132,7 @@ pub enum Attribute {
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceData {
+    pub timestamp: u128,
     pub payment_hash: [u8; 32],
     pub attrs: Vec<Attribute>,
 }
@@ -323,7 +324,7 @@ impl Serialize for InvoiceSignature {
         S: serde::Serializer,
     {
         let base32: Vec<u8> = self.to_base32().iter().map(|x| x.to_u8()).collect();
-        let hex = hex::encode(&base32);
+        let hex = hex::encode(base32);
         hex.serialize(serializer)
     }
 }
@@ -620,24 +621,29 @@ impl InvoiceBuilder {
     }
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
-        let mut payment_hash = self.payment_hash;
         let preimage = self.get_payment_preimage();
         if self.payment_hash.is_some() && preimage.is_some() {
             return Err(InvoiceError::BothPaymenthashAndPreimage);
         }
-        if let Some(preimage) = preimage {
-            // Hash self.payment_preimage to payment_hash
-            payment_hash = Some(Sha256::hash(&preimage).to_byte_array());
-        }
+        let payment_hash = if let Some(preimage) = preimage {
+            Sha256::hash(&preimage).to_byte_array()
+        } else if let Some(payment_hash) = self.payment_hash {
+            payment_hash
+        } else {
+            // generate a random payment hash if not provided
+            rand_sha256_hash()
+        };
 
         self.check_duplicated_attrs()?;
+        let timestamp = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
         Ok(CkbInvoice {
             currency: self.currency,
             amount: self.amount,
             prefix: self.prefix,
             signature: None,
             data: InvoiceData {
-                payment_hash: payment_hash.ok_or(InvoiceError::NoPaymentHash)?,
+                timestamp,
+                payment_hash,
                 attrs: self.attrs,
             },
         })
@@ -730,6 +736,7 @@ impl From<CkbInvoice> for RawCkbInvoice {
 impl From<InvoiceData> for gen_invoice::RawInvoiceData {
     fn from(data: InvoiceData) -> Self {
         RawInvoiceDataBuilder::default()
+            .timestamp(data.timestamp.pack())
             .payment_hash(
                 PaymentHash::new_builder()
                     .set(u8_slice_to_bytes(&data.payment_hash).unwrap())
@@ -754,6 +761,7 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 
     fn try_from(data: gen_invoice::RawInvoiceData) -> Result<Self, Self::Error> {
         Ok(InvoiceData {
+            timestamp: data.timestamp().unpack(),
             payment_hash: bytes_to_u8_array(&data.payment_hash().as_bytes()),
             attrs: data
                 .attrs()
@@ -771,6 +779,7 @@ mod tests {
         key::{KeyPair, Secp256k1},
         secp256k1::SecretKey,
     };
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn gen_rand_public_key() -> PublicKey {
         let secp = Secp256k1::new();
@@ -802,6 +811,10 @@ mod tests {
             signature: None,
             data: InvoiceData {
                 payment_hash: rand_sha256_hash(),
+                timestamp: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -975,6 +988,7 @@ mod tests {
             signature: Some(InvoiceSignature(signature)),
             data: InvoiceData {
                 payment_hash: [0u8; 32],
+                timestamp: 0,
                 attrs: vec![
                     Attribute::FinalHtlcTimeout(5),
                     Attribute::FinalHtlcMinimumCltvExpiry(12),
@@ -1015,7 +1029,7 @@ mod tests {
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
-            .fallback("address".to_string())
+            .fallback_address("address".to_string())
             .expiry_time(Duration::from_secs(1024))
             .payee_pub_key(public_key)
             .add_attr(Attribute::FinalHtlcTimeout(5))
@@ -1047,7 +1061,7 @@ mod tests {
             .amount(Some(1280))
             .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
-            .fallback("address".to_string())
+            .fallback_address("address".to_string())
             .expiry_time(Duration::from_secs(1024))
             .payee_pub_key(public_key)
             .add_attr(Attribute::FinalHtlcTimeout(5))
@@ -1144,5 +1158,56 @@ mod tests {
         assert_eq!(res.is_ok(), true);
         let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
         assert_eq!(decoded, invoice);
+    }
+
+    #[test]
+    fn test_invoice_timestamp() {
+        let payment_hash: [u8; 32] = rand_u8_vector(32).try_into().unwrap();
+        let private_key = gen_rand_private_key();
+        let invoice1 = InvoiceBuilder::new(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(payment_hash)
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+
+        let invoice2 = InvoiceBuilder::new(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(payment_hash)
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+
+        assert_ne!(invoice1.data.timestamp, invoice2.data.timestamp);
+        assert_ne!(invoice1.to_string(), invoice2.to_string());
+    }
+
+    #[test]
+    fn test_invoice_gen_payment_hash() {
+        let private_key = gen_rand_private_key();
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_preimage(rand_u8_vector(32).try_into().unwrap())
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+        let payment_hash = invoice.payment_hash();
+        let payment_preimage = invoice.payment_preimage().unwrap();
+        assert_eq!(
+            Sha256::hash(payment_preimage).to_byte_array(),
+            *payment_hash
+        );
+    }
+
+    #[test]
+    fn test_invoice_rand_payment_hash() {
+        let private_key = gen_rand_private_key();
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+        let payment_preimage = invoice.payment_preimage();
+        assert!(payment_preimage.is_none());
     }
 }

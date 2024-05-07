@@ -1,4 +1,4 @@
-use super::invoice::Currency;
+use super::invoice_impl::Currency;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]

@@ -7,11 +7,10 @@ use nom::{
     bytes::{complete::take_while1, streaming::tag},
     IResult,
 };
-#[cfg(test)]
 use rand::Rng;
 use std::io::{Cursor, Result as IoResult};
 
-use super::invoice::{Currency, SiPrefix};
+use super::invoice_impl::{Currency, SiPrefix};
 use super::InvoiceError;
 use std::str::FromStr;
 
@@ -187,7 +186,7 @@ pub(crate) fn parse_hrp(
             let amount = amount
                 .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
                 .transpose()?;
-            let si_prefix = si_prefix.map(|x| SiPrefix::from_str(x)).transpose()?;
+            let si_prefix = si_prefix.map(SiPrefix::from_str).transpose()?;
             Ok((currency, amount, si_prefix))
         }
         Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),
@@ -221,7 +220,6 @@ pub(crate) fn rand_u8_vector(num: usize) -> Vec<u8> {
     (0..num).map(|_| rng.gen()).collect()
 }
 
-#[cfg(test)]
 pub(crate) fn rand_sha256_hash() -> [u8; 32] {
     let mut rng = rand::thread_rng();
     let mut result = [0u8; 32];

@@ -45,9 +45,6 @@ pub enum InvoiceError {
     /// Duplicated attribute key
     #[error("Duplicated attribute key: {0}")]
     DuplicatedAttributeKey(String),
-    /// No payment hash
-    #[error("No payment hash")]
-    NoPaymentHash,
     /// Both set payment_hash and payment_preimage
     #[error("Both payment_hash and payment_preimage are set")]
     BothPaymenthashAndPreimage,

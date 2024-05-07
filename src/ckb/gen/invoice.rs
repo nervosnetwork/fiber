@@ -6992,7 +6992,8 @@ impl ::core::fmt::Debug for RawInvoiceData {
 impl ::core::fmt::Display for RawInvoiceData {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
+        write!(f, "{}: {}", "timestamp", self.timestamp())?;
+        write!(f, ", {}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -7008,11 +7009,12 @@ impl ::core::default::Default for RawInvoiceData {
     }
 }
 impl RawInvoiceData {
-    const DEFAULT_VALUE: [u8; 48] = [
-        48, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 68] = [
+        68, 0, 0, 0, 16, 0, 0, 0, 32, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7029,17 +7031,23 @@ impl RawInvoiceData {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn payment_hash(&self) -> PaymentHash {
+    pub fn timestamp(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn payment_hash(&self) -> PaymentHash {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
         PaymentHash::new_unchecked(self.0.slice(start..end))
     }
     pub fn attrs(&self) -> InvoiceAttrsVec {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..end))
         } else {
             InvoiceAttrsVec::new_unchecked(self.0.slice(start..))
@@ -7072,6 +7080,7 @@ impl molecule::prelude::Entity for RawInvoiceData {
     }
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
+            .timestamp(self.timestamp())
             .payment_hash(self.payment_hash())
             .attrs(self.attrs())
     }
@@ -7095,7 +7104,8 @@ impl<'r> ::core::fmt::Debug for RawInvoiceDataReader<'r> {
 impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "payment_hash", self.payment_hash())?;
+        write!(f, "{}: {}", "timestamp", self.timestamp())?;
+        write!(f, ", {}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "attrs", self.attrs())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -7105,7 +7115,7 @@ impl<'r> ::core::fmt::Display for RawInvoiceDataReader<'r> {
     }
 }
 impl<'r> RawInvoiceDataReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7122,17 +7132,23 @@ impl<'r> RawInvoiceDataReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn payment_hash(&self) -> PaymentHashReader<'r> {
+    pub fn timestamp(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn payment_hash(&self) -> PaymentHashReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
         PaymentHashReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn attrs(&self) -> InvoiceAttrsVecReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             InvoiceAttrsVecReader::new_unchecked(&self.as_slice()[start..])
@@ -7185,18 +7201,24 @@ impl<'r> molecule::prelude::Reader<'r> for RawInvoiceDataReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        PaymentHashReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        InvoiceAttrsVecReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        PaymentHashReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        InvoiceAttrsVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct RawInvoiceDataBuilder {
+    pub(crate) timestamp: Uint128,
     pub(crate) payment_hash: PaymentHash,
     pub(crate) attrs: InvoiceAttrsVec,
 }
 impl RawInvoiceDataBuilder {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
+    pub fn timestamp(mut self, v: Uint128) -> Self {
+        self.timestamp = v;
+        self
+    }
     pub fn payment_hash(mut self, v: PaymentHash) -> Self {
         self.payment_hash = v;
         self
@@ -7211,12 +7233,15 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
     const NAME: &'static str = "RawInvoiceDataBuilder";
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.timestamp.as_slice().len()
             + self.payment_hash.as_slice().len()
             + self.attrs.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.timestamp.as_slice().len();
         offsets.push(total_size);
         total_size += self.payment_hash.as_slice().len();
         offsets.push(total_size);
@@ -7225,6 +7250,7 @@ impl molecule::prelude::Builder for RawInvoiceDataBuilder {
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
+        writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.payment_hash.as_slice())?;
         writer.write_all(self.attrs.as_slice())?;
         Ok(())
@@ -7274,10 +7300,11 @@ impl ::core::default::Default for RawCkbInvoice {
     }
 }
 impl RawCkbInvoice {
-    const DEFAULT_VALUE: [u8; 73] = [
-        73, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 48, 0, 0,
-        0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 93] = [
+        93, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 68, 0, 0,
+        0, 16, 0, 0, 0, 32, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 4, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 5;
     pub fn total_size(&self) -> usize {
