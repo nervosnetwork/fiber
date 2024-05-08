@@ -268,12 +268,7 @@ impl ChannelActor {
         state.holder_commitment_number = state.get_next_commitment_number(true);
         let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
         state.state = ChannelState::SigningCommitment(flags);
-        if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
-            state.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
-            if state.should_holder_send_tx_signatures_first() {
-                state.handle_tx_signatures(self.network.clone(), None)?;
-            }
-        }
+        state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
         Ok(())
     }
 
@@ -1259,7 +1254,7 @@ impl ChannelActorState {
                 self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_message(commitment_signed)?;
+                self.handle_commitment_signed_message(commitment_signed, network.clone())?;
                 if let ChannelState::SigningCommitment(flags) = self.state {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
                         // TODO: maybe we should send our commitment_signed message here.
@@ -1501,6 +1496,7 @@ impl ChannelActorState {
     pub fn handle_commitment_signed_message(
         &mut self,
         commitment_signed: CommitmentSigned,
+        network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         let flags = match self.state {
             ChannelState::CollaboratingFundingTx(flags)
@@ -1552,9 +1548,25 @@ impl ChannelActorState {
         debug!("Updating peer next local nonce");
         self.counterparty_nonce = Some(commitment_signed.next_local_nonce);
         self.counterparty_initial_commitment_point = None;
-        self.state = ChannelState::SigningCommitment(
-            flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT,
-        );
+        let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
+        self.state = ChannelState::SigningCommitment(flags);
+        self.maybe_transition_to_tx_signatures(flags, network)?;
+        Ok(())
+    }
+
+    pub fn maybe_transition_to_tx_signatures(
+        &mut self,
+        flags: SigningCommitmentFlags,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
+            debug!("Commitment signed message sent by both sides, tranitioning to AwaitingTxSignatures state");
+            self.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+            if self.should_holder_send_tx_signatures_first() {
+                debug!("It is our turn to send tx_signatures, so we will do it now.");
+                self.handle_tx_signatures(network, None)?;
+            }
+        }
         Ok(())
     }
 
