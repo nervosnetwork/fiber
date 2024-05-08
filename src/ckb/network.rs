@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::HashSet;
 use std::{collections::HashMap, str};
+use tentacle::secio::SecioKeyPair;
 
 use tentacle::{
     async_trait,
@@ -29,6 +30,7 @@ use super::channel::{
     ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
     ProcessingChannelResult,
 };
+use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
@@ -270,6 +272,10 @@ impl NetworkActor {
 
 pub struct NetworkActorState {
     peer_id: PeerId,
+    // This is the entropy used to generate various random values.
+    // Must be kept secret.
+    // TODO: Maybe we should abstract this into a separate trait.
+    entropy: [u8; 32],
     network: ActorRef<NetworkActorMessage>,
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
@@ -284,15 +290,34 @@ pub struct NetworkActorState {
 }
 
 impl NetworkActorState {
+    pub fn generate_channel_seed(&mut self) -> [u8; 32] {
+        let channel_user_id = self.channels.len();
+        let seed = channel_user_id
+            .to_be_bytes()
+            .into_iter()
+            .chain(self.entropy.iter().cloned())
+            .collect::<Vec<u8>>();
+        let result = blake2b_hash_with_salt(&seed, b"PCN_CHANNEL_SEED");
+        self.entropy = blake2b_hash_with_salt(&result, b"PCN_NETWORK_ENTROPY_UPDATE");
+        result
+    }
+
     pub async fn create_outbound_channel(
         &mut self,
         open_channel: OpenChannelCommand,
     ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
         let network = self.network.clone();
+        let OpenChannelCommand {
+            peer_id,
+            funding_amount,
+        } = open_channel;
         Ok(Actor::spawn_linked(
             None,
-            ChannelActor::new(open_channel.peer_id.clone(), network.clone()),
-            ChannelInitializationParameter::OpenChannelCommand(open_channel),
+            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelInitializationParameter::OpenChannel(
+                funding_amount,
+                self.generate_channel_seed(),
+            ),
             network.clone().get_cell(),
         )
         .await?
@@ -320,16 +345,14 @@ impl NetworkActorState {
             warn!("A channel of id {:?} is already created, returning it", &id);
             return Ok(channel.clone());
         }
-        let channel_user_id = self.channels.len();
 
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone()),
-            ChannelInitializationParameter::AcceptChannelCommand(
-                peer_id.clone(),
-                channel_user_id,
-                open_channel,
+            ChannelInitializationParameter::AcceptChannel(
                 funding_amount,
+                self.generate_channel_seed(),
+                open_channel,
             ),
             network.clone().get_cell(),
         )
@@ -492,11 +515,13 @@ impl Actor for NetworkActor {
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
-        let pk = kp.public_key();
+        let entropy = blake2b_hash_with_salt(kp.as_ref(), b"PCN_NETWORK_ENTROPY");
+        let secio_kp = SecioKeyPair::from(kp.into());
+        let secio_pk = secio_kp.public_key();
         let handle = Handle::new(myself.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
-            .key_pair(kp)
+            .key_pair(secio_kp)
             .build(handle);
         let listen_addr = service
             .listen(
@@ -507,7 +532,7 @@ impl Actor for NetworkActor {
             .await
             .expect("listen tentacle");
 
-        let my_peer_id: PeerId = PeerId::from(pk);
+        let my_peer_id: PeerId = PeerId::from(secio_pk);
         info!(
             "Started listening tentacle on {}/p2p/{}",
             listen_addr,
@@ -532,6 +557,7 @@ impl Actor for NetworkActor {
 
         Ok(NetworkActorState {
             peer_id: my_peer_id,
+            entropy,
             network: myself,
             control,
             peers: Default::default(),

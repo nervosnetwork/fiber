@@ -23,6 +23,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use std::{borrow::Borrow, collections::HashMap, fmt::Debug};
 
 use super::{
+    key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
     types::{
@@ -146,12 +147,14 @@ impl OpenChannelCommand {
 }
 
 pub enum ChannelInitializationParameter {
-    /// To open a new channel to another peer, we process OpenChannelCommand
-    /// and create a new outgoing channel.
-    OpenChannelCommand(OpenChannelCommand),
-    /// To accept a new channel from another peer, we process AcceptChannelCommand
-    /// OpenChannel message and create a incoming channel.
-    AcceptChannelCommand(PeerId, usize, OpenChannel, u128),
+    /// To open a new channel to another peer, the funding amount and
+    /// a unique channel seed to generate unique channel id,
+    /// must be given.
+    OpenChannel(u128, [u8; 32]),
+    /// To accept a new channel from another peer, the funding amount,
+    /// a unique channel seed to generate unique channel id,
+    /// and original OpenChannel message must be given.
+    AcceptChannel(u128, [u8; 32], OpenChannel),
 }
 
 #[derive(Debug)]
@@ -468,13 +471,16 @@ impl Actor for ChannelActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
-            ChannelInitializationParameter::AcceptChannelCommand(
-                peer_id,
-                channel_user_id,
-                open_channel,
+            ChannelInitializationParameter::AcceptChannel(
                 my_funding_amount,
+                seed,
+                open_channel,
             ) => {
-                debug!("Openning channel {:?}", &open_channel);
+                let peer_id = self.peer_id.clone();
+                debug!(
+                    "Accepting channel {:?} to peer {:?}",
+                    &open_channel, &peer_id
+                );
 
                 let counterpart_pubkeys = (&open_channel).into();
                 let OpenChannel {
@@ -503,14 +509,6 @@ impl Actor for ChannelActor {
                         "Funding type script is not none, but we are currently unable to process this".to_string(),
                     )));
                 }
-
-                let seed = channel_user_id
-                    .to_be_bytes()
-                    .into_iter()
-                    .chain(peer_id.as_bytes().iter().cloned())
-                    .collect::<Vec<u8>>();
-
-                // TODO: we should wait for user to confirm that they want to accept this channel.
 
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
@@ -571,10 +569,16 @@ impl Actor for ChannelActor {
                 state.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannelCommand(open_channel) => {
-                info!("Trying to open a channel to {:?}", &open_channel.peer_id);
+            ChannelInitializationParameter::OpenChannel(funding_amount, seed) => {
+                let peer_id = self.peer_id.clone();
+                info!("Trying to open a channel to {:?}", &peer_id);
 
-                let mut channel = open_channel.create_channel()?;
+                let mut channel = ChannelActorState::new_outbound_channel(
+                    &seed,
+                    self.peer_id.clone(),
+                    funding_amount,
+                    LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
+                );
 
                 let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
                 let message = PCNMessage::OpenChannel(OpenChannel {
@@ -617,12 +621,12 @@ impl Actor for ChannelActor {
 
                 debug!(
                     "Created OpenChannel message to {:?}: {:?}",
-                    &open_channel.peer_id, &message
+                    &peer_id, &message
                 );
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                            peer_id: open_channel.peer_id,
+                            peer_id,
                             message,
                         }),
                     ))
@@ -785,15 +789,6 @@ pub struct ChannelActorState {
     // The commitment point that is going to be used in the following commitment transaction.
     pub counterparty_commitment_point: Option<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
-}
-
-fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
-    let mut hasher = new_blake2b();
-    hasher.update(salt);
-    hasher.update(data);
-    let mut result = [0u8; 32];
-    hasher.finalize(&mut result);
-    result
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]

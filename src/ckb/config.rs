@@ -56,6 +56,6 @@ impl CkbConfig {
 
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         self.create_base_dir()?;
-        super::key::read_or_generate_private_key(&self.base_dir().join("sk")).map_err(Into::into)
+        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
     }
 }
