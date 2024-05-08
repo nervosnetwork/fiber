@@ -1416,7 +1416,7 @@ impl ChannelActorState {
                 }
 
                 self.pending_received_tlcs.insert(tlc.id, tlc);
-                debug!("Savd tlc {:?} to pending_received_tlcs", &tlc);
+                debug!("Saved tlc {:?} to pending_received_tlcs", &tlc);
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
@@ -1680,7 +1680,7 @@ impl ChannelActorState {
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
         debug!(
-            "Successfuly handled commitment signed message: {:?}, tx: {:?}",
+            "Successfully handled commitment signed message: {:?}, tx: {:?}",
             &commitment_signed, &tx
         );
 
@@ -1694,7 +1694,28 @@ impl ChannelActorState {
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady(_) => {
-                // TODO: now should revoke previous transation by revealing preimage.
+                // Now we should revoke previous transation by revealing preimage.
+                let revocation_preimage = self
+                    .signer
+                    .get_commitment_secret(self.holder_commitment_number);
+                debug!(
+                    "Revealing preimage for revocation: {:?}",
+                    &revocation_preimage
+                );
+                self.holder_commitment_number = self.get_next_commitment_number(true);
+                let next_commitment_point = self.get_holder_commitment_point();
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                            peer_id: self.peer_id.clone(),
+                            message: PCNMessage::RevokeAndAck(RevokeAndAck {
+                                channel_id: self.get_id(),
+                                per_commitment_secret: revocation_preimage.into(),
+                                next_per_commitment_point: next_commitment_point,
+                            }),
+                        }),
+                    ))
+                    .expect("network actor alive");
                 self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
             }
         }
