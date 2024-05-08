@@ -1,17 +1,17 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::{
-    core::TransactionView,
-    packed::{OutPoint, Transaction},
-    prelude::IntoTransactionView,
+    core::{DepType, TransactionBuilder, TransactionView},
+    packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Transaction},
+    prelude::{IntoTransactionView, Pack},
 };
 use log::{debug, error, info, warn};
-use molecule::prelude::Entity;
+use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
-    sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
-    PubNonce, SecNonce,
+    sign_partial, verify_partial, AggNonce, BinaryEncoding, CompactSignature, KeyAggContext,
+    PartialSignature, PubNonce, SecNonce,
 };
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
 use serde::Deserialize;
@@ -1088,6 +1088,17 @@ impl ChannelActorState {
         }
     }
 
+    pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
+        let tx = self
+            .funding_tx
+            .as_ref()
+            .expect("Funding transaction is present");
+        // By convention, the funding tx output for the channel is the first output.
+        tx.output_pts_iter()
+            .next()
+            .expect("Funding transaction output is present")
+    }
+
     pub fn get_holder_commitment_point(&self) -> Pubkey {
         self.signer
             .get_commitment_point(self.holder_commitment_number)
@@ -1818,6 +1829,7 @@ impl ChannelActorState {
         let tlcs = self.get_tlcs_for_commitment_tx();
 
         CommitmentTransaction {
+            input: self.get_funding_transaction_outpoint(),
             commitment_number,
             to_broadcaster_value,
             to_countersignatory_value,
@@ -1850,6 +1862,9 @@ impl ChannelActorState {
 /// meaning that counterparties have different resulting CKB transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitmentTransaction {
+    // The input to the commitment transactions,
+    // always the first output of the  funding transaction.
+    pub input: OutPoint,
     // Will change after each commitment to derive new commitment secrets.
     // Currently always 0.
     pub commitment_number: u64,
@@ -1909,27 +1924,6 @@ impl Musig2Context {
             },
         )
     }
-
-    pub fn create_signature(
-        self,
-        message: &[u8],
-        partial_signature: PartialSignature,
-        partial_signature_given_first: bool,
-    ) -> Result<CompactSignature, ProcessingChannelError> {
-        let (sign_ctx, verify_ctx) = self.split();
-        verify_ctx.verify(partial_signature, message)?;
-        let partial_signature_2 = sign_ctx.sign(message)?;
-        Ok(aggregate_partial_signatures(
-            &verify_ctx.key_agg_ctx,
-            &verify_ctx.agg_nonce,
-            if partial_signature_given_first {
-                vec![partial_signature, partial_signature_2]
-            } else {
-                vec![partial_signature_2, partial_signature]
-            },
-            message,
-        )?)
-    }
 }
 
 pub struct Musig2VerifyContext {
@@ -1972,8 +1966,34 @@ impl Musig2SignContext {
 
 impl CommitmentTransaction {
     pub fn gen_tx(&self) -> TransactionView {
-        // TODO: implement build transaction here.
-        Transaction::default().into_view()
+        // TODO: Use real commitment lock outpoint here.
+        let commitment_lock_outpoint = OutPoint::new_builder()
+            .tx_hash(Byte32::zero())
+            .index(0u32.pack())
+            .build();
+
+        let tx_builder = TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(commitment_lock_outpoint)
+                    .dep_type(DepType::Code.into())
+                    .build(),
+            )
+            .input(
+                CellInput::new_builder()
+                    .previous_output(self.input.clone())
+                    .build(),
+            );
+
+        let (outputs, outputs_data) = self.build_outputs();
+        let tx_builder = tx_builder.set_outputs(outputs);
+        let tx_builder = tx_builder.set_outputs_data(outputs_data);
+        tx_builder.build()
+    }
+
+    // TODO: add outputs from self.tlcs
+    pub fn build_outputs(&self) -> (Vec<CellOutput>, Vec<Bytes>) {
+        (vec![], vec![])
     }
 
     pub fn sign(
@@ -2015,24 +2035,25 @@ impl CommitmentTransaction {
         })
     }
 
-    pub fn create_transaction(
+    pub fn aggregate_partial_signatures(
         &self,
-        ctx: Musig2Context,
-        partial_signature: PartialSignature,
-        partial_signature_given_first: bool,
-        set_signature: impl Fn(
-            TransactionView,
-            CompactSignature,
-        ) -> Result<Transaction, ProcessingChannelError>,
-    ) -> Result<Transaction, ProcessingChannelError> {
+        verify_ctx: Musig2VerifyContext,
+        partial_signatures: [PartialSignature; 2],
+    ) -> Result<TransactionView, ProcessingChannelError> {
         let tx: TransactionView = self.gen_tx();
         let message = tx.hash();
-        let signature = ctx.create_signature(
-            message.as_slice(),
-            partial_signature,
-            partial_signature_given_first,
+        let signature: CompactSignature = aggregate_partial_signatures(
+            &verify_ctx.key_agg_ctx,
+            &verify_ctx.agg_nonce,
+            partial_signatures,
+            message.as_bytes(),
         )?;
-        set_signature(tx, signature)
+
+        // TODO: check the witness format of commitment transaction.
+        Ok(tx
+            .as_advanced_builder()
+            .set_witnesses(vec![signature.to_bytes().pack()])
+            .build())
     }
 }
 
