@@ -388,12 +388,12 @@ pub struct OpenChannel {
     pub channel_id: Hash256,
     #[serde_as(as = "Option<EntityWrapperBase64<Script>>")]
     pub funding_type_script: Option<Script>,
-    pub funding_amount: u64,
+    pub funding_amount: u128,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
-    pub max_tlc_value_in_flight: u64,
+    pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
-    pub min_tlc_value: u64,
+    pub min_tlc_value: u128,
     pub to_self_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
@@ -466,14 +466,10 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptChannel {
     pub channel_id: Hash256,
-    // TODO: remove funding_amount.
-    // https://github.com/lightning/bolts/blob/master/02-peer-protocol.md#the-accept_channel-message
-    // bolts2 does not mention the funding_satoshis in accept channel.
-    // Maybe we should remove it.
-    pub funding_amount: u64,
-    pub max_tlc_value_in_flight: u64,
+    pub funding_amount: u128,
+    pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
-    pub min_tlc_value: u64,
+    pub min_tlc_value: u128,
     pub to_self_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
@@ -871,7 +867,7 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
-    pub amount: u64,
+    pub amount: u128,
     pub payment_hash: Hash256,
     pub expiry: LockTime,
 }

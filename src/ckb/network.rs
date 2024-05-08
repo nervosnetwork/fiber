@@ -61,7 +61,7 @@ pub enum NetworkActorCommand {
 pub struct OpenChannelCommand {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
-    pub total_value: u64,
+    pub total_value: u128,
 }
 
 impl NetworkActorMessage {

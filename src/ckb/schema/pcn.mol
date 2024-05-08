@@ -9,12 +9,12 @@ table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
     funding_type_script:         ScriptOpt,
-    funding_amount:              Uint64,
+    funding_amount:              Uint128,
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
-    max_tlc_value_in_flight:     Uint64,
+    max_tlc_value_in_flight:     Uint128,
     max_accept_tlcs:             Uint64,
-    min_tlc_value:               Uint64,
+    min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Pubkey,
     revocation_basepoint:        Pubkey,
@@ -29,10 +29,10 @@ table OpenChannel {
 
 table AcceptChannel {
     channel_id:                  Byte32,
-    funding_amount:              Uint64,
-    max_tlc_value_in_flight:     Uint64,
+    funding_amount:              Uint128,
+    max_tlc_value_in_flight:     Uint128,
     max_accept_tlcs:             Uint64,
-    min_tlc_value:               Uint64,
+    min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Pubkey,
     revocation_basepoint:        Pubkey,
@@ -102,7 +102,7 @@ table ClosingSigned {
 table AddTlc {
     channel_id:     Byte32,
     tlc_id:         Uint64,
-    amount:         Uint64,
+    amount:         Uint128,
     payment_hash:   Byte32,
     expiry:         Uint64,
 }

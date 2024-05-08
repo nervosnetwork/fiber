@@ -62,7 +62,7 @@ pub enum TxCollaborationCommand {
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 pub struct AddTlcCommand {
-    amount: u64,
+    amount: u128,
     preimage: Option<Hash256>,
     expiry: LockTime,
 }
@@ -117,9 +117,9 @@ pub const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
 pub const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = (2 ^ 48) - 1;
 pub const DEFAULT_FEE_RATE: u64 = 0;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
-pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u64 = u64::MAX;
+pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
-pub const DEFAULT_MIN_TLC_VALUE: u64 = 0;
+pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_SELF_DELAY_BLOCKS: u64 = 10;
 
 #[serde_as]
@@ -763,8 +763,8 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
-    pub total_value: u64,
-    pub to_self_value: u64,
+    pub total_value: u128,
+    pub to_self_value: u128,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
@@ -965,7 +965,7 @@ impl ChannelActorState {
         temp_channel_id: Hash256,
         seed: &[u8],
         peer_id: PeerId,
-        counterparty_value: u64,
+        counterparty_value: u128,
         counterparty_delay: LockTime,
         counterparty_pubkeys: ChannelBasePublicKeys,
         counterparty_nonce: PubNonce,
@@ -1019,7 +1019,7 @@ impl ChannelActorState {
     pub fn new_outbound_channel(
         seed: &[u8],
         peer_id: PeerId,
-        value: u64,
+        value: u128,
         to_self_delay: LockTime,
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
@@ -1175,7 +1175,7 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    pub fn get_amounts_for_both_party(&self, local: bool) -> (u64, u64) {
+    pub fn get_amounts_for_both_party(&self, local: bool) -> (u128, u128) {
         // TODO: consider transaction fee here.
         // TODO: exclude all the timelocked values here.
         if local {
@@ -1866,9 +1866,9 @@ pub struct CommitmentTransaction {
     pub commitment_number: u64,
     // The broadcaster's balance, may be spent after timelock by the broadcaster or
     // by the countersignatory with revocation key.
-    pub to_broadcaster_value: u64,
+    pub to_broadcaster_value: u128,
     // The countersignatory's balance, may be spent immediately by the countersignatory.
-    pub to_countersignatory_value: u64,
+    pub to_countersignatory_value: u128,
     // The list of TLC commitmentments. These outputs are already multisiged to another
     // set of transactions, whose output may be spent by countersignatory with revocation key,
     // the original sender after delay, or the receiver if they has correct preimage,
@@ -2141,7 +2141,7 @@ pub struct TLC {
     pub is_offered: bool,
     /// The value, in msat, of the HTLC. The value as it appears in the commitment transaction is
     /// this divided by 1000.
-    pub amount: u64,
+    pub amount: u128,
     /// The CLTV lock-time at which this HTLC expires.
     pub lock_time: LockTime,
     /// The hash of the preimage which unlocks this HTLC.
