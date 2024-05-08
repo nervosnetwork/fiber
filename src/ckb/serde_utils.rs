@@ -40,7 +40,7 @@ where
 
     String::deserialize(deserializer)
         .and_then(|string| {
-            if &string[..2].to_lowercase() != "0x" {
+            if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
                 return Err(Error::custom("hex string should start with 0x"));
             };
             hex::decode(&string[2..])

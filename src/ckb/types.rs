@@ -810,6 +810,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosingSigned {
     pub channel_id: Hash256,
+    // TODO: fee is actually not used for now.
     pub fee: u64,
     pub partial_signature: PartialSignature,
 }

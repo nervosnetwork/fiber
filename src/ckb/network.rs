@@ -1,3 +1,4 @@
+use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Transaction};
 use log::{debug, error, info, warn};
 use ractor::{async_trait as rasync_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
@@ -96,6 +97,7 @@ pub enum NetworkServiceEvent {
     ChannelPendingToBeAccepted(PeerId, Hash256),
     ChannelReady(PeerId, Hash256),
     ChannelShutDown(PeerId, Hash256),
+    ChannelClosed(PeerId, Hash256, TransactionView),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -115,8 +117,10 @@ pub enum NetworkActorEvent {
     ChannelAccepted(Hash256, Hash256),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
-    /// A channel is ready to use.
+    /// A channel is being shutting down.
     ChannelShutdown(Hash256, PeerId),
+    /// A channel is already closed.
+    ChannelClosed(Hash256, PeerId, TransactionView),
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
@@ -646,6 +650,20 @@ impl Actor for NetworkActor {
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
                                 NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
+                    info!(
+                        "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
+                        channel_id, peer_id, tx
+                    );
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx),
                             ),
                         ))
                         .expect("myself alive");

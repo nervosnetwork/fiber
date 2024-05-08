@@ -863,6 +863,8 @@ pub struct ChannelActorState {
     // The commitment point that is going to be used in the following commitment transaction.
     pub counterparty_commitment_point: Option<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
+    pub holder_shutdown_signature: Option<PartialSignature>,
+    pub counterparty_shutdown_signature: Option<PartialSignature>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -962,7 +964,7 @@ bitflags! {
         /// we and they have sent `shutdown` messages and all HTLCs are resolved.
         const THEIR_CLOSING_SIGNED = 1 << 3;
         /// Indicates all pending HTLCs are resolved, and this channel will be dropped.
-        const DROPPING_PENDING = ShuttingDownFlags::AWAITING_PENDING_TLCS.bits() | 1 << 2;
+        const DROPPING_PENDING = ShuttingDownFlags::AWAITING_PENDING_TLCS.bits() | ShuttingDownFlags::OUR_CLOSING_SIGNED.bits() | ShuttingDownFlags::THEIR_CLOSING_SIGNED.bits();
     }
 }
 
@@ -994,6 +996,8 @@ pub enum ChannelState {
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
+    /// This channel is closed.
+    Closed,
 }
 
 fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
@@ -1096,6 +1100,8 @@ impl ChannelActorState {
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_point: Some(counterparty_commitment_point),
             counterparty_initial_commitment_point: Some(counterparty_prev_commitment_point),
+            holder_shutdown_signature: None,
+            counterparty_shutdown_signature: None,
         }
     }
 
@@ -1135,6 +1141,8 @@ impl ChannelActorState {
             counterparty_initial_commitment_point: None,
             holder_shutdown_script: None,
             counterparty_shutdown_script: None,
+            holder_shutdown_signature: None,
+            counterparty_shutdown_signature: None,
         }
     }
 }
@@ -1199,7 +1207,6 @@ impl ChannelActorState {
             .funding_tx
             .as_ref()
             .expect("Funding transaction is present");
-        dbg!(&tx);
         // By convention, the funding tx output for the channel is the first output.
         tx.output_pts_iter()
             .next()
@@ -1526,6 +1533,74 @@ impl ChannelActorState {
 
                 Ok(())
             }
+            PCNMessage::ClosingSigned(closing) => {
+                let flags = match self.state {
+                    ChannelState::ShuttingDown(flags)
+                        if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) =>
+                    {
+                        flags
+                    }
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "received ClosingSigned message, but we're not ready for ClosingSigned, state is currently {:?}",
+                            self.state
+                        )));
+                    }
+                };
+                let ClosingSigned {
+                    partial_signature,
+                    channel_id,
+                    fee: _,
+                } = closing;
+
+                if channel_id != self.get_id() {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "Channel id mismatch".to_string(),
+                    ));
+                }
+
+                let verify_ctx = Musig2VerifyContext::from(&*self);
+                let tx = self.build_shutdown_tx(
+                    self.get_holder_shutdown_script(),
+                    self.get_counterparty_shutdown_script(),
+                );
+                let message = get_tx_message_to_sign(&tx);
+                verify_ctx.verify(partial_signature, message.as_slice())?;
+                debug!("Successfully verified ClosingSigned message");
+                self.counterparty_shutdown_signature = Some(partial_signature);
+
+                let flags = flags | ShuttingDownFlags::THEIR_CLOSING_SIGNED;
+                self.state = ChannelState::ShuttingDown(flags);
+                if flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
+                    self.state = ChannelState::Closed;
+                    let partial_signatures = if self.should_holder_send_tx_signatures_first() {
+                        [
+                            self.holder_shutdown_signature.unwrap(),
+                            self.counterparty_shutdown_signature.unwrap(),
+                        ]
+                    } else {
+                        [
+                            self.counterparty_shutdown_signature.unwrap(),
+                            self.holder_shutdown_signature.unwrap(),
+                        ]
+                    };
+                    let tx =
+                        aggregate_partial_signatures_for_tx(tx, verify_ctx, partial_signatures)
+                            .expect("The validity of the signatures verified");
+
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelClosed(
+                                self.get_id(),
+                                self.peer_id.clone(),
+                                tx,
+                            ),
+                        ))
+                        .expect("network actor alive");
+                }
+                Ok(())
+            }
+
             _ => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
@@ -1561,6 +1636,7 @@ impl ChannelActorState {
                 ))
                 .expect("network actor alive");
 
+            self.holder_shutdown_signature = Some(signature);
             network
                 .send_message(NetworkActorMessage::new_event(
                     NetworkActorEvent::ChannelShutdown(self.get_id(), self.peer_id.clone()),
@@ -2042,7 +2118,7 @@ impl ChannelActorState {
         counterparty_shutdown_script: &Script,
     ) -> Result<PartialSignature, ProcessingChannelError> {
         let tx = self.build_shutdown_tx(holder_shutdown_script, counterparty_shutdown_script);
-        let message = tx.hash();
+        let message = get_tx_message_to_sign(&tx);
 
         let sign_ctx = Musig2SignContext::from(self);
         let signature = sign_ctx.sign(message.as_slice())?;
@@ -2060,7 +2136,7 @@ impl ChannelActorState {
         signature: PartialSignature,
     ) -> bool {
         let tx = self.build_shutdown_tx(holder_shutdown_script, counterparty_shutdown_script);
-        let message = tx.hash();
+        let message = get_tx_message_to_sign(&tx);
         let verify_ctx = Musig2VerifyContext::from(self);
         let result = verify_ctx.verify(signature, message.as_slice());
         debug!(
@@ -2306,7 +2382,7 @@ impl CommitmentTransaction {
         sign_ctx: Musig2SignContext,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let tx = self.gen_tx();
-        let message = tx.hash();
+        let message = get_tx_message_to_sign(&tx);
 
         let signature = sign_ctx.sign(message.as_slice())?;
         debug!(
@@ -2327,7 +2403,7 @@ impl CommitmentTransaction {
         verify_ctx: Musig2VerifyContext,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let tx = self.gen_tx();
-        let message = tx.hash();
+        let message = get_tx_message_to_sign(&tx);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
             &signature, &tx, &message
@@ -2341,12 +2417,17 @@ impl CommitmentTransaction {
     }
 }
 
+fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
+    let hash = tx.hash();
+    hash
+}
+
 pub fn aggregate_partial_signatures_for_tx(
     tx: TransactionView,
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
 ) -> Result<TransactionView, ProcessingChannelError> {
-    let message = tx.hash();
+    let message = get_tx_message_to_sign(&tx);
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
         &verify_ctx.agg_nonce,
