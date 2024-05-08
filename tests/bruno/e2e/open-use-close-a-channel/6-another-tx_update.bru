@@ -1,11 +1,11 @@
 meta {
-  name: remove tx from tx collaboration
+  name: add another tx input
   type: http
-  seq: 7
+  seq: 6
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE1_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -22,8 +22,8 @@ body:json {
         "channel_id": "0x80118d4f35c6c1aafea499f71b37bda4cea12c513ef416e4c5befad30054e8e3",
         "command": {
           "TxCollaborationCommand": {
-            "TxRemove": {
-              "transaction": "0x440000000c00000040000000340000001c0000002000000024000000280000002c0000003000000000000000000000000000000000000000040000000400000004000000"
+            "TxUpdate": {
+              "transaction": "0x4d0000000c00000040000000340000001c0000002000000024000000280000002c000000300000000000000000000000000000000000000004000000040000000d000000080000000100000000"
             }
           }
         }

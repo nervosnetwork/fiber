@@ -8,9 +8,9 @@ The whole process is something like:
 2. Send a test message from NODE3 to NODE1 (not necessary for pcn per se)
 3. Send `open_channel` from NODE3 to NODE1 (thus NODE3 is the opener and NODE1 the acceptor)
 4. NODE1 automatically accepts channel and replies `accept_channel` message
-5. NODE1 sends a `tx_add` to NODE3 to fund part of the funding transaction
-6. NODE3 sends a `tx_add` to NODE1 to fund part of the funding transaction
-7. NODE1 sends a `tx_remove` to NODE3 to remove part of the funding from the funding transaction
+5. NODE1 sends a `tx_update` to NODE3 to fund part of the funding transaction
+6. NODE3 sends a `tx_update` to NODE1 to fund part of the funding transaction
+7. NODE1 sends a `tx_update` to NODE3 to remove part of the funding from the funding transaction
 8. NODE3 sends a `tx_complete` to NODE1 to express his intention of complete the funding process
 9. NODE1 sends a `tx_complete` to NODE3 to express his intention of complete the funding process
 10. Both NODE1 and NODE1 send a `commitment_signed` to sign a spending transaction of the yet to exist funding transaction
@@ -27,8 +27,8 @@ The whole process is something like:
 21. NODE1 acknowledges the commitment transaction by sending a `revoke_and_ack`
 22. NODE1 initiates a `shutdown` to close the channel
 23. NODE3 replies a `shutdown` to acknowledge the closure of this channel
-24. NODE3 sends a `closing_signed` to make a NODE1 immediately broadcastable closure transaction 
-24. NODE1 sends a `closing_signed` to make a NODE3 immediately broadcastable closure transaction 
+24. NODE3 sends a `closing_signed` to make a NODE1 immediately broadcastable closure transaction
+24. NODE1 sends a `closing_signed` to make a NODE3 immediately broadcastable closure transaction
 
 ## Starting nodes
 
