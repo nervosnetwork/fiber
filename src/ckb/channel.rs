@@ -292,7 +292,7 @@ impl ChannelActor {
         );
         let tlc = TLC::from((id, command));
 
-        // TODO: Note that since we are message sending is async,
+        // TODO: Note that since message sending is async,
         // we can't guarantee anything about the order of message sending
         // and state updating. And any of these may fail while the other succeedes.
         // We may need to handle all these possibilities.
@@ -318,6 +318,10 @@ impl ChannelActor {
         // Update the state for this tlc.
         state.pending_offered_tlcs.insert(id, tlc);
         state.next_offering_tlc_id += 1;
+        debug!(
+            "Added tlc with id {:?} to pending offered tlcs: {:?}",
+            id, &tlc
+        );
         Ok(())
     }
 
@@ -1350,6 +1354,7 @@ impl ChannelActorState {
                 }
 
                 self.pending_received_tlcs.insert(tlc.id, tlc);
+                debug!("Savd tlc {:?} to pending_received_tlcs", &tlc);
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
@@ -1728,6 +1733,9 @@ impl ChannelActorState {
         );
     }
 
+    // Whose pubkey should go first in musig2?
+    // We define a definitive order for the pubkeys in musig2 to makes it easier
+    // to aggregate musig2 signatures.
     fn should_holders_pubkey_go_first_in_musig2(&self) -> bool {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
@@ -1737,12 +1745,17 @@ impl ChannelActorState {
         holder_pubkey <= counterparty_pubkey
     }
 
+    // Who should us (also called holder) send tx_signatures first?
+    // In order to avoid deadlock, we need to define an order for sending tx_signatures.
+    // Currently the order of sending tx_signatures is defined as follows:
+    // If the amount to self is less than the amount to remote, then we should send,
+    // else if the amount to self is equal to the amount to remote and we have
+    // smaller funding_pubkey, then we should send first. Otherwise, we should wait
+    // the counterparty to send tx_signatures first.
     fn should_holder_send_tx_signatures_first(&self) -> bool {
-        // TODO: 我们会定义出资金额较少的一方必须先发送
-        // tx_signatures 消息, 在金额相同的情况下, 按 funding_pubkey
-        // 排序较小的先发送, 这样可以避免双方同时等待对方 tx_signatures
-        // 消息导致的死锁问题.
-        self.should_holders_pubkey_go_first_in_musig2()
+        self.to_self_amount < self.to_remote_amount
+            || self.to_self_amount == self.to_remote_amount
+                && self.should_holders_pubkey_go_first_in_musig2()
     }
 
     pub fn build_commitment_tx(&self, local: bool) -> CommitmentTransaction {

@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 
 // TODO: we need to securely erase the key.
 // We wrap the key in a struct to obtain create a function to obtain secret entropy from this key.
-// Unfortunately, we SecioKeyPair does not allow us to obtain the secret key from the key pair.
+// Unfortunately, SecioKeyPair does not allow us to obtain the secret key from the key pair.
 pub struct KeyPair([u8; 32]);
 
 use tentacle::secio::SecioKeyPair;
