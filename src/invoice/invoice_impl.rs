@@ -137,6 +137,21 @@ pub struct InvoiceData {
     pub attrs: Vec<Attribute>,
 }
 
+macro_rules! attr_getter {
+    ($name:ident, $attr_name:ident, $attr:ty) => {
+        pub fn $name(&self) -> Option<&$attr> {
+            self.data
+                .attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    Attribute::$attr_name(val) => Some(val),
+                    _ => None,
+                })
+                .next()
+        }
+    };
+}
+
 /// Represents a syntactically and semantically correct lightning BOLT11 invoice.
 ///
 /// There are three ways to construct a `CkbInvoice`:
@@ -174,10 +189,6 @@ impl CkbInvoice {
         base32
     }
 
-    pub fn is_signed(&self) -> bool {
-        self.signature.is_some()
-    }
-
     fn hash(&self) -> [u8; 32] {
         let hrp = self.hrp_part();
         let data = self.data_part();
@@ -185,47 +196,6 @@ impl CkbInvoice {
         let mut hash: [u8; 32] = Default::default();
         hash.copy_from_slice(&Sha256::hash(&preimage).to_byte_array());
         hash
-    }
-
-    /// Recovers the public key used for signing the invoice from the recoverable signature.
-    pub fn recover_payee_pub_key(&self) -> Result<PublicKey, secp256k1::Error> {
-        let hash = Message::from_slice(&self.hash()[..])
-            .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
-
-        let res = secp256k1::Secp256k1::new()
-            .recover_ecdsa(&hash, &self.signature.as_ref().unwrap().0)
-            .unwrap();
-        Ok(res)
-    }
-
-    pub fn payee_pub_key(&self) -> Option<&PublicKey> {
-        self.data
-            .attrs
-            .iter()
-            .filter_map(|attr| match attr {
-                Attribute::PayeePublicKey(pk) => Some(pk),
-                _ => None,
-            })
-            .next()
-    }
-
-    pub fn payment_hash(&self) -> &[u8; 32] {
-        &self.data.payment_hash
-    }
-
-    pub fn payment_preimage(&self) -> Option<&[u8; 32]> {
-        self.data
-            .attrs
-            .iter()
-            .filter_map(|attr| match attr {
-                Attribute::PaymentPreimage(preimage) => Some(preimage),
-                _ => None,
-            })
-            .next()
-    }
-
-    pub fn payment_hash_id(&self) -> String {
-        hex::encode(self.payment_hash())
     }
 
     /// Checks if the signature is valid for the included payee public key or if none exists if it's
@@ -262,6 +232,41 @@ impl CkbInvoice {
         }
     }
 
+    fn update_signature<F>(&mut self, sign_function: F) -> Result<(), InvoiceError>
+    where
+        F: FnOnce(&Message) -> RecoverableSignature,
+    {
+        let hash = self.hash();
+        let message = Message::from_slice(&hash).unwrap();
+        let signature = sign_function(&message);
+        self.signature = Some(InvoiceSignature(signature));
+        self.check_signature()?;
+        Ok(())
+    }
+
+    /// Recovers the public key used for signing the invoice from the recoverable signature.
+    pub fn recover_payee_pub_key(&self) -> Result<PublicKey, secp256k1::Error> {
+        let hash = Message::from_slice(&self.hash()[..])
+            .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
+
+        let res = secp256k1::Secp256k1::new()
+            .recover_ecdsa(&hash, &self.signature.as_ref().unwrap().0)
+            .unwrap();
+        Ok(res)
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.signature.is_some()
+    }
+
+    pub fn payment_hash(&self) -> &[u8; 32] {
+        &self.data.payment_hash
+    }
+
+    pub fn payment_hash_id(&self) -> String {
+        hex::encode(self.payment_hash())
+    }
+
     /// Check that the invoice is signed correctly and that key recovery works
     pub fn check_signature(&self) -> Result<(), InvoiceError> {
         if self.signature.is_none() {
@@ -283,17 +288,18 @@ impl CkbInvoice {
         Ok(())
     }
 
-    fn update_signature<F>(&mut self, sign_function: F) -> Result<(), InvoiceError>
-    where
-        F: FnOnce(&Message) -> RecoverableSignature,
-    {
-        let hash = self.hash();
-        let message = Message::from_slice(&hash).unwrap();
-        let signature = sign_function(&message);
-        self.signature = Some(InvoiceSignature(signature));
-        self.check_signature()?;
-        Ok(())
-    }
+    attr_getter!(payee_pub_key, PayeePublicKey, PublicKey);
+    attr_getter!(expiry_time, ExpiryTime, Duration);
+    attr_getter!(description, Description, String);
+    attr_getter!(final_htlc_timeout, FinalHtlcTimeout, u64);
+    attr_getter!(
+        final_htlc_minimum_cltv_expiry,
+        FinalHtlcMinimumCltvExpiry,
+        u64
+    );
+    attr_getter!(udt_script, UdtScript, CkbScript);
+    attr_getter!(payment_preimage, PaymentPreimage, [u8; 32]);
+    attr_getter!(fallback_address, FallbackAddr, String);
 }
 
 /// Recoverable signature
@@ -545,6 +551,14 @@ impl Default for InvoiceBuilder {
     }
 }
 
+macro_rules! attr_setter {
+    ($name:ident, $attr:ident, $param:ty) => {
+        pub fn $name(self, value: $param) -> Self {
+            self.add_attr(Attribute::$attr(value))
+        }
+    };
+}
+
 impl InvoiceBuilder {
     pub fn new(currency: Currency) -> Self {
         Self {
@@ -571,57 +585,32 @@ impl InvoiceBuilder {
         self
     }
 
-    pub fn payment_hash(mut self, payment_hash: [u8; 32]) -> Self {
-        self.payment_hash = Some(payment_hash);
-        self
-    }
-
-    pub fn payment_preimage(self, payment_preimage: [u8; 32]) -> Self {
-        self.add_attr(Attribute::PaymentPreimage(payment_preimage))
-    }
-
-    pub fn description(self, description: &str) -> Self {
-        self.add_attr(Attribute::Description(description.to_string()))
-    }
-
     fn add_attr(mut self, attr: Attribute) -> Self {
         self.attrs.push(attr);
         self
     }
 
-    /// Sets the payee's public key.
-    pub fn payee_pub_key(self, pub_key: PublicKey) -> Self {
-        self.add_attr(Attribute::PayeePublicKey(pub_key))
+    pub fn payment_hash(mut self, payment_hash: [u8; 32]) -> Self {
+        self.payment_hash = Some(payment_hash);
+        self
     }
 
-    /// Sets the expiry time
-    /// dropping the subsecond part (which is not representable in BOLT 11 invoices).
-    pub fn expiry_time(self, expiry_time: Duration) -> Self {
-        self.add_attr(Attribute::ExpiryTime(expiry_time))
-    }
+    attr_setter!(payment_preimage, PaymentPreimage, [u8; 32]);
+    attr_setter!(description, Description, String);
+    attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
+    attr_setter!(expiry_time, ExpiryTime, Duration);
+    attr_setter!(fallback_address, FallbackAddr, String);
+    attr_setter!(final_cltv, FinalHtlcMinimumCltvExpiry, u64);
 
-    /// Adds a fallback address.
-    pub fn fallback_address(self, fallback: String) -> Self {
-        self.add_attr(Attribute::FallbackAddr(fallback))
-    }
-
-    /// Adds a final cltv expiry.
-    pub fn final_cltv(self, final_cltv: u64) -> Self {
-        self.add_attr(Attribute::FinalHtlcMinimumCltvExpiry(final_cltv))
-    }
-
-    fn get_payment_preimage(&self) -> Option<[u8; 32]> {
-        self.attrs
+    pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
+        let preimage = self
+            .attrs
             .iter()
             .filter_map(|attr| match attr {
                 Attribute::PaymentPreimage(preimage) => Some(*preimage),
                 _ => None,
             })
-            .next()
-    }
-
-    pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
-        let preimage = self.get_payment_preimage();
+            .next();
         if self.payment_hash.is_some() && preimage.is_some() {
             return Err(InvoiceError::BothPaymenthashAndPreimage);
         }

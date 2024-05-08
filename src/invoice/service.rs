@@ -92,7 +92,7 @@ impl InvoiceService {
         let mut invoice_builder =
             InvoiceBuilder::new(new_invoice.currency).amount(Some(new_invoice.amount));
         if let Some(description) = new_invoice.description {
-            invoice_builder = invoice_builder.description(&description);
+            invoice_builder = invoice_builder.description(description);
         };
         if let Some(payment_hash) = new_invoice.payment_hash {
             invoice_builder = invoice_builder.payment_hash(payment_hash);
