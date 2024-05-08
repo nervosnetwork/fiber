@@ -95,6 +95,7 @@ pub enum NetworkServiceEvent {
     ChannelCreated(PeerId, Hash256),
     ChannelPendingToBeAccepted(PeerId, Hash256),
     ChannelReady(PeerId, Hash256),
+    ChannelShutDown(PeerId, Hash256),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -114,6 +115,8 @@ pub enum NetworkActorEvent {
     ChannelAccepted(Hash256, Hash256),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
+    /// A channel is ready to use.
+    ChannelShutdown(Hash256, PeerId),
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
@@ -629,6 +632,20 @@ impl Actor for NetworkActor {
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
                                 NetworkServiceEvent::ChannelReady(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
+                    info!(
+                        "Channel ({:?}) to peer {:?} is being shutdown.",
+                        channel_id, peer_id
+                    );
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
                             ),
                         ))
                         .expect("myself alive");

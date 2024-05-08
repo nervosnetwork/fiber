@@ -2,7 +2,7 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_types::{
     core::{DepType, TransactionBuilder, TransactionView},
-    packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Transaction},
+    packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{IntoTransactionView, Pack},
 };
 
@@ -28,9 +28,9 @@ use super::{
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
     types::{
-        AcceptChannel, AddTlc, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel,
-        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck, TxCollaborationMsg,
-        TxComplete, TxSignatures, TxUpdate,
+        AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
+        OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
+        TxCollaborationMsg, TxComplete, TxSignatures, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -775,6 +775,8 @@ pub struct ChannelActorState {
 
     // Cached channel parameter for easier of access.
     pub holder_channel_parameters: ChannelParametersOneParty,
+    // The holder has set a shutdown script.
+    pub holder_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
     pub holder_commitment_number: u64,
@@ -794,6 +796,9 @@ pub struct ChannelActorState {
     // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
     // will be removed from this map.
     pub pending_received_tlcs: HashMap<u64, TLC>,
+
+    // The counterparty has already sent a shutdown message with this script.
+    pub counterparty_shutdown_script: Option<Script>,
 
     pub counterparty_nonce: Option<PubNonce>,
     // The commitment point used in the first commitment transaction after funding transaction.
@@ -887,6 +892,25 @@ bitflags! {
         ///	implicit ACK, so instead we have to hold them away temporarily to be sent later.
         const AWAITING_REMOTE_REVOKE = 1;
     }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct ShuttingDownFlags: u32 {
+        /// Indicates that we have sent a `shutdown` message.
+        const OUR_SHUTDOWN_SENT = 1;
+        /// Indicates that they have sent a `shutdown` message.
+        const THEIR_SHUTDOWN_SENT = 1 << 1;
+        /// Indicates that both we and they have sent `shutdown` messages,
+        /// but some HTLCs are still pending resolution.
+        const AWAITING_PENDING_TLCS = ShuttingDownFlags::OUR_SHUTDOWN_SENT.bits() | ShuttingDownFlags::THEIR_SHUTDOWN_SENT.bits();
+        /// Indicates that we have sent a `closing_signed` message, implying both
+        /// we and they have sent `shutdown` messages and all HTLCs are resolved.
+        const OUR_CLOSING_SIGNED = 1 << 2;
+        /// Indicates that they have sent a `closing_signed` message, implying both
+        /// we and they have sent `shutdown` messages and all HTLCs are resolved.
+        const THEIR_CLOSING_SIGNED = 1 << 3;
+        /// Indicates all pending HTLCs are resolved, and this channel will be dropped.
+        const DROPPING_PENDING = ShuttingDownFlags::AWAITING_PENDING_TLCS.bits() | 1 << 2;
+    }
 }
 
 // Depending on the state of the channel, we may process the commitment_signed command differently.
@@ -916,7 +940,7 @@ pub enum ChannelState {
     ChannelReady(ChannelReadyFlags),
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
-    ShutdownComplete,
+    ShuttingDown(ShuttingDownFlags),
 }
 
 fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
@@ -1003,6 +1027,7 @@ impl ChannelActorState {
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
             to_remote_amount: counterparty_value,
+            holder_shutdown_script: None,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
                 selected_contest_delay: counterparty_delay,
@@ -1014,6 +1039,7 @@ impl ChannelActorState {
             }),
             holder_commitment_number: commitment_number,
             counterparty_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
+            counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_point: Some(counterparty_commitment_point),
             counterparty_initial_commitment_point: Some(counterparty_prev_commitment_point),
@@ -1054,6 +1080,8 @@ impl ChannelActorState {
             counterparty_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
             counterparty_commitment_point: None,
             counterparty_initial_commitment_point: None,
+            holder_shutdown_script: None,
+            counterparty_shutdown_script: None,
         }
     }
 }
@@ -1125,6 +1153,19 @@ impl ChannelActorState {
             .expect("Funding transaction output is present")
     }
 
+    pub fn get_holder_shutdown_script(&self) -> &Script {
+        // TODO: what is the best strategy for shutdown script here?
+        self.holder_shutdown_script
+            .as_ref()
+            .expect("Holder shutdown script is present")
+    }
+
+    pub fn get_counterparty_shutdown_script(&self) -> &Script {
+        self.counterparty_shutdown_script
+            .as_ref()
+            .expect("Counterparty shutdown script is present")
+    }
+
     pub fn get_holder_commitment_point(&self) -> Pubkey {
         self.signer
             .get_commitment_point(self.holder_commitment_number)
@@ -1180,15 +1221,9 @@ impl ChannelActorState {
         // TODO: consider transaction fee here.
         // TODO: exclude all the timelocked values here.
         if local {
-            (
-                self.to_remote_amount,
-                self.to_self_amount - self.to_remote_amount,
-            )
+            (self.to_remote_amount, self.to_self_amount)
         } else {
-            (
-                self.to_self_amount - self.to_remote_amount,
-                self.to_remote_amount,
-            )
+            (self.to_self_amount, self.to_remote_amount)
         }
     }
 
@@ -1406,6 +1441,61 @@ impl ChannelActorState {
                         remove_tlc.tlc_id
                     ))),
                 }
+            }
+            PCNMessage::Shutdown(shutdown) => {
+                let flags = match self.state {
+                    ChannelState::ChannelReady(_) => ShuttingDownFlags::empty(),
+                    ChannelState::ShuttingDown(flags)
+                        if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
+                    {
+                        return Err(ProcessingChannelError::InvalidParameter(
+                            "Received Shutdown message, but we're already in ShuttingDown state"
+                                .to_string(),
+                        ));
+                    }
+                    ChannelState::ShuttingDown(flags) => flags,
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
+                            self.state
+                        )));
+                    }
+                };
+                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+                self.counterparty_shutdown_script = Some(shutdown.close_script);
+
+                // TODO: should automatically check this periodically.
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+                    && self.get_tlcs_for_commitment_tx().is_empty()
+                {
+                    self.state =
+                        ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
+
+                    let signature = self.build_and_sign_shutdown_tx(
+                        self.get_holder_shutdown_script(),
+                        self.get_counterparty_shutdown_script(),
+                    )?;
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                                peer_id: self.peer_id.clone(),
+                                message: PCNMessage::ClosingSigned(ClosingSigned {
+                                    partial_signature: signature,
+                                    channel_id: self.get_id(),
+                                    fee: 0,
+                                }),
+                            }),
+                        ))
+                        .expect("network actor alive");
+
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelShutdown(self.get_id(), self.peer_id.clone()),
+                        ))
+                        .expect("network actor alive");
+                }
+
+                Ok(())
             }
             _ => {
                 warn!("Received unsupported message: {:?}", &message);
@@ -1819,6 +1909,50 @@ impl ChannelActorState {
                 && self.should_holders_pubkey_go_first_in_musig2()
     }
 
+    // TODO: the parameter with type Script is not enough to build a valid
+    // ckb transaction (we also need cell deps, witnesses, etc.).
+    pub fn build_shutdown_tx(
+        &self,
+        _holder_shutdown_script: &Script,
+        _counterparty_shutdown_script: &Script,
+    ) -> TransactionView {
+        todo!("build shutdown tx")
+    }
+
+    pub fn build_and_sign_shutdown_tx(
+        &self,
+        holder_shutdown_script: &Script,
+        counterparty_shutdown_script: &Script,
+    ) -> Result<PartialSignature, ProcessingChannelError> {
+        let tx = self.build_shutdown_tx(holder_shutdown_script, counterparty_shutdown_script);
+        let message = tx.hash();
+
+        let sign_ctx = Musig2SignContext::from(self);
+        let signature = sign_ctx.sign(message.as_slice())?;
+        debug!(
+            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &signature,
+        );
+        Ok(signature)
+    }
+
+    pub fn build_and_verify_shutdown_tx(
+        &self,
+        holder_shutdown_script: &Script,
+        counterparty_shutdown_script: &Script,
+        signature: PartialSignature,
+    ) -> bool {
+        let tx = self.build_shutdown_tx(holder_shutdown_script, counterparty_shutdown_script);
+        let message = tx.hash();
+        let verify_ctx = Musig2VerifyContext::from(self);
+        let result = verify_ctx.verify(signature, message.as_slice());
+        debug!(
+            "Verified commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &result,
+        );
+        result.is_ok()
+    }
+
     pub fn build_commitment_tx(&self, local: bool) -> CommitmentTransaction {
         let (to_broadcaster_value, to_countersignatory_value) =
             self.get_amounts_for_both_party(local);
@@ -2084,27 +2218,26 @@ impl CommitmentTransaction {
             signature,
         })
     }
+}
 
-    pub fn aggregate_partial_signatures(
-        &self,
-        verify_ctx: Musig2VerifyContext,
-        partial_signatures: [PartialSignature; 2],
-    ) -> Result<TransactionView, ProcessingChannelError> {
-        let tx: TransactionView = self.gen_tx();
-        let message = tx.hash();
-        let signature: CompactSignature = aggregate_partial_signatures(
-            &verify_ctx.key_agg_ctx,
-            &verify_ctx.agg_nonce,
-            partial_signatures,
-            message.as_bytes(),
-        )?;
+pub fn aggregate_partial_signatures_for_tx(
+    tx: TransactionView,
+    verify_ctx: Musig2VerifyContext,
+    partial_signatures: [PartialSignature; 2],
+) -> Result<TransactionView, ProcessingChannelError> {
+    let message = tx.hash();
+    let signature: CompactSignature = aggregate_partial_signatures(
+        &verify_ctx.key_agg_ctx,
+        &verify_ctx.agg_nonce,
+        partial_signatures,
+        message.as_bytes(),
+    )?;
 
-        // TODO: check the witness format of commitment transaction.
-        Ok(tx
-            .as_advanced_builder()
-            .set_witnesses(vec![signature.to_bytes().pack()])
-            .build())
-    }
+    // TODO: check the witness format of commitment transaction.
+    Ok(tx
+        .as_advanced_builder()
+        .set_witnesses(vec![signature.to_bytes().pack()])
+        .build())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

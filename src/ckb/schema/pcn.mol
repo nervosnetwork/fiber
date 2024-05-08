@@ -91,7 +91,7 @@ table Shutdown {
 table ClosingSigned {
     channel_id: Byte32,
     fee:        Uint64,
-    signature:  Signature,
+    partial_signature:  Byte32,
 }
 
 table AddTlc {

@@ -535,24 +535,27 @@ pub struct CommitmentSigned {
     pub next_local_nonce: PubNonce,
 }
 
+fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
+    MByte32::new_builder()
+        .set(
+            partial_signature
+                .serialize()
+                .into_iter()
+                .map(Byte::new)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .build()
+}
+
 impl From<CommitmentSigned> for molecule_pcn::CommitmentSigned {
     fn from(commitment_signed: CommitmentSigned) -> Self {
         molecule_pcn::CommitmentSigned::new_builder()
             .channel_id(commitment_signed.channel_id.into())
-            .partial_signature(
-                MByte32::new_builder()
-                    .set(
-                        commitment_signed
-                            .partial_signature
-                            .serialize()
-                            .into_iter()
-                            .map(Byte::new)
-                            .collect::<Vec<_>>()
-                            .try_into()
-                            .unwrap(),
-                    )
-                    .build(),
-            )
+            .partial_signature(partial_signature_to_molecule(
+                commitment_signed.partial_signature,
+            ))
             .next_local_nonce((&commitment_signed.next_local_nonce).into())
             .build()
     }
@@ -808,7 +811,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 pub struct ClosingSigned {
     pub channel_id: Hash256,
     pub fee: u64,
-    pub signature: Signature,
+    pub partial_signature: PartialSignature,
 }
 
 impl From<ClosingSigned> for molecule_pcn::ClosingSigned {
@@ -816,7 +819,9 @@ impl From<ClosingSigned> for molecule_pcn::ClosingSigned {
         molecule_pcn::ClosingSigned::new_builder()
             .channel_id(closing_signed.channel_id.into())
             .fee(closing_signed.fee.pack())
-            .signature(closing_signed.signature.into())
+            .partial_signature(partial_signature_to_molecule(
+                closing_signed.partial_signature,
+            ))
             .build()
     }
 }
@@ -828,7 +833,10 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
         Ok(ClosingSigned {
             channel_id: closing_signed.channel_id().into(),
             fee: closing_signed.fee().unpack(),
-            signature: closing_signed.signature().try_into()?,
+            partial_signature: PartialSignature::from_slice(
+                closing_signed.partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
         })
     }
 }
