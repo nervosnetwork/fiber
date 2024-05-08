@@ -2003,7 +2003,37 @@ impl ChannelActorState {
         _holder_shutdown_script: &Script,
         _counterparty_shutdown_script: &Script,
     ) -> TransactionView {
-        todo!("build shutdown tx")
+        let tx_builder = TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(get_commitment_lock_outpoint())
+                    .dep_type(DepType::Code.into())
+                    .build(),
+            )
+            .input(
+                CellInput::new_builder()
+                    .previous_output(self.get_funding_transaction_outpoint())
+                    .build(),
+            );
+
+        // TODO: Check UDT type, if it is ckb then convert it into u64.
+        let holder_value = self.to_self_amount as u64;
+        let counterparty_value = self.to_remote_amount as u64;
+        let holder_output = CellOutput::new_builder()
+            .capacity(holder_value.pack())
+            .lock(self.get_holder_shutdown_script().clone())
+            .build();
+        let counterparty_output = CellOutput::new_builder()
+            .capacity(counterparty_value.pack())
+            .lock(self.get_counterparty_shutdown_script().clone())
+            .build();
+        let outputs = if self.should_holders_pubkey_go_first_in_musig2() {
+            vec![holder_output, counterparty_output]
+        } else {
+            vec![counterparty_output, holder_output]
+        };
+        let tx_builder = tx_builder.set_outputs(outputs);
+        tx_builder.build()
     }
 
     pub fn build_and_sign_shutdown_tx(
@@ -2235,18 +2265,22 @@ impl Musig2SignContext {
     }
 }
 
+fn get_commitment_lock_outpoint() -> OutPoint {
+    // TODO: Use real commitment lock outpoint here.
+    let commitment_lock_outpoint = OutPoint::new_builder()
+        .tx_hash(Byte32::zero())
+        .index(0u32.pack())
+        .build();
+
+    commitment_lock_outpoint
+}
+
 impl CommitmentTransaction {
     pub fn gen_tx(&self) -> TransactionView {
-        // TODO: Use real commitment lock outpoint here.
-        let commitment_lock_outpoint = OutPoint::new_builder()
-            .tx_hash(Byte32::zero())
-            .index(0u32.pack())
-            .build();
-
         let tx_builder = TransactionBuilder::default()
             .cell_dep(
                 CellDep::new_builder()
-                    .out_point(commitment_lock_outpoint)
+                    .out_point(get_commitment_lock_outpoint())
                     .dep_type(DepType::Code.into())
                     .build(),
             )
