@@ -5,6 +5,7 @@ use ckb_types::{
     packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Transaction},
     prelude::{IntoTransactionView, Pack},
 };
+
 use log::{debug, error, info, warn};
 use molecule::prelude::{Builder, Entity};
 use musig2::{
@@ -28,8 +29,8 @@ use super::{
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel,
-        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, TxCollaborationMsg, TxComplete,
-        TxSignatures, TxUpdate,
+        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck, TxCollaborationMsg,
+        TxComplete, TxSignatures, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -211,7 +212,7 @@ impl ChannelActor {
                     "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
                     &state.state
                 );
-                SigningCommitmentFlags::empty()
+                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
             }
             ChannelState::SigningCommitment(flags)
                 if flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) =>
@@ -226,9 +227,17 @@ impl ChannelActor {
                     "Processing commitment_signed command in from SigningCommitment state {:?}",
                     &state.state
                 );
-                flags
+                CommitmentSignedFlags::SigningCommitment(flags)
             }
-
+            ChannelState::ChannelReady(flags)
+                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed command in state {:?}, which requires the remote to send a revoke message first.",
+                    &state.state
+                )));
+            }
+            ChannelState::ChannelReady(flags) => CommitmentSignedFlags::ChannelReady(flags),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to send commitment signed message in state {:?}",
@@ -266,9 +275,17 @@ impl ChannelActor {
             .expect("network actor alive");
 
         state.holder_commitment_number = state.get_next_commitment_number(true);
-        let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-        state.state = ChannelState::SigningCommitment(flags);
-        state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
+        match flags {
+            CommitmentSignedFlags::SigningCommitment(flags) => {
+                let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+                state.state = ChannelState::SigningCommitment(flags);
+                state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
+            }
+            CommitmentSignedFlags::ChannelReady(flags) => {
+                let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
+                state.state = ChannelState::ChannelReady(flags);
+            }
+        }
         Ok(())
     }
 
@@ -872,6 +889,14 @@ bitflags! {
     }
 }
 
+// Depending on the state of the channel, we may process the commitment_signed command differently.
+// Below are all the channel state flags variants that we may encounter
+// in normal commitment_signed processing flow.
+enum CommitmentSignedFlags {
+    SigningCommitment(SigningCommitmentFlags),
+    ChannelReady(ChannelReadyFlags),
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
@@ -1115,21 +1140,6 @@ impl ChannelActorState {
             .expect("Counterparty commitment point is present")
     }
 
-    pub fn get_funding_transaction(&self) -> OutPoint {
-        // TODO: we should use the actual funding transaction and outpoint here.
-        // We don't have a valid funding transaction yet, so we just use a bogus one.
-
-        OutPoint::default()
-
-        // self.funding_tx
-        //     .as_ref()
-        //     .expect("Funding transaction is present")
-        //     .output_pts()
-        //     .first()
-        //     .expect("Funding transaction output is present")
-        //     .clone()
-    }
-
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
@@ -1288,7 +1298,7 @@ impl ChannelActorState {
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
                                 Transaction::default(),
-                                self.get_funding_transaction(),
+                                self.get_funding_transaction_outpoint(),
                                 self.get_id(),
                             ),
                         ))
@@ -1299,6 +1309,11 @@ impl ChannelActorState {
                     return Ok(());
                 };
                 self.handle_tx_signatures(network, Some(tx_signatures.witnesses))?;
+                Ok(())
+            }
+            PCNMessage::RevokeAndAck(revoke_and_ack) => {
+                self.handle_revoke_and_ack_message(revoke_and_ack, network.clone())?;
+                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
                 Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
@@ -1528,7 +1543,7 @@ impl ChannelActorState {
                     "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
                     &self.state
                 );
-                SigningCommitmentFlags::empty()
+                CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
             }
             ChannelState::SigningCommitment(flags)
                 if flags.contains(SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT) =>
@@ -1543,9 +1558,26 @@ impl ChannelActorState {
                     "Processing commitment_signed command in from SigningCommitment state {:?}",
                     &self.state
                 );
-                flags
+                CommitmentSignedFlags::SigningCommitment(flags)
             }
-
+            // TODO: There is a chance that both parties unknowingly send commitment_signed messages,
+            // and both of they thought they are the first one to send the message and fail the other
+            // party's message. What to do in this case?
+            ChannelState::ChannelReady(flags)
+                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) =>
+            {
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Unable to process commitment_signed message in state {:?}, as we are have already sent a commitment_signed, the remote should have sent a revoke message first.",
+                    &self.state
+                )));
+            }
+            ChannelState::ChannelReady(flags) => {
+                debug!(
+                    "Processing commitment_signed command in from ChannelReady state {:?}",
+                    &self.state
+                );
+                CommitmentSignedFlags::ChannelReady(flags)
+            }
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to send commitment signed message in state {:?}",
@@ -1563,10 +1595,18 @@ impl ChannelActorState {
 
         debug!("Updating peer next local nonce");
         self.counterparty_nonce = Some(commitment_signed.next_local_nonce);
-        self.counterparty_initial_commitment_point = None;
-        let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
-        self.state = ChannelState::SigningCommitment(flags);
-        self.maybe_transition_to_tx_signatures(flags, network)?;
+        match flags {
+            CommitmentSignedFlags::SigningCommitment(flags) => {
+                self.counterparty_initial_commitment_point = None;
+                let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
+                self.state = ChannelState::SigningCommitment(flags);
+                self.maybe_transition_to_tx_signatures(flags, network)?;
+            }
+            CommitmentSignedFlags::ChannelReady(_) => {
+                // TODO: now should revoke previous transation by revealing preimage.
+                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+            }
+        }
         Ok(())
     }
 
@@ -1669,7 +1709,7 @@ impl ChannelActorState {
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::FundingTransactionPending(
                             Transaction::default(),
-                            self.get_funding_transaction(),
+                            self.get_funding_transaction_outpoint(),
                             self.get_id(),
                         ),
                     ))
@@ -1710,6 +1750,14 @@ impl ChannelActorState {
                 NetworkActorCommand::SendPcnMessage(msg),
             ))
             .expect("network actor alive");
+        Ok(())
+    }
+
+    pub fn handle_revoke_and_ack_message(
+        &mut self,
+        _revoke_and_ack: RevokeAndAck,
+        _network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
         Ok(())
     }
 
