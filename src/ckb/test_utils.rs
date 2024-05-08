@@ -162,9 +162,9 @@ impl NetworkNode {
         .await;
     }
 
-    pub async fn expect_event<F>(&mut self, event_filter: F)
+    pub async fn expect_to_process_event<F, T>(&mut self, event_processor: F) -> T
     where
-        F: Fn(&NetworkServiceEvent) -> bool,
+        F: Fn(&NetworkServiceEvent) -> Option<T>,
     {
         loop {
             select! {
@@ -173,9 +173,9 @@ impl NetworkNode {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
                             println!("Recevied event when waiting for specific event: {:?}", &event);
-                            if event_filter(&event) {
+                            if let Some(r) =  event_processor(&event) {
                                 println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
-                                break;
+                                return r;
                             }
                         }
                     }
@@ -185,6 +185,14 @@ impl NetworkNode {
                 }
             }
         }
+    }
+
+    pub async fn expect_event<F>(&mut self, event_filter: F)
+    where
+        F: Fn(&NetworkServiceEvent) -> bool,
+    {
+        self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
+            .await;
     }
 }
 

@@ -139,7 +139,7 @@ impl OpenChannelCommand {
         Ok(ChannelActorState::new_outbound_channel(
             &seed,
             self.peer_id.clone(),
-            self.total_value,
+            self.funding_amount,
             LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
         ))
     }
@@ -149,9 +149,9 @@ pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, we process OpenChannelCommand
     /// and create a new outgoing channel.
     OpenChannelCommand(OpenChannelCommand),
-    /// To accept a new channel from another peer, we process received
+    /// To accept a new channel from another peer, we process AcceptChannelCommand
     /// OpenChannel message and create a incoming channel.
-    OpenChannelMessage(PeerId, usize, OpenChannel),
+    AcceptChannelCommand(PeerId, usize, OpenChannel, u128),
 }
 
 #[derive(Debug)]
@@ -468,10 +468,11 @@ impl Actor for ChannelActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
-            ChannelInitializationParameter::OpenChannelMessage(
+            ChannelInitializationParameter::AcceptChannelCommand(
                 peer_id,
                 channel_user_id,
                 open_channel,
+                my_funding_amount,
             ) => {
                 debug!("Openning channel {:?}", &open_channel);
 
@@ -496,8 +497,10 @@ impl Actor for ChannelActor {
                 }
 
                 if funding_type_script.is_some() {
+                    // We have not implemented funding type script yet.
+                    // But don't panic, otherwise adversary can easily take us down.
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Funding type script is not none".to_string(),
+                        "Funding type script is not none, but we are currently unable to process this".to_string(),
                     )));
                 }
 
@@ -507,8 +510,11 @@ impl Actor for ChannelActor {
                     .chain(peer_id.as_bytes().iter().cloned())
                     .collect::<Vec<u8>>();
 
+                // TODO: we should wait for user to confirm that they want to accept this channel.
+
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
+                    my_funding_amount,
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
@@ -575,7 +581,7 @@ impl Actor for ChannelActor {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
                     funding_type_script: None,
-                    funding_amount: channel.total_value,
+                    funding_amount: channel.to_self_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
@@ -741,8 +747,8 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
-    pub total_value: u128,
-    pub to_self_value: u128,
+    pub to_self_amount: u128,
+    pub to_remote_amount: u128,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
@@ -941,6 +947,7 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
+        holder_value: u128,
         seed: &[u8],
         peer_id: PeerId,
         counterparty_value: u128,
@@ -969,14 +976,14 @@ impl ChannelActorState {
             peer_id,
             funding_tx: None,
             is_acceptor: true,
-            total_value: counterparty_value,
+            to_self_amount: holder_value,
             temp_id: temp_channel_id,
             id: Some(channel_id),
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_self_value: 0,
+            to_remote_amount: counterparty_value,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
                 selected_contest_delay: counterparty_delay,
@@ -1009,14 +1016,14 @@ impl ChannelActorState {
             peer_id,
             funding_tx: None,
             is_acceptor: false,
-            total_value: value,
+            to_self_amount: value,
             temp_id: new_channel_id,
             id: None,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_self_value: value,
+            to_remote_amount: value,
             signer,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
@@ -1157,9 +1164,15 @@ impl ChannelActorState {
         // TODO: consider transaction fee here.
         // TODO: exclude all the timelocked values here.
         if local {
-            (self.to_self_value, self.total_value - self.to_self_value)
+            (
+                self.to_remote_amount,
+                self.to_self_amount - self.to_remote_amount,
+            )
         } else {
-            (self.total_value - self.to_self_value, self.to_self_value)
+            (
+                self.to_self_amount - self.to_remote_amount,
+                self.to_remote_amount,
+            )
         }
     }
 
@@ -1383,10 +1396,10 @@ impl ChannelActorState {
         &mut self,
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
-        if accept_channel.funding_amount != self.total_value {
+        if accept_channel.funding_amount != self.to_self_amount {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "funding_amount mismatch (expected {}, got {})",
-                self.total_value, accept_channel.funding_amount
+                self.to_self_amount, accept_channel.funding_amount
             )));
         }
 
@@ -2281,8 +2294,9 @@ mod tests {
 
     use crate::{
         ckb::{
-            network::OpenChannelCommand, test_utils::NetworkNode, NetworkActorCommand,
-            NetworkActorMessage,
+            network::{AcceptChannelCommand, OpenChannelCommand},
+            test_utils::NetworkNode,
+            NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
     };
@@ -2309,14 +2323,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_channel_to_peer() {
-        let [mut node_a, node_b] = NetworkNode::new_n_interconnected_nodes(2)
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
             .unwrap();
 
         let open_channel_command = OpenChannelCommand {
             peer_id: node_b.peer_id.clone(),
-            total_value: 1000,
+            funding_amount: 1000,
         };
         node_a
             .network_actor
@@ -2324,11 +2338,71 @@ mod tests {
                 NetworkActorCommand::OpenChannel(open_channel_command),
             ))
             .expect("node_a alive");
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_open_and_accept_channel() {
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::OpenChannel(OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 1000,
+                }),
+            ))
+            .expect("node_a alive");
+        let channel_id = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    Some(channel_id.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_b
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::AcceptChannel(AcceptChannelCommand {
+                    temp_channel_id: channel_id.clone(),
+                    funding_amount: 1000,
+                }),
+            ))
+            .expect("node_a alive");
+
         node_a
             .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
                     println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
                     assert_eq!(peer_id, &node_b.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
                     true
                 }
                 _ => false,

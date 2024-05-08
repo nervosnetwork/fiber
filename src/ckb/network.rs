@@ -27,6 +27,7 @@ use tokio_util::task::TaskTracker;
 
 use super::channel::{
     ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
+    ProcessingChannelResult,
 };
 use super::types::{Hash256, OpenChannel};
 use super::{
@@ -50,8 +51,10 @@ pub enum NetworkActorCommand {
     SendPcnMessage(PCNMessageWithPeerId),
     // Directly send a message to session
     SendPcnMessageToSession(PCNMessageWithSessionId),
-    // Open channel to a peer.
+    // Open a channel to a peer.
     OpenChannel(OpenChannelCommand),
+    // Accept a channel to a peer.
+    AcceptChannel(AcceptChannelCommand),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
 }
@@ -61,7 +64,13 @@ pub enum NetworkActorCommand {
 pub struct OpenChannelCommand {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
-    pub total_value: u128,
+    pub funding_amount: u128,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AcceptChannelCommand {
+    pub temp_channel_id: Hash256,
+    pub funding_amount: u128,
 }
 
 impl NetworkActorMessage {
@@ -82,6 +91,7 @@ pub enum NetworkServiceEvent {
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
     ChannelCreated(PeerId, Hash256),
+    ChannelPendingToBeAccepted(PeerId, Hash256),
     ChannelReady(PeerId, Hash256),
 }
 
@@ -95,6 +105,7 @@ pub enum NetworkActorEvent {
     PeerMessage(PeerId, SessionContext, PCNMessage),
 
     /// Channel related events.
+
     /// A new channel is created and the peer id and actor reference is given here.
     ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
     /// A channel has been accepted. The two Hash256 are respectively newly agreed channel id and temp channel id.
@@ -178,11 +189,14 @@ impl NetworkActor {
         );
 
         match message {
-            PCNMessage::OpenChannel(open_channel) => {
-                state.create_inbound_channel(peer_id, open_channel).await?;
-            }
             PCNMessage::TestMessage(test) => {
                 debug!("Test message {:?}", test);
+            }
+
+            // We should process OpenChannel message here because there is no channel corresponding
+            // to the channel id in the message yet.
+            PCNMessage::OpenChannel(open_channel) => {
+                state.on_open_channel_msg(peer_id, open_channel).await?;
             }
 
             _ => match state.channels.get(&message.get_channel_id()) {
@@ -240,6 +254,9 @@ impl NetworkActor {
             NetworkActorCommand::OpenChannel(open_channel) => {
                 state.create_outbound_channel(open_channel).await?;
             }
+            NetworkActorCommand::AcceptChannel(accept_channel) => {
+                state.create_inbound_channel(accept_channel).await?;
+            }
 
             NetworkActorCommand::ControlPcnChannel(c) => {
                 state
@@ -259,6 +276,9 @@ pub struct NetworkActorState {
     control: ServiceAsyncControl,
     peers: HashMap<PeerId, HashSet<SessionId>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
+    // Channels in this hashmap are pending for acceptance. The user needs to
+    // issue an AcceptChannelCommand with the amount of funding to accept the channel.
+    to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
     // Channels in this hashmap are pending for funding transaction confirmation.
     pending_channels: HashMap<OutPoint, Hash256>,
 }
@@ -281,9 +301,19 @@ impl NetworkActorState {
 
     pub async fn create_inbound_channel(
         &mut self,
-        peer_id: PeerId,
-        open_channel: OpenChannel,
+        accept_channel: AcceptChannelCommand,
     ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
+        let AcceptChannelCommand {
+            temp_channel_id,
+            funding_amount,
+        } = accept_channel;
+        let (peer_id, open_channel) = self
+            .to_be_accepted_channels
+            .remove(&temp_channel_id)
+            .ok_or(ProcessingChannelError::InvalidParameter(format!(
+                "No channel with temp id {:?} found",
+                &temp_channel_id
+            )))?;
         let network = self.network.clone();
         let id = open_channel.channel_id;
         if let Some(channel) = self.channels.get(&id) {
@@ -295,10 +325,11 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone()),
-            ChannelInitializationParameter::OpenChannelMessage(
+            ChannelInitializationParameter::AcceptChannelCommand(
                 peer_id.clone(),
                 channel_user_id,
                 open_channel,
+                funding_amount,
             ),
             network.clone().get_cell(),
         )
@@ -373,6 +404,40 @@ impl NetworkActorState {
     ) {
         debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
         self.channels.insert(id, actor);
+    }
+
+    pub async fn on_open_channel_msg(
+        &mut self,
+        peer_id: PeerId,
+        open_channel: OpenChannel,
+    ) -> ProcessingChannelResult {
+        let id = open_channel.channel_id;
+        if let Some(channel) = self.to_be_accepted_channels.get(&id) {
+            warn!(
+                "A channel from {:?} of id {:?} is already awaiting to be accepted: {:?}",
+                &peer_id, &id, channel
+            );
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "A channel from {:?} of id {:?} is already awaiting to be accepted",
+                &peer_id, &id,
+            )));
+        }
+        debug!(
+            "Channel from {:?} of id {:?} is now awaiting to be accepted: {:?}",
+            &peer_id, &id, &open_channel
+        );
+        self.to_be_accepted_channels
+            .insert(id, (peer_id.clone(), open_channel));
+        // Also send an PeerDisconnected event to outside observers.
+        self.network
+            .clone()
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(
+                    NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
+                ),
+            ))
+            .expect("myself alive");
+        Ok(())
     }
 
     async fn on_funding_transaction_pending(
@@ -471,6 +536,7 @@ impl Actor for NetworkActor {
             control,
             peers: Default::default(),
             channels: Default::default(),
+            to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
         })
     }
