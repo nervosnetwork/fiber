@@ -644,63 +644,34 @@ impl TryFrom<molecule_pcn::ChannelReady> for ChannelReady {
 
 #[derive(Debug, Clone)]
 pub enum TxCollaborationMsg {
-    TxAdd(TxAdd),
-    TxRemove(TxRemove),
+    TxUpdate(TxUpdate),
     TxComplete(TxComplete),
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxAdd {
+pub struct TxUpdate {
     pub channel_id: Hash256,
     #[serde_as(as = "EntityWrapperBase64<Transaction>")]
     pub tx: Transaction,
 }
 
-impl From<TxAdd> for molecule_pcn::TxAdd {
-    fn from(tx_add: TxAdd) -> Self {
-        molecule_pcn::TxAdd::new_builder()
-            .channel_id(tx_add.channel_id.into())
-            .tx(tx_add.tx)
+impl From<TxUpdate> for molecule_pcn::TxUpdate {
+    fn from(tx_update: TxUpdate) -> Self {
+        molecule_pcn::TxUpdate::new_builder()
+            .channel_id(tx_update.channel_id.into())
+            .tx(tx_update.tx)
             .build()
     }
 }
 
-impl TryFrom<molecule_pcn::TxAdd> for TxAdd {
+impl TryFrom<molecule_pcn::TxUpdate> for TxUpdate {
     type Error = Error;
 
-    fn try_from(tx_add: molecule_pcn::TxAdd) -> Result<Self, Self::Error> {
-        Ok(TxAdd {
-            channel_id: tx_add.channel_id().into(),
-            tx: tx_add.tx(),
-        })
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxRemove {
-    pub channel_id: Hash256,
-    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
-    pub tx: Transaction,
-}
-
-impl From<TxRemove> for molecule_pcn::TxRemove {
-    fn from(tx_remove: TxRemove) -> Self {
-        molecule_pcn::TxRemove::new_builder()
-            .channel_id(tx_remove.channel_id.into())
-            .tx(tx_remove.tx)
-            .build()
-    }
-}
-
-impl TryFrom<molecule_pcn::TxRemove> for TxRemove {
-    type Error = Error;
-
-    fn try_from(tx_remove: molecule_pcn::TxRemove) -> Result<Self, Self::Error> {
-        Ok(TxRemove {
-            channel_id: tx_remove.channel_id().into(),
-            tx: tx_remove.tx(),
+    fn try_from(tx_update: molecule_pcn::TxUpdate) -> Result<Self, Self::Error> {
+        Ok(TxUpdate {
+            channel_id: tx_update.channel_id().into(),
+            tx: tx_update.tx(),
         })
     }
 }
@@ -1124,8 +1095,7 @@ pub enum PCNMessage {
     CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
     ChannelReady(ChannelReady),
-    TxAdd(TxAdd),
-    TxRemove(TxRemove),
+    TxUpdate(TxUpdate),
     TxComplete(TxComplete),
     TxAbort(TxAbort),
     TxInitRBF(TxInitRBF),
@@ -1147,8 +1117,7 @@ impl PCNMessage {
             PCNMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
             PCNMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
             PCNMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
-            PCNMessage::TxAdd(tx_add) => tx_add.channel_id,
-            PCNMessage::TxRemove(tx_remove) => tx_remove.channel_id,
+            PCNMessage::TxUpdate(tx_update) => tx_update.channel_id,
             PCNMessage::TxComplete(tx_complete) => tx_complete.channel_id,
             PCNMessage::TxAbort(tx_abort) => tx_abort.channel_id,
             PCNMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
@@ -1184,9 +1153,8 @@ impl From<PCNMessage> for molecule_pcn::PCNMessageUnion {
             PCNMessage::ChannelReady(channel_ready) => {
                 molecule_pcn::PCNMessageUnion::ChannelReady(channel_ready.into())
             }
-            PCNMessage::TxAdd(tx_add) => molecule_pcn::PCNMessageUnion::TxAdd(tx_add.into()),
-            PCNMessage::TxRemove(tx_remove) => {
-                molecule_pcn::PCNMessageUnion::TxRemove(tx_remove.into())
+            PCNMessage::TxUpdate(tx_update) => {
+                molecule_pcn::PCNMessageUnion::TxUpdate(tx_update.into())
             }
             PCNMessage::TxComplete(tx_complete) => {
                 molecule_pcn::PCNMessageUnion::TxComplete(tx_complete.into())
@@ -1251,9 +1219,8 @@ impl TryFrom<molecule_pcn::PCNMessage> for PCNMessage {
             molecule_pcn::PCNMessageUnion::ChannelReady(channel_ready) => {
                 PCNMessage::ChannelReady(channel_ready.try_into()?)
             }
-            molecule_pcn::PCNMessageUnion::TxAdd(tx_add) => PCNMessage::TxAdd(tx_add.try_into()?),
-            molecule_pcn::PCNMessageUnion::TxRemove(tx_remove) => {
-                PCNMessage::TxRemove(tx_remove.try_into()?)
+            molecule_pcn::PCNMessageUnion::TxUpdate(tx_update) => {
+                PCNMessage::TxUpdate(tx_update.try_into()?)
             }
             molecule_pcn::PCNMessageUnion::TxComplete(tx_complete) => {
                 PCNMessage::TxComplete(tx_complete.try_into()?)
@@ -1314,8 +1281,7 @@ impl_traits!(AcceptChannel);
 impl_traits!(CommitmentSigned);
 impl_traits!(TxSignatures);
 impl_traits!(ChannelReady);
-impl_traits!(TxAdd);
-impl_traits!(TxRemove);
+impl_traits!(TxUpdate);
 impl_traits!(TxComplete);
 impl_traits!(TxAbort);
 impl_traits!(TxInitRBF);

@@ -60,12 +60,7 @@ table ChannelReady {
     channel_id: Byte32,
 }
 
-table TxAdd {
-    channel_id: Byte32,
-    tx:         Transaction,
-}
-
-table TxRemove {
+table TxUpdate {
     channel_id: Byte32,
     tx:         Transaction,
 }
@@ -149,8 +144,7 @@ union PCNMessage {
     CommitmentSigned,
     TxSignatures,
     ChannelReady,
-    TxAdd,
-    TxRemove,
+    TxUpdate,
     TxComplete,
     TxAbort,
     TxInitRBF,

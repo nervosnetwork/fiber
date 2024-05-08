@@ -5408,8 +5408,8 @@ impl molecule::prelude::Builder for ChannelReadyBuilder {
     }
 }
 #[derive(Clone)]
-pub struct TxAdd(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for TxAdd {
+pub struct TxUpdate(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TxUpdate {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -5418,12 +5418,12 @@ impl ::core::fmt::LowerHex for TxAdd {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for TxAdd {
+impl ::core::fmt::Debug for TxUpdate {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for TxAdd {
+impl ::core::fmt::Display for TxUpdate {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
@@ -5435,13 +5435,13 @@ impl ::core::fmt::Display for TxAdd {
         write!(f, " }}")
     }
 }
-impl ::core::default::Default for TxAdd {
+impl ::core::default::Default for TxUpdate {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        TxAdd::new_unchecked(v)
+        TxUpdate::new_unchecked(v)
     }
 }
-impl TxAdd {
+impl TxUpdate {
     const DEFAULT_VALUE: [u8; 112] = [
         112, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 68, 0, 0, 0, 12, 0, 0, 0, 64, 0, 0, 0, 52, 0,
@@ -5481,15 +5481,15 @@ impl TxAdd {
             Transaction::new_unchecked(self.0.slice(start..))
         }
     }
-    pub fn as_reader<'r>(&'r self) -> TxAddReader<'r> {
-        TxAddReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> TxUpdateReader<'r> {
+        TxUpdateReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for TxAdd {
-    type Builder = TxAddBuilder;
-    const NAME: &'static str = "TxAdd";
+impl molecule::prelude::Entity for TxUpdate {
+    type Builder = TxUpdateBuilder;
+    const NAME: &'static str = "TxUpdate";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        TxAdd(data)
+        TxUpdate(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -5498,10 +5498,10 @@ impl molecule::prelude::Entity for TxAdd {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TxAddReader::from_slice(slice).map(|reader| reader.to_entity())
+        TxUpdateReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TxAddReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        TxUpdateReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -5513,8 +5513,8 @@ impl molecule::prelude::Entity for TxAdd {
     }
 }
 #[derive(Clone, Copy)]
-pub struct TxAddReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for TxAddReader<'r> {
+pub struct TxUpdateReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TxUpdateReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -5523,12 +5523,12 @@ impl<'r> ::core::fmt::LowerHex for TxAddReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for TxAddReader<'r> {
+impl<'r> ::core::fmt::Debug for TxUpdateReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for TxAddReader<'r> {
+impl<'r> ::core::fmt::Display for TxUpdateReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
@@ -5540,7 +5540,7 @@ impl<'r> ::core::fmt::Display for TxAddReader<'r> {
         write!(f, " }}")
     }
 }
-impl<'r> TxAddReader<'r> {
+impl<'r> TxUpdateReader<'r> {
     pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
@@ -5575,14 +5575,14 @@ impl<'r> TxAddReader<'r> {
         }
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for TxAddReader<'r> {
-    type Entity = TxAdd;
-    const NAME: &'static str = "TxAddReader";
+impl<'r> molecule::prelude::Reader<'r> for TxUpdateReader<'r> {
+    type Entity = TxUpdate;
+    const NAME: &'static str = "TxUpdateReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        TxAddReader(slice)
+        TxUpdateReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -5627,11 +5627,11 @@ impl<'r> molecule::prelude::Reader<'r> for TxAddReader<'r> {
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct TxAddBuilder {
+pub struct TxUpdateBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) tx: Transaction,
 }
-impl TxAddBuilder {
+impl TxUpdateBuilder {
     pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
@@ -5642,9 +5642,9 @@ impl TxAddBuilder {
         self
     }
 }
-impl molecule::prelude::Builder for TxAddBuilder {
-    type Entity = TxAdd;
-    const NAME: &'static str = "TxAddBuilder";
+impl molecule::prelude::Builder for TxUpdateBuilder {
+    type Entity = TxUpdate;
+    const NAME: &'static str = "TxUpdateBuilder";
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
@@ -5669,272 +5669,7 @@ impl molecule::prelude::Builder for TxAddBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        TxAdd::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
-pub struct TxRemove(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for TxRemove {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for TxRemove {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for TxRemove {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "tx", self.tx())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for TxRemove {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        TxRemove::new_unchecked(v)
-    }
-}
-impl TxRemove {
-    const DEFAULT_VALUE: [u8; 112] = [
-        112, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 68, 0, 0, 0, 12, 0, 0, 0, 64, 0, 0, 0, 52, 0,
-        0, 0, 28, 0, 0, 0, 32, 0, 0, 0, 36, 0, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 48, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 2;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn channel_id(&self) -> Byte32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn tx(&self) -> Transaction {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
-            Transaction::new_unchecked(self.0.slice(start..end))
-        } else {
-            Transaction::new_unchecked(self.0.slice(start..))
-        }
-    }
-    pub fn as_reader<'r>(&'r self) -> TxRemoveReader<'r> {
-        TxRemoveReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for TxRemove {
-    type Builder = TxRemoveBuilder;
-    const NAME: &'static str = "TxRemove";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        TxRemove(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TxRemoveReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TxRemoveReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .channel_id(self.channel_id())
-            .tx(self.tx())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct TxRemoveReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for TxRemoveReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for TxRemoveReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for TxRemoveReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "tx", self.tx())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl<'r> TxRemoveReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn channel_id(&self) -> Byte32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn tx(&self) -> TransactionReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
-            TransactionReader::new_unchecked(&self.as_slice()[start..end])
-        } else {
-            TransactionReader::new_unchecked(&self.as_slice()[start..])
-        }
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for TxRemoveReader<'r> {
-    type Entity = TxRemove;
-    const NAME: &'static str = "TxRemoveReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        TxRemoveReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
-        }
-        let total_size = molecule::unpack_number(slice) as usize;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
-        }
-        if slice_len < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
-        }
-        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
-        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        if slice_len < offset_first {
-            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
-        }
-        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
-        if field_count < Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        } else if !compatible && field_count > Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        };
-        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
-            .chunks_exact(molecule::NUMBER_SIZE)
-            .map(|x| molecule::unpack_number(x) as usize)
-            .collect();
-        offsets.push(total_size);
-        if offsets.windows(2).any(|i| i[0] > i[1]) {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        TransactionReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct TxRemoveBuilder {
-    pub(crate) channel_id: Byte32,
-    pub(crate) tx: Transaction,
-}
-impl TxRemoveBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn channel_id(mut self, v: Byte32) -> Self {
-        self.channel_id = v;
-        self
-    }
-    pub fn tx(mut self, v: Transaction) -> Self {
-        self.tx = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for TxRemoveBuilder {
-    type Entity = TxRemove;
-    const NAME: &'static str = "TxRemoveBuilder";
-    fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.channel_id.as_slice().len()
-            + self.tx.as_slice().len()
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
-        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.channel_id.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tx.as_slice().len();
-        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
-        for offset in offsets.into_iter() {
-            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
-        }
-        writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.tx.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        TxRemove::new_unchecked(inner.into())
+        TxUpdate::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -9593,7 +9328,7 @@ impl ::core::default::Default for PCNMessage {
 }
 impl PCNMessage {
     const DEFAULT_VALUE: [u8; 16] = [0, 0, 0, 0, 12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 17;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -9606,18 +9341,17 @@ impl PCNMessage {
             3 => CommitmentSigned::new_unchecked(inner).into(),
             4 => TxSignatures::new_unchecked(inner).into(),
             5 => ChannelReady::new_unchecked(inner).into(),
-            6 => TxAdd::new_unchecked(inner).into(),
-            7 => TxRemove::new_unchecked(inner).into(),
-            8 => TxComplete::new_unchecked(inner).into(),
-            9 => TxAbort::new_unchecked(inner).into(),
-            10 => TxInitRBF::new_unchecked(inner).into(),
-            11 => TxAckRBF::new_unchecked(inner).into(),
-            12 => Shutdown::new_unchecked(inner).into(),
-            13 => ClosingSigned::new_unchecked(inner).into(),
-            14 => AddTlc::new_unchecked(inner).into(),
-            15 => TlcsSigned::new_unchecked(inner).into(),
-            16 => RevokeAndAck::new_unchecked(inner).into(),
-            17 => RemoveTlc::new_unchecked(inner).into(),
+            6 => TxUpdate::new_unchecked(inner).into(),
+            7 => TxComplete::new_unchecked(inner).into(),
+            8 => TxAbort::new_unchecked(inner).into(),
+            9 => TxInitRBF::new_unchecked(inner).into(),
+            10 => TxAckRBF::new_unchecked(inner).into(),
+            11 => Shutdown::new_unchecked(inner).into(),
+            12 => ClosingSigned::new_unchecked(inner).into(),
+            13 => AddTlc::new_unchecked(inner).into(),
+            14 => TlcsSigned::new_unchecked(inner).into(),
+            15 => RevokeAndAck::new_unchecked(inner).into(),
+            16 => RemoveTlc::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9674,7 +9408,7 @@ impl<'r> ::core::fmt::Display for PCNMessageReader<'r> {
     }
 }
 impl<'r> PCNMessageReader<'r> {
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 17;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -9687,18 +9421,17 @@ impl<'r> PCNMessageReader<'r> {
             3 => CommitmentSignedReader::new_unchecked(inner).into(),
             4 => TxSignaturesReader::new_unchecked(inner).into(),
             5 => ChannelReadyReader::new_unchecked(inner).into(),
-            6 => TxAddReader::new_unchecked(inner).into(),
-            7 => TxRemoveReader::new_unchecked(inner).into(),
-            8 => TxCompleteReader::new_unchecked(inner).into(),
-            9 => TxAbortReader::new_unchecked(inner).into(),
-            10 => TxInitRBFReader::new_unchecked(inner).into(),
-            11 => TxAckRBFReader::new_unchecked(inner).into(),
-            12 => ShutdownReader::new_unchecked(inner).into(),
-            13 => ClosingSignedReader::new_unchecked(inner).into(),
-            14 => AddTlcReader::new_unchecked(inner).into(),
-            15 => TlcsSignedReader::new_unchecked(inner).into(),
-            16 => RevokeAndAckReader::new_unchecked(inner).into(),
-            17 => RemoveTlcReader::new_unchecked(inner).into(),
+            6 => TxUpdateReader::new_unchecked(inner).into(),
+            7 => TxCompleteReader::new_unchecked(inner).into(),
+            8 => TxAbortReader::new_unchecked(inner).into(),
+            9 => TxInitRBFReader::new_unchecked(inner).into(),
+            10 => TxAckRBFReader::new_unchecked(inner).into(),
+            11 => ShutdownReader::new_unchecked(inner).into(),
+            12 => ClosingSignedReader::new_unchecked(inner).into(),
+            13 => AddTlcReader::new_unchecked(inner).into(),
+            14 => TlcsSignedReader::new_unchecked(inner).into(),
+            15 => RevokeAndAckReader::new_unchecked(inner).into(),
+            16 => RemoveTlcReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9730,18 +9463,17 @@ impl<'r> molecule::prelude::Reader<'r> for PCNMessageReader<'r> {
             3 => CommitmentSignedReader::verify(inner_slice, compatible),
             4 => TxSignaturesReader::verify(inner_slice, compatible),
             5 => ChannelReadyReader::verify(inner_slice, compatible),
-            6 => TxAddReader::verify(inner_slice, compatible),
-            7 => TxRemoveReader::verify(inner_slice, compatible),
-            8 => TxCompleteReader::verify(inner_slice, compatible),
-            9 => TxAbortReader::verify(inner_slice, compatible),
-            10 => TxInitRBFReader::verify(inner_slice, compatible),
-            11 => TxAckRBFReader::verify(inner_slice, compatible),
-            12 => ShutdownReader::verify(inner_slice, compatible),
-            13 => ClosingSignedReader::verify(inner_slice, compatible),
-            14 => AddTlcReader::verify(inner_slice, compatible),
-            15 => TlcsSignedReader::verify(inner_slice, compatible),
-            16 => RevokeAndAckReader::verify(inner_slice, compatible),
-            17 => RemoveTlcReader::verify(inner_slice, compatible),
+            6 => TxUpdateReader::verify(inner_slice, compatible),
+            7 => TxCompleteReader::verify(inner_slice, compatible),
+            8 => TxAbortReader::verify(inner_slice, compatible),
+            9 => TxInitRBFReader::verify(inner_slice, compatible),
+            10 => TxAckRBFReader::verify(inner_slice, compatible),
+            11 => ShutdownReader::verify(inner_slice, compatible),
+            12 => ClosingSignedReader::verify(inner_slice, compatible),
+            13 => AddTlcReader::verify(inner_slice, compatible),
+            14 => TlcsSignedReader::verify(inner_slice, compatible),
+            15 => RevokeAndAckReader::verify(inner_slice, compatible),
+            16 => RemoveTlcReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -9750,7 +9482,7 @@ impl<'r> molecule::prelude::Reader<'r> for PCNMessageReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct PCNMessageBuilder(pub(crate) PCNMessageUnion);
 impl PCNMessageBuilder {
-    pub const ITEMS_COUNT: usize = 18;
+    pub const ITEMS_COUNT: usize = 17;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<PCNMessageUnion>,
@@ -9784,8 +9516,7 @@ pub enum PCNMessageUnion {
     CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
     ChannelReady(ChannelReady),
-    TxAdd(TxAdd),
-    TxRemove(TxRemove),
+    TxUpdate(TxUpdate),
     TxComplete(TxComplete),
     TxAbort(TxAbort),
     TxInitRBF(TxInitRBF),
@@ -9805,8 +9536,7 @@ pub enum PCNMessageUnionReader<'r> {
     CommitmentSigned(CommitmentSignedReader<'r>),
     TxSignatures(TxSignaturesReader<'r>),
     ChannelReady(ChannelReadyReader<'r>),
-    TxAdd(TxAddReader<'r>),
-    TxRemove(TxRemoveReader<'r>),
+    TxUpdate(TxUpdateReader<'r>),
     TxComplete(TxCompleteReader<'r>),
     TxAbort(TxAbortReader<'r>),
     TxInitRBF(TxInitRBFReader<'r>),
@@ -9844,11 +9574,8 @@ impl ::core::fmt::Display for PCNMessageUnion {
             PCNMessageUnion::ChannelReady(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
-            PCNMessageUnion::TxAdd(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TxAdd::NAME, item)
-            }
-            PCNMessageUnion::TxRemove(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TxRemove::NAME, item)
+            PCNMessageUnion::TxUpdate(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
             }
             PCNMessageUnion::TxComplete(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxComplete::NAME, item)
@@ -9904,11 +9631,8 @@ impl<'r> ::core::fmt::Display for PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::ChannelReady(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
-            PCNMessageUnionReader::TxAdd(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TxAdd::NAME, item)
-            }
-            PCNMessageUnionReader::TxRemove(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TxRemove::NAME, item)
+            PCNMessageUnionReader::TxUpdate(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
             }
             PCNMessageUnionReader::TxComplete(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxComplete::NAME, item)
@@ -9952,8 +9676,7 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(ref item) => write!(f, "{}", item),
             PCNMessageUnion::TxSignatures(ref item) => write!(f, "{}", item),
             PCNMessageUnion::ChannelReady(ref item) => write!(f, "{}", item),
-            PCNMessageUnion::TxAdd(ref item) => write!(f, "{}", item),
-            PCNMessageUnion::TxRemove(ref item) => write!(f, "{}", item),
+            PCNMessageUnion::TxUpdate(ref item) => write!(f, "{}", item),
             PCNMessageUnion::TxComplete(ref item) => write!(f, "{}", item),
             PCNMessageUnion::TxAbort(ref item) => write!(f, "{}", item),
             PCNMessageUnion::TxInitRBF(ref item) => write!(f, "{}", item),
@@ -9976,8 +9699,7 @@ impl<'r> PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::CommitmentSigned(ref item) => write!(f, "{}", item),
             PCNMessageUnionReader::TxSignatures(ref item) => write!(f, "{}", item),
             PCNMessageUnionReader::ChannelReady(ref item) => write!(f, "{}", item),
-            PCNMessageUnionReader::TxAdd(ref item) => write!(f, "{}", item),
-            PCNMessageUnionReader::TxRemove(ref item) => write!(f, "{}", item),
+            PCNMessageUnionReader::TxUpdate(ref item) => write!(f, "{}", item),
             PCNMessageUnionReader::TxComplete(ref item) => write!(f, "{}", item),
             PCNMessageUnionReader::TxAbort(ref item) => write!(f, "{}", item),
             PCNMessageUnionReader::TxInitRBF(ref item) => write!(f, "{}", item),
@@ -10021,14 +9743,9 @@ impl ::core::convert::From<ChannelReady> for PCNMessageUnion {
         PCNMessageUnion::ChannelReady(item)
     }
 }
-impl ::core::convert::From<TxAdd> for PCNMessageUnion {
-    fn from(item: TxAdd) -> Self {
-        PCNMessageUnion::TxAdd(item)
-    }
-}
-impl ::core::convert::From<TxRemove> for PCNMessageUnion {
-    fn from(item: TxRemove) -> Self {
-        PCNMessageUnion::TxRemove(item)
+impl ::core::convert::From<TxUpdate> for PCNMessageUnion {
+    fn from(item: TxUpdate) -> Self {
+        PCNMessageUnion::TxUpdate(item)
     }
 }
 impl ::core::convert::From<TxComplete> for PCNMessageUnion {
@@ -10111,14 +9828,9 @@ impl<'r> ::core::convert::From<ChannelReadyReader<'r>> for PCNMessageUnionReader
         PCNMessageUnionReader::ChannelReady(item)
     }
 }
-impl<'r> ::core::convert::From<TxAddReader<'r>> for PCNMessageUnionReader<'r> {
-    fn from(item: TxAddReader<'r>) -> Self {
-        PCNMessageUnionReader::TxAdd(item)
-    }
-}
-impl<'r> ::core::convert::From<TxRemoveReader<'r>> for PCNMessageUnionReader<'r> {
-    fn from(item: TxRemoveReader<'r>) -> Self {
-        PCNMessageUnionReader::TxRemove(item)
+impl<'r> ::core::convert::From<TxUpdateReader<'r>> for PCNMessageUnionReader<'r> {
+    fn from(item: TxUpdateReader<'r>) -> Self {
+        PCNMessageUnionReader::TxUpdate(item)
     }
 }
 impl<'r> ::core::convert::From<TxCompleteReader<'r>> for PCNMessageUnionReader<'r> {
@@ -10181,8 +9893,7 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(item) => item.as_bytes(),
             PCNMessageUnion::TxSignatures(item) => item.as_bytes(),
             PCNMessageUnion::ChannelReady(item) => item.as_bytes(),
-            PCNMessageUnion::TxAdd(item) => item.as_bytes(),
-            PCNMessageUnion::TxRemove(item) => item.as_bytes(),
+            PCNMessageUnion::TxUpdate(item) => item.as_bytes(),
             PCNMessageUnion::TxComplete(item) => item.as_bytes(),
             PCNMessageUnion::TxAbort(item) => item.as_bytes(),
             PCNMessageUnion::TxInitRBF(item) => item.as_bytes(),
@@ -10203,8 +9914,7 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(item) => item.as_slice(),
             PCNMessageUnion::TxSignatures(item) => item.as_slice(),
             PCNMessageUnion::ChannelReady(item) => item.as_slice(),
-            PCNMessageUnion::TxAdd(item) => item.as_slice(),
-            PCNMessageUnion::TxRemove(item) => item.as_slice(),
+            PCNMessageUnion::TxUpdate(item) => item.as_slice(),
             PCNMessageUnion::TxComplete(item) => item.as_slice(),
             PCNMessageUnion::TxAbort(item) => item.as_slice(),
             PCNMessageUnion::TxInitRBF(item) => item.as_slice(),
@@ -10225,18 +9935,17 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(_) => 3,
             PCNMessageUnion::TxSignatures(_) => 4,
             PCNMessageUnion::ChannelReady(_) => 5,
-            PCNMessageUnion::TxAdd(_) => 6,
-            PCNMessageUnion::TxRemove(_) => 7,
-            PCNMessageUnion::TxComplete(_) => 8,
-            PCNMessageUnion::TxAbort(_) => 9,
-            PCNMessageUnion::TxInitRBF(_) => 10,
-            PCNMessageUnion::TxAckRBF(_) => 11,
-            PCNMessageUnion::Shutdown(_) => 12,
-            PCNMessageUnion::ClosingSigned(_) => 13,
-            PCNMessageUnion::AddTlc(_) => 14,
-            PCNMessageUnion::TlcsSigned(_) => 15,
-            PCNMessageUnion::RevokeAndAck(_) => 16,
-            PCNMessageUnion::RemoveTlc(_) => 17,
+            PCNMessageUnion::TxUpdate(_) => 6,
+            PCNMessageUnion::TxComplete(_) => 7,
+            PCNMessageUnion::TxAbort(_) => 8,
+            PCNMessageUnion::TxInitRBF(_) => 9,
+            PCNMessageUnion::TxAckRBF(_) => 10,
+            PCNMessageUnion::Shutdown(_) => 11,
+            PCNMessageUnion::ClosingSigned(_) => 12,
+            PCNMessageUnion::AddTlc(_) => 13,
+            PCNMessageUnion::TlcsSigned(_) => 14,
+            PCNMessageUnion::RevokeAndAck(_) => 15,
+            PCNMessageUnion::RemoveTlc(_) => 16,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -10247,8 +9956,7 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(_) => "CommitmentSigned",
             PCNMessageUnion::TxSignatures(_) => "TxSignatures",
             PCNMessageUnion::ChannelReady(_) => "ChannelReady",
-            PCNMessageUnion::TxAdd(_) => "TxAdd",
-            PCNMessageUnion::TxRemove(_) => "TxRemove",
+            PCNMessageUnion::TxUpdate(_) => "TxUpdate",
             PCNMessageUnion::TxComplete(_) => "TxComplete",
             PCNMessageUnion::TxAbort(_) => "TxAbort",
             PCNMessageUnion::TxInitRBF(_) => "TxInitRBF",
@@ -10269,8 +9977,7 @@ impl PCNMessageUnion {
             PCNMessageUnion::CommitmentSigned(item) => item.as_reader().into(),
             PCNMessageUnion::TxSignatures(item) => item.as_reader().into(),
             PCNMessageUnion::ChannelReady(item) => item.as_reader().into(),
-            PCNMessageUnion::TxAdd(item) => item.as_reader().into(),
-            PCNMessageUnion::TxRemove(item) => item.as_reader().into(),
+            PCNMessageUnion::TxUpdate(item) => item.as_reader().into(),
             PCNMessageUnion::TxComplete(item) => item.as_reader().into(),
             PCNMessageUnion::TxAbort(item) => item.as_reader().into(),
             PCNMessageUnion::TxInitRBF(item) => item.as_reader().into(),
@@ -10294,8 +10001,7 @@ impl<'r> PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::CommitmentSigned(item) => item.as_slice(),
             PCNMessageUnionReader::TxSignatures(item) => item.as_slice(),
             PCNMessageUnionReader::ChannelReady(item) => item.as_slice(),
-            PCNMessageUnionReader::TxAdd(item) => item.as_slice(),
-            PCNMessageUnionReader::TxRemove(item) => item.as_slice(),
+            PCNMessageUnionReader::TxUpdate(item) => item.as_slice(),
             PCNMessageUnionReader::TxComplete(item) => item.as_slice(),
             PCNMessageUnionReader::TxAbort(item) => item.as_slice(),
             PCNMessageUnionReader::TxInitRBF(item) => item.as_slice(),
@@ -10316,18 +10022,17 @@ impl<'r> PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::CommitmentSigned(_) => 3,
             PCNMessageUnionReader::TxSignatures(_) => 4,
             PCNMessageUnionReader::ChannelReady(_) => 5,
-            PCNMessageUnionReader::TxAdd(_) => 6,
-            PCNMessageUnionReader::TxRemove(_) => 7,
-            PCNMessageUnionReader::TxComplete(_) => 8,
-            PCNMessageUnionReader::TxAbort(_) => 9,
-            PCNMessageUnionReader::TxInitRBF(_) => 10,
-            PCNMessageUnionReader::TxAckRBF(_) => 11,
-            PCNMessageUnionReader::Shutdown(_) => 12,
-            PCNMessageUnionReader::ClosingSigned(_) => 13,
-            PCNMessageUnionReader::AddTlc(_) => 14,
-            PCNMessageUnionReader::TlcsSigned(_) => 15,
-            PCNMessageUnionReader::RevokeAndAck(_) => 16,
-            PCNMessageUnionReader::RemoveTlc(_) => 17,
+            PCNMessageUnionReader::TxUpdate(_) => 6,
+            PCNMessageUnionReader::TxComplete(_) => 7,
+            PCNMessageUnionReader::TxAbort(_) => 8,
+            PCNMessageUnionReader::TxInitRBF(_) => 9,
+            PCNMessageUnionReader::TxAckRBF(_) => 10,
+            PCNMessageUnionReader::Shutdown(_) => 11,
+            PCNMessageUnionReader::ClosingSigned(_) => 12,
+            PCNMessageUnionReader::AddTlc(_) => 13,
+            PCNMessageUnionReader::TlcsSigned(_) => 14,
+            PCNMessageUnionReader::RevokeAndAck(_) => 15,
+            PCNMessageUnionReader::RemoveTlc(_) => 16,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -10338,8 +10043,7 @@ impl<'r> PCNMessageUnionReader<'r> {
             PCNMessageUnionReader::CommitmentSigned(_) => "CommitmentSigned",
             PCNMessageUnionReader::TxSignatures(_) => "TxSignatures",
             PCNMessageUnionReader::ChannelReady(_) => "ChannelReady",
-            PCNMessageUnionReader::TxAdd(_) => "TxAdd",
-            PCNMessageUnionReader::TxRemove(_) => "TxRemove",
+            PCNMessageUnionReader::TxUpdate(_) => "TxUpdate",
             PCNMessageUnionReader::TxComplete(_) => "TxComplete",
             PCNMessageUnionReader::TxAbort(_) => "TxAbort",
             PCNMessageUnionReader::TxInitRBF(_) => "TxInitRBF",
@@ -10383,13 +10087,8 @@ impl From<ChannelReady> for PCNMessage {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxAdd> for PCNMessage {
-    fn from(value: TxAdd) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<TxRemove> for PCNMessage {
-    fn from(value: TxRemove) -> Self {
+impl From<TxUpdate> for PCNMessage {
+    fn from(value: TxUpdate) -> Self {
         Self::new_builder().set(value).build()
     }
 }

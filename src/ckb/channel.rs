@@ -27,8 +27,8 @@ use super::{
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, CommitmentSigned, Hash256, LockTime, OpenChannel,
-        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, TxAdd, TxCollaborationMsg,
-        TxComplete, TxRemove, TxSignatures,
+        PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, TxCollaborationMsg, TxComplete,
+        TxSignatures, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -55,8 +55,7 @@ pub enum ChannelCommand {
 
 #[derive(Clone, Debug, Deserialize)]
 pub enum TxCollaborationCommand {
-    TxAdd(TxAddCommand),
-    TxRemove(TxRemoveCommand),
+    TxUpdate(TxUpdateCommand),
     TxComplete(TxCompleteCommand),
 }
 
@@ -124,14 +123,10 @@ pub const DEFAULT_TO_SELF_DELAY_BLOCKS: u64 = 10;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
-pub struct TxCommand {
+pub struct TxUpdateCommand {
     #[serde_as(as = "EntityWrapperHex<Transaction>")]
     pub transaction: Transaction,
 }
-
-pub type TxAddCommand = TxCommand;
-
-pub type TxRemoveCommand = TxCommand;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TxCompleteCommand {}
@@ -176,13 +171,9 @@ impl ChannelActor {
         command: TxCollaborationCommand,
     ) -> Result<(), ProcessingChannelError> {
         let pcn_msg = match command {
-            TxCollaborationCommand::TxAdd(tx_add) => PCNMessage::TxAdd(TxAdd {
+            TxCollaborationCommand::TxUpdate(tx_update) => PCNMessage::TxUpdate(TxUpdate {
                 channel_id: state.get_id(),
-                tx: tx_add.transaction.clone(),
-            }),
-            TxCollaborationCommand::TxRemove(tx_remove) => PCNMessage::TxRemove(TxRemove {
-                channel_id: state.get_id(),
-                tx: tx_remove.transaction.clone(),
+                tx: tx_update.transaction.clone(),
             }),
             TxCollaborationCommand::TxComplete(_) => PCNMessage::TxComplete(TxComplete {
                 channel_id: state.get_id(),
@@ -394,13 +385,6 @@ impl ChannelActor {
                     "Acceptor tries to start sending tx collaboration message".to_string(),
                 ));
             }
-            ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
-                if matches!(command, TxCollaborationCommand::TxRemove(_)) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Trying to remove tx in the initial state".to_string(),
-                ));
-            }
             ChannelState::NegotiatingFunding(_) => {
                 debug!("Beginning processing tx collaboration command");
                 CollaboratingFundingTxFlags::empty()
@@ -439,14 +423,8 @@ impl ChannelActor {
         // TODO: Note that we may deadlock here if send_tx_collaboration_command does successfully send the message,
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
-            TxCollaborationCommand::TxAdd(tx_add) => {
-                state.add_tx_to_funding_tx(tx_add.transaction)?;
-                state.state = ChannelState::CollaboratingFundingTx(
-                    CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
-                );
-            }
-            TxCollaborationCommand::TxRemove(tx_remove) => {
-                state.remove_tx_from_funding_tx(tx_remove.transaction)?;
+            TxCollaborationCommand::TxUpdate(tx_update) => {
+                state.update_funding_tx(tx_update.transaction)?;
                 state.state = ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 );
@@ -1266,11 +1244,8 @@ impl ChannelActorState {
                     .expect("network actor alive");
                 Ok(())
             }
-            PCNMessage::TxAdd(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxAdd(tx))
-            }
-            PCNMessage::TxRemove(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxRemove(tx))
+            PCNMessage::TxUpdate(tx) => {
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
             }
             PCNMessage::TxComplete(tx) => {
                 self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
@@ -1467,13 +1442,6 @@ impl ChannelActorState {
                     "Initiator received a tx collaboration message".to_string(),
                 ));
             }
-            ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT)
-                if matches!(msg, TxCollaborationMsg::TxRemove(_)) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Recevied a TxRemove message from the start of tx collaboration".to_string(),
-                ));
-            }
             ChannelState::NegotiatingFunding(_) => {
                 debug!("Beginning processing tx collaboration message");
                 CollaboratingFundingTxFlags::empty()
@@ -1507,14 +1475,8 @@ impl ChannelActorState {
             }
         };
         match msg {
-            TxCollaborationMsg::TxAdd(msg) => {
-                self.add_tx_to_funding_tx(msg.tx)?;
-                self.state = ChannelState::CollaboratingFundingTx(
-                    CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
-                );
-            }
-            TxCollaborationMsg::TxRemove(msg) => {
-                self.remove_tx_from_funding_tx(msg.tx)?;
+            TxCollaborationMsg::TxUpdate(msg) => {
+                self.update_funding_tx(msg.tx)?;
                 self.state = ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
                 );
@@ -1715,14 +1677,8 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn add_tx_to_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
+    pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
         // TODO check if the tx is valid
-        self.funding_tx = Some(tx.into_view());
-        Ok(())
-    }
-
-    pub fn remove_tx_from_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
-        // TODO check if the tx is valid and removed inputs belong to the remote peer
         self.funding_tx = Some(tx.into_view());
         Ok(())
     }
