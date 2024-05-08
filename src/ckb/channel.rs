@@ -23,6 +23,8 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use std::{borrow::Borrow, collections::HashMap, fmt::Debug};
 
+use crate::ckb::types::Shutdown;
+
 use super::{
     key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
@@ -53,6 +55,7 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(AddTlcCommand),
     RemoveTlc(RemoveTlcCommand),
+    Shutdown(ShutdownCommand),
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -72,6 +75,13 @@ pub struct AddTlcCommand {
 pub struct RemoveTlcCommand {
     id: u64,
     reason: RemoveTlcReason,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShutdownCommand {
+    #[serde_as(as = "EntityWrapperHex<Script>")]
+    close_script: Script,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -375,6 +385,48 @@ impl ChannelActor {
         }
     }
 
+    pub fn handle_shutdown_command(
+        &self,
+        state: &mut ChannelActorState,
+        command: ShutdownCommand,
+    ) -> ProcessingChannelResult {
+        debug!("Handling shutdown command: {:?}", &command);
+        let flags = match state.state {
+            ChannelState::ChannelReady(_) => {
+                debug!("Handling shutdown command in ChannelReady state");
+                ShuttingDownFlags::empty()
+            }
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => {
+                debug!("Handling shutdown command in state {:?}", &state.state);
+                return Err(ProcessingChannelError::InvalidState(
+                    "Trying to send shutdown message while in invalid state".to_string(),
+                ));
+            }
+        };
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::Shutdown(Shutdown {
+                        channel_id: state.get_id(),
+                        close_script: command.close_script.clone(),
+                    }),
+                }),
+            ))
+            .expect("network actor alive");
+        state.holder_shutdown_script = Some(command.close_script.clone());
+        let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+        state.state = ChannelState::ShuttingDown(flags);
+        debug!(
+            "Channel state updated to {:?} after processing shutdown command",
+            &state.state
+        );
+
+        state.maybe_transition_to_closing_signed(flags, self.network.clone())?;
+        Ok(())
+    }
+
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
     // to present in the other function as well.
     pub fn handle_tx_collaboration_command(
@@ -470,6 +522,7 @@ impl ChannelActor {
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command) => self.handle_add_tlc_command(state, command),
             ChannelCommand::RemoveTlc(command) => self.handle_remove_tlc_command(state, command),
+            ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
         }
     }
 }
@@ -1461,39 +1514,15 @@ impl ChannelActorState {
                         )));
                     }
                 };
-                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
                 self.counterparty_shutdown_script = Some(shutdown.close_script);
 
-                // TODO: should automatically check this periodically.
-                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
-                    && self.get_tlcs_for_commitment_tx().is_empty()
-                {
-                    self.state =
-                        ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
-
-                    let signature = self.build_and_sign_shutdown_tx(
-                        self.get_holder_shutdown_script(),
-                        self.get_counterparty_shutdown_script(),
-                    )?;
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                                peer_id: self.peer_id.clone(),
-                                message: PCNMessage::ClosingSigned(ClosingSigned {
-                                    partial_signature: signature,
-                                    channel_id: self.get_id(),
-                                    fee: 0,
-                                }),
-                            }),
-                        ))
-                        .expect("network actor alive");
-
-                    network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ChannelShutdown(self.get_id(), self.peer_id.clone()),
-                        ))
-                        .expect("network actor alive");
-                }
+                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+                self.state = ChannelState::ShuttingDown(flags);
+                debug!(
+                    "Channel state updated to {:?} after processing shutdown command",
+                    &self.state
+                );
+                self.maybe_transition_to_closing_signed(flags, network)?;
 
                 Ok(())
             }
@@ -1502,6 +1531,43 @@ impl ChannelActorState {
                 Ok(())
             }
         }
+    }
+
+    pub fn maybe_transition_to_closing_signed(
+        &mut self,
+        flags: ShuttingDownFlags,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        // TODO: should automatically check this periodically.
+        if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
+            && self.get_tlcs_for_commitment_tx().is_empty()
+        {
+            self.state = ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
+
+            let signature = self.build_and_sign_shutdown_tx(
+                self.get_holder_shutdown_script(),
+                self.get_counterparty_shutdown_script(),
+            )?;
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                        peer_id: self.peer_id.clone(),
+                        message: PCNMessage::ClosingSigned(ClosingSigned {
+                            partial_signature: signature,
+                            channel_id: self.get_id(),
+                            fee: 0,
+                        }),
+                    }),
+                ))
+                .expect("network actor alive");
+
+            network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::ChannelShutdown(self.get_id(), self.peer_id.clone()),
+                ))
+                .expect("network actor alive");
+        }
+        Ok(())
     }
 
     pub fn handle_accept_channel_message(
