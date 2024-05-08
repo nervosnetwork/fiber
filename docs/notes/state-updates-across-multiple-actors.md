@@ -1,0 +1,3 @@
+# State updates across multiple actors
+
+One of the major problems of actor model is that updating multiple actors as a single atomic operation is a challenging task. For example, sometimes we want to update the channel actor and network actor atomically. Normally, it should not be a big problem even if there is a short period when the states shared between different actors are inconsistent, but we should be especially careful while updating these states.

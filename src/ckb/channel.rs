@@ -654,6 +654,12 @@ impl Actor for ChannelActor {
                     &channel.get_id(),
                     &channel
                 );
+
+                // There is a slim chance that this message is not immediately processed by
+                // the network actor, while the peer already receive the message AcceptChannel and
+                // starts sending following messages. This is a problem of transactionally updating
+                // states across multiple actors (NetworkActor and ChannelActor).
+                // See also the notes [state updates across multiple actors](docs/notes/state-update-across-multiple-actors.md).
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelCreated(
