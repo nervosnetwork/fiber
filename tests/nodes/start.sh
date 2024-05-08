@@ -14,12 +14,12 @@ start() {
 }
 
 if [ "$#" -ne 1 ]; then
-    start -d 1 &
-    start -d 2 &
-    start -d 3 &
+    LOG_SURFFIX=$' [node 1]\n' start -d 1 &
+    LOG_SURFFIX=$' [node 2]\n' start -d 2 &
+    LOG_SURFFIX=$' [node 3]\n' start -d 3 &
 else
     for id in "$@"; do
-        start -d "$id" &
+        LOG_SURFFIX=" [$id]"$'\n' start -d "$id" &
     done
 fi
 
