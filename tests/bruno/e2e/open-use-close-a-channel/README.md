@@ -22,7 +22,7 @@ The whole process is something like:
 16. NODE3 sends an `add_tlc` to pay NODE1 again, calling this payment payment2
 17. NODE1 sends an `add_tlc` to pay NODE3, calling this payment payment3
 18. NODE1 sends NODE3 a `remove_tlc` to complete a payment2
-19. NODE3 sends NODE1 to fail payment3
+19. NODE3 sends NODE1 a `remove_tlc` to fail payment3
 20. NODE3 sends a `commitment_signed` to commit the inflight transactions
 21. NODE1 acknowledges the commitment transaction by sending a `revoke_and_ack`
 22. NODE1 initiates a `shutdown` to close the channel
