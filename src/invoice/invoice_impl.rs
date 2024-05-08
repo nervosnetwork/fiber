@@ -76,6 +76,17 @@ pub enum SiPrefix {
     Kilo,
 }
 
+impl SiPrefix {
+    // 1 CKB = 100_000_000 shannons
+    pub fn multiplier(&self) -> u64 {
+        match *self {
+            SiPrefix::Milli => 100_000,
+            SiPrefix::Micro => 100,
+            SiPrefix::Kilo => 100_000_000_000,
+        }
+    }
+}
+
 impl ToString for SiPrefix {
     fn to_string(&self) -> String {
         match self {
@@ -286,6 +297,15 @@ impl CkbInvoice {
         }
 
         Ok(())
+    }
+
+    pub fn amount_ckb_shannons(&self) -> Option<u64> {
+        self.amount.map(|v| {
+            v * self
+                .prefix
+                .as_ref()
+                .map_or(100_000_000, |si| si.multiplier())
+        })
     }
 
     attr_getter!(payee_pub_key, PayeePublicKey, PublicKey);
@@ -922,6 +942,10 @@ mod tests {
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
         assert_eq!(decoded_invoice.is_signed(), true);
+        assert_eq!(
+            decoded_invoice.amount_ckb_shannons(),
+            Some(1280 * 1000 * 100_000_000)
+        );
     }
 
     #[test]
