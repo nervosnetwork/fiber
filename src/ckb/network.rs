@@ -451,7 +451,7 @@ impl NetworkActorState {
         );
         self.to_be_accepted_channels
             .insert(id, (peer_id.clone(), open_channel));
-        // Also send an PeerDisconnected event to outside observers.
+        // Notify outside observers.
         self.network
             .clone()
             .send_message(NetworkActorMessage::new_event(
@@ -582,7 +582,7 @@ impl Actor for NetworkActor {
                 }
                 NetworkActorEvent::PeerConnected(id, session) => {
                     state.on_peer_connected(&id, &session);
-                    // Also send an PeerConnected event to outside observers.
+                    // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
@@ -593,7 +593,7 @@ impl Actor for NetworkActor {
                 }
                 NetworkActorEvent::PeerDisconnected(id, session) => {
                     state.on_peer_disconnected(&id, &session);
-                    // Also send an PeerDisconnected event to outside observers.
+                    // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
@@ -604,7 +604,7 @@ impl Actor for NetworkActor {
                 }
                 NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
                     state.on_channel_created(channel_id, &peer_id, actor);
-                    // Also send an PeerDisconnected event to outside observers.
+                    // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
@@ -624,7 +624,7 @@ impl Actor for NetworkActor {
                         "Channel ({:?}) to peer {:?} is now ready",
                         channel_id, peer_id
                     );
-                    // Also send an PeerDisconnected event to outside observers.
+                    // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::NetworkServiceEvent(
