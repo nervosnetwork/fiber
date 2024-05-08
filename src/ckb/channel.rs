@@ -1118,6 +1118,7 @@ impl ChannelActorState {
             .funding_tx
             .as_ref()
             .expect("Funding transaction is present");
+        dbg!(&tx);
         // By convention, the funding tx output for the channel is the first output.
         tx.output_pts_iter()
             .next()
@@ -1763,6 +1764,7 @@ impl ChannelActorState {
 
     pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
         // TODO check if the tx is valid
+        debug!("Updating funding transaction to {:?}", &tx);
         self.funding_tx = Some(tx.into_view());
         Ok(())
     }
@@ -2374,10 +2376,12 @@ impl InMemorySigner {
 
 #[cfg(test)]
 mod tests {
+
+    use ckb_sdk::core::TransactionBuilder;
     use ckb_types::{
-        packed::Transaction,
-        prelude::IntoTransactionView,
-        prelude::{Pack, PackVec},
+        core::{DepType, ScriptHashType},
+        packed::{CellDep, CellInput, CellOutput, OutPoint, Transaction},
+        prelude::{AsTransactionBuilder, Pack},
     };
     use molecule::prelude::{Builder, Entity};
 
@@ -2401,13 +2405,155 @@ mod tests {
         assert_eq!(derived_privkey.pubkey(), derived_pubkey);
     }
 
+    // This test is used to dump transactions that are used in the tx collaboration of e2e tests.
+    // We generate the following transactions (tx1, tx2, tx3) by:
+    // 1. A add input1 to inputs, and outputs output1, call this tx tx1.
+    // 2. B add input2 to tx1, and outputs output1 and output2, call this tx tx2.
+    // 3. A remove input1 from tx2 and add input3 to tx2, keep outputs
+    // output1 and output2, call this tx tx3.
+    // TODO: change this into a unit test.
     #[test]
-    fn test_deserialize_transaction() {
-        let tx_builder = Transaction::new_builder();
-        let tx_builder = tx_builder.witnesses(vec![[0u8].pack()].pack());
-        let tx = tx_builder.build();
-        let tx_view = tx.into_view();
-        dbg!(tx_view);
+    fn test_dump_fake_tx_inputs_to_funding_tx() {
+        let always_success_out_point1 = ckb_types::packed::OutPoint::new_builder()
+            .tx_hash([0u8; 32].pack())
+            .index(0u32.pack())
+            .build();
+
+        let always_success_out_point2 = ckb_types::packed::OutPoint::new_builder()
+            .tx_hash([2u8; 32].pack())
+            .index(0u32.pack())
+            .build();
+
+        let funding_tx_lock_script_out_point = ckb_types::packed::OutPoint::new_builder()
+            .tx_hash([2u8; 32].pack())
+            .index(0u32.pack())
+            .build();
+
+        let secp256k1_code_hash = [42u8; 32];
+        let secp256k1_hash_type = ScriptHashType::Data.into();
+
+        let funding_tx_lock_script = ckb_types::packed::Script::new_builder()
+            .code_hash([2u8; 32].pack())
+            .hash_type(ScriptHashType::Data2.into())
+            .args([3u8; 20].pack())
+            .build();
+
+        let change1_lock_script = ckb_types::packed::Script::new_builder()
+            .code_hash(secp256k1_code_hash.pack())
+            .hash_type(secp256k1_hash_type)
+            .args([1u8; 20].pack())
+            .build();
+
+        let change2_lock_script = ckb_types::packed::Script::new_builder()
+            .code_hash(secp256k1_code_hash.pack())
+            .hash_type(secp256k1_hash_type)
+            .args([2u8; 20].pack())
+            .build();
+
+        let input1_capacity = 1000u64;
+        let input2_capacity = 2000u64;
+        let input3_capacity = 3000u64;
+        let output1_capacity = 500u64;
+        let output2_capacity = 1000u64;
+
+        let build_input_cell = |capacity: u64, lock_script_outpoint: OutPoint| -> CellInput {
+            let mut tx_builder = TransactionBuilder::default();
+            tx_builder
+                .cell_dep(
+                    CellDep::new_builder()
+                        .out_point(lock_script_outpoint)
+                        .dep_type(DepType::Code.into())
+                        .build(),
+                )
+                .output(CellOutput::new_builder().capacity(capacity.pack()).build());
+            let tx = tx_builder.build();
+            let outpoint = tx.output_pts_iter().next().unwrap();
+            CellInput::new_builder().previous_output(outpoint).build()
+        };
+        let tx1 = Transaction::default()
+            .as_advanced_builder()
+            .set_cell_deps(vec![
+                CellDep::new_builder()
+                    .out_point(funding_tx_lock_script_out_point.clone())
+                    .dep_type(DepType::Code.into())
+                    .build(),
+                CellDep::new_builder()
+                    .out_point(always_success_out_point1.clone())
+                    .dep_type(DepType::Code.into())
+                    .build(),
+            ])
+            .set_inputs(vec![build_input_cell(
+                input1_capacity,
+                always_success_out_point1.clone(),
+            )])
+            .set_outputs(vec![
+                CellOutput::new_builder()
+                    .capacity(output1_capacity.pack())
+                    .lock(funding_tx_lock_script.clone())
+                    .build(),
+                CellOutput::new_builder()
+                    .capacity((input1_capacity - output1_capacity).pack())
+                    .lock(change1_lock_script.clone())
+                    .build(),
+            ])
+            .build();
+        dbg!(&tx1);
+        let tx2 = {
+            let inputs = tx1.inputs().into_iter().chain(
+                vec![build_input_cell(
+                    input2_capacity,
+                    always_success_out_point2.clone(),
+                )]
+                .into_iter(),
+            );
+            let cell_deps = tx1.cell_deps().into_iter().chain(
+                vec![CellDep::new_builder()
+                    .out_point(always_success_out_point2.clone())
+                    .dep_type(DepType::Code.into())
+                    .build()]
+                .into_iter(),
+            );
+            Transaction::default()
+                .as_advanced_builder()
+                .set_cell_deps(cell_deps.collect())
+                .set_inputs(inputs.collect())
+                .set_outputs(vec![
+                    CellOutput::new_builder()
+                        .capacity((output1_capacity + output2_capacity).pack())
+                        .lock(funding_tx_lock_script.clone())
+                        .build(),
+                    CellOutput::new_builder()
+                        .capacity((input1_capacity - output1_capacity).pack())
+                        .lock(change1_lock_script.clone())
+                        .build(),
+                    CellOutput::new_builder()
+                        .capacity((input2_capacity - output2_capacity).pack())
+                        .lock(change2_lock_script.clone())
+                        .build(),
+                ])
+                .build()
+        };
+        dbg!(&tx2);
+
+        let tx3 = {
+            let inputs = tx2
+                .inputs()
+                .into_iter()
+                .skip(1)
+                .chain(vec![build_input_cell(
+                    input3_capacity,
+                    always_success_out_point2,
+                )]);
+            let cell_deps = tx2.cell_deps().into_iter().skip(1);
+            let outputs = tx2.outputs().into_iter();
+            Transaction::default()
+                .as_advanced_builder()
+                .set_cell_deps(cell_deps.collect())
+                .set_inputs(inputs.collect())
+                .set_outputs(outputs.collect())
+                .build()
+        };
+        dbg!(&tx3);
     }
 
     #[tokio::test]

@@ -31,7 +31,6 @@ assert {
 }
 
 script:post-response {
-  // TODO: current interface requires us to set the amount of our contribution to the 
-  // channel in the AcceptChannel message. This seems to make automatic accepting channel impossible
-  // We need to change current behaviour of automatically accepting channel and update this file.
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
 }

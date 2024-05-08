@@ -13,7 +13,7 @@ The whole process is something like:
 7. NODE1 sends a `tx_update` to NODE3 to remove part of the funding from the funding transaction
 8. NODE3 sends a `tx_complete` to NODE1 to express his intention of complete the funding process
 9. NODE1 sends a `tx_complete` to NODE3 to express his intention of complete the funding process
-10. Both NODE1 and NODE1 send a `commitment_signed` to sign a spending transaction of the yet to exist funding transaction
+10. Both NODE1 and NODE3 send a `commitment_signed` to sign a spending transaction of the yet to exist funding transaction
 11. The node with less funds in the funding transaction sends a `tx_signatures` to its counterparty
 12. The counterparty replies a `tx_signatures`
 13. The opener NODE3 sends a `channel_ready` to indicate the channel is ready for him
