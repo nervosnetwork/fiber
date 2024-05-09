@@ -96,8 +96,8 @@ pub struct ChannelCommandWithId {
     pub command: ChannelCommand,
 }
 
-pub const HOLDER_INITIAL_COMMITMENT_NUMBER: u64 = 0;
-pub const COUNTERPARTY_INITIAL_COMMITMENT_NUMBER: u64 = (2 ^ 48) - 1;
+pub const INITITATOR_INITIAL_COMMITMENT_NUMBER: u64 = 0;
+pub const ACCEPTOR_INITIAL_COMMITMENT_NUMBER: u64 = (2 ^ 48) - 1;
 pub const DEFAULT_FEE_RATE: u64 = 0;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
@@ -550,7 +550,7 @@ impl Actor for ChannelActor {
                     *second_per_commitment_point,
                 );
 
-                let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = ACCEPTOR_INITIAL_COMMITMENT_NUMBER;
 
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
@@ -607,7 +607,7 @@ impl Actor for ChannelActor {
                     LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
                 );
 
-                let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = INITITATOR_INITIAL_COMMITMENT_NUMBER;
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
@@ -812,14 +812,10 @@ pub struct ChannelActorState {
     pub counterparty_shutdown_script: Option<Script>,
 
     pub counterparty_nonce: Option<PubNonce>,
-    // The commitment point used in the first commitment transaction after funding transaction.
-    // We should use this commitment point if the funding channel is not created yet.
-    // Otherwise, use counterparty_commitment_point instead.
-    // We will ensure that counterparty_initial_commitment_point is always true after creating
-    // the first commitment transaction after funding transaction.
-    pub counterparty_initial_commitment_point: Option<Pubkey>,
-    // The commitment point that is going to be used in the following commitment transaction.
-    pub counterparty_commitment_point: Option<Pubkey>,
+
+    // All the commitment point that are sent from the counterparty.
+    // We need to save all these points to derive the keys for the commitment transactions.
+    pub counterparty_commitment_points: Vec<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
     pub holder_shutdown_signature: Option<PartialSignature>,
     pub counterparty_shutdown_signature: Option<PartialSignature>,
@@ -1015,7 +1011,7 @@ impl ChannelActorState {
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
-        let commitment_number = COUNTERPARTY_INITIAL_COMMITMENT_NUMBER;
+        let commitment_number = ACCEPTOR_INITIAL_COMMITMENT_NUMBER;
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
 
@@ -1053,11 +1049,13 @@ impl ChannelActorState {
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
-            counterparty_commitment_number: HOLDER_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_number: INITITATOR_INITIAL_COMMITMENT_NUMBER,
             counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
-            counterparty_commitment_point: Some(counterparty_commitment_point),
-            counterparty_initial_commitment_point: Some(counterparty_prev_commitment_point),
+            counterparty_commitment_points: vec![
+                counterparty_prev_commitment_point,
+                counterparty_commitment_point,
+            ],
             holder_shutdown_signature: None,
             counterparty_shutdown_signature: None,
         }
@@ -1071,7 +1069,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let commitment_number = HOLDER_INITIAL_COMMITMENT_NUMBER;
+        let commitment_number = INITITATOR_INITIAL_COMMITMENT_NUMBER;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
@@ -1094,9 +1092,8 @@ impl ChannelActorState {
             counterparty_channel_parameters: None,
             holder_commitment_number: commitment_number,
             counterparty_nonce: None,
-            counterparty_commitment_number: COUNTERPARTY_INITIAL_COMMITMENT_NUMBER,
-            counterparty_commitment_point: None,
-            counterparty_initial_commitment_point: None,
+            counterparty_commitment_number: ACCEPTOR_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_points: vec![],
             holder_shutdown_script: None,
             counterparty_shutdown_script: None,
             holder_shutdown_signature: None,
@@ -1146,20 +1143,6 @@ impl ChannelActorState {
         }
     }
 
-    pub fn is_funded(&self) -> bool {
-        match self.state {
-            ChannelState::ChannelReady(_) => {
-                assert!(self.funding_tx.is_some());
-                assert!(self.id.is_some());
-                assert!(self.counterparty_commitment_point.is_some());
-                assert!(self.counterparty_initial_commitment_point.is_some());
-                assert!(self.counterparty_channel_parameters.is_some());
-                true
-            }
-            _ => false,
-        }
-    }
-
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
         let tx = self
             .funding_tx
@@ -1189,15 +1172,10 @@ impl ChannelActorState {
             .get_commitment_point(self.holder_commitment_number)
     }
 
-    /// The first commitment point for the first commitment transaction after funding transaction
-    /// is saved in `counterparty_initial_commitment_point`. Afterwards,
-    /// `counterparty_initial_commitment_point` should be set to None and
-    /// `counterparty_commitment_point` is used.
-    pub fn get_counterparty_commitment_point(&self) -> &Pubkey {
-        self.counterparty_initial_commitment_point
-            .as_ref()
-            .or(self.counterparty_commitment_point.as_ref())
-            .expect("Counterparty commitment point is present")
+    /// Get the counterparty commitment point for the given commitment number.
+    pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> &Pubkey {
+        let index = self.canonicalize_commitment_number(commitment_number, false);
+        &self.counterparty_commitment_points[index as usize]
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
@@ -1675,9 +1653,8 @@ impl ChannelActorState {
             pubkeys: counterparty_pubkeys,
             selected_contest_delay: accept_channel.to_self_delay,
         });
-        self.counterparty_initial_commitment_point =
-            Some(accept_channel.first_per_commitment_point);
-        self.counterparty_commitment_point = Some(accept_channel.second_per_commitment_point);
+        self.counterparty_commitment_points
+            .push(accept_channel.first_per_commitment_point);
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
@@ -1833,7 +1810,6 @@ impl ChannelActorState {
         self.counterparty_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
-                self.counterparty_initial_commitment_point = None;
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.state = ChannelState::SigningCommitment(flags);
                 self.maybe_transition_to_tx_signatures(flags, network)?;
@@ -2149,6 +2125,21 @@ impl ChannelActorState {
         result.is_ok()
     }
 
+    // Because we follow the BOLT specification, the commitment number starts
+    // from 0 for the channel initator, and the acceptor's commitment number
+    // starts from 2^48 - 1. This function is used to convert the commitment
+    // number to a canonical form (that is, the natural sequence number to
+    // commitment number among all the commitments in the channel).
+    // The local parameter indicates whether the commitment number is from
+    // the local party or the counterparty.
+    pub fn canonicalize_commitment_number(&self, commitment_number: u64, local: bool) -> u64 {
+        if local && self.is_acceptor || !local && !self.is_acceptor {
+            ACCEPTOR_INITIAL_COMMITMENT_NUMBER - commitment_number
+        } else {
+            commitment_number
+        }
+    }
+
     pub fn build_tx_creation_keys(&self, local: bool, commitment_number: u64) -> TxCreationKeys {
         debug!(
             "Building commitment transaction #{} for {}",
@@ -2165,13 +2156,13 @@ impl ChannelActorState {
                 self.get_holder_channel_parameters(),
                 self.get_counterparty_channel_parameters(),
                 self.signer.get_commitment_point(commitment_number),
-                *self.get_counterparty_commitment_point(),
+                *self.get_counterparty_commitment_point(commitment_number),
             )
         } else {
             (
                 self.get_counterparty_channel_parameters(),
                 self.get_holder_channel_parameters(),
-                *self.get_counterparty_commitment_point(),
+                *self.get_counterparty_commitment_point(commitment_number),
                 self.signer.get_commitment_point(commitment_number),
             )
         };
