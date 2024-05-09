@@ -18,11 +18,11 @@ The whole process is something like:
 12. The counterparty replies a `tx_signatures`
 13. The opener NODE3 sends a `channel_ready` to indicate the channel is ready for him
 14. The acceptor waits a few blocks after the funding transaction is broadcasted and replies a `channel_ready`
-15. NODE3 sends an `add_tlc` to pay NODE1 10.
-16. NODE1 sends an `add_tlc` to pay NODE3 to pay 20, and then NODE3 sends 30 to NODE1.
-17. NODE1 sends an `add_tlc` to pay NODE3 to pay 30, and then NODE3 sends 30 to NODE1.
-18. NODE1 sends NODE3 a `remove_tlc` to complete a payment2
-19. NODE3 sends NODE1 a `remove_tlc` to fail payment3
+15. NODE3 sends an `add_tlc` to pay NODE1 10 (payment1).
+16. NODE1 sends an `add_tlc` to pay NODE3 to pay 20 (payment2), and then NODE3 sends 30 to NODE1 (payment3).
+17. NODE1 sends an `add_tlc` to pay NODE3 to pay 20 (payment4), and then NODE3 sends 30 to NODE1 (payment5).
+19. NODE3 sends NODE1 a `remove_tlc` to fail payment2.
+18. NODE1 sends NODE3 a `remove_tlc` to complete a payment3. By this time, NODE1 has 1100 ckb ready to use, and NODE3 has 430 ckb ready to use.
 20. NODE3 sends a `commitment_signed` to commit the inflight transactions
 21. NODE1 acknowledges the commitment transaction by sending a `revoke_and_ack`
 22. NODE1 initiates a `shutdown` to close the channel

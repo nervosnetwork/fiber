@@ -21,7 +21,11 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::mpsc::error::TrySendError;
 
-use std::{borrow::Borrow, collections::HashMap, fmt::Debug};
+use std::{
+    borrow::Borrow,
+    collections::{hash_map, HashMap},
+    fmt::Debug,
+};
 
 use crate::ckb::types::Shutdown;
 
@@ -300,10 +304,23 @@ impl ChannelActor {
 
         // Update the state for this tlc.
         state.pending_offered_tlcs.insert(tlc.id, tlc);
+        state.to_self_amount -= tlc.amount;
         state.next_offering_tlc_id += 1;
         debug!(
             "Added tlc with id {:?} to pending offered tlcs: {:?}",
             tlc.id, &tlc
+        );
+        debug!(
+            "Current pending offered tlcs: {:?}",
+            &state.pending_offered_tlcs
+        );
+        debug!(
+            "Current pending received tlcs: {:?}",
+            &state.pending_received_tlcs
+        );
+        debug!(
+            "Balance after addtlccommand: to_self_amount: {} to_remote_amount: {}",
+            state.to_self_amount, state.to_remote_amount
         );
         Ok(())
     }
@@ -325,12 +342,27 @@ impl ChannelActor {
                         reason: command.reason,
                     }),
                 };
+                if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
+                    if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Preimage {:?} does not match payment hash {:?}",
+                            fulfill, tlc.payment_hash
+                        )));
+                    }
+                }
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(msg),
                     ))
                     .expect("network actor alive");
-                Ok(())
+                match command.reason {
+                    RemoveTlcReason::RemoveTlcFail(_) => {
+                        state.to_remote_amount += tlc.amount;
+                    }
+                    RemoveTlcReason::RemoveTlcFulfill(_) => {
+                        state.to_self_amount += tlc.amount;
+                    }
+                }
             }
             None => {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -339,6 +371,11 @@ impl ChannelActor {
                 )));
             }
         }
+        debug!(
+            "Balance after removetlccommand: to_self_amount: {} to_remote_amount: {}",
+            state.to_self_amount, state.to_remote_amount
+        );
+        Ok(())
     }
 
     pub fn handle_shutdown_command(
@@ -1247,6 +1284,15 @@ impl ChannelActorState {
     }
 
     pub fn get_tlcs_for_commitment_tx(&self) -> Vec<TLC> {
+        debug!("Getting tlcs for commitment tx");
+        debug!(
+            "Current pending offered tlcs: {:?}",
+            self.pending_offered_tlcs
+        );
+        debug!(
+            "Current pending received tlcs: {:?}",
+            self.pending_received_tlcs
+        );
         self.pending_offered_tlcs
             .values()
             .chain(self.pending_received_tlcs.values())
@@ -1480,7 +1526,21 @@ impl ChannelActorState {
                 }
 
                 self.pending_received_tlcs.insert(tlc.id, tlc);
+                self.to_remote_amount -= tlc.amount;
+
                 debug!("Saved tlc {:?} to pending_received_tlcs", &tlc);
+                debug!(
+                    "Current pending_received_tlcs: {:?}",
+                    &self.pending_received_tlcs
+                );
+                debug!(
+                    "Current pending_offered_tlcs: {:?}",
+                    &self.pending_offered_tlcs
+                );
+                debug!(
+                    "Balance after tlc added: to_self_amount: {}, to_remote_amount: {}",
+                    self.to_self_amount, self.to_remote_amount
+                );
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
@@ -1490,20 +1550,41 @@ impl ChannelActorState {
             PCNMessage::RemoveTlc(remove_tlc) => {
                 self.check_state_for_tlc_update()?;
 
-                match self.pending_offered_tlcs.get(&remove_tlc.tlc_id) {
-                    Some(current) => {
-                        debug!(
-                            "Removing tlc {:?} from channel {:?}",
-                            &current,
-                            &self.get_id()
-                        );
-                        // TODO: need pay the balance to the user.
+                let channel_id = self.get_id();
+                match self.pending_offered_tlcs.entry(remove_tlc.tlc_id) {
+                    hash_map::Entry::Occupied(entry) => {
+                        let current = entry.get();
+                        debug!("Removing tlc {:?} from channel {:?}", &current, &channel_id);
+                        match remove_tlc.reason {
+                            RemoveTlcReason::RemoveTlcFail(fail) => {
+                                debug!("TLC {:?} failed with code {}", &current, &fail.error_code);
+                                self.to_self_amount += current.amount;
+                                debug!("Balance after tlc removed: to_self_amount: {}, to_remote_amount: {}", self.to_self_amount, self.to_remote_amount);
+                            }
+                            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
+                                let preimage = fulfill.payment_preimage;
+                                debug!(
+                                    "TLC {:?} succeeded with preimage {:?}",
+                                    &current, &preimage
+                                );
+                                if current.payment_hash != blake2b_256(preimage).into() {
+                                    return Err(ProcessingChannelError::InvalidParameter(
+                                        "Payment preimage does not match the hash".to_string(),
+                                    ));
+                                }
+                                self.to_remote_amount += current.amount;
+                                debug!("Balance after tlc removed: to_self_amount: {}, to_remote_amount: {}", self.to_self_amount, self.to_remote_amount);
+                            }
+                        }
+                        entry.remove();
                         Ok(())
                     }
-                    None => Err(ProcessingChannelError::InvalidParameter(format!(
-                        "TLC with id {:?} not found in pending_received_tlcs",
-                        remove_tlc.tlc_id
-                    ))),
+                    hash_map::Entry::Vacant(_) => {
+                        Err(ProcessingChannelError::InvalidParameter(format!(
+                            "TLC with id {:?} not found in pending_received_tlcs",
+                            remove_tlc.tlc_id
+                        )))
+                    }
                 }
             }
             PCNMessage::Shutdown(shutdown) => {
