@@ -8,9 +8,9 @@ The whole process is something like:
 2. Send a test message from NODE3 to NODE1 (not necessary for pcn per se)
 3. Send `open_channel` from NODE3 to NODE1 (thus NODE3 is the opener and NODE1 the acceptor)
 4. NODE1 automatically accepts channel and replies `accept_channel` message
-5. NODE1 sends a `tx_update` to NODE3 to fund part of the funding transaction
-6. NODE3 sends a `tx_update` to NODE1 to fund part of the funding transaction
-7. NODE1 sends a `tx_update` to NODE3 to remove part of the funding from the funding transaction
+5. NODE1 sends a `tx_update` to NODE3 add input1 with 1000 ckb to inputs, and outputs 500 to the funding transaction.
+6. NODE3 adds input2 with 2000 ckb to tx1 and sends a `tx_update` to NODE1, and fund the channel with 1000 ckb (so now we have 1500 ckb in the funding output).
+7. NODE1 remove input1 from tx2 and add input3 to tx2 with the balance of funding transaction output unchanged.
 8. NODE3 sends a `tx_complete` to NODE1 to express his intention of complete the funding process
 9. NODE1 sends a `tx_complete` to NODE3 to express his intention of complete the funding process
 10. Both NODE1 and NODE3 send a `commitment_signed` to sign a spending transaction of the yet to exist funding transaction
@@ -18,9 +18,9 @@ The whole process is something like:
 12. The counterparty replies a `tx_signatures`
 13. The opener NODE3 sends a `channel_ready` to indicate the channel is ready for him
 14. The acceptor waits a few blocks after the funding transaction is broadcasted and replies a `channel_ready`
-15. NODE3 sends an `add_tlc` to pay NODE1, calling this payment payment1
-16. NODE3 sends an `add_tlc` to pay NODE1 again, calling this payment payment2
-17. NODE1 sends an `add_tlc` to pay NODE3, calling this payment payment3
+15. NODE3 sends an `add_tlc` to pay NODE1 10.
+16. NODE1 sends an `add_tlc` to pay NODE3 to pay 20, and then NODE3 sends 30 to NODE1.
+17. NODE1 sends an `add_tlc` to pay NODE3 to pay 30, and then NODE3 sends 30 to NODE1.
 18. NODE1 sends NODE3 a `remove_tlc` to complete a payment2
 19. NODE3 sends NODE1 a `remove_tlc` to fail payment3
 20. NODE3 sends a `commitment_signed` to commit the inflight transactions

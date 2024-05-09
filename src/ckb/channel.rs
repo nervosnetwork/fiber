@@ -457,6 +457,7 @@ impl ChannelActor {
                 );
             }
             TxCollaborationCommand::TxComplete(_) => {
+                state.check_tx_complete_preconditions()?;
                 state.state = ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
                 );
@@ -552,7 +553,7 @@ impl Actor for ChannelActor {
 
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
-                    funding_amount: open_channel.funding_amount,
+                    funding_amount: my_funding_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     to_self_delay: *to_self_delay,
@@ -1081,7 +1082,7 @@ impl ChannelActorState {
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_remote_amount: value,
+            to_remote_amount: 0,
             signer,
             holder_channel_parameters: ChannelParametersOneParty {
                 pubkeys: holder_pubkeys,
@@ -1660,13 +1661,6 @@ impl ChannelActorState {
         &mut self,
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
-        if accept_channel.funding_amount != self.to_self_amount {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "funding_amount mismatch (expected {}, got {})",
-                self.to_self_amount, accept_channel.funding_amount
-            )));
-        }
-
         if self.state != ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT) {
             return Err(ProcessingChannelError::InvalidState(format!(
                 "accepting a channel while in state {:?}, expecting NegotiatingFundingFlags::OUR_INIT_SENT",
@@ -1675,6 +1669,7 @@ impl ChannelActorState {
         }
 
         self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+        self.to_remote_amount = accept_channel.funding_amount;
         self.counterparty_nonce = Some(accept_channel.next_local_nonce.clone());
 
         let counterparty_pubkeys = (&accept_channel).into();
@@ -1758,6 +1753,7 @@ impl ChannelActorState {
                 );
             }
             TxCollaborationMsg::TxComplete(_msg) => {
+                self.check_tx_complete_preconditions()?;
                 self.state = ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT,
                 );
@@ -2024,9 +2020,61 @@ impl ChannelActorState {
     }
 
     pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
-        // TODO check if the tx is valid
+        // TODO: check if the tx is valid
+        let tx = tx.into_view();
         debug!("Updating funding transaction to {:?}", &tx);
-        self.funding_tx = Some(tx.into_view());
+        let first_output = tx
+            .outputs()
+            .get(0)
+            .ok_or(ProcessingChannelError::InvalidParameter(
+                "Funding transaction should have at least one output".to_string(),
+            ))?;
+        debug!("New funding transaction output: {:?}", &first_output);
+        match self.funding_tx {
+            Some(ref current_tx) => {
+                debug!("Current funding transaction: {:?}", &current_tx);
+                debug!(
+                    "Current funding transaction output: {:?}",
+                    &current_tx.outputs().get(0)
+                );
+            }
+            None => {}
+        }
+        self.funding_tx = Some(tx);
+        Ok(())
+    }
+
+    // TODO: More checks to the funding tx.
+    fn check_tx_complete_preconditions(&self) -> ProcessingChannelResult {
+        match self.funding_tx.as_ref() {
+            None => {
+                return Err(ProcessingChannelError::InvalidState(
+                    "Received TxComplete message without a funding transaction".to_string(),
+                ));
+            }
+            Some(tx) => {
+                debug!(
+                    "Received TxComplete message, funding tx is present {:?}",
+                    tx
+                );
+                let first_output =
+                    tx.outputs()
+                        .get(0)
+                        .ok_or(ProcessingChannelError::InvalidParameter(
+                            "Funding transaction should have at least one output".to_string(),
+                        ))?;
+
+                let first_output_capacity =
+                    u64::from_le_bytes(first_output.capacity().as_slice().try_into().unwrap())
+                        as u128;
+
+                if self.to_self_amount + self.to_remote_amount != first_output_capacity {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount) 
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
