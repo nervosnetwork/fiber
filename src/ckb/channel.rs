@@ -90,34 +90,6 @@ fn get_random_preimage() -> Hash256 {
     preimage.into()
 }
 
-impl From<(u64, AddTlcCommand)> for TLC {
-    fn from((id, command): (u64, AddTlcCommand)) -> Self {
-        let preimage = command.preimage.unwrap_or(get_random_preimage());
-        let hash = blake2b_256(&preimage);
-        TLC {
-            id,
-            amount: command.amount,
-            payment_hash: hash.into(),
-            lock_time: command.expiry,
-            is_offered: true,
-            payment_preimage: Some(preimage),
-        }
-    }
-}
-
-impl From<AddTlc> for TLC {
-    fn from(message: AddTlc) -> Self {
-        TLC {
-            id: message.tlc_id,
-            amount: message.amount,
-            payment_hash: message.payment_hash,
-            lock_time: message.expiry,
-            is_offered: false,
-            payment_preimage: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChannelCommandWithId {
     pub channel_id: Hash256,
@@ -256,11 +228,8 @@ impl ChannelActor {
             }
         };
 
-        let PartiallySignedCommitmentTransaction {
-            inner: _inner,
-            tx,
-            signature,
-        } = state.build_and_sign_commitment_tx()?;
+        let PartiallySignedCommitmentTransaction { tx, signature } =
+            state.build_and_sign_commitment_tx()?;
         debug!(
             "Build a funding tx ({:?}) with partial signature {:?}",
             &tx, &signature
@@ -306,18 +275,7 @@ impl ChannelActor {
     ) -> ProcessingChannelResult {
         state.check_state_for_tlc_update()?;
 
-        // TODO: we are filling the user command with a new id here.
-        // The advantage of this is that we don't need to burden the users to
-        // provide a next id for each tlc. The disadvantage is that users may
-        // inadvertently click the same button twice, and we will process the same
-        // twice, the frontend needs to prevent this kind of behaviour.
-        // Is this what we want?
-        let id = state.next_offering_tlc_id;
-        assert!(
-            state.pending_offered_tlcs.get(&id).is_none(),
-            "Must not have the same id in pending offered tlcs"
-        );
-        let tlc = TLC::from((id, command));
+        let tlc = state.create_outbounding_tlc(command);
 
         // TODO: Note that since message sending is async,
         // we can't guarantee anything about the order of message sending
@@ -343,11 +301,11 @@ impl ChannelActor {
             .expect("network actor alive");
 
         // Update the state for this tlc.
-        state.pending_offered_tlcs.insert(id, tlc);
+        state.pending_offered_tlcs.insert(tlc.id, tlc);
         state.next_offering_tlc_id += 1;
         debug!(
             "Added tlc with id {:?} to pending offered tlcs: {:?}",
-            id, &tlc
+            tlc.id, &tlc
         );
         Ok(())
     }
@@ -1287,9 +1245,12 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_tlcs_for_commitment_tx(&self) -> Vec<TLCOutputInCommitment> {
-        // TODO: get tlc outputs for commitment transaction
-        vec![]
+    pub fn get_tlcs_for_commitment_tx(&self) -> Vec<TLC> {
+        self.pending_offered_tlcs
+            .values()
+            .chain(self.pending_received_tlcs.values())
+            .cloned()
+            .collect()
     }
 
     pub fn get_counterparty_funding_pubkey(&self) -> &Pubkey {
@@ -1308,6 +1269,48 @@ impl ChannelActorState {
                     self.state
                 )))
             }
+        }
+    }
+
+    pub fn create_outbounding_tlc(&mut self, command: AddTlcCommand) -> TLC {
+        // TODO: we are filling the user command with a new id here.
+        // The advantage of this is that we don't need to burden the users to
+        // provide a next id for each tlc. The disadvantage is that users may
+        // inadvertently click the same button twice, and we will process the same
+        // twice, the frontend needs to prevent this kind of behaviour.
+        // Is this what we want?
+        let id = self.next_offering_tlc_id;
+        assert!(
+            self.pending_offered_tlcs.get(&id).is_none(),
+            "Must not have the same id in pending offered tlcs"
+        );
+
+        let preimage = command.preimage.unwrap_or(get_random_preimage());
+        let hash = blake2b_256(&preimage);
+        TLC {
+            id,
+            amount: command.amount,
+            payment_hash: hash.into(),
+            lock_time: command.expiry,
+            is_offered: true,
+            payment_preimage: Some(preimage),
+            local_commitment_number: self.get_next_commitment_number(true),
+            remote_commitment_number: self.get_next_commitment_number(false),
+        }
+    }
+
+    pub fn create_inbounding_tlc(&self, message: AddTlc) -> TLC {
+        let local_commitment_number = self.get_next_commitment_number(true);
+        let remote_commitment_number = self.get_next_commitment_number(false);
+        TLC {
+            id: message.tlc_id,
+            amount: message.amount,
+            payment_hash: message.payment_hash,
+            lock_time: message.expiry,
+            is_offered: false,
+            payment_preimage: None,
+            local_commitment_number,
+            remote_commitment_number,
         }
     }
 }
@@ -1452,7 +1455,7 @@ impl ChannelActorState {
             PCNMessage::AddTlc(add_tlc) => {
                 self.check_state_for_tlc_update()?;
 
-                let tlc = TLC::from(add_tlc);
+                let tlc = self.create_inbounding_tlc(add_tlc);
                 let id = tlc.id;
 
                 match self.pending_received_tlcs.get(&id) {
@@ -2146,15 +2149,7 @@ impl ChannelActorState {
         result.is_ok()
     }
 
-    pub fn build_commitment_tx(&self, local: bool) -> CommitmentTransaction {
-        let (to_broadcaster_value, to_countersignatory_value) =
-            self.get_amounts_for_both_party(local);
-
-        let commitment_number = if local {
-            self.holder_commitment_number
-        } else {
-            self.counterparty_commitment_number
-        };
+    pub fn build_tx_creation_keys(&self, local: bool, commitment_number: u64) -> TxCreationKeys {
         debug!(
             "Building commitment transaction #{} for {}",
             commitment_number,
@@ -2202,32 +2197,72 @@ impl ChannelActorState {
                 &countersignatory_commitment_point,
             ),
         };
+        tx_creation_keys
+    }
 
-        let tlcs = self.get_tlcs_for_commitment_tx();
+    pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
+        let input = self.get_funding_transaction_outpoint();
+        let tx_builder = TransactionBuilder::default()
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(get_commitment_lock_outpoint())
+                    .dep_type(DepType::Code.into())
+                    .build(),
+            )
+            .input(CellInput::new_builder().previous_output(input).build());
 
-        CommitmentTransaction {
-            input: self.get_funding_transaction_outpoint(),
-            commitment_number,
-            to_broadcaster_value,
-            to_countersignatory_value,
-            tlcs,
-            keys: tx_creation_keys,
-        }
+        let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
+        let tx_builder = tx_builder.set_outputs(outputs);
+        let tx_builder = tx_builder.set_outputs_data(outputs_data);
+        tx_builder.build()
+    }
+
+    fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
+        let (_to_broadcaster_value, _to_countersignatory_value) =
+            self.get_amounts_for_both_party(local);
+
+        let _commitment_number = if local {
+            self.holder_commitment_number
+        } else {
+            self.counterparty_commitment_number
+        };
+
+        let _tlcs = self.get_tlcs_for_commitment_tx();
+        // TODO: generate outputs from channel state
+        (vec![], vec![])
     }
 
     pub fn build_and_verify_commitment_tx(
         &self,
         signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let commitment_tx = self.build_commitment_tx(false);
-        commitment_tx.verify(signature, self.into())
+        let verify_ctx = Musig2VerifyContext::from(self);
+
+        let tx = self.build_commitment_tx(false);
+        let message = get_tx_message_to_sign(&tx);
+        debug!(
+            "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
+            &signature, &tx, &message
+        );
+        verify_ctx.verify(signature, message.as_slice())?;
+        Ok(PartiallySignedCommitmentTransaction { tx, signature })
     }
 
     pub fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let commitment_tx = self.build_commitment_tx(true);
-        commitment_tx.sign(self.into())
+        let sign_ctx = Musig2SignContext::from(self);
+
+        let tx = self.build_commitment_tx(true);
+        let message = get_tx_message_to_sign(&tx);
+
+        let signature = sign_ctx.sign(message.as_slice())?;
+        debug!(
+            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &signature,
+        );
+
+        Ok(PartiallySignedCommitmentTransaction { tx, signature })
     }
 }
 
@@ -2262,7 +2297,6 @@ pub struct CommitmentTransaction {
 /// the ckb transaction.
 #[derive(Clone, Debug)]
 pub struct PartiallySignedCommitmentTransaction {
-    inner: CommitmentTransaction,
     tx: TransactionView,
     signature: PartialSignature,
 }
@@ -2349,72 +2383,6 @@ fn get_commitment_lock_outpoint() -> OutPoint {
         .build();
 
     commitment_lock_outpoint
-}
-
-impl CommitmentTransaction {
-    pub fn gen_tx(&self) -> TransactionView {
-        let tx_builder = TransactionBuilder::default()
-            .cell_dep(
-                CellDep::new_builder()
-                    .out_point(get_commitment_lock_outpoint())
-                    .dep_type(DepType::Code.into())
-                    .build(),
-            )
-            .input(
-                CellInput::new_builder()
-                    .previous_output(self.input.clone())
-                    .build(),
-            );
-
-        let (outputs, outputs_data) = self.build_outputs();
-        let tx_builder = tx_builder.set_outputs(outputs);
-        let tx_builder = tx_builder.set_outputs_data(outputs_data);
-        tx_builder.build()
-    }
-
-    // TODO: add outputs from self.tlcs
-    pub fn build_outputs(&self) -> (Vec<CellOutput>, Vec<Bytes>) {
-        (vec![], vec![])
-    }
-
-    pub fn sign(
-        self,
-        sign_ctx: Musig2SignContext,
-    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let tx = self.gen_tx();
-        let message = get_tx_message_to_sign(&tx);
-
-        let signature = sign_ctx.sign(message.as_slice())?;
-        debug!(
-            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
-            &tx, &message, &signature,
-        );
-
-        Ok(PartiallySignedCommitmentTransaction {
-            inner: self,
-            tx,
-            signature,
-        })
-    }
-
-    pub fn verify(
-        self,
-        signature: PartialSignature,
-        verify_ctx: Musig2VerifyContext,
-    ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let tx = self.gen_tx();
-        let message = get_tx_message_to_sign(&tx);
-        debug!(
-            "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
-            &signature, &tx, &message
-        );
-        verify_ctx.verify(signature, message.as_slice())?;
-        Ok(PartiallySignedCommitmentTransaction {
-            inner: self,
-            tx,
-            signature,
-        })
-    }
 }
 
 fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
@@ -2534,8 +2502,7 @@ pub struct TLC {
     pub id: u64,
     /// Is this HTLC being received by us or offered by us?
     pub is_offered: bool,
-    /// The value, in msat, of the HTLC. The value as it appears in the commitment transaction is
-    /// this divided by 1000.
+    /// The value as it appears in the commitment transaction
     pub amount: u128,
     /// The CLTV lock-time at which this HTLC expires.
     pub lock_time: LockTime,
@@ -2543,14 +2510,19 @@ pub struct TLC {
     pub payment_hash: Hash256,
     /// The preimage of the hash to be sent to the counterparty.
     pub payment_preimage: Option<Hash256>,
+    /// The commitment number is kept here because we need to derive
+    /// the local and remote payment pubkey. Note that commitment number
+    /// is different for initiator and acceptor. So we keep both
+    /// a local_commitment_number and a remote_commitment_number.
+    pub local_commitment_number: u64,
+    pub remote_commitment_number: u64,
 }
 
 /// A tlc output in a commitment transaction, including both the tlc output
-/// and the index in the commitment transaction.
+/// and the commitment_number that it first appeared in the commitment transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TLCOutputInCommitment {
     pub output: TLC,
-    pub transaction_output_index: Option<u32>,
 }
 
 /// The set of public keys which are used in the creation of one commitment transaction.
