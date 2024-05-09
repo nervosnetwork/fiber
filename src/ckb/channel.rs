@@ -1125,6 +1125,14 @@ impl ChannelActorState {
         self.counterparty_nonce.as_ref().unwrap()
     }
 
+    pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
+        if local {
+            self.get_holder_channel_parameters()
+        } else {
+            self.get_counterparty_channel_parameters()
+        }
+    }
+
     pub fn get_holder_channel_parameters(&self) -> &ChannelParametersOneParty {
         &self.holder_channel_parameters
     }
@@ -1165,15 +1173,38 @@ impl ChannelActorState {
             .expect("Counterparty shutdown script is present")
     }
 
-    pub fn get_holder_commitment_point(&self) -> Pubkey {
-        self.signer
-            .get_commitment_point(self.holder_commitment_number)
+    pub fn get_commitment_point(&self, local: bool, commitment_number: u64) -> Pubkey {
+        if local {
+            self.get_holder_commitment_point(commitment_number)
+        } else {
+            self.get_counterparty_commitment_point(commitment_number)
+        }
+    }
+
+    pub fn get_current_commitment_point(&self, local: bool) -> Pubkey {
+        if local {
+            self.get_current_holder_commitment_point()
+        } else {
+            self.get_current_counterparty_commitment_point()
+        }
+    }
+
+    pub fn get_holder_commitment_point(&self, commitment_number: u64) -> Pubkey {
+        self.signer.get_commitment_point(commitment_number)
+    }
+
+    pub fn get_current_holder_commitment_point(&self) -> Pubkey {
+        self.get_holder_commitment_point(self.holder_commitment_number)
+    }
+
+    pub fn get_current_counterparty_commitment_point(&self) -> Pubkey {
+        self.get_counterparty_commitment_point(self.counterparty_commitment_number)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
-    pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> &Pubkey {
+    pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> Pubkey {
         let index = commitment_number as usize;
-        &self.counterparty_commitment_points[index]
+        self.counterparty_commitment_points[index]
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
@@ -1822,7 +1853,7 @@ impl ChannelActorState {
                     &revocation_preimage
                 );
                 self.holder_commitment_number = self.get_next_commitment_number(true);
-                let next_commitment_point = self.get_holder_commitment_point();
+                let next_commitment_point = self.get_current_holder_commitment_point();
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
@@ -2138,15 +2169,15 @@ impl ChannelActorState {
             (
                 self.get_holder_channel_parameters(),
                 self.get_counterparty_channel_parameters(),
-                self.signer.get_commitment_point(commitment_number),
-                *self.get_counterparty_commitment_point(commitment_number),
+                self.get_holder_commitment_point(commitment_number),
+                self.get_counterparty_commitment_point(commitment_number),
             )
         } else {
             (
                 self.get_counterparty_channel_parameters(),
                 self.get_holder_channel_parameters(),
-                *self.get_counterparty_commitment_point(commitment_number),
-                self.signer.get_commitment_point(commitment_number),
+                self.get_counterparty_commitment_point(commitment_number),
+                self.get_holder_commitment_point(commitment_number),
             )
         };
         let tx_creation_keys = TxCreationKeys {
