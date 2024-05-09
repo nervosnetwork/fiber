@@ -344,9 +344,10 @@ impl ChannelActor {
                 };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
                     if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
+                        dbg!(&command, &tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Preimage {:?} does not match payment hash {:?}",
-                            fulfill, tlc.payment_hash
+                            "Preimage {:?} is hashed to {:?}, which does not match payment hash {:?}",
+                            fulfill.payment_preimage, blake2b_256(fulfill.payment_preimage), tlc.payment_hash,
                         )));
                     }
                 }
@@ -1300,6 +1301,10 @@ impl ChannelActorState {
             .collect()
     }
 
+    fn any_tlc_pending(&self) -> bool {
+        !self.pending_offered_tlcs.is_empty() || !self.pending_received_tlcs.is_empty()
+    }
+
     pub fn get_counterparty_funding_pubkey(&self) -> &Pubkey {
         &self
             .get_counterparty_channel_parameters()
@@ -1310,6 +1315,7 @@ impl ChannelActorState {
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ChannelReady(_) => Ok(()),
+            ChannelState::ShuttingDown(_) => Ok(()),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Invalid state {:?} for adding tlc",
@@ -1623,6 +1629,13 @@ impl ChannelActorState {
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) =>
                     {
+                        if self.any_tlc_pending() {
+                            return Err(ProcessingChannelError::InvalidState(format!(
+                                "received ClosingSigned message, but we're not ready for ClosingSigned because there are still some pending tlcs, state: {:?}, pending tlcs: {:?}",
+                                self.state,
+                                self.get_tlcs_for_commitment_tx()
+                            )));
+                        }
                         flags
                     }
                     _ => {
@@ -1692,9 +1705,8 @@ impl ChannelActorState {
         network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         // TODO: should automatically check this periodically.
-        if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS)
-            && self.get_tlcs_for_commitment_tx().is_empty()
-        {
+        if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) && !self.any_tlc_pending() {
+            debug!("All pending tlcs are resolved, transitioning to ClosingSigned");
             self.state = ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
 
             let signature = self.build_and_sign_shutdown_tx(
@@ -1721,6 +1733,11 @@ impl ChannelActorState {
                 ))
                 .expect("network actor alive");
         }
+        debug!(
+            "Not transitioning to ClosingSigned, current state: {:?}, pending tlcs: {:?}",
+            &self.state,
+            &self.get_tlcs_for_commitment_tx()
+        );
         Ok(())
     }
 

@@ -21,14 +21,14 @@ The whole process is something like:
 15. NODE3 sends an `add_tlc` to pay NODE1 10 (payment1).
 16. NODE1 sends an `add_tlc` to pay NODE3 to pay 20 (payment2), and then NODE3 sends 30 to NODE1 (payment3).
 17. NODE1 sends an `add_tlc` to pay NODE3 to pay 20 (payment4), and then NODE3 sends 30 to NODE1 (payment5).
-19. NODE3 sends NODE1 a `remove_tlc` to fail payment2.
-18. NODE1 sends NODE3 a `remove_tlc` to complete a payment3. By this time, NODE1 has 1100 ckb ready to use, and NODE3 has 430 ckb ready to use.
+18. NODE1 sends NODE3 a `remove_tlc` to complete a payment3.
+19. NODE3 sends NODE1 a `remove_tlc` to fail payment2. By this time, NODE1 has 1100 ckb ready to use, and NODE3 has 430 ckb ready to use.
 20. NODE3 sends a `commitment_signed` to commit the inflight transactions
 21. NODE1 acknowledges the commitment transaction by sending a `revoke_and_ack`
 22. NODE1 initiates a `shutdown` to close the channel
 23. NODE3 replies a `shutdown` to acknowledge the closure of this channel
-24. NODE3 sends a `closing_signed` to make a NODE1 immediately broadcastable closure transaction
-24. NODE1 sends a `closing_signed` to make a NODE3 immediately broadcastable closure transaction
+24. There are still payment1, payment4 and payment5 waiting for resolution. We remove them payment1 and payment5 by failing them from NODE1, and complete payment4 from NODE3.
+25. NODE3 and NODE1 automatically send a `closing_signed` to their counterparty on all tlc finished. 
 
 ## Starting nodes
 

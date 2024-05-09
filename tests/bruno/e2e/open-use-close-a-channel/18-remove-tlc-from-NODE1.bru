@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE1_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -24,8 +24,8 @@ body:json {
           "RemoveTlc": {
             "id": 1,
             "reason": {
-              "RemoveTlcFail": {
-                "error_code": 42
+              "RemoveTlcFulfill": {
+                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000002"
               }
             }
           }

@@ -1,7 +1,7 @@
 meta {
-  name: remove tlc from NODE3
+  name: remove tlc from NODE1
   type: http
-  seq: 18
+  seq: 24
 }
 
 post {
@@ -22,10 +22,10 @@ body:json {
         "channel_id": "{{CHANNEL_ID}}",
         "command": {
           "RemoveTlc": {
-            "id": 0,
+            "id": 1,
             "reason": {
-              "RemoveTlcFail": {
-                "error_code": 42
+              "RemoveTlcFulfill": {
+                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000001"
               }
             }
           }

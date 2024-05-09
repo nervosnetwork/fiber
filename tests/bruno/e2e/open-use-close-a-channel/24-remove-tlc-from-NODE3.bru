@@ -1,11 +1,11 @@
 meta {
   name: remove tlc from NODE3
   type: http
-  seq: 18
+  seq: 23
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE1_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ body:json {
         "channel_id": "{{CHANNEL_ID}}",
         "command": {
           "RemoveTlc": {
-            "id": 0,
+            "id": 2,
             "reason": {
               "RemoveTlcFail": {
                 "error_code": 42
