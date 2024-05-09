@@ -96,8 +96,6 @@ pub struct ChannelCommandWithId {
     pub command: ChannelCommand,
 }
 
-pub const INITITATOR_INITIAL_COMMITMENT_NUMBER: u64 = 0;
-pub const ACCEPTOR_INITIAL_COMMITMENT_NUMBER: u64 = (2 ^ 48) - 1;
 pub const DEFAULT_FEE_RATE: u64 = 0;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
@@ -550,7 +548,7 @@ impl Actor for ChannelActor {
                     *second_per_commitment_point,
                 );
 
-                let commitment_number = ACCEPTOR_INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = 0;
 
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
@@ -569,7 +567,7 @@ impl Actor for ChannelActor {
                         .get_commitment_point(commitment_number),
                     second_per_commitment_point: state
                         .signer
-                        .get_commitment_point(commitment_number - 1),
+                        .get_commitment_point(commitment_number + 1),
                     next_local_nonce: state.get_holder_musig2_pubnonce(),
                 };
 
@@ -607,7 +605,7 @@ impl Actor for ChannelActor {
                     LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
                 );
 
-                let commitment_number = INITITATOR_INITIAL_COMMITMENT_NUMBER;
+                let commitment_number = 0;
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
@@ -1011,7 +1009,7 @@ impl ChannelActorState {
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
-        let commitment_number = ACCEPTOR_INITIAL_COMMITMENT_NUMBER;
+        let commitment_number = 0;
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
 
@@ -1049,7 +1047,7 @@ impl ChannelActorState {
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
-            counterparty_commitment_number: INITITATOR_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_number: 0,
             counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_points: vec![
@@ -1069,7 +1067,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let commitment_number = INITITATOR_INITIAL_COMMITMENT_NUMBER;
+        let commitment_number = 0;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
@@ -1092,7 +1090,7 @@ impl ChannelActorState {
             counterparty_channel_parameters: None,
             holder_commitment_number: commitment_number,
             counterparty_nonce: None,
-            counterparty_commitment_number: ACCEPTOR_INITIAL_COMMITMENT_NUMBER,
+            counterparty_commitment_number: 0,
             counterparty_commitment_points: vec![],
             holder_shutdown_script: None,
             counterparty_shutdown_script: None,
@@ -1139,7 +1137,7 @@ impl ChannelActorState {
         if local {
             self.holder_commitment_number + 1
         } else {
-            self.counterparty_commitment_number - 1
+            self.counterparty_commitment_number + 1
         }
     }
 
@@ -1174,8 +1172,8 @@ impl ChannelActorState {
 
     /// Get the counterparty commitment point for the given commitment number.
     pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> &Pubkey {
-        let index = self.canonicalize_commitment_number(commitment_number, false);
-        &self.counterparty_commitment_points[index as usize]
+        let index = commitment_number as usize;
+        &self.counterparty_commitment_points[index]
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
@@ -2123,21 +2121,6 @@ impl ChannelActorState {
             &tx, &message, &result,
         );
         result.is_ok()
-    }
-
-    // Because we follow the BOLT specification, the commitment number starts
-    // from 0 for the channel initator, and the acceptor's commitment number
-    // starts from 2^48 - 1. This function is used to convert the commitment
-    // number to a canonical form (that is, the natural sequence number to
-    // commitment number among all the commitments in the channel).
-    // The local parameter indicates whether the commitment number is from
-    // the local party or the counterparty.
-    pub fn canonicalize_commitment_number(&self, commitment_number: u64, local: bool) -> u64 {
-        if local && self.is_acceptor || !local && !self.is_acceptor {
-            ACCEPTOR_INITIAL_COMMITMENT_NUMBER - commitment_number
-        } else {
-            commitment_number
-        }
     }
 
     pub fn build_tx_creation_keys(&self, local: bool, commitment_number: u64) -> TxCreationKeys {
