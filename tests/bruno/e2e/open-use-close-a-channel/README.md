@@ -27,7 +27,7 @@ The whole process is something like:
 21. NODE1 acknowledges the commitment transaction by sending a `revoke_and_ack`
 22. NODE1 initiates a `shutdown` to close the channel
 23. NODE3 replies a `shutdown` to acknowledge the closure of this channel
-24. There are still payment1, payment4 and payment5 waiting for resolution. We remove them payment1 and payment5 by failing them from NODE1, and complete payment4 from NODE3.
+24. There are still payment1, payment4 and payment5 waiting for resolution. We remove them payment1 and payment5 by failing them from NODE1, and complete payment4 from NODE3. NODE1 has 1010 ckb ready to use, and NODE3 has 490 ckb ready to use.
 25. NODE3 and NODE1 automatically send a `closing_signed` to their counterparty on all tlc finished. 
 
 ## Starting nodes

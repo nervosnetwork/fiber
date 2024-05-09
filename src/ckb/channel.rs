@@ -376,6 +376,8 @@ impl ChannelActor {
             "Balance after removetlccommand: to_self_amount: {} to_remote_amount: {}",
             state.to_self_amount, state.to_remote_amount
         );
+        state.maybe_transition_to_closing_signed(self.network.clone())?;
+
         Ok(())
     }
 
@@ -417,7 +419,7 @@ impl ChannelActor {
             &state.state
         );
 
-        state.maybe_transition_to_closing_signed(flags, self.network.clone())?;
+        state.maybe_transition_to_closing_signed(self.network.clone())?;
         Ok(())
     }
 
@@ -1583,6 +1585,9 @@ impl ChannelActorState {
                             }
                         }
                         entry.remove();
+                        if self.pending_offered_tlcs.is_empty() {
+                            self.maybe_transition_to_closing_signed(network)?;
+                        }
                         Ok(())
                     }
                     hash_map::Entry::Vacant(_) => {
@@ -1620,7 +1625,7 @@ impl ChannelActorState {
                     "Channel state updated to {:?} after processing shutdown command",
                     &self.state
                 );
-                self.maybe_transition_to_closing_signed(flags, network)?;
+                self.maybe_transition_to_closing_signed(network)?;
 
                 Ok(())
             }
@@ -1701,9 +1706,14 @@ impl ChannelActorState {
 
     pub fn maybe_transition_to_closing_signed(
         &mut self,
-        flags: ShuttingDownFlags,
         network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
+        let flags = match self.state {
+            ChannelState::ShuttingDown(flags) => flags,
+            _ => {
+                return Ok(());
+            }
+        };
         // TODO: should automatically check this periodically.
         if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) && !self.any_tlc_pending() {
             debug!("All pending tlcs are resolved, transitioning to ClosingSigned");
