@@ -1215,11 +1215,7 @@ impl ChannelActorState {
             .get_counterparty_channel_parameters()
             .pubkeys
             .funding_pubkey;
-        let keys = if self.should_holders_pubkey_go_first_in_musig2() {
-            vec![holder_pubkey, counterparty_pubkey]
-        } else {
-            vec![counterparty_pubkey, holder_pubkey]
-        };
+        let keys = self.order_things_for_musig2(holder_pubkey, counterparty_pubkey);
         KeyAggContext::new(keys).expect("Valid pubkeys")
     }
 
@@ -1236,11 +1232,7 @@ impl ChannelActorState {
         let holder_nonce = self.get_holder_nonce();
         let holder_nonce = holder_nonce.borrow();
         let counterparty_nonce = self.get_counterparty_nonce();
-        let nonces = if self.should_holders_pubkey_go_first_in_musig2() {
-            vec![holder_nonce, counterparty_nonce]
-        } else {
-            vec![counterparty_nonce, holder_nonce]
-        };
+        let nonces = self.order_things_for_musig2(holder_nonce, counterparty_nonce);
         AggNonce::sum(nonces)
     }
 
@@ -1585,17 +1577,10 @@ impl ChannelActorState {
                 self.state = ChannelState::ShuttingDown(flags);
                 if flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
                     self.state = ChannelState::Closed;
-                    let partial_signatures = if self.should_holder_send_tx_signatures_first() {
-                        [
-                            self.holder_shutdown_signature.unwrap(),
-                            self.counterparty_shutdown_signature.unwrap(),
-                        ]
-                    } else {
-                        [
-                            self.counterparty_shutdown_signature.unwrap(),
-                            self.holder_shutdown_signature.unwrap(),
-                        ]
-                    };
+                    let partial_signatures = self.order_things_for_musig2(
+                        self.holder_shutdown_signature.unwrap(),
+                        self.counterparty_shutdown_signature.unwrap(),
+                    );
                     let tx =
                         aggregate_partial_signatures_for_tx(tx, verify_ctx, partial_signatures)
                             .expect("The validity of the signatures verified");
@@ -2123,7 +2108,7 @@ impl ChannelActorState {
     // Whose pubkey should go first in musig2?
     // We define a definitive order for the pubkeys in musig2 to makes it easier
     // to aggregate musig2 signatures.
-    fn should_holders_pubkey_go_first_in_musig2(&self) -> bool {
+    fn should_holder_go_first_in_musig2(&self) -> bool {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
             .get_counterparty_channel_parameters()
@@ -2132,7 +2117,16 @@ impl ChannelActorState {
         holder_pubkey <= counterparty_pubkey
     }
 
-    // Who should us (also called holder) send tx_signatures first?
+    // Order some items (like pubkey and nonce) from holders and counterparty in musig2.
+    fn order_things_for_musig2<T>(&self, holder: T, counterparty: T) -> [T; 2] {
+        if self.should_holder_go_first_in_musig2() {
+            [holder, counterparty]
+        } else {
+            [counterparty, holder]
+        }
+    }
+
+    // Should we (also called holder) send tx_signatures first?
     // In order to avoid deadlock, we need to define an order for sending tx_signatures.
     // Currently the order of sending tx_signatures is defined as follows:
     // If the amount to self is less than the amount to remote, then we should send,
@@ -2142,7 +2136,7 @@ impl ChannelActorState {
     fn should_holder_send_tx_signatures_first(&self) -> bool {
         self.to_self_amount < self.to_remote_amount
             || self.to_self_amount == self.to_remote_amount
-                && self.should_holders_pubkey_go_first_in_musig2()
+                && self.should_holder_go_first_in_musig2()
     }
 
     // TODO: the parameter with type Script is not enough to build a valid
@@ -2176,12 +2170,8 @@ impl ChannelActorState {
             .capacity(counterparty_value.pack())
             .lock(self.get_counterparty_shutdown_script().clone())
             .build();
-        let outputs = if self.should_holders_pubkey_go_first_in_musig2() {
-            vec![holder_output, counterparty_output]
-        } else {
-            vec![counterparty_output, holder_output]
-        };
-        let tx_builder = tx_builder.set_outputs(outputs);
+        let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
+        let tx_builder = tx_builder.set_outputs(outputs.to_vec());
         tx_builder.build()
     }
 
