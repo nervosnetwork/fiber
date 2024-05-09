@@ -147,6 +147,14 @@ impl From<&Privkey> for Scalar {
     }
 }
 
+impl From<Hash256> for Privkey {
+    fn from(hash: Hash256) -> Self {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(hash.as_ref());
+        Privkey::from_slice(&bytes)
+    }
+}
+
 impl From<Privkey> for SecretKey {
     fn from(pk: Privkey) -> Self {
         pk.0

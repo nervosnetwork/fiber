@@ -789,6 +789,7 @@ pub struct ChannelActorState {
     pub holder_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
+    // This value is guaranteed to be 1 when channel is just created.
     pub holder_commitment_number: u64,
     pub counterparty_commitment_number: u64,
 
@@ -1010,7 +1011,7 @@ impl ChannelActorState {
         counterparty_commitment_point: Pubkey,
         counterparty_prev_commitment_point: Pubkey,
     ) -> Self {
-        let commitment_number = 0;
+        let commitment_number = 1;
         let signer = InMemorySigner::generate_from_seed(seed);
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
 
@@ -1048,7 +1049,7 @@ impl ChannelActorState {
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
-            counterparty_commitment_number: 0,
+            counterparty_commitment_number: 1,
             counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_points: vec![
@@ -1091,7 +1092,7 @@ impl ChannelActorState {
             counterparty_channel_parameters: None,
             holder_commitment_number: commitment_number,
             counterparty_nonce: None,
-            counterparty_commitment_number: 0,
+            counterparty_commitment_number: 1,
             counterparty_commitment_points: vec![],
             holder_shutdown_script: None,
             counterparty_shutdown_script: None,
@@ -1679,6 +1680,8 @@ impl ChannelActorState {
         });
         self.counterparty_commitment_points
             .push(accept_channel.first_per_commitment_point);
+        self.counterparty_commitment_points
+            .push(accept_channel.second_per_commitment_point);
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
@@ -1843,7 +1846,7 @@ impl ChannelActorState {
                 // Now we should revoke previous transation by revealing preimage.
                 let revocation_preimage = self
                     .signer
-                    .get_commitment_secret(self.holder_commitment_number);
+                    .get_commitment_secret(self.holder_commitment_number - 1);
                 debug!(
                     "Revealing preimage for revocation: {:?}",
                     &revocation_preimage
@@ -2013,9 +2016,23 @@ impl ChannelActorState {
 
     pub fn handle_revoke_and_ack_message(
         &mut self,
-        _revoke_and_ack: RevokeAndAck,
+        revoke_and_ack: RevokeAndAck,
         _network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
+        let RevokeAndAck {
+            channel_id: _,
+            per_commitment_secret,
+            next_per_commitment_point,
+        } = revoke_and_ack;
+        let per_commitment_point = self.get_current_counterparty_commitment_point();
+        if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Invalid per_commitment_secret".to_string(),
+            ));
+        }
+        self.counterparty_commitment_points
+            .push(next_per_commitment_point);
+        self.counterparty_commitment_number = self.get_next_commitment_number(false);
         Ok(())
     }
 
@@ -2754,7 +2771,16 @@ mod tests {
         NetworkServiceEvent,
     };
 
-    use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey};
+    use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey, InMemorySigner};
+
+    #[test]
+    fn test_per_commitment_point_and_secret_consistency() {
+        let signer = InMemorySigner::generate_from_seed(&[1; 32]);
+        assert_eq!(
+            signer.get_commitment_point(0),
+            Privkey::from(&signer.get_commitment_secret(0)).pubkey()
+        );
+    }
 
     #[test]
     fn test_derive_private_and_public_keys() {
