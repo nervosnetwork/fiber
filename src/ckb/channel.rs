@@ -1277,13 +1277,19 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    pub fn get_amounts_for_both_party(&self, local: bool) -> (u128, u128) {
+    pub fn get_broadcaster_and_countersignatory_amounts(&self, local: bool) -> (u128, u128) {
         // TODO: consider transaction fee here.
         // TODO: exclude all the timelocked values here.
-        if local {
-            (self.to_remote_amount, self.to_self_amount)
-        } else {
+        debug!("Getting amounts for both party");
+        dbg!(if local {
             (self.to_self_amount, self.to_remote_amount)
+        } else {
+            (self.to_remote_amount, self.to_self_amount)
+        });
+        if local {
+            (self.to_self_amount, self.to_remote_amount)
+        } else {
+            (self.to_remote_amount, self.to_self_amount)
         }
     }
 
@@ -1352,6 +1358,8 @@ impl ChannelActorState {
             payment_preimage: Some(preimage),
             local_commitment_number: self.get_next_commitment_number(true),
             remote_commitment_number: self.get_next_commitment_number(false),
+            local_payment_key_hash: None,
+            remote_payment_key_hash: None,
         }
     }
 
@@ -1367,6 +1375,8 @@ impl ChannelActorState {
             payment_preimage: None,
             local_commitment_number,
             remote_commitment_number,
+            local_payment_key_hash: None,
+            remote_payment_key_hash: None,
         }
     }
 }
@@ -2388,7 +2398,7 @@ impl ChannelActorState {
 
     fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
         let (to_broadcaster_value, to_countersignatory_value) =
-            self.get_amounts_for_both_party(local);
+            self.get_broadcaster_and_countersignatory_amounts(local);
 
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
@@ -2428,13 +2438,27 @@ impl ChannelActorState {
             )
         };
 
-        let tlcs = self.get_tlcs_for_commitment_tx();
+        let mut tlcs = self.get_tlcs_for_commitment_tx();
+        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
+        // In the commitment transaction, we need also to include the amount of the TLCs.
+        let to_broadcaster_value =
+            to_broadcaster_value as u64 + tlcs.iter().map(|tlc| tlc.amount).sum::<u128>() as u64;
+
+        dbg!(
+            &tlcs,
+            to_countersignatory_value,
+            to_broadcaster_value,
+            to_broadcaster_value
+        );
+        for tlc in tlcs.iter_mut() {
+            tlc.fill_in_pubkeys(local, &self);
+        }
         let witnesses: Vec<u8> = [
             (to_broadcaster_value as u64).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
             tlcs.iter()
-                .map(|tlc| tlc.serialize_to_lock_args(local, &self))
+                .map(|tlc| tlc.serialize_to_lock_args())
                 .flatten()
                 .collect(),
         ]
@@ -2755,11 +2779,20 @@ pub struct TLC {
     /// a local_commitment_number and a remote_commitment_number.
     pub local_commitment_number: u64,
     pub remote_commitment_number: u64,
+    // Below are the actual public keys used in the commitment transaction.
+    // These are derived from the channel base keys and per-commitment data.
+    pub local_payment_key_hash: Option<ShortHash>,
+    pub remote_payment_key_hash: Option<ShortHash>,
 }
 
 impl TLC {
     fn get_hash(&self) -> ShortHash {
         self.payment_hash.as_ref()[..20].try_into().unwrap()
+    }
+
+    fn fill_in_pubkeys(&mut self, local: bool, channel: &ChannelActorState) {
+        self.local_payment_key_hash = Some(self.get_local_pubkey_hash(local, channel));
+        self.remote_payment_key_hash = Some(self.get_remote_pubkey_hash(local, channel));
     }
 
     fn get_local_pubkey_hash(&self, local: bool, channel: &ChannelActorState) -> ShortHash {
@@ -2800,13 +2833,15 @@ impl TLC {
         derive_tlc_pubkey(&base_key, &commitment_point)
     }
 
-    pub fn serialize_to_lock_args(&self, local: bool, channel: &ChannelActorState) -> Vec<u8> {
+    // Serialize the tlc output to lock args.
+    // Must be called after fill_in_pubkeys.
+    pub fn serialize_to_lock_args(&self) -> Vec<u8> {
         [
             (if self.is_offered { [0] } else { [1] }).to_vec(),
             self.amount.to_le_bytes().to_vec(),
             self.get_hash().to_vec(),
-            self.get_remote_pubkey_hash(local, channel).to_vec(),
-            self.get_local_pubkey_hash(local, channel).to_vec(),
+            self.remote_payment_key_hash.unwrap().to_vec(),
+            self.local_payment_key_hash.unwrap().to_vec(),
             Since::from(self.lock_time).value().to_le_bytes().to_vec(),
         ]
         .concat()
