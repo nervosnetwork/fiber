@@ -143,12 +143,17 @@ impl CommitmentLockContext {
         let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
         let auth_out_point = context.deploy_cell(auth_bin);
 
+        dbg!(
+            &funding_lock_out_point,
+            &commitment_lock_out_point,
+            &auth_out_point
+        );
         // prepare cell deps
         let funding_lock_dep = CellDep::new_builder()
-            .out_point(commitment_lock_out_point.clone())
+            .out_point(funding_lock_out_point.clone())
             .build();
         let commitment_lock_dep = CellDep::new_builder()
-            .out_point(funding_lock_out_point.clone())
+            .out_point(commitment_lock_out_point.clone())
             .build();
         dbg!(&commitment_lock_out_point);
         let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
@@ -259,7 +264,7 @@ pub fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
     static INSTANCE: OnceCell<Mutex<CommitmentLockContext>> = OnceCell::new();
     INSTANCE.get_or_init(|| {
         let c = CommitmentLockContext::new();
-        Mutex::new(c)
+        Mutex::new(c) // run
     })
 }
 

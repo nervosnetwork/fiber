@@ -8,7 +8,10 @@ use ckb_types::{
 };
 
 use log::{debug, error, info, warn};
-use molecule::prelude::{Builder, Entity};
+use molecule::{
+    bytes,
+    prelude::{Builder, Entity},
+};
 use musig2::{
     aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
@@ -1447,7 +1450,6 @@ impl ChannelActorState {
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
                     }
                 }
-                {}
                 Ok(())
             }
             PCNMessage::TxSignatures(tx_signatures) => {
@@ -1934,14 +1936,49 @@ impl ChannelActorState {
 
             println!("tx: {:?}", tx);
 
-            // TODO: this does not work yet becasue we can't find the funding transaction.
+            let context = get_commitment_lock_context().lock().unwrap();
+            let context = &mut context.context.clone();
 
-            // let context = get_commitment_lock_context().lock().unwrap();
-            // let cycles = context
-            //     .context
-            //     .verify_tx(&tx, 10_000_000)
-            //     .expect("pass verification");
-            // println!("consume cycles: {}", cycles);
+            context.create_cell_with_out_point(
+                self.get_funding_transaction_outpoint(),
+                CellOutput::new_builder().capacity(4000000.pack()).build(),
+                bytes::Bytes::new(),
+            );
+            let revocation_keys = [
+                "8172cbf168dcb988d2849ea229603f843614a038e1baa83783aee2f9aeac32ea",
+                "e16a04c9d5d3d80bc0bb03c19dceddfc34a5017a885a57b9316bd9944022a088",
+            ]
+            .iter()
+            .map(|x| hex::decode(x).unwrap())
+            .collect::<Vec<_>>();
+            dbg!(&revocation_keys);
+
+            for local in [true, false] {
+                let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+                let tx = context.complete_tx(tx.clone());
+
+                let results = revocation_keys
+                    .iter()
+                    .map(|key| {
+                        let signature = ckb_crypto::secp::Privkey::from_slice(&key)
+                            .sign_recoverable(&message.into())
+                            .unwrap()
+                            .serialize();
+                        let witness_script = self.build_commitment_transaction_witnesses(local);
+                        let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+
+                        dbg!(witness.clone());
+                        let tx = tx.as_advanced_builder().witness(witness.pack()).build();
+                        println!("tx: {:?}", tx);
+
+                        dbg!(tx.hash());
+                        let result = context.verify_tx(&tx, 10_000_000);
+                        dbg!(&result);
+                        result.is_ok()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(results, vec![false, true]);
+            }
         }
 
         debug!(
@@ -1955,45 +1992,6 @@ impl ChannelActorState {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.state = ChannelState::SigningCommitment(flags);
-                if is_testing() {
-                    {
-                        let context = get_commitment_lock_context().lock().unwrap();
-                        let context = &context.context;
-
-                        let revocation_keys = [
-                            "8172cbf168dcb988d2849ea229603f843614a038e1baa83783aee2f9aeac32ea",
-                            "e16a04c9d5d3d80bc0bb03c19dceddfc34a5017a885a57b9316bd9944022a088",
-                        ]
-                        .iter()
-                        .map(|x| hex::decode(x).unwrap())
-                        .collect::<Vec<_>>();
-                        for local in [true, false] {
-                            let tx = self.build_commitment_tx(local);
-                            // sign with revocation key
-                            let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-
-                            let results = revocation_keys.iter().map(|key| {
-                                let signature = ckb_crypto::secp::Privkey::from_slice(&key)
-                                    .sign_recoverable(&message.into())
-                                    .unwrap()
-                                    .serialize();
-                                let witness_script =
-                                    self.build_commitment_transaction_witnesses(local);
-                                let witness =
-                                    [witness_script.clone(), vec![0xFF], signature].concat();
-
-                                let tx = tx.as_advanced_builder().witness(witness.pack()).build();
-                                println!("tx: {:?}", tx);
-
-                                // run
-                                let cycles = context
-                                    .verify_tx(&tx, 10_000_000)
-                                    .expect("pass verification");
-                                println!("consume cycles: {}", cycles);
-                            });
-                        }
-                    }
-                }
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady(_) => {
