@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_sdk::Since;
 use ckb_types::{
     core::{DepType, TransactionBuilder, TransactionView},
     packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
@@ -281,7 +282,7 @@ impl ChannelActor {
 
         // TODO: Note that since message sending is async,
         // we can't guarantee anything about the order of message sending
-        // and state updating. And any of these may fail while the other succeedes.
+        // and state updating. And any of these may fail while the other succeeds.
         // We may need to handle all these possibilities.
         // To make things worse, we currently don't have a way to ACK all the messages.
 
@@ -2386,18 +2387,86 @@ impl ChannelActorState {
     }
 
     fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
-        let (_to_broadcaster_value, _to_countersignatory_value) =
+        let (to_broadcaster_value, to_countersignatory_value) =
             self.get_amounts_for_both_party(local);
 
-        let _commitment_number = if local {
-            self.holder_commitment_number
-        } else {
-            self.counterparty_commitment_number
+        let immediate_payment_key = {
+            let (commitment_point, base_payment_key) = if local {
+                (
+                    self.get_current_counterparty_commitment_point(),
+                    self.get_counterparty_channel_parameters()
+                        .payment_base_key(),
+                )
+            } else {
+                (
+                    self.get_current_holder_commitment_point(),
+                    self.get_holder_channel_parameters().payment_base_key(),
+                )
+            };
+            derive_payment_pubkey(base_payment_key, &commitment_point)
+        };
+        let (delayed_payment_key, revocation_key) = {
+            let (commitment_point, base_delayed_payment_key, base_revocation_key) = if local {
+                (
+                    self.get_current_holder_commitment_point(),
+                    self.get_holder_channel_parameters()
+                        .delayed_payment_base_key(),
+                    self.get_holder_channel_parameters().revocation_base_key(),
+                )
+            } else {
+                (
+                    self.get_current_counterparty_commitment_point(),
+                    self.get_counterparty_channel_parameters()
+                        .delayed_payment_base_key(),
+                    self.get_counterparty_channel_parameters()
+                        .revocation_base_key(),
+                )
+            };
+            (
+                derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
+                derive_revocation_pubkey(base_revocation_key, &commitment_point),
+            )
         };
 
-        let _tlcs = self.get_tlcs_for_commitment_tx();
-        // TODO: generate outputs from channel state
-        (vec![], vec![])
+        let tlcs = self.get_tlcs_for_commitment_tx();
+        let witnesses: Vec<u8> = [
+            (to_broadcaster_value as u64).to_le_bytes().to_vec(),
+            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
+            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
+            tlcs.iter()
+                .map(|tlc| tlc.serialize_to_lock_args(local, &self))
+                .flatten()
+                .collect(),
+        ]
+        .concat();
+
+        // TODO: fill in the actual lock script.
+        let secp256k1_lock_script = Script::default();
+        let commitment_lock_script = Script::default();
+
+        let outputs = vec![
+            CellOutput::new_builder()
+                .capacity((to_countersignatory_value as u64).pack())
+                .lock(
+                    secp256k1_lock_script
+                        .as_builder()
+                        .args(blake2b_256(immediate_payment_key.serialize())[0..20].pack())
+                        .build(),
+                )
+                .build(),
+            CellOutput::new_builder()
+                .capacity((to_broadcaster_value as u64).pack())
+                .lock(
+                    commitment_lock_script
+                        .as_builder()
+                        .args(blake2b_256(witnesses)[0..20].pack())
+                        .build(),
+                )
+                .build(),
+        ];
+        let outputs_data = vec![Bytes::default(); outputs.len()];
+
+        (outputs, outputs_data)
     }
 
     pub fn build_and_verify_commitment_tx(
@@ -2661,6 +2730,8 @@ pub struct CounterpartyChannelTransactionParameters {
     pub selected_contest_delay: u16,
 }
 
+type ShortHash = [u8; 20];
+
 /// A tlc output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TLC {
@@ -2684,6 +2755,62 @@ pub struct TLC {
     /// a local_commitment_number and a remote_commitment_number.
     pub local_commitment_number: u64,
     pub remote_commitment_number: u64,
+}
+
+impl TLC {
+    fn get_hash(&self) -> ShortHash {
+        self.payment_hash.as_ref()[..20].try_into().unwrap()
+    }
+
+    fn get_local_pubkey_hash(&self, local: bool, channel: &ChannelActorState) -> ShortHash {
+        let pubkey = self.get_pubkey(true, local, channel);
+        blake2b_256(pubkey.serialize())[..20].try_into().unwrap()
+    }
+
+    fn get_remote_pubkey_hash(&self, local: bool, channel: &ChannelActorState) -> ShortHash {
+        let pubkey = self.get_pubkey(false, local, channel);
+        blake2b_256(pubkey.serialize())[..20].try_into().unwrap()
+    }
+
+    fn get_pubkey(
+        &self,
+        local_pubkey: bool,
+        local_commitment: bool,
+        channel: &ChannelActorState,
+    ) -> Pubkey {
+        let commitment_number = if local_commitment {
+            self.local_commitment_number
+        } else {
+            self.remote_commitment_number
+        };
+        let (base_key, commitment_point) = if local_pubkey {
+            (
+                channel.get_holder_channel_parameters().pubkeys.tlc_base_key,
+                channel.get_holder_commitment_point(commitment_number),
+            )
+        } else {
+            (
+                channel
+                    .get_counterparty_channel_parameters()
+                    .pubkeys
+                    .tlc_base_key,
+                channel.get_counterparty_commitment_point(commitment_number),
+            )
+        };
+        derive_tlc_pubkey(&base_key, &commitment_point)
+    }
+
+    pub fn serialize_to_lock_args(&self, local: bool, channel: &ChannelActorState) -> Vec<u8> {
+        [
+            (if self.is_offered { [0] } else { [1] }).to_vec(),
+            self.amount.to_le_bytes().to_vec(),
+            self.get_hash().to_vec(),
+            self.get_remote_pubkey_hash(local, channel).to_vec(),
+            self.get_local_pubkey_hash(local, channel).to_vec(),
+            Since::from(self.lock_time).value().to_le_bytes().to_vec(),
+        ]
+        .concat()
+    }
 }
 
 /// A tlc output in a commitment transaction, including both the tlc output

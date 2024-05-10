@@ -23,7 +23,7 @@ pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     INSTANCE.get_or_init(Secp256k1::new)
 }
 
-#[serde_as]
+// TODO: We actually use both relative
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LockTime(u64);
 
@@ -286,6 +286,12 @@ impl From<&Pubkey> for Point {
     }
 }
 
+impl From<&Pubkey> for PublicKey {
+    fn from(val: &Pubkey) -> Self {
+        val.0
+    }
+}
+
 impl From<Pubkey> for PublicKey {
     fn from(pk: Pubkey) -> Self {
         pk.0
@@ -295,6 +301,12 @@ impl From<Pubkey> for PublicKey {
 impl From<PublicKey> for Pubkey {
     fn from(pk: PublicKey) -> Pubkey {
         Pubkey(pk)
+    }
+}
+
+impl Pubkey {
+    pub fn serialize(&self) -> [u8; 33] {
+        PublicKey::from(self).serialize()
     }
 }
 
