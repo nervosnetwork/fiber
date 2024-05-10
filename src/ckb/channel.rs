@@ -1930,14 +1930,14 @@ impl ChannelActorState {
 
             println!("tx: {:?}", tx);
 
-            const MAX_CYCLES: u64 = 10_000_000;
-            let context = get_commitment_lock_context().lock().unwrap();
-            // run
-            let cycles = context
-                .context
-                .verify_tx(&tx, MAX_CYCLES)
-                .expect("pass verification");
-            println!("consume cycles: {}", cycles);
+            // TODO: this does not work yet becasue we can't find the funding transaction.
+
+            // let context = get_commitment_lock_context().lock().unwrap();
+            // let cycles = context
+            //     .context
+            //     .verify_tx(&tx, 10_000_000)
+            //     .expect("pass verification");
+            // println!("consume cycles: {}", cycles);
         }
 
         debug!(

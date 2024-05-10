@@ -124,7 +124,8 @@ pub fn verify_and_dump_failed_tx(
 
 pub(crate) struct CommitmentLockContext {
     pub(crate) context: Context,
-    pub(crate) lock_script_outpoint: OutPoint,
+    pub(crate) funding_lock_out_point: OutPoint,
+    pub(crate) commitment_lock_out_point: OutPoint,
     pub(crate) cell_deps: CellDepVec,
 }
 
@@ -133,22 +134,29 @@ impl CommitmentLockContext {
         // deploy contract
         let mut context = Context::default();
         let loader = Loader::default();
+        let funding_lock_bin =
+            loader.load_binary("/home/e/Workspace/ckb-pcn-scripts/build/release/funding-lock");
         let commitment_lock_bin =
             loader.load_binary("/home/e/Workspace/ckb-pcn-scripts/build/release/commitment-lock");
         let auth_bin = loader.load_binary("/home/e/Workspace/ckb-pcn-scripts/deps/auth");
+        let funding_lock_out_point = context.deploy_cell(funding_lock_bin);
         let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
         let auth_out_point = context.deploy_cell(auth_bin);
 
         // prepare cell deps
-        let commitment_lock_dep = CellDep::new_builder()
+        let funding_lock_dep = CellDep::new_builder()
             .out_point(commitment_lock_out_point.clone())
+            .build();
+        let commitment_lock_dep = CellDep::new_builder()
+            .out_point(funding_lock_out_point.clone())
             .build();
         dbg!(&commitment_lock_out_point);
         let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
-        let cell_deps = vec![commitment_lock_dep, auth_dep].pack();
+        let cell_deps = vec![funding_lock_dep, commitment_lock_dep, auth_dep].pack();
         Self {
             context,
-            lock_script_outpoint: commitment_lock_out_point,
+            funding_lock_out_point,
+            commitment_lock_out_point,
             cell_deps,
         }
     }
@@ -192,7 +200,7 @@ impl CommitmentLockContext {
 
         let lock_script = self
             .context
-            .build_script(&self.lock_script_outpoint, args.into())
+            .build_script(&self.commitment_lock_out_point, args.into())
             .expect("script");
 
         (
@@ -257,5 +265,5 @@ pub fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
 
 pub fn get_commitment_lock_outpoint() -> OutPoint {
     let context = get_commitment_lock_context().lock().unwrap();
-    context.lock_script_outpoint.clone()
+    context.commitment_lock_out_point.clone()
 }
