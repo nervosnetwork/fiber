@@ -1293,7 +1293,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_tlcs_for_commitment_tx(&self) -> Vec<TLC> {
+    pub fn get_tlcs_for_commitment_tx(&self, local: bool) -> Vec<TLC> {
         debug!("Getting tlcs for commitment tx");
         debug!(
             "Current pending offered tlcs: {:?}",
@@ -1303,11 +1303,21 @@ impl ChannelActorState {
             "Current pending received tlcs: {:?}",
             self.pending_received_tlcs
         );
-        self.pending_offered_tlcs
-            .values()
-            .chain(self.pending_received_tlcs.values())
-            .cloned()
-            .collect()
+
+        let (mut a, mut b): (Vec<TLC>, Vec<TLC>) = if local {
+            (
+                self.pending_offered_tlcs.values().cloned().collect(),
+                self.pending_received_tlcs.values().cloned().collect(),
+            )
+        } else {
+            (
+                self.pending_received_tlcs.values().cloned().collect(),
+                self.pending_offered_tlcs.values().cloned().collect(),
+            )
+        };
+        a.sort_by(|x, y| x.id.cmp(&y.id));
+        b.sort_by(|x, y| x.id.cmp(&y.id));
+        [a, b].concat()
     }
 
     fn any_tlc_pending(&self) -> bool {
@@ -1356,16 +1366,16 @@ impl ChannelActorState {
             lock_time: command.expiry,
             is_offered: true,
             payment_preimage: Some(preimage),
-            local_commitment_number: self.get_next_commitment_number(true),
-            remote_commitment_number: self.get_next_commitment_number(false),
+            local_commitment_number: self.holder_commitment_number,
+            remote_commitment_number: self.counterparty_commitment_number,
             local_payment_key_hash: None,
             remote_payment_key_hash: None,
         }
     }
 
     pub fn create_inbounding_tlc(&self, message: AddTlc) -> TLC {
-        let local_commitment_number = self.get_next_commitment_number(true);
-        let remote_commitment_number = self.get_next_commitment_number(false);
+        let local_commitment_number = self.holder_commitment_number;
+        let remote_commitment_number = self.counterparty_commitment_number;
         TLC {
             id: message.tlc_id,
             amount: message.amount,
@@ -1649,7 +1659,7 @@ impl ChannelActorState {
                             return Err(ProcessingChannelError::InvalidState(format!(
                                 "received ClosingSigned message, but we're not ready for ClosingSigned because there are still some pending tlcs, state: {:?}, pending tlcs: {:?}",
                                 self.state,
-                                self.get_tlcs_for_commitment_tx()
+                                self.get_tlcs_for_commitment_tx(true)
                             )));
                         }
                         flags
@@ -1757,7 +1767,7 @@ impl ChannelActorState {
         debug!(
             "Not transitioning to ClosingSigned, current state: {:?}, pending tlcs: {:?}",
             &self.state,
-            &self.get_tlcs_for_commitment_tx()
+            &self.get_tlcs_for_commitment_tx(true)
         );
         Ok(())
     }
@@ -2438,7 +2448,9 @@ impl ChannelActorState {
             )
         };
 
-        let mut tlcs = self.get_tlcs_for_commitment_tx();
+        let mut tlcs = self.get_tlcs_for_commitment_tx(local);
+        tlcs.sort_by(|a, b| a.id.cmp(&b.id));
+        dbg!("Old tlcs", &tlcs);
         // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
         // In the commitment transaction, we need also to include the amount of the TLCs.
         let to_broadcaster_value =
@@ -2451,8 +2463,14 @@ impl ChannelActorState {
             to_broadcaster_value
         );
         for tlc in tlcs.iter_mut() {
+            debug!("Filling in pubkeys for TLC: {:?}", &tlc);
             tlc.fill_in_pubkeys(local, &self);
         }
+        debug!(
+            "Trying to generate witnesses from {} TLCs: {:?}",
+            tlcs.len(),
+            &tlcs
+        );
         let witnesses: Vec<u8> = [
             (to_broadcaster_value as u64).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
