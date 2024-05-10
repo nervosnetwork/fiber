@@ -2654,7 +2654,17 @@ impl Musig2SignContext {
     }
 }
 
+fn is_testing() -> bool {
+    true
+}
+
 fn get_commitment_lock_outpoint() -> OutPoint {
+    if is_testing() {
+        let out_point = super::temp::get_commitment_lock_outpoint();
+        debug!("Using commitment lock outpoint {:?}", &out_point);
+        return out_point;
+    }
+
     // TODO: Use real commitment lock outpoint here.
     let commitment_lock_outpoint = OutPoint::new_builder()
         .tx_hash(Byte32::zero())

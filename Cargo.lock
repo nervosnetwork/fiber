@@ -460,6 +460,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ckb-always-success-script"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b3b72a38c9920a29990df12002c4d069a147c8782f0c211f8a01b2df8f42bfd"
+
+[[package]]
 name = "ckb-chain-spec"
 version = "0.114.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -509,6 +515,19 @@ dependencies = [
  "rand 0.7.3",
  "secp256k1 0.24.3",
  "thiserror",
+]
+
+[[package]]
+name = "ckb-dao"
+version = "0.114.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d66be40303a1ffd12d6a6bd15f3b949c20894caea07181dcfb6408b7aa9fcbf4"
+dependencies = [
+ "byteorder",
+ "ckb-chain-spec",
+ "ckb-dao-utils",
+ "ckb-traits",
+ "ckb-types",
 ]
 
 [[package]]
@@ -690,6 +709,7 @@ dependencies = [
  "ckb-hash 0.115.0",
  "ckb-jsonrpc-types",
  "ckb-sdk",
+ "ckb-testtool",
  "ckb-types",
  "clap",
  "clap-serde-derive",
@@ -837,6 +857,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ckb-systemtime"
+version = "0.114.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae5937620517015b665ec7f703354017d687e5a4cccc6764379f90d90f112a6a"
+
+[[package]]
+name = "ckb-testtool"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c03584407b880869b153775190da5e1ffb9b5064273a1a116ce922ab78a8c65"
+dependencies = [
+ "ckb-always-success-script",
+ "ckb-chain-spec",
+ "ckb-crypto",
+ "ckb-error",
+ "ckb-hash 0.114.0",
+ "ckb-jsonrpc-types",
+ "ckb-mock-tx-types",
+ "ckb-resource",
+ "ckb-script",
+ "ckb-traits",
+ "ckb-types",
+ "ckb-verification",
+ "lazy_static",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "ckb-traits"
 version = "0.114.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -869,6 +917,36 @@ dependencies = [
  "numext-fixed-uint",
  "once_cell",
  "paste",
+]
+
+[[package]]
+name = "ckb-verification"
+version = "0.114.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc9f9af7f7dcd2941e2752af4fd2f7c7434a60d57de6ab6572b8d7a30f9ffd42"
+dependencies = [
+ "ckb-chain-spec",
+ "ckb-dao",
+ "ckb-dao-utils",
+ "ckb-error",
+ "ckb-pow",
+ "ckb-script",
+ "ckb-systemtime",
+ "ckb-traits",
+ "ckb-types",
+ "ckb-verification-traits",
+ "derive_more",
+ "lru",
+]
+
+[[package]]
+name = "ckb-verification-traits"
+version = "0.114.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b92f4bc9079ea35e8d52f9791f8d0c174bc5228944c5bd7cb1c6f957b9be573a"
+dependencies = [
+ "bitflags 1.3.2",
+ "ckb-error",
 ]
 
 [[package]]
