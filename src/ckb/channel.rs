@@ -1935,6 +1935,7 @@ impl ChannelActorState {
             let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
             println!("tx: {:?}", tx);
+            dbg!(tx.hash(), tx.inputs(), tx.outputs(), tx.witnesses());
 
             let context = get_commitment_lock_context().lock().unwrap();
             let context = &mut context.context.clone();
