@@ -122,10 +122,10 @@ pub fn verify_and_dump_failed_tx(
     result
 }
 
-struct CommitmentLockContext {
-    context: Context,
-    lock_script_outpoint: OutPoint,
-    cell_deps: CellDepVec,
+pub(crate) struct CommitmentLockContext {
+    pub(crate) context: Context,
+    pub(crate) lock_script_outpoint: OutPoint,
+    pub(crate) cell_deps: CellDepVec,
 }
 
 impl CommitmentLockContext {
@@ -247,7 +247,7 @@ impl CommitmentLockContext {
     }
 }
 
-fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
+pub fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
     static INSTANCE: OnceCell<Mutex<CommitmentLockContext>> = OnceCell::new();
     INSTANCE.get_or_init(|| {
         let c = CommitmentLockContext::new();

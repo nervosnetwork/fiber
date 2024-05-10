@@ -28,7 +28,7 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::types::Shutdown;
+use crate::ckb::{temp::get_commitment_lock_context, types::Shutdown};
 
 use super::{
     key::blake2b_hash_with_salt,
@@ -1925,6 +1925,21 @@ impl ChannelActorState {
 
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
+        if is_testing() {
+            let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+
+            println!("tx: {:?}", tx);
+
+            const MAX_CYCLES: u64 = 10_000_000;
+            let context = get_commitment_lock_context().lock().unwrap();
+            // run
+            let cycles = context
+                .context
+                .verify_tx(&tx, MAX_CYCLES)
+                .expect("pass verification");
+            println!("consume cycles: {}", cycles);
+        }
+
         debug!(
             "Successfully handled commitment signed message: {:?}, tx: {:?}",
             &commitment_signed, &tx
@@ -2542,6 +2557,33 @@ impl ChannelActorState {
         );
 
         Ok(PartiallySignedCommitmentTransaction { tx, signature })
+    }
+
+    pub fn verify_and_complete_tx(
+        &self,
+        signature: PartialSignature,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        let tx = self.build_and_verify_commitment_tx(signature)?;
+        assert_eq!(tx.tx, self.build_commitment_tx(false));
+        let sign_ctx = Musig2SignContext::from(self);
+
+        let message = get_tx_message_to_sign(&tx.tx);
+
+        let signature2 = sign_ctx.sign(message.as_slice())?;
+        debug!(
+            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &signature2,
+        );
+
+        let signatures = self.order_things_for_musig2(signature, signature2);
+        let tx = aggregate_partial_signatures_for_tx(
+            tx.tx,
+            Musig2VerifyContext::from(&*self),
+            signatures,
+        )
+        .expect("The validity of the signatures verified");
+
+        Ok(tx)
     }
 }
 
