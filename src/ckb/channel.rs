@@ -345,7 +345,6 @@ impl ChannelActor {
                 };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
                     if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
-                        dbg!(&command, &tlc);
                         state.pending_received_tlcs.insert(tlc.id, tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Preimage {:?} is hashed to {:?}, which does not match payment hash {:?}",
@@ -1279,14 +1278,6 @@ impl ChannelActorState {
     }
 
     pub fn get_broadcaster_and_countersignatory_amounts(&self, local: bool) -> (u128, u128) {
-        // TODO: consider transaction fee here.
-        // TODO: exclude all the timelocked values here.
-        debug!("Getting amounts for both party");
-        dbg!(if local {
-            (self.to_self_amount, self.to_remote_amount)
-        } else {
-            (self.to_remote_amount, self.to_self_amount)
-        });
         if local {
             (self.to_self_amount, self.to_remote_amount)
         } else {
@@ -2392,8 +2383,7 @@ impl ChannelActorState {
             .input(CellInput::new_builder().previous_output(input).build());
 
         let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
-        dbg!("Outputs", &outputs);
-        dbg!("Outputs data", &outputs_data);
+        debug!("Built outputs for commitment transaction: {:?}", &outputs);
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
         tx_builder.build()
@@ -2446,25 +2436,26 @@ impl ChannelActorState {
             )
         };
 
-        let (mut received_tlcs, mut offered_tlcs) = (
-            self.pending_received_tlcs
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
-            self.pending_offered_tlcs
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
-        for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-            debug!("Filling in pubkeys for TLC: {:?}", &tlc);
-            tlc.fill_in_pubkeys(local, &self);
-        }
+        // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         let tlcs = {
+            let (mut received_tlcs, mut offered_tlcs) = (
+                self.pending_received_tlcs
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                self.pending_offered_tlcs
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                tlc.fill_in_pubkeys(local, &self);
+            }
             let (mut a, mut b) = if local {
                 (received_tlcs, offered_tlcs)
             } else {
                 for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                    // Need to flip these fields for the counterparty.
                     tlc.is_offered = !tlc.is_offered;
                     (tlc.local_payment_key_hash, tlc.remote_payment_key_hash) =
                         (tlc.remote_payment_key_hash, tlc.local_payment_key_hash);
@@ -2475,45 +2466,13 @@ impl ChannelActorState {
             b.sort_by(|x, y| x.id.cmp(&y.id));
             [a, b].concat()
         };
-        debug!(
-            "Trying to generate witnesses from {} TLCs: {:?}",
-            tlcs.len(),
-            &tlcs
-        );
-        dbg!("New tlcs", &tlcs);
-        let tlcs_hex = tlcs
-            .iter()
-            .map(|tlc| tlc.serialize_to_lock_args())
-            .map(|x| hex::encode(x))
-            .collect::<Vec<String>>();
-        dbg!("TLCS hex", tlcs_hex,);
         // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
         // In the commitment transaction, we need also to include the amount of the TLCs.
         let to_broadcaster_value =
             to_broadcaster_value as u64 + tlcs.iter().map(|tlc| tlc.amount).sum::<u128>() as u64;
 
-        dbg!(
-            &tlcs,
-            to_countersignatory_value,
-            to_broadcaster_value,
-            to_broadcaster_value
-        );
-
-        let witnesses = [
-            (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
-            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
-            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
-            tlcs.iter()
-                .map(|tlc| tlc.serialize_to_lock_args())
-                .flatten()
-                .collect(),
-        ]
-        .iter()
-        .map(|x| hex::encode(x))
-        .collect::<Vec<String>>();
-        dbg!("Witnesses", witnesses);
         let witnesses: Vec<u8> = [
-            (to_broadcaster_value as u64).to_le_bytes().to_vec(),
+            (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
             tlcs.iter()
@@ -2527,8 +2486,6 @@ impl ChannelActorState {
         let secp256k1_lock_script = Script::default();
         let commitment_lock_script = Script::default();
 
-        dbg!(hex::encode(&witnesses));
-        dbg!(hex::encode(&blake2b_256(&witnesses)[0..20]));
         let outputs = vec![
             CellOutput::new_builder()
                 .capacity((to_countersignatory_value as u64).pack())
@@ -2897,20 +2854,6 @@ impl TLC {
     // Serialize the tlc output to lock args.
     // Must be called after fill_in_pubkeys.
     pub fn serialize_to_lock_args(&self) -> Vec<u8> {
-        dbg!(
-            "Serializing tlc",
-            [
-                (if self.is_offered { [0] } else { [1] }).to_vec(),
-                self.amount.to_le_bytes().to_vec(),
-                self.get_hash().to_vec(),
-                self.remote_payment_key_hash.unwrap().to_vec(),
-                self.local_payment_key_hash.unwrap().to_vec(),
-                Since::from(self.lock_time).value().to_le_bytes().to_vec(),
-            ]
-            .iter()
-            .map(|x| hex::encode(x))
-            .collect::<Vec<String>>()
-        );
         [
             (if self.is_offered { [0] } else { [1] }).to_vec(),
             self.amount.to_le_bytes().to_vec(),
