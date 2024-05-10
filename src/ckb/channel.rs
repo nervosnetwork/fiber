@@ -346,6 +346,7 @@ impl ChannelActor {
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
                     if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
                         dbg!(&command, &tlc);
+                        state.pending_received_tlcs.insert(tlc.id, tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Preimage {:?} is hashed to {:?}, which does not match payment hash {:?}",
                             fulfill.payment_preimage, blake2b_256(fulfill.payment_preimage), tlc.payment_hash,
@@ -1293,7 +1294,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_tlcs_for_commitment_tx(&self, local: bool) -> Vec<TLC> {
+    pub fn get_all_tlcs(&self) -> Vec<TLC> {
         debug!("Getting tlcs for commitment tx");
         debug!(
             "Current pending offered tlcs: {:?}",
@@ -1303,21 +1304,11 @@ impl ChannelActorState {
             "Current pending received tlcs: {:?}",
             self.pending_received_tlcs
         );
-
-        let (mut a, mut b): (Vec<TLC>, Vec<TLC>) = if local {
-            (
-                self.pending_offered_tlcs.values().cloned().collect(),
-                self.pending_received_tlcs.values().cloned().collect(),
-            )
-        } else {
-            (
-                self.pending_received_tlcs.values().cloned().collect(),
-                self.pending_offered_tlcs.values().cloned().collect(),
-            )
-        };
-        a.sort_by(|x, y| x.id.cmp(&y.id));
-        b.sort_by(|x, y| x.id.cmp(&y.id));
-        [a, b].concat()
+        self.pending_offered_tlcs
+            .values()
+            .chain(self.pending_received_tlcs.values())
+            .cloned()
+            .collect()
     }
 
     fn any_tlc_pending(&self) -> bool {
@@ -1659,7 +1650,7 @@ impl ChannelActorState {
                             return Err(ProcessingChannelError::InvalidState(format!(
                                 "received ClosingSigned message, but we're not ready for ClosingSigned because there are still some pending tlcs, state: {:?}, pending tlcs: {:?}",
                                 self.state,
-                                self.get_tlcs_for_commitment_tx(true)
+                                self.get_all_tlcs()
                             )));
                         }
                         flags
@@ -1767,7 +1758,7 @@ impl ChannelActorState {
         debug!(
             "Not transitioning to ClosingSigned, current state: {:?}, pending tlcs: {:?}",
             &self.state,
-            &self.get_tlcs_for_commitment_tx(true)
+            &self.get_all_tlcs()
         );
         Ok(())
     }
@@ -2401,6 +2392,8 @@ impl ChannelActorState {
             .input(CellInput::new_builder().previous_output(input).build());
 
         let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
+        dbg!("Outputs", &outputs);
+        dbg!("Outputs data", &outputs_data);
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
         tx_builder.build()
@@ -2425,9 +2418,11 @@ impl ChannelActorState {
             };
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
-        let (delayed_payment_key, revocation_key) = {
-            let (commitment_point, base_delayed_payment_key, base_revocation_key) = if local {
+        let (delayed_epoch, delayed_payment_key, revocation_key) = {
+            let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
+            {
                 (
+                    self.get_holder_channel_parameters().selected_contest_delay,
                     self.get_current_holder_commitment_point(),
                     self.get_holder_channel_parameters()
                         .delayed_payment_base_key(),
@@ -2435,6 +2430,8 @@ impl ChannelActorState {
                 )
             } else {
                 (
+                    self.get_counterparty_channel_parameters()
+                        .selected_contest_delay,
                     self.get_current_counterparty_commitment_point(),
                     self.get_counterparty_channel_parameters()
                         .delayed_payment_base_key(),
@@ -2443,14 +2440,53 @@ impl ChannelActorState {
                 )
             };
             (
+                delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
                 derive_revocation_pubkey(base_revocation_key, &commitment_point),
             )
         };
 
-        let mut tlcs = self.get_tlcs_for_commitment_tx(local);
-        tlcs.sort_by(|a, b| a.id.cmp(&b.id));
-        dbg!("Old tlcs", &tlcs);
+        let (mut received_tlcs, mut offered_tlcs) = (
+            self.pending_received_tlcs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+            self.pending_offered_tlcs
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+            debug!("Filling in pubkeys for TLC: {:?}", &tlc);
+            tlc.fill_in_pubkeys(local, &self);
+        }
+        let tlcs = {
+            let (mut a, mut b) = if local {
+                (received_tlcs, offered_tlcs)
+            } else {
+                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                    tlc.is_offered = !tlc.is_offered;
+                    (tlc.local_payment_key_hash, tlc.remote_payment_key_hash) =
+                        (tlc.remote_payment_key_hash, tlc.local_payment_key_hash);
+                }
+                (offered_tlcs, received_tlcs)
+            };
+            a.sort_by(|x, y| x.id.cmp(&y.id));
+            b.sort_by(|x, y| x.id.cmp(&y.id));
+            [a, b].concat()
+        };
+        debug!(
+            "Trying to generate witnesses from {} TLCs: {:?}",
+            tlcs.len(),
+            &tlcs
+        );
+        dbg!("New tlcs", &tlcs);
+        let tlcs_hex = tlcs
+            .iter()
+            .map(|tlc| tlc.serialize_to_lock_args())
+            .map(|x| hex::encode(x))
+            .collect::<Vec<String>>();
+        dbg!("TLCS hex", tlcs_hex,);
         // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
         // In the commitment transaction, we need also to include the amount of the TLCs.
         let to_broadcaster_value =
@@ -2462,15 +2498,20 @@ impl ChannelActorState {
             to_broadcaster_value,
             to_broadcaster_value
         );
-        for tlc in tlcs.iter_mut() {
-            debug!("Filling in pubkeys for TLC: {:?}", &tlc);
-            tlc.fill_in_pubkeys(local, &self);
-        }
-        debug!(
-            "Trying to generate witnesses from {} TLCs: {:?}",
-            tlcs.len(),
-            &tlcs
-        );
+
+        let witnesses = [
+            (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
+            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
+            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
+            tlcs.iter()
+                .map(|tlc| tlc.serialize_to_lock_args())
+                .flatten()
+                .collect(),
+        ]
+        .iter()
+        .map(|x| hex::encode(x))
+        .collect::<Vec<String>>();
+        dbg!("Witnesses", witnesses);
         let witnesses: Vec<u8> = [
             (to_broadcaster_value as u64).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
@@ -2486,6 +2527,8 @@ impl ChannelActorState {
         let secp256k1_lock_script = Script::default();
         let commitment_lock_script = Script::default();
 
+        dbg!(hex::encode(&witnesses));
+        dbg!(hex::encode(&blake2b_256(&witnesses)[0..20]));
         let outputs = vec![
             CellOutput::new_builder()
                 .capacity((to_countersignatory_value as u64).pack())
@@ -2854,6 +2897,20 @@ impl TLC {
     // Serialize the tlc output to lock args.
     // Must be called after fill_in_pubkeys.
     pub fn serialize_to_lock_args(&self) -> Vec<u8> {
+        dbg!(
+            "Serializing tlc",
+            [
+                (if self.is_offered { [0] } else { [1] }).to_vec(),
+                self.amount.to_le_bytes().to_vec(),
+                self.get_hash().to_vec(),
+                self.remote_payment_key_hash.unwrap().to_vec(),
+                self.local_payment_key_hash.unwrap().to_vec(),
+                Since::from(self.lock_time).value().to_le_bytes().to_vec(),
+            ]
+            .iter()
+            .map(|x| hex::encode(x))
+            .collect::<Vec<String>>()
+        );
         [
             (if self.is_offered { [0] } else { [1] }).to_vec(),
             self.amount.to_le_bytes().to_vec(),
