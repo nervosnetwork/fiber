@@ -100,6 +100,10 @@ impl CommitmentLockContext {
         }
     }
 
+    fn get_cell_deps(&self) -> CellDepVec {
+        self.cell_deps.clone()
+    }
+
     fn get_witnesses(
         &self,
         local_delay_epoch: Since,

@@ -3,8 +3,10 @@ use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
     core::{DepType, TransactionBuilder, TransactionView},
-    packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
-    prelude::{IntoTransactionView, Pack},
+    packed::{
+        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, Transaction,
+    },
+    prelude::{IntoTransactionView, Pack, PackVec},
 };
 
 use log::{debug, error, info, warn};
@@ -19,7 +21,7 @@ use musig2::{
     PartialSignature, PubNonce, SecNonce,
 };
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
-use secp256k1::PublicKey;
+
 use serde::Deserialize;
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
@@ -1210,6 +1212,23 @@ impl ChannelActorState {
             .expect("Funding transaction output is present")
     }
 
+    pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
+        if is_testing() {
+            get_commitment_lock_context()
+                .lock()
+                .unwrap()
+                .cell_deps
+                .clone()
+        } else {
+            // TODO: Fill in the actual cell deps here.
+            [CellDep::new_builder()
+                .out_point(get_commitment_lock_outpoint())
+                .dep_type(DepType::Code.into())
+                .build()]
+            .pack()
+        }
+    }
+
     pub fn get_holder_shutdown_script(&self) -> &Script {
         // TODO: what is the best strategy for shutdown script here?
         self.holder_shutdown_script
@@ -1935,7 +1954,13 @@ impl ChannelActorState {
             let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
             println!("tx: {:?}", tx);
-            dbg!(tx.hash(), tx.inputs(), tx.outputs(), tx.witnesses());
+            dbg!(
+                tx.hash(),
+                tx.cell_deps(),
+                tx.inputs(),
+                tx.outputs(),
+                tx.witnesses()
+            );
 
             let context = get_commitment_lock_context().lock().unwrap();
             let context = &mut context.context.clone();
@@ -2315,12 +2340,7 @@ impl ChannelActorState {
         _counterparty_shutdown_script: &Script,
     ) -> TransactionView {
         let tx_builder = TransactionBuilder::default()
-            .cell_dep(
-                CellDep::new_builder()
-                    .out_point(get_commitment_lock_outpoint())
-                    .dep_type(DepType::Code.into())
-                    .build(),
-            )
+            .cell_deps(self.get_commitment_transaction_cell_deps())
             .input(
                 CellInput::new_builder()
                     .previous_output(self.get_funding_transaction_outpoint())
@@ -2431,12 +2451,7 @@ impl ChannelActorState {
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
         let input = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
-            .cell_dep(
-                CellDep::new_builder()
-                    .out_point(get_commitment_lock_outpoint())
-                    .dep_type(DepType::Code.into())
-                    .build(),
-            )
+            .cell_deps(self.get_commitment_transaction_cell_deps())
             .input(CellInput::new_builder().previous_output(input).build());
 
         let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
