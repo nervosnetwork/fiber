@@ -1982,8 +1982,8 @@ impl ChannelActorState {
 
             for local in [true, false] {
                 dbg!("Before completed tx: {:?}", &tx);
-                let tx = context.complete_tx(tx.clone());
-                dbg!("After completed tx: {:?}", &tx);
+                let _tx = context.complete_tx(tx.clone());
+                dbg!("After completed tx: {:?}", &_tx);
 
                 // Use the second output as an input to the new transaction.
                 let commitment_out_point = &tx.output_pts()[1];
