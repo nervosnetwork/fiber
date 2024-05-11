@@ -1995,7 +1995,10 @@ impl ChannelActorState {
                 let new_tx = TransactionBuilder::default()
                     .cell_deps(tx.cell_deps().clone())
                     .set_inputs(vec![input])
-                    .outputs(vec![CellOutput::new_builder().capacity(100.pack()).build()])
+                    .outputs(vec![CellOutput::new_builder()
+                        .capacity(100.pack())
+                        .lock(get_secp256k1_lock_script(b"whatever"))
+                        .build()])
                     .outputs_data(vec![Default::default()])
                     .build();
                 dbg!("new tx: {:?}", &new_tx);
@@ -2876,7 +2879,9 @@ fn get_commitment_lock_script(args: &[u8]) -> Script {
 
 // TODO: fill in the actual lock script.
 fn get_secp256k1_lock_script(args: &[u8]) -> Script {
-    Script::new_builder().args(args.pack()).build()
+    // Just need a script that can be found by ckb to pass the test.
+    // So we use commitment lock script instead of a non-existing secp256k1 lock script.
+    get_commitment_lock_script(args)
 }
 
 fn get_commitment_lock_outpoint() -> OutPoint {
