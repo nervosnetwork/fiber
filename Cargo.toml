@@ -61,7 +61,7 @@ ckb-hash = "0.115.0"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery"] }
 musig2 = { version = "0.0.11", features = ["secp256k1", "serde"] }
 ractor = "0.9.7"
-ckb-testtool = { git = "https://github.com/contrun/capsule.git", branch = "determinisitic-rng" }
+ckb-testtool = { path = "../capsule/crates/testtool" }
 
 [profile.release]
 panic = "abort"

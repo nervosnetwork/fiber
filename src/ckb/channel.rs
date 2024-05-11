@@ -4,7 +4,8 @@ use ckb_sdk::Since;
 use ckb_types::{
     core::{DepType, TransactionBuilder, TransactionView},
     packed::{
-        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, Transaction,
+        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, ScriptBuilder,
+        Transaction,
     },
     prelude::{IntoTransactionView, Pack, PackVec},
 };
@@ -2649,28 +2650,18 @@ impl ChannelActorState {
         ]
         .concat();
 
-        // TODO: fill in the actual lock script.
-        let secp256k1_lock_script = Script::default();
-        let commitment_lock_script = Script::default();
+        let secp256k1_lock_script =
+            get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
+        let commitment_lock_script = get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
 
         let outputs = vec![
             CellOutput::new_builder()
                 .capacity((to_countersignatory_value as u64).pack())
-                .lock(
-                    secp256k1_lock_script
-                        .as_builder()
-                        .args(blake2b_256(immediate_payment_key.serialize())[0..20].pack())
-                        .build(),
-                )
+                .lock(secp256k1_lock_script)
                 .build(),
             CellOutput::new_builder()
                 .capacity((to_broadcaster_value as u64).pack())
-                .lock(
-                    commitment_lock_script
-                        .as_builder()
-                        .args(blake2b_256(witnesses)[0..20].pack())
-                        .build(),
-                )
+                .lock(commitment_lock_script)
                 .build(),
         ];
         let outputs_data = vec![Bytes::default(); outputs.len()];
@@ -2717,6 +2708,10 @@ impl ChannelActorState {
     ) -> Result<TransactionView, ProcessingChannelError> {
         let tx = self.build_and_verify_commitment_tx(signature)?;
         assert_eq!(tx.tx, self.build_commitment_tx(false));
+        dbg!(
+            "verify_and_complete_tx build_and_verify_commitment_tx tx: {:?}",
+            &tx.tx
+        );
         let sign_ctx = Musig2SignContext::from(self);
 
         let message = get_tx_message_to_sign(&tx.tx);
@@ -2734,7 +2729,7 @@ impl ChannelActorState {
             signatures,
         )
         .expect("The validity of the signatures verified");
-
+        dbg!("verify_and_complete_tx tx: {:?}", &tx);
         Ok(tx)
     }
 }
@@ -2850,6 +2845,20 @@ impl Musig2SignContext {
 
 fn is_testing() -> bool {
     true
+}
+
+// TODO: fill in the actual lock script.
+fn get_commitment_lock_script(args: &[u8]) -> Script {
+    if is_testing() {
+        return super::temp::get_commitment_lock_script(args);
+    } else {
+        Script::new_builder().args(args.pack()).build()
+    }
+}
+
+// TODO: fill in the actual lock script.
+fn get_secp256k1_lock_script(args: &[u8]) -> Script {
+    Script::new_builder().args(args.pack()).build()
 }
 
 fn get_commitment_lock_outpoint() -> OutPoint {

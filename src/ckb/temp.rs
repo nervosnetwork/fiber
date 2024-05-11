@@ -3,7 +3,7 @@ use ckb_sdk::Since;
 use ckb_testtool::context::Context;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
-    packed::{CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script},
+    packed::{CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, ScriptBuilder},
     prelude::{Builder, Entity, Pack, PackVec},
 };
 struct AugmentedTransaction {
@@ -91,6 +91,7 @@ impl CommitmentLockContext {
             .build();
         dbg!(&commitment_lock_out_point);
         let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+        dbg!(&funding_lock_dep, &commitment_lock_dep, &auth_dep);
         let cell_deps = vec![funding_lock_dep, commitment_lock_dep, auth_dep].pack();
         Self {
             context,
@@ -98,10 +99,6 @@ impl CommitmentLockContext {
             commitment_lock_out_point,
             cell_deps,
         }
-    }
-
-    fn get_cell_deps(&self) -> CellDepVec {
-        self.cell_deps.clone()
     }
 
     fn get_witnesses(
@@ -209,4 +206,13 @@ pub fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
 pub fn get_commitment_lock_outpoint() -> OutPoint {
     let context = get_commitment_lock_context().lock().unwrap();
     context.commitment_lock_out_point.clone()
+}
+
+pub fn get_commitment_lock_script(args: &[u8]) -> Script {
+    let mut context = get_commitment_lock_context().lock().unwrap();
+    let commitment_lock_out_point = context.commitment_lock_out_point.clone();
+    context
+        .context
+        .build_script(&commitment_lock_out_point, args.to_owned().into())
+        .expect("Build script")
 }
