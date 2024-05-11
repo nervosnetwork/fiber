@@ -1981,8 +1981,9 @@ impl ChannelActorState {
             dbg!(&revocation_keys);
 
             for local in [true, false] {
+                dbg!("Before completed tx: {:?}", &tx);
                 let tx = context.complete_tx(tx.clone());
-                dbg!("completed tx: {:?}", &tx);
+                dbg!("After completed tx: {:?}", &tx);
 
                 // Use the second output as an input to the new transaction.
                 let commitment_out_point = &tx.output_pts()[1];
