@@ -7,7 +7,7 @@ use ckb_types::{
         Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, ScriptBuilder,
         Transaction,
     },
-    prelude::{IntoTransactionView, Pack, PackVec},
+    prelude::{AsTransactionBuilder, IntoTransactionView, Pack, PackVec},
 };
 
 use log::{debug, error, info, warn};
@@ -1981,8 +1981,24 @@ impl ChannelActorState {
             dbg!(&revocation_keys);
 
             for local in [true, false] {
-                let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
                 let tx = context.complete_tx(tx.clone());
+                dbg!("completed tx: {:?}", &tx);
+
+                // Use the second output as an input to the new transaction.
+                let commitment_out_point = &tx.output_pts()[1];
+
+                let input = CellInput::new_builder()
+                    .previous_output(commitment_out_point.clone())
+                    .build();
+
+                let new_tx = TransactionBuilder::default()
+                    .cell_deps(tx.cell_deps().clone())
+                    .set_inputs(vec![input])
+                    .outputs(vec![CellOutput::new_builder().capacity(100.pack()).build()])
+                    .outputs_data(vec![Default::default()])
+                    .build();
+                dbg!("new tx: {:?}", &new_tx);
+                let message: [u8; 32] = new_tx.hash().as_slice().try_into().unwrap();
 
                 let results = revocation_keys
                     .iter()
@@ -1994,11 +2010,12 @@ impl ChannelActorState {
                         let witness_script = self.build_commitment_transaction_witnesses(local);
                         let witness = [witness_script.clone(), vec![0xFF], signature].concat();
 
-                        dbg!(witness.clone());
-                        let tx = tx.as_advanced_builder().witness(witness.pack()).build();
-                        println!("tx: {:?}", tx);
+                        let new_tx = new_tx
+                            .as_advanced_builder()
+                            .witnesses(vec![witness.pack()])
+                            .build();
+                        dbg!("Spending transaction of commitment tx: {:?}", new_tx);
 
-                        dbg!(tx.hash());
                         let result = context.verify_tx(&tx, 10_000_000);
                         dbg!(&result);
                         result.is_ok()
