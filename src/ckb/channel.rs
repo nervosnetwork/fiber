@@ -3342,7 +3342,7 @@ mod tests {
     use ckb_types::{
         core::{DepType, ScriptHashType},
         packed::{CellDep, CellInput, CellOutput, OutPoint, Transaction},
-        prelude::{AsTransactionBuilder, Pack},
+        prelude::{AsTransactionBuilder, Pack, Unpack},
     };
     use molecule::prelude::{Builder, Entity};
     use rand::rngs::mock;
@@ -3633,6 +3633,7 @@ mod tests {
             .iter()
             .enumerate()
         {
+            dbg!("Processing tx", i);
             let tx = Transaction::from_slice(hex::decode(tx).unwrap().as_slice())
                 .unwrap()
                 .into_view();
@@ -3648,17 +3649,19 @@ mod tests {
                 )
             );
             assert!(result.is_ok());
-            let outpoint = tx.output_pts().get(0).unwrap().clone();
-            let (cell, cell_data) = tx.output_with_data(0).unwrap();
-            dbg!(
-                "Creating cell with celloutput and data",
-                &outpoint,
-                &cell,
-                &cell_data
-            );
-            context
-                .context
-                .create_cell_with_out_point(outpoint, cell, cell_data);
+            for outpoint in tx.output_pts_iter() {
+                let index: u32 = outpoint.index().unpack();
+                let (cell, cell_data) = tx.output_with_data(index as usize).unwrap();
+                dbg!(
+                    "Creating cell with celloutput and data",
+                    &outpoint,
+                    &cell,
+                    &cell_data
+                );
+                context
+                    .context
+                    .create_cell_with_out_point(outpoint, cell, cell_data);
+            }
         }
     }
 }
