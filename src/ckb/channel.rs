@@ -1216,7 +1216,7 @@ impl ChannelActorState {
     pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
         if is_testing() {
             get_commitment_lock_context()
-                .lock()
+                .read()
                 .unwrap()
                 .cell_deps
                 .clone()
@@ -1963,7 +1963,7 @@ impl ChannelActorState {
                 tx.witnesses()
             );
 
-            let context = get_commitment_lock_context().lock().unwrap();
+            let context = get_commitment_lock_context().write().unwrap();
             let context = &mut context.context.clone();
 
             context.create_cell_with_out_point(
@@ -1987,23 +1987,20 @@ impl ChannelActorState {
 
                 // Use the second output as an input to the new transaction.
                 let commitment_out_point = &tx.output_pts()[1];
+                dbg!("commitment_out_point: {:?}", commitment_out_point);
 
                 let input = CellInput::new_builder()
                     .previous_output(commitment_out_point.clone())
                     .build();
 
+                dbg!("input: {:?}", &input);
                 let new_tx = TransactionBuilder::default()
                     .cell_deps(tx.cell_deps().clone())
-                    .set_inputs(vec![input])
-                    .outputs(vec![CellOutput::new_builder()
-                        .capacity(100.pack())
-                        .lock(get_secp256k1_lock_script(b"whatever"))
-                        .build()])
-                    .outputs_data(vec![Default::default()])
+                    .inputs(vec![input])
                     .build();
                 dbg!("new tx: {:?}", &new_tx);
                 let message: [u8; 32] = new_tx.hash().as_slice().try_into().unwrap();
-
+                dbg!("message: {:?}", &message);
                 let results = revocation_keys
                     .iter()
                     .map(|key| {
@@ -2025,6 +2022,7 @@ impl ChannelActorState {
                         result.is_ok()
                     })
                     .collect::<Vec<_>>();
+                dbg!("validating results", &results);
                 assert_eq!(results, vec![false, true]);
             }
         }

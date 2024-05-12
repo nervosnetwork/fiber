@@ -3,7 +3,7 @@ use ckb_sdk::Since;
 use ckb_testtool::context::Context;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
-    packed::{CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, ScriptBuilder},
+    packed::{CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec},
 };
 struct AugmentedTransaction {
@@ -15,11 +15,9 @@ use ckb_testtool::{
     ckb_error::Error,
     ckb_types::{bytes::Bytes, core::Cycle},
 };
-use std::env;
 use std::fs;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Mutex;
+
+use std::{env, sync::RwLock};
 
 use once_cell::sync::OnceCell;
 
@@ -75,12 +73,19 @@ impl CommitmentLockContext {
         let auth_bin = loader.load_binary("../../build/release/auth");
         let funding_lock_out_point: OutPoint = context.deploy_cell(funding_lock_bin);
         let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
-        let auth_out_point = context.deploy_cell(auth_bin);
+        let auth_out_point: OutPoint = context.deploy_cell(auth_bin);
+        let always_fail_outpoint = OutPoint::default();
+        context.create_cell_with_out_point(
+            always_fail_outpoint.clone(),
+            CellOutput::default(),
+            Bytes::new(),
+        );
 
         dbg!(
             &funding_lock_out_point,
             &commitment_lock_out_point,
-            &auth_out_point
+            &auth_out_point,
+            &always_fail_outpoint
         );
         // prepare cell deps
         let funding_lock_dep = CellDep::new_builder()
@@ -91,8 +96,17 @@ impl CommitmentLockContext {
             .build();
         dbg!(&commitment_lock_out_point);
         let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
+        let always_fail_dep = CellDep::new_builder()
+            .out_point(always_fail_outpoint.clone())
+            .build();
         dbg!(&funding_lock_dep, &commitment_lock_dep, &auth_dep);
-        let cell_deps = vec![funding_lock_dep, commitment_lock_dep, auth_dep].pack();
+        let cell_deps = vec![
+            funding_lock_dep,
+            commitment_lock_dep,
+            auth_dep,
+            // always_fail_dep,
+        ]
+        .pack();
         Self {
             context,
             funding_lock_out_point,
@@ -195,21 +209,21 @@ impl CommitmentLockContext {
     }
 }
 
-pub fn get_commitment_lock_context() -> &'static Mutex<CommitmentLockContext> {
-    static INSTANCE: OnceCell<Mutex<CommitmentLockContext>> = OnceCell::new();
+pub fn get_commitment_lock_context() -> &'static RwLock<CommitmentLockContext> {
+    static INSTANCE: OnceCell<RwLock<CommitmentLockContext>> = OnceCell::new();
     INSTANCE.get_or_init(|| {
         let c = CommitmentLockContext::new();
-        Mutex::new(c) // run
+        RwLock::new(c) // run
     })
 }
 
 pub fn get_commitment_lock_outpoint() -> OutPoint {
-    let context = get_commitment_lock_context().lock().unwrap();
+    let context = get_commitment_lock_context().read().unwrap();
     context.commitment_lock_out_point.clone()
 }
 
 pub fn get_commitment_lock_script(args: &[u8]) -> Script {
-    let mut context = get_commitment_lock_context().lock().unwrap();
+    let context = get_commitment_lock_context().read().unwrap();
     let commitment_lock_out_point = context.commitment_lock_out_point.clone();
     context
         .context
