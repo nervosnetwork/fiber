@@ -60,6 +60,7 @@ pub(crate) struct CommitmentLockContext {
     pub(crate) context: Context,
     pub(crate) funding_lock_out_point: OutPoint,
     pub(crate) commitment_lock_out_point: OutPoint,
+    pub(crate) always_success_out_point: OutPoint,
     pub(crate) cell_deps: CellDepVec,
 }
 
@@ -71,21 +72,17 @@ impl CommitmentLockContext {
         let funding_lock_bin = loader.load_binary("../../build/release/funding-lock");
         let commitment_lock_bin = loader.load_binary("../../build/release/commitment-lock");
         let auth_bin = loader.load_binary("../../build/release/auth");
+        let always_success_bin = loader.load_binary("../../build/release/always_success");
         let funding_lock_out_point: OutPoint = context.deploy_cell(funding_lock_bin);
         let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
         let auth_out_point: OutPoint = context.deploy_cell(auth_bin);
-        let always_fail_outpoint = OutPoint::default();
-        context.create_cell_with_out_point(
-            always_fail_outpoint.clone(),
-            CellOutput::default(),
-            Bytes::new(),
-        );
+        let always_success_out_point = context.deploy_cell(always_success_bin);
 
         dbg!(
             &funding_lock_out_point,
             &commitment_lock_out_point,
             &auth_out_point,
-            &always_fail_outpoint
+            &always_success_out_point
         );
         // prepare cell deps
         let funding_lock_dep = CellDep::new_builder()
@@ -96,21 +93,27 @@ impl CommitmentLockContext {
             .build();
         dbg!(&commitment_lock_out_point);
         let auth_dep = CellDep::new_builder().out_point(auth_out_point).build();
-        let always_fail_dep = CellDep::new_builder()
-            .out_point(always_fail_outpoint.clone())
+        let always_success_dep = CellDep::new_builder()
+            .out_point(always_success_out_point.clone())
             .build();
-        dbg!(&funding_lock_dep, &commitment_lock_dep, &auth_dep);
+        dbg!(
+            &funding_lock_dep,
+            &commitment_lock_dep,
+            &auth_dep,
+            &always_success_dep
+        );
         let cell_deps = vec![
             funding_lock_dep,
             commitment_lock_dep,
             auth_dep,
-            // always_fail_dep,
+            always_success_dep,
         ]
         .pack();
         Self {
             context,
             funding_lock_out_point,
             commitment_lock_out_point,
+            always_success_out_point,
             cell_deps,
         }
     }
@@ -228,5 +231,19 @@ pub fn get_commitment_lock_script(args: &[u8]) -> Script {
     context
         .context
         .build_script(&commitment_lock_out_point, args.to_owned().into())
+        .expect("Build script")
+}
+
+pub fn get_always_success_outpoint() -> OutPoint {
+    let context = get_commitment_lock_context().read().unwrap();
+    context.always_success_out_point.clone()
+}
+
+pub fn get_always_success_script(args: &[u8]) -> Script {
+    let context = get_commitment_lock_context().read().unwrap();
+    let always_success_out_point = context.always_success_out_point.clone();
+    context
+        .context
+        .build_script(&always_success_out_point, args.to_owned().into())
         .expect("Build script")
 }

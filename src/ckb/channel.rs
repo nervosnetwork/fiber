@@ -4,8 +4,7 @@ use ckb_sdk::Since;
 use ckb_types::{
     core::{DepType, TransactionBuilder, TransactionView},
     packed::{
-        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, ScriptBuilder,
-        Transaction,
+        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, Transaction,
     },
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, PackVec},
 };
@@ -44,6 +43,7 @@ use super::{
     key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
+    temp::get_always_success_script,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
@@ -1952,6 +1952,8 @@ impl ChannelActorState {
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
         if is_testing() {
+            let output_lock_script = get_secp256k1_lock_script(b"whatever");
+
             let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
             println!("tx: {:?}", tx);
@@ -1997,8 +1999,17 @@ impl ChannelActorState {
                 let new_tx = TransactionBuilder::default()
                     .cell_deps(tx.cell_deps().clone())
                     .inputs(vec![input])
+                    .output(
+                        CellOutput::new_builder()
+                            .capacity(2000.pack())
+                            .lock(output_lock_script.clone())
+                            .build(),
+                    )
                     .build();
-                dbg!("new tx: {:?}", &new_tx);
+                dbg!(
+                    "Built spending transaction with cell deps and inputs: {:?}",
+                    &new_tx
+                );
                 let message: [u8; 32] = new_tx.hash().as_slice().try_into().unwrap();
                 dbg!("message: {:?}", &message);
                 let results = revocation_keys
@@ -2879,7 +2890,7 @@ fn get_commitment_lock_script(args: &[u8]) -> Script {
 fn get_secp256k1_lock_script(args: &[u8]) -> Script {
     // Just need a script that can be found by ckb to pass the test.
     // So we use commitment lock script instead of a non-existing secp256k1 lock script.
-    get_commitment_lock_script(args)
+    get_always_success_script(args)
 }
 
 fn get_commitment_lock_outpoint() -> OutPoint {
