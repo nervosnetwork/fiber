@@ -1956,15 +1956,15 @@ impl ChannelActorState {
         if is_testing() {
             let output_lock_script = get_always_success_script(b"whatever");
 
-            let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+            let commitment_tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
-            println!("The complete commitment transaction is {:?}", tx);
+            println!("The complete commitment transaction is {:?}", commitment_tx);
             dbg!(
-                tx.hash(),
-                tx.cell_deps(),
-                tx.inputs(),
-                tx.outputs(),
-                tx.witnesses()
+                commitment_tx.hash(),
+                commitment_tx.cell_deps(),
+                commitment_tx.inputs(),
+                commitment_tx.outputs(),
+                commitment_tx.witnesses()
             );
 
             let context = get_commitment_lock_context().write().unwrap();
@@ -1980,21 +1980,21 @@ impl ChannelActorState {
             dbg!(&revocation_keys);
 
             for local in [true, false] {
-                dbg!("Before completed tx: {:?}", &tx);
-                let _tx = context.complete_tx(tx.clone());
-                dbg!("After completed tx: {:?}", &_tx);
-
                 // Use the second output as an input to the new transaction.
                 // The first output is an immediate spendable output,
                 // while the second output is a delayed output locked by commitment lock.
                 let commitment_lock_index = 1;
-                let commitment_out_point = &tx.output_pts()[commitment_lock_index];
+                let commitment_out_point = &commitment_tx.output_pts()[commitment_lock_index];
                 dbg!("commitment_out_point: {:?}", commitment_out_point);
-                let commitment_out_point =
-                    tx.output_pts().get(commitment_lock_index).unwrap().clone();
-                let (commitment_lock_cell, commitment_lock_cell_data) =
-                    tx.output_with_data(commitment_lock_index).unwrap();
-                dbg!("inputs to new_tx saved: {:?}", &tx);
+                let commitment_out_point = commitment_tx
+                    .output_pts()
+                    .get(commitment_lock_index)
+                    .unwrap()
+                    .clone();
+                let (commitment_lock_cell, commitment_lock_cell_data) = commitment_tx
+                    .output_with_data(commitment_lock_index)
+                    .unwrap();
+                dbg!("inputs to new_tx saved: {:?}", &commitment_tx);
                 dbg!("outpoint: {:?}", &commitment_out_point);
                 dbg!("Cell: {:?}", &commitment_lock_cell);
                 context.create_cell_with_out_point(
@@ -2002,14 +2002,21 @@ impl ChannelActorState {
                     commitment_lock_cell,
                     commitment_lock_cell_data,
                 );
+                // We can verify revocation tx works by
+                // verify the funding tx, commitment tx and revocation tx verify successfully.
+                dbg!(
+                    "add the funding tx to test_verify_fixed_tx to verify our construction works",
+                    &self.funding_tx
+                );
+                dbg!("add the commitment tx to test_verify_fixed_tx to verify our construction works", &commitment_tx);
 
                 let input = CellInput::new_builder()
                     .previous_output(commitment_out_point.clone())
                     .build();
 
                 dbg!("input: {:?}", &input);
-                let new_tx = TransactionBuilder::default()
-                    .cell_deps(tx.cell_deps().clone())
+                let revocation_tx = TransactionBuilder::default()
+                    .cell_deps(commitment_tx.cell_deps().clone())
                     .inputs(vec![input])
                     .outputs(vec![CellOutput::new_builder()
                         .capacity(20.pack())
@@ -2019,9 +2026,9 @@ impl ChannelActorState {
                     .build();
                 dbg!(
                     "Built spending transaction with cell deps and inputs: {:?}",
-                    &new_tx
+                    &revocation_tx
                 );
-                let message: [u8; 32] = new_tx.hash().as_slice().try_into().unwrap();
+                let message: [u8; 32] = revocation_tx.hash().as_slice().try_into().unwrap();
                 dbg!("message: {:?}", &message);
                 let results = revocation_keys
                     .iter()
@@ -2033,17 +2040,19 @@ impl ChannelActorState {
                         let witness_script = self.build_commitment_transaction_witnesses(local);
                         let witness = [witness_script.clone(), vec![0xFF], signature].concat();
 
-                        let new_tx = new_tx
+                        let revocation_tx = revocation_tx
                             .as_advanced_builder()
                             .witnesses(vec![witness.pack()])
                             .build();
 
+                            dbg!("add the revocation tx to test_verify_fixed_tx to verify our construction works", &revocation_tx);
+
                         dbg!(
                             "Verifying spending transaction of commitment tx: {:?}",
-                            &new_tx
+                            &revocation_tx
                         );
 
-                        let result = context.verify_tx(&new_tx, 10_000_000);
+                        let result = context.verify_tx(&revocation_tx, 10_000_000);
                         dbg!(&result);
                         result.is_ok()
                     })
@@ -3606,5 +3615,50 @@ mod tests {
                 _ => false,
             })
             .await;
+    }
+
+    #[test]
+    fn test_verify_fixed_tx() {
+        use ckb_types::prelude::IntoTransactionView;
+
+        let mut context = get_commitment_lock_context().write().unwrap();
+        context.context.set_capture_debug(true);
+        // These three transactions are are respectively funding tx, commitment tx
+        // and revocation tx that tries to revoke a commitment tx.
+        let funding_tx = "b50000000c000000b1000000a50000001c0000002000000024000000280000002c00000099000000000000000000000000000000000000006d0000000800000065000000100000001800000065000000dc050000000000004d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf011800000066756e64696e67207472616e73616374696f6e20746573740c000000080000000000000004000000";
+        let commitment_tx = "260200000c000000da010000ce0100001c00000020000000b8000000bc000000ec000000ba0100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef68229591000000000000000000010000000000000000000000396a405a3fc223ce968a7e6cd7907fcdb9c18d0d40eed8c7ee5d75060d6c646900000000ce0000000c0000006d00000061000000100000001800000061000000e8030000000000004900000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf01140000009a480101f0c18c6ef7dbcdf54b6278212be5138961000000100000001800000061000000f40100000000000049000000100000003000000031000000c5421e17391f3acfb8093c02a4c434d6d9a812abb7ae59270ee680e1ab318fcf011400000051dcdb6df954a4108e46ce2dba4e677298af9028140000000c0000001000000000000000000000004c000000080000004000000068c8433bd151fa8d30f819d46d67835bcfba9d3ed5784ab7c07e0de3203393dcc137f3b7f80e74e49b01160d31ce558a8c8d21da315d95882620221f2c60350d";
+        let revocation_tx_1 = "df0100000c00000061010000550100001c00000020000000b8000000bc000000ec000000490100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef682295910000000000000000000100000000000000000000000793996ad02bd5d606c8c6d2796530d25264f6ba0c3e8ca3cbf6d5300427f5d7010000005d000000080000005500000010000000180000005500000014000000000000003d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf010800000077686174657665720c00000008000000000000007e00000008000000720000000a00000000000080f2aa0645547c88cd9ed0934c57f113acc4dca6c4ba781a397bbb0499b92db1a9b001bd32fb2437f0ff1bde73b64d5884297d6383ae16bd07ea1b6ca0537d233325a2e6482845b31ce27ffc61fd95d9696af95a05c44547902ea4ea95e109778934d90386c0bc8275d201";
+        let revocation_tx_2 = "df0100000c00000061010000550100001c00000020000000b8000000bc000000ec000000490100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef682295910000000000000000000100000000000000000000000793996ad02bd5d606c8c6d2796530d25264f6ba0c3e8ca3cbf6d5300427f5d7010000005d000000080000005500000010000000180000005500000014000000000000003d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf010800000077686174657665720c00000008000000000000007e00000008000000720000000a00000000000080f2aa0645547c88cd9ed0934c57f113acc4dca6c4ba781a397bbb0499b92db1a9b001bd32fb2437f0ffba865a25ccf672437b7041d0d5c6733a72d8051dee7ba9686671bee606c23b9f71a401a354abe792e821947dd353bca4a090ae4373d997624eeedfe2041ce18d01";
+        for (i, tx) in [funding_tx, commitment_tx, revocation_tx_1, revocation_tx_2]
+            .iter()
+            .enumerate()
+        {
+            let tx = Transaction::from_slice(hex::decode(tx).unwrap().as_slice())
+                .unwrap()
+                .into_view();
+            let result = context.context.verify_tx(&tx, 10_000_000);
+            dbg!("Verifying tx", &tx);
+            let mock_tx = context.context.dump_tx(&tx);
+            dbg!(
+                &result,
+                &tx,
+                &serde_json::to_writer_pretty(
+                    std::fs::File::create(format!("foo{i}.json")).unwrap(),
+                    &mock_tx.unwrap()
+                )
+            );
+            assert!(result.is_ok());
+            let outpoint = tx.output_pts().get(0).unwrap().clone();
+            let (cell, cell_data) = tx.output_with_data(0).unwrap();
+            dbg!(
+                "Creating cell with celloutput and data",
+                &outpoint,
+                &cell,
+                &cell_data
+            );
+            context
+                .context
+                .create_cell_with_out_point(outpoint, cell, cell_data);
+        }
     }
 }
