@@ -1951,12 +1951,14 @@ impl ChannelActorState {
 
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
+        // Try to create an transaction which spends the commitment transaction, to
+        // verify that our code actually works.
         if is_testing() {
-            let output_lock_script = get_secp256k1_lock_script(b"whatever");
+            let output_lock_script = get_commitment_lock_script(b"whatever");
 
             let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
-            println!("tx: {:?}", tx);
+            println!("The complete commitment transaction is {:?}", tx);
             dbg!(
                 tx.hash(),
                 tx.cell_deps(),
@@ -1968,11 +1970,6 @@ impl ChannelActorState {
             let context = get_commitment_lock_context().write().unwrap();
             let context = &mut context.context.clone();
 
-            context.create_cell_with_out_point(
-                self.get_funding_transaction_outpoint(),
-                CellOutput::new_builder().capacity(4000000.pack()).build(),
-                bytes::Bytes::new(),
-            );
             let revocation_keys = [
                 "8172cbf168dcb988d2849ea229603f843614a038e1baa83783aee2f9aeac32ea",
                 "e16a04c9d5d3d80bc0bb03c19dceddfc34a5017a885a57b9316bd9944022a088",
@@ -1988,7 +1985,7 @@ impl ChannelActorState {
                 dbg!("After completed tx: {:?}", &_tx);
 
                 // Use the second output as an input to the new transaction.
-                let commitment_out_point = &tx.output_pts()[1];
+                let commitment_out_point = &tx.output_pts()[0];
                 dbg!("commitment_out_point: {:?}", commitment_out_point);
 
                 let input = CellInput::new_builder()
@@ -1999,12 +1996,13 @@ impl ChannelActorState {
                 let new_tx = TransactionBuilder::default()
                     .cell_deps(tx.cell_deps().clone())
                     .inputs(vec![input])
-                    .output(
+                    .outputs(vec![
                         CellOutput::new_builder()
                             .capacity(2000.pack())
                             .lock(output_lock_script.clone())
-                            .build(),
+                            .build()]
                     )
+                    .outputs_data(vec![Default::default()])
                     .build();
                 dbg!(
                     "Built spending transaction with cell deps and inputs: {:?}",
@@ -2026,8 +2024,10 @@ impl ChannelActorState {
                             .as_advanced_builder()
                             .witnesses(vec![witness.pack()])
                             .build();
-                        dbg!("Spending transaction of commitment tx: {:?}", new_tx);
-
+                        dbg!(
+                            "Verifying spending transaction of commitment tx: {:?}",
+                            new_tx
+                        );
                         let result = context.verify_tx(&tx, 10_000_000);
                         dbg!(&result);
                         result.is_ok()
@@ -2248,30 +2248,19 @@ impl ChannelActorState {
     pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
         // TODO: check if the tx is valid
         let tx = tx.into_view();
-        debug!("Updating funding transaction to {:?}", &tx);
-        let first_output = tx
+        let _ = tx
             .outputs()
             .get(0)
             .ok_or(ProcessingChannelError::InvalidParameter(
                 "Funding transaction should have at least one output".to_string(),
             ))?;
-        debug!("New funding transaction output: {:?}", &first_output);
-        match self.funding_tx {
-            Some(ref current_tx) => {
-                debug!("Current funding transaction: {:?}", &current_tx);
-                debug!(
-                    "Current funding transaction output: {:?}",
-                    &current_tx.outputs().get(0)
-                );
-            }
-            None => {}
-        }
+        debug!("Updating funding transaction to {:?}", &tx);
         self.funding_tx = Some(tx);
         Ok(())
     }
 
     // TODO: More checks to the funding tx.
-    fn check_tx_complete_preconditions(&self) -> ProcessingChannelResult {
+    fn check_tx_complete_preconditions(&mut self) -> ProcessingChannelResult {
         match self.funding_tx.as_ref() {
             None => {
                 return Err(ProcessingChannelError::InvalidState(
@@ -2298,6 +2287,39 @@ impl ChannelActorState {
                     return Err(ProcessingChannelError::InvalidParameter(
                         format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount) 
                     ));
+                }
+
+                // Just create a cell with the same capacity as the first output of the funding tx.
+                // This is to test the validity of the commitment tx that spends the funding tx.
+                if is_testing() {
+                    let always_success = get_always_success_script(b"funding transaction test");
+                    let mut context = get_commitment_lock_context().write().unwrap();
+                    let context = &mut context.context;
+                    let funding_tx = Transaction::default()
+                        .as_advanced_builder()
+                        .outputs([CellOutput::new_builder()
+                            .capacity(first_output.capacity())
+                            .lock(always_success)
+                            .build()])
+                        .outputs_data(vec![Default::default()])
+                        .build();
+                    dbg!("funding_tx before completion: {:?}", &funding_tx);
+                    let funding_tx = context.complete_tx(funding_tx);
+
+                    dbg!("funding_tx after completion: {:?}", &funding_tx);
+
+                    let result = context.verify_tx(&funding_tx, 10_000_000);
+                    dbg!(&result);
+                    assert!(result.is_ok());
+
+                    // Save this transaction so that we can find it later.
+                    let outpoint = funding_tx.output_pts().get(0).unwrap().clone();
+                    let (cell, cell_data) = funding_tx.output_with_data(0).unwrap();
+                    dbg!("funding_tx saved: {:?}", &funding_tx);
+                    dbg!("outpoint: {:?}", &outpoint);
+                    dbg!("Cell: {:?}", &cell);
+                    context.create_cell_with_out_point(outpoint, cell, cell_data);
+                    self.funding_tx = Some(funding_tx);
                 }
             }
         }
@@ -2405,7 +2427,7 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(self);
         let signature = sign_ctx.sign(message.as_slice())?;
         debug!(
-            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            "Signed shutdown tx ({:?}) message {:?} with signature {:?}",
             &tx, &message, &signature,
         );
         Ok(signature)
@@ -2732,6 +2754,8 @@ impl ChannelActorState {
         Ok(PartiallySignedCommitmentTransaction { tx, signature })
     }
 
+    /// Verify the partial signature from the peer and create a complete transaction
+    /// with valid witnesses.
     pub fn verify_and_complete_tx(
         &self,
         signature: PartialSignature,
@@ -2740,7 +2764,12 @@ impl ChannelActorState {
         assert_eq!(tx.tx, self.build_commitment_tx(false));
         dbg!(
             "verify_and_complete_tx build_and_verify_commitment_tx tx: {:?}",
-            &tx.tx
+            &tx.tx,
+            tx.tx.hash(),
+            tx.tx.cell_deps(),
+            tx.tx.inputs(),
+            tx.tx.outputs(),
+            tx.tx.witnesses()
         );
         let sign_ctx = Musig2SignContext::from(self);
 
@@ -2919,6 +2948,8 @@ pub fn aggregate_partial_signatures_for_tx(
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
 ) -> Result<TransactionView, ProcessingChannelError> {
+    debug!("Aggregating partial signatures for tx {:?}", &tx);
+
     let message = get_tx_message_to_sign(&tx);
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
@@ -3290,10 +3321,12 @@ mod tests {
         prelude::{AsTransactionBuilder, Pack},
     };
     use molecule::prelude::{Builder, Entity};
+    use rand::rngs::mock;
 
     use crate::{
         ckb::{
             network::{AcceptChannelCommand, OpenChannelCommand},
+            temp::get_commitment_lock_context,
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
         },

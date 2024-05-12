@@ -15,7 +15,7 @@ use ckb_testtool::{
     ckb_error::Error,
     ckb_types::{bytes::Bytes, core::Cycle},
 };
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use std::{env, sync::RwLock};
 
@@ -25,10 +25,9 @@ use super::{channel::TLC, types::Pubkey};
 
 pub struct Loader();
 impl Loader {
-    pub fn load_binary(&self, name: &str) -> Bytes {
+    pub fn load_binary(&self, name: PathBuf) -> Bytes {
         let result = fs::read(&name);
         if result.is_err() {
-            dbg!(std::env::current_dir().unwrap());
             panic!("Loading binary {:?} failed: {:?}", name, result.err());
         }
         result.unwrap().into()
@@ -67,12 +66,27 @@ pub(crate) struct CommitmentLockContext {
 impl CommitmentLockContext {
     fn new() -> Self {
         // deploy contract
+        let base_dir = env::var("BINARY_PATH")
+            .ok()
+            .map(|x| PathBuf::from(x))
+            .unwrap_or({
+                let mut cwd = env::current_dir().unwrap();
+                cwd.push("build");
+                cwd.push("release");
+                cwd
+            });
+        let get_binary_path = |binary: &str| {
+            let mut path = base_dir.clone();
+            path.push(PathBuf::from(binary));
+            path
+        };
         let mut context = Context::default();
         let loader = Loader {};
-        let funding_lock_bin = loader.load_binary("../../build/release/funding-lock");
-        let commitment_lock_bin = loader.load_binary("../../build/release/commitment-lock");
-        let auth_bin = loader.load_binary("../../build/release/auth");
-        let always_success_bin = loader.load_binary("../../build/release/always_success");
+
+        let funding_lock_bin = loader.load_binary(get_binary_path("funding-lock"));
+        let commitment_lock_bin = loader.load_binary(get_binary_path("commitment-lock"));
+        let auth_bin = loader.load_binary(get_binary_path("auth"));
+        let always_success_bin = loader.load_binary(get_binary_path("always_success"));
         let funding_lock_out_point: OutPoint = context.deploy_cell(funding_lock_bin);
         let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
         let auth_out_point: OutPoint = context.deploy_cell(auth_bin);
