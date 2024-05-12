@@ -1954,7 +1954,7 @@ impl ChannelActorState {
         // Try to create an transaction which spends the commitment transaction, to
         // verify that our code actually works.
         if is_testing() {
-            let output_lock_script = get_commitment_lock_script(b"whatever");
+            let output_lock_script = get_always_success_script(b"whatever");
 
             let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
@@ -1985,9 +1985,18 @@ impl ChannelActorState {
                 dbg!("After completed tx: {:?}", &_tx);
 
                 // Use the second output as an input to the new transaction.
-                let commitment_out_point = &tx.output_pts()[0];
+                // The first output is an immediate spendable output,
+                // while the second output is a delayed output locked by commitment lock.
+                let commitment_lock_index = 1;
+                let commitment_out_point = &tx.output_pts()[commitment_lock_index];
                 dbg!("commitment_out_point: {:?}", commitment_out_point);
-
+                                            let commitment_out_point = tx.output_pts().get(commitment_lock_index).unwrap().clone();
+                                            let (commitment_lock_cell, commitment_lock_cell_data) = tx.output_with_data(commitment_lock_index).unwrap();
+                                            dbg!("inputs to new_tx saved: {:?}", &tx);
+                                            dbg!("outpoint: {:?}", &commitment_out_point);
+                                            dbg!("Cell: {:?}", &commitment_lock_cell);
+                                            context.create_cell_with_out_point(commitment_out_point.clone(), commitment_lock_cell, commitment_lock_cell_data);
+                        
                 let input = CellInput::new_builder()
                     .previous_output(commitment_out_point.clone())
                     .build();
@@ -1998,7 +2007,7 @@ impl ChannelActorState {
                     .inputs(vec![input])
                     .outputs(vec![
                         CellOutput::new_builder()
-                            .capacity(2000.pack())
+                            .capacity(20.pack())
                             .lock(output_lock_script.clone())
                             .build()]
                     )
@@ -2024,11 +2033,13 @@ impl ChannelActorState {
                             .as_advanced_builder()
                             .witnesses(vec![witness.pack()])
                             .build();
+
                         dbg!(
                             "Verifying spending transaction of commitment tx: {:?}",
-                            new_tx
+                            &new_tx
                         );
-                        let result = context.verify_tx(&tx, 10_000_000);
+                        
+                        let result = context.verify_tx(&new_tx, 10_000_000);
                         dbg!(&result);
                         result.is_ok()
                     })
@@ -3592,4 +3603,5 @@ mod tests {
             })
             .await;
     }
+
 }
