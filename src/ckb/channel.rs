@@ -266,7 +266,6 @@ impl ChannelActor {
             ))
             .expect("network actor alive");
 
-        state.holder_commitment_number = state.get_next_commitment_number(true);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
