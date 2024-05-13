@@ -865,6 +865,7 @@ checksum = "ae5937620517015b665ec7f703354017d687e5a4cccc6764379f90d90f112a6a"
 [[package]]
 name = "ckb-testtool"
 version = "0.11.0"
+source = "git+https://github.com/contrun/capsule.git?branch=determinisitic-rng#d4d7361c93b7fb665ed3e4870abb6b8d4458f21c"
 dependencies = [
  "ckb-always-success-script",
  "ckb-chain-spec",
