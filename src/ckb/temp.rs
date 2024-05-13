@@ -123,6 +123,7 @@ impl CommitmentLockContext {
             always_success_dep,
         ]
         .pack();
+        context.set_capture_debug(true);
         Self {
             context,
             funding_lock_out_point,

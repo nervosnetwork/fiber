@@ -2038,6 +2038,7 @@ impl ChannelActorState {
                             .unwrap()
                             .serialize();
                         let witness_script = self.build_commitment_transaction_witnesses(local);
+                        dbg!("Witnesses to set", hex::encode(&witness_script));
                         let witness = [witness_script.clone(), vec![0xFF], signature].concat();
 
                         let revocation_tx = revocation_tx
@@ -2539,25 +2540,11 @@ impl ChannelActorState {
     }
 
     fn build_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
-        let (to_broadcaster_value, to_countersignatory_value) =
-            self.get_broadcaster_and_countersignatory_amounts(local);
-
-        let immediate_payment_key = {
-            let (commitment_point, base_payment_key) = if local {
-                (
-                    self.get_current_counterparty_commitment_point(),
-                    self.get_counterparty_channel_parameters()
-                        .payment_base_key(),
-                )
-            } else {
-                (
-                    self.get_current_holder_commitment_point(),
-                    self.get_holder_channel_parameters().payment_base_key(),
-                )
-            };
-            derive_payment_pubkey(base_payment_key, &commitment_point)
-        };
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
+            dbg!(
+                self.get_current_holder_commitment_point(),
+                self.get_current_counterparty_commitment_point()
+            );
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
                 (
@@ -2578,6 +2565,7 @@ impl ChannelActorState {
                         .revocation_base_key(),
                 )
             };
+            dbg!(base_delayed_payment_key, base_revocation_key);
             (
                 delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
@@ -2615,11 +2603,18 @@ impl ChannelActorState {
             b.sort_by(|x, y| x.id.cmp(&y.id));
             [a, b].concat()
         };
-        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
-        // In the commitment transaction, we need also to include the amount of the TLCs.
-        let to_broadcaster_value =
-            to_broadcaster_value as u64 + tlcs.iter().map(|tlc| tlc.amount).sum::<u128>() as u64;
 
+        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
+        let revocation_key_hash = blake2b_256(revocation_key.serialize());
+
+        dbg!(
+            &tlcs,
+            local,
+            delayed_payment_key,
+            hex::encode(&delayed_payment_key_hash[..20]),
+            revocation_key,
+            hex::encode(&revocation_key_hash[..20])
+        );
         let witnesses: Vec<u8> = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
@@ -2637,6 +2632,15 @@ impl ChannelActorState {
         let (to_broadcaster_value, to_countersignatory_value) =
             self.get_broadcaster_and_countersignatory_amounts(local);
 
+        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
+        // In the commitment transaction, we need also to include the amount of the TLCs.
+        let to_broadcaster_value = to_broadcaster_value as u64
+            + self
+                .get_all_tlcs()
+                .iter()
+                .map(|tlc| tlc.amount)
+                .sum::<u128>() as u64;
+
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
@@ -2652,80 +2656,16 @@ impl ChannelActorState {
             };
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
-        let (delayed_epoch, delayed_payment_key, revocation_key) = {
-            let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
-            {
-                (
-                    self.get_holder_channel_parameters().selected_contest_delay,
-                    self.get_current_holder_commitment_point(),
-                    self.get_holder_channel_parameters()
-                        .delayed_payment_base_key(),
-                    self.get_holder_channel_parameters().revocation_base_key(),
-                )
-            } else {
-                (
-                    self.get_counterparty_channel_parameters()
-                        .selected_contest_delay,
-                    self.get_current_counterparty_commitment_point(),
-                    self.get_counterparty_channel_parameters()
-                        .delayed_payment_base_key(),
-                    self.get_counterparty_channel_parameters()
-                        .revocation_base_key(),
-                )
-            };
-            (
-                delay,
-                derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
-                derive_revocation_pubkey(base_revocation_key, &commitment_point),
-            )
-        };
 
-        // Build a sorted array of TLC so that both party can generate the same commitment transaction.
-        let tlcs = {
-            let (mut received_tlcs, mut offered_tlcs) = (
-                self.pending_received_tlcs
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                self.pending_offered_tlcs
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
-            for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                tlc.fill_in_pubkeys(local, &self);
-            }
-            let (mut a, mut b) = if local {
-                (received_tlcs, offered_tlcs)
-            } else {
-                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
-                    // Need to flip these fields for the counterparty.
-                    tlc.is_offered = !tlc.is_offered;
-                    (tlc.local_payment_key_hash, tlc.remote_payment_key_hash) =
-                        (tlc.remote_payment_key_hash, tlc.local_payment_key_hash);
-                }
-                (offered_tlcs, received_tlcs)
-            };
-            a.sort_by(|x, y| x.id.cmp(&y.id));
-            b.sort_by(|x, y| x.id.cmp(&y.id));
-            [a, b].concat()
-        };
-        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
-        // In the commitment transaction, we need also to include the amount of the TLCs.
-        let to_broadcaster_value =
-            to_broadcaster_value as u64 + tlcs.iter().map(|tlc| tlc.amount).sum::<u128>() as u64;
+        let witnesses: Vec<u8> = self.build_commitment_transaction_witnesses(local);
 
-        let witnesses: Vec<u8> = [
-            (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
-            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
-            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
-            tlcs.iter()
-                .map(|tlc| tlc.serialize_to_lock_args())
-                .flatten()
-                .collect(),
-        ]
-        .concat();
-
+        let hash = blake2b_256(&witnesses);
+        dbg!(
+            "witness in host",
+            hex::encode(&witnesses),
+            "witness hash",
+            hex::encode(&hash[..20])
+        );
         let secp256k1_lock_script =
             get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
         let commitment_lock_script = get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
