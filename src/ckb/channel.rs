@@ -1071,9 +1071,12 @@ impl ChannelActorState {
             &counterparty_pubkeys.revocation_base_key,
         );
 
+        let counterparty_commitment_number = 1;
+
         debug!(
-            "Generated channel id ({:?}) for temporary channel {:?}",
-            &channel_id, &temp_channel_id
+            "Generated channel id ({:?}) for temporary channel {:?} with local commitment number {:?} and remote commitment number {:?}",
+            &channel_id, &temp_channel_id,
+            commitment_number, counterparty_commitment_number
         );
 
         Self {
@@ -1100,7 +1103,7 @@ impl ChannelActorState {
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
-            counterparty_commitment_number: 1,
+            counterparty_commitment_number,
             counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_points: vec![
@@ -1120,7 +1123,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let commitment_number = 0;
+        let commitment_number = 1;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
@@ -1274,6 +1277,11 @@ impl ChannelActorState {
     /// Get the counterparty commitment point for the given commitment number.
     pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> Pubkey {
         let index = commitment_number as usize;
+        dbg!(
+            "getting counterparty commitment point",
+            index,
+            &self.counterparty_commitment_points
+        );
         self.counterparty_commitment_points[index]
     }
 
@@ -1954,6 +1962,7 @@ impl ChannelActorState {
         // Try to create an transaction which spends the commitment transaction, to
         // verify that our code actually works.
         if is_testing() {
+            dbg!("Since we are in testing model, we will now create a revocation transaction to test our construction works");
             let output_lock_script = get_always_success_script(b"whatever");
 
             let commitment_tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
@@ -1979,66 +1988,67 @@ impl ChannelActorState {
             .collect::<Vec<_>>();
             dbg!(&revocation_keys);
 
-            for local in [true, false] {
-                // Use the second output as an input to the new transaction.
-                // The first output is an immediate spendable output,
-                // while the second output is a delayed output locked by commitment lock.
-                let commitment_lock_index = 1;
-                let commitment_out_point = &commitment_tx.output_pts()[commitment_lock_index];
-                dbg!("commitment_out_point: {:?}", commitment_out_point);
-                let commitment_out_point = commitment_tx
-                    .output_pts()
-                    .get(commitment_lock_index)
-                    .unwrap()
-                    .clone();
-                let (commitment_lock_cell, commitment_lock_cell_data) = commitment_tx
-                    .output_with_data(commitment_lock_index)
-                    .unwrap();
-                dbg!("inputs to new_tx saved: {:?}", &commitment_tx);
-                dbg!("outpoint: {:?}", &commitment_out_point);
-                dbg!("Cell: {:?}", &commitment_lock_cell);
-                context.create_cell_with_out_point(
-                    commitment_out_point.clone(),
-                    commitment_lock_cell,
-                    commitment_lock_cell_data,
-                );
-                // We can verify revocation tx works by
-                // verify the funding tx, commitment tx and revocation tx verify successfully.
-                dbg!(
-                    "add the funding tx to test_verify_fixed_tx to verify our construction works",
-                    &self.funding_tx
-                );
-                dbg!("add the commitment tx to test_verify_fixed_tx to verify our construction works", &commitment_tx);
+            // Use the second output as an input to the new transaction.
+            // The first output is an immediate spendable output,
+            // while the second output is a delayed output locked by commitment lock.
+            let commitment_lock_index = 1;
+            let commitment_out_point = &commitment_tx.output_pts()[commitment_lock_index];
+            dbg!("commitment_out_point: {:?}", commitment_out_point);
+            let commitment_out_point = commitment_tx
+                .output_pts()
+                .get(commitment_lock_index)
+                .unwrap()
+                .clone();
+            let (commitment_lock_cell, commitment_lock_cell_data) = commitment_tx
+                .output_with_data(commitment_lock_index)
+                .unwrap();
+            dbg!("inputs to new_tx saved: {:?}", &commitment_tx);
+            dbg!("outpoint: {:?}", &commitment_out_point);
+            dbg!("Cell: {:?}", &commitment_lock_cell);
+            context.create_cell_with_out_point(
+                commitment_out_point.clone(),
+                commitment_lock_cell,
+                commitment_lock_cell_data,
+            );
+            // We can verify revocation tx works by
+            // verify the funding tx, commitment tx and revocation tx verify successfully.
+            dbg!(
+                "add the funding tx to test_verify_fixed_tx to verify our construction works",
+                &self.funding_tx
+            );
+            dbg!(
+                "add the commitment tx to test_verify_fixed_tx to verify our construction works",
+                &commitment_tx
+            );
 
-                let input = CellInput::new_builder()
-                    .previous_output(commitment_out_point.clone())
-                    .build();
+            let input = CellInput::new_builder()
+                .previous_output(commitment_out_point.clone())
+                .build();
 
-                dbg!("input: {:?}", &input);
-                let revocation_tx = TransactionBuilder::default()
-                    .cell_deps(commitment_tx.cell_deps().clone())
-                    .inputs(vec![input])
-                    .outputs(vec![CellOutput::new_builder()
-                        .capacity(20.pack())
-                        .lock(output_lock_script.clone())
-                        .build()])
-                    .outputs_data(vec![Default::default()])
-                    .build();
-                dbg!(
-                    "Built spending transaction with cell deps and inputs: {:?}",
-                    &revocation_tx
-                );
-                let message: [u8; 32] = revocation_tx.hash().as_slice().try_into().unwrap();
-                dbg!("message: {:?}", &message);
-                let results = revocation_keys
+            dbg!("input: {:?}", &input);
+            let revocation_tx = TransactionBuilder::default()
+                .cell_deps(commitment_tx.cell_deps().clone())
+                .inputs(vec![input])
+                .outputs(vec![CellOutput::new_builder()
+                    .capacity(20.pack())
+                    .lock(output_lock_script.clone())
+                    .build()])
+                .outputs_data(vec![Default::default()])
+                .build();
+            dbg!(
+                "Built spending transaction with cell deps and inputs: {:?}",
+                &revocation_tx
+            );
+            let message: [u8; 32] = revocation_tx.hash().as_slice().try_into().unwrap();
+            dbg!("message: {:?}", hex::encode(&message));
+            let results = revocation_keys
                     .iter()
                     .map(|key| {
                         let signature = ckb_crypto::secp::Privkey::from_slice(&key)
                             .sign_recoverable(&message.into())
                             .unwrap()
                             .serialize();
-                        let witness_script = self.build_previous_commitment_transaction_witnesses(local);
-                        dbg!("Witnesses to set", hex::encode(&witness_script));
+                        let witness_script = self.build_previous_commitment_transaction_witnesses(false);
                         let witness = [witness_script.clone(), vec![0xFF], signature].concat();
 
                         let revocation_tx = revocation_tx
@@ -2058,13 +2068,12 @@ impl ChannelActorState {
                         result.is_ok()
                     })
                     .collect::<Vec<_>>();
-                dbg!("validating results", &results);
-                // The person who firstly signs the transaction will give the other one
-                // the right to revoke the commitment transaction. While the other one
-                // can't revoke the commitment transaction, as this is not signed to
-                // allow his revocation key to revoke the commitment transaction.
-                assert!(results == vec![false, true] || results == vec![true, false]);
-            }
+            dbg!("validating results", &results);
+            // The person who firstly signs the transaction will give the other one
+            // the right to revoke the commitment transaction. While the other one
+            // can't revoke the commitment transaction, as this is not signed to
+            // allow his revocation key to revoke the commitment transaction.
+            assert!(results == vec![false, true] || results == vec![true, false]);
         }
 
         debug!(
@@ -2549,6 +2558,11 @@ impl ChannelActorState {
         } else {
             self.counterparty_commitment_number
         };
+        dbg!(
+            "Building current commitment transaction witnesses for",
+            local,
+            commitment_number
+        );
         self.build_commitment_transaction_witnesses(local, commitment_number)
     }
 
@@ -2558,6 +2572,11 @@ impl ChannelActorState {
         } else {
             self.counterparty_commitment_number - 1
         };
+        dbg!(
+            "Building previous commitment transaction witnesses for",
+            local,
+            commitment_number
+        );
         self.build_commitment_transaction_witnesses(local, commitment_number)
     }
 
@@ -2567,11 +2586,12 @@ impl ChannelActorState {
         local: bool,
         commitment_number: u64,
     ) -> Vec<u8> {
+        dbg!(
+            "Building commitment transaction witnesses for commitment number",
+            commitment_number,
+            local
+        );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
-            dbg!(
-                self.get_current_holder_commitment_point(),
-                self.get_current_counterparty_commitment_point()
-            );
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
                 (
@@ -2592,7 +2612,7 @@ impl ChannelActorState {
                         .revocation_base_key(),
                 )
             };
-            dbg!(base_delayed_payment_key, base_revocation_key);
+            dbg!(delay, base_delayed_payment_key, base_revocation_key);
             (
                 delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
@@ -2686,14 +2706,17 @@ impl ChannelActorState {
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
 
-        let witnesses: Vec<u8> = self.build_current_commitment_transaction_witnesses(local);
+        let witnesses: Vec<u8> = self.build_previous_commitment_transaction_witnesses(local);
 
         let hash = blake2b_256(&witnesses);
         dbg!(
             "witness in host",
             hex::encode(&witnesses),
             "witness hash",
-            hex::encode(&hash[..20])
+            hex::encode(&hash[..20]),
+            local,
+            self.holder_commitment_number,
+            self.counterparty_commitment_number
         );
         let secp256k1_lock_script =
             get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
@@ -2720,6 +2743,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let verify_ctx = Musig2VerifyContext::from(self);
 
+        dbg!("Calling build_commitment_tx from build_and_verify_commitment_tx");
         let tx = self.build_commitment_tx(false);
         let message = get_tx_message_to_sign(&tx);
         debug!(
@@ -2735,6 +2759,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let sign_ctx = Musig2SignContext::from(self);
 
+        dbg!("Calling build_commitment_tx from build_and_sign_commitment_tx");
         let tx = self.build_commitment_tx(true);
         let message = get_tx_message_to_sign(&tx);
 
@@ -2753,8 +2778,8 @@ impl ChannelActorState {
         &self,
         signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
+        dbg!("Calling build_commitment_tx from verify_and_complete_tx");
         let tx = self.build_and_verify_commitment_tx(signature)?;
-        assert_eq!(tx.tx, self.build_commitment_tx(false));
         dbg!(
             "verify_and_complete_tx build_and_verify_commitment_tx tx: {:?}",
             &tx.tx,
