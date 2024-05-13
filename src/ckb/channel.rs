@@ -2037,7 +2037,7 @@ impl ChannelActorState {
                             .sign_recoverable(&message.into())
                             .unwrap()
                             .serialize();
-                        let witness_script = self.build_commitment_transaction_witnesses(local);
+                        let witness_script = self.build_previous_commitment_transaction_witnesses(local);
                         dbg!("Witnesses to set", hex::encode(&witness_script));
                         let witness = [witness_script.clone(), vec![0xFF], signature].concat();
 
@@ -2059,7 +2059,11 @@ impl ChannelActorState {
                     })
                     .collect::<Vec<_>>();
                 dbg!("validating results", &results);
-                assert_eq!(results, vec![false, true]);
+                // The person who firstly signs the transaction will give the other one
+                // the right to revoke the commitment transaction. While the other one
+                // can't revoke the commitment transaction, as this is not signed to
+                // allow his revocation key to revoke the commitment transaction.
+                assert!(results == vec![false, true] || results == vec![true, false]);
             }
         }
 
@@ -2539,7 +2543,30 @@ impl ChannelActorState {
         tx_builder.build()
     }
 
-    fn build_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+        let commitment_number = if local {
+            self.holder_commitment_number
+        } else {
+            self.counterparty_commitment_number
+        };
+        self.build_commitment_transaction_witnesses(local, commitment_number)
+    }
+
+    fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+        let commitment_number = if local {
+            self.holder_commitment_number - 1
+        } else {
+            self.counterparty_commitment_number - 1
+        };
+        self.build_commitment_transaction_witnesses(local, commitment_number)
+    }
+
+    // We need this function both for building new commitment transaction and revoking old commitment transaction.
+    fn build_commitment_transaction_witnesses(
+        &self,
+        local: bool,
+        commitment_number: u64,
+    ) -> Vec<u8> {
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             dbg!(
                 self.get_current_holder_commitment_point(),
@@ -2549,7 +2576,7 @@ impl ChannelActorState {
             {
                 (
                     self.get_holder_channel_parameters().selected_contest_delay,
-                    self.get_current_holder_commitment_point(),
+                    self.get_holder_commitment_point(commitment_number),
                     self.get_holder_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_holder_channel_parameters().revocation_base_key(),
@@ -2558,7 +2585,7 @@ impl ChannelActorState {
                 (
                     self.get_counterparty_channel_parameters()
                         .selected_contest_delay,
-                    self.get_current_counterparty_commitment_point(),
+                    self.get_counterparty_commitment_point(commitment_number),
                     self.get_counterparty_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_counterparty_channel_parameters()
@@ -2574,6 +2601,8 @@ impl ChannelActorState {
         };
 
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
+        // TODO: we actually need a historical snapshot of tlcs for the commitment number.
+        // This currently only works for the current commitment number.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.pending_received_tlcs
@@ -2657,7 +2686,7 @@ impl ChannelActorState {
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
 
-        let witnesses: Vec<u8> = self.build_commitment_transaction_witnesses(local);
+        let witnesses: Vec<u8> = self.build_current_commitment_transaction_witnesses(local);
 
         let hash = blake2b_256(&witnesses);
         dbg!(
