@@ -4,7 +4,7 @@ use ckb_types::{
     packed::{CellDep, CellDepVec, OutPoint, Script},
     prelude::{Builder, Entity, PackVec},
 };
-use log::debug;
+use log::{debug, warn};
 use once_cell::sync::OnceCell;
 use std::{
     collections::HashMap,
@@ -39,35 +39,43 @@ impl MockContext {
     pub fn get() -> &'static Self {
         static INSTANCE: OnceCell<MockContext> = OnceCell::new();
         INSTANCE.get_or_init(|| {
-            let base_dir = env::var("TESTING_CONTRACTS_DIR")
-                .expect("TESTING_CONTRACTS_DIR must be given to mock ckb context");
-
             let mut context = Context::default();
 
-            let (map, cell_deps): (HashMap<Contract, _>, Vec<CellDep>) = [
-                Contract::FundingLock,
-                Contract::CommitmentLock,
-                Contract::AlwaysSuccess,
-                Contract::Secp256k1Lock,
-                // These are contracts that we will call from other contracts, e.g. funding-lock.
-                Contract::CkbAuth,
-                Contract::SimpleUDT,
-            ]
-            .iter()
-            .map(|contract| {
-                let binary = load_contract_binary(base_dir.as_str(), *contract);
-                let out_point = context.deploy_cell(binary);
-                let script = context
-                    .build_script(&out_point, Bytes::new())
-                    .expect("Build script");
-                let cell_dep = CellDep::new_builder().out_point(out_point.clone()).build();
-                ((*contract, (out_point, script)), cell_dep)
-            })
-            .unzip();
-
+            let (map, cell_deps) = match env::var("TESTING_CONTRACTS_DIR") {
+                Ok(base_dir) => {
+                    [
+                        Contract::FundingLock,
+                        Contract::CommitmentLock,
+                        Contract::AlwaysSuccess,
+                        Contract::Secp256k1Lock,
+                        // These are contracts that we will call from other contracts, e.g. funding-lock.
+                        Contract::CkbAuth,
+                        Contract::SimpleUDT,
+                    ]
+                    .iter()
+                    .map(|contract| {
+                        let binary = load_contract_binary(base_dir.as_str(), *contract);
+                        let out_point = context.deploy_cell(binary);
+                        let script = context
+                            .build_script(&out_point, Bytes::new())
+                            .expect("Build script");
+                        let cell_dep = CellDep::new_builder().out_point(out_point.clone()).build();
+                        ((*contract, (out_point, script)), cell_dep)
+                    })
+                    .unzip()
+                }
+                Err(e) => {
+                    warn!(
+                        "TESTING_CONTRACTS_DIR is not set, using default contracts: {:?}",
+                        e
+                    );
+                    (HashMap::new(), vec![])
+                }
+            };
             let cell_dep_vec = cell_deps.pack();
             debug!("Loaded contracts into the mock environement: {:?}", &map);
             debug!("Use this contracts with CellDepVec: {:?}", &cell_dep_vec);
+
             let context = MockContext {
                 context: RwLock::new(context),
                 contracts_context: Arc::new(ContractsContext {

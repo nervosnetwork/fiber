@@ -201,3 +201,31 @@ impl CkbChainState {
         }
     }
 }
+
+#[cfg(test)]
+pub struct MockChainActor;
+
+#[cfg(test)]
+#[ractor::async_trait]
+impl Actor for MockChainActor {
+    type Msg = CkbChainMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _: ActorRef<Self::Msg>,
+        _: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _: ActorRef<Self::Msg>,
+        _: Self::Msg,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+}

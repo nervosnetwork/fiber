@@ -7,6 +7,7 @@ use std::{
 };
 
 use ractor::{Actor, ActorRef};
+
 use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::{
@@ -17,6 +18,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
+    ckb_chain::MockChainActor,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
 };
@@ -96,9 +98,17 @@ impl NetworkNode {
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
+        let mut chain_base_dir = PathBuf::from(base_dir.as_ref());
+        chain_base_dir.push("ckb-chain");
+
+        let noop_chain_actor = Actor::spawn_linked(None, MockChainActor {}, (), root.get_cell())
+            .await
+            .expect("start mock chain actor")
+            .0;
+
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender),
+            NetworkActor::new(event_sender, noop_chain_actor.clone()),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )

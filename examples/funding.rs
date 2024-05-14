@@ -19,7 +19,7 @@
 /// cargo run --example funding /tmp/ckb-local /tmp/ckb-remote
 /// ```
 use ckb_pcn_node::{
-    ckb::types::Hash256,
+    ckb::chain::CommitmentLockContext,
     ckb_chain::{
         CkbChainActor, CkbChainConfig, CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest,
     },
@@ -37,7 +37,7 @@ pub async fn main() {
     let (local_actor, local_handle) = Actor::spawn(
         Some("local actor".to_string()),
         CkbChainActor {},
-        local_config,
+        (local_config, CommitmentLockContext::get_mock()),
     )
     .await
     .expect("start local actor");
@@ -45,7 +45,7 @@ pub async fn main() {
     let (remote_actor, remote_handle) = Actor::spawn(
         Some("remote actor".to_string()),
         CkbChainActor {},
-        remote_config,
+        (remote_config, CommitmentLockContext::get_mock()),
     )
     .await
     .expect("start remote actor");
@@ -83,26 +83,10 @@ fn prepare() -> (CkbChainConfig, CkbChainConfig) {
         CkbChainConfig {
             base_dir: Some(local_path),
             rpc_url: rpc_url.clone(),
-            funding_source_lock_script_code_hash: make_h256(
-                "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-            ),
-            funding_source_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType::Type,
-            funding_cell_lock_script_code_hash: make_h256(
-                "0x8090ce20be9976e2407511502acebf74ac1cfed10d7b35b7f33f56c9bd0daec6",
-            ),
-            funding_cell_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType::Type,
         },
         CkbChainConfig {
             base_dir: Some(remote_path),
             rpc_url: rpc_url.clone(),
-            funding_source_lock_script_code_hash: make_h256(
-                "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-            ),
-            funding_source_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType::Type,
-            funding_cell_lock_script_code_hash: make_h256(
-                "0x8090ce20be9976e2407511502acebf74ac1cfed10d7b35b7f33f56c9bd0daec6",
-            ),
-            funding_cell_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType::Type,
         },
     );
 }
@@ -178,12 +162,6 @@ async fn run(local: &ActorRef<CkbChainMessage>, remote: &ActorRef<CkbChainMessag
     .expect("remote calls");
 
     log::info!("tx status of {}: {:?}", tx.hash(), status);
-}
-
-fn make_h256(hex: &str) -> Hash256 {
-    let mut buf = [0u8; 32];
-    hex::decode_to_slice(&hex[2..], &mut buf).expect("decode hash256");
-    Hash256::from(buf)
 }
 
 fn log_tx(name: &str, tx: &FundingTx) {

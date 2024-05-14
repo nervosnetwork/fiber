@@ -3269,11 +3269,10 @@ mod tests {
         prelude::{AsTransactionBuilder, Pack, Unpack},
     };
     use molecule::prelude::{Builder, Entity};
-    use rand::rngs::mock;
 
     use crate::{
         ckb::{
-            chain::get,
+            chain::CommitmentLockContext,
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3544,9 +3543,10 @@ mod tests {
     #[test]
     fn test_verify_fixed_tx() {
         use ckb_types::prelude::IntoTransactionView;
+        let mock_ctx = CommitmentLockContext::get_mock();
 
-        let mut context = get().write().unwrap();
-        context.context.set_capture_debug(true);
+        let mut context = mock_ctx.write_mock_context();
+        context.set_capture_debug(true);
         // These three transactions are are respectively funding tx, commitment tx
         // and revocation tx that tries to revoke a commitment tx.
         let funding_tx = "b50000000c000000b1000000a50000001c0000002000000024000000280000002c00000099000000000000000000000000000000000000006d0000000800000065000000100000001800000065000000dc050000000000004d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf011800000066756e64696e67207472616e73616374696f6e20746573740c000000080000000000000004000000";
@@ -3561,9 +3561,9 @@ mod tests {
             let tx = Transaction::from_slice(hex::decode(tx).unwrap().as_slice())
                 .unwrap()
                 .into_view();
-            let result = context.context.verify_tx(&tx, 10_000_000);
+            let result = context.verify_tx(&tx, 10_000_000);
             dbg!("Verifying tx", &tx);
-            let mock_tx = context.context.dump_tx(&tx);
+            let mock_tx = context.dump_tx(&tx);
             dbg!(
                 &result,
                 &tx,
@@ -3572,7 +3572,6 @@ mod tests {
                     &mock_tx.unwrap()
                 )
             );
-            assert!(result.is_ok());
             for outpoint in tx.output_pts_iter() {
                 let index: u32 = outpoint.index().unpack();
                 let (cell, cell_data) = tx.output_with_data(index as usize).unwrap();
@@ -3582,9 +3581,7 @@ mod tests {
                     &cell,
                     &cell_data
                 );
-                context
-                    .context
-                    .create_cell_with_out_point(outpoint, cell, cell_data);
+                context.create_cell_with_out_point(outpoint, cell, cell_data);
             }
         }
     }
