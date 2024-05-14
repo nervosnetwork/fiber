@@ -1,0 +1,28 @@
+[[cells]]
+name = "commitment-lock"
+enable_type_id = true
+location = { file = "contracts/commitment-lock" }
+
+[[cells]]
+name = "lock-dep-auth"
+enable_type_id = false
+location = { file = "contracts/auth" }
+[[cells]]
+name = "lock-dep-simple_udt"
+enable_type_id = false
+location = { file = "contracts/simple_udt" }
+
+# Dep group cells
+[[dep_groups]]
+name = "joyid_dep_group"
+cells = [
+    "joyid",
+    "lock-dep-auth",
+    "lock-dep-simple_udt",
+]
+
+# The lock script set to output cells
+[lock]
+code_hash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"
+args = "0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7"
+hash_type = "type"
