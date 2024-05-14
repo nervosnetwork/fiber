@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 use super::super::FundingError;
+use crate::ckb::serde_utils::EntityWrapperHex;
+
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
     traits::{
@@ -21,6 +23,8 @@ use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
 };
+use serde::Deserialize;
+use serde_with::serde_as;
 
 /// Funding transaction wrapper.
 ///
@@ -31,9 +35,11 @@ pub struct FundingTx {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, Default)]
+#[serde_as]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct FundingUdtInfo {
     /// The UDT type script
+    #[serde_as(as = "EntityWrapperHex<packed::Script>")]
     type_script: packed::Script,
     /// CKB amount to be provided by the local party.
     local_ckb_amount: u64,
@@ -41,11 +47,13 @@ pub struct FundingUdtInfo {
     remote_ckb_amount: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[serde_as]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct FundingRequest {
     /// UDT channel info
     pub udt_info: Option<FundingUdtInfo>,
     /// The funding cell lock script args
+    #[serde_as(as = "EntityWrapperHex<packed::Bytes>")]
     pub funding_cell_lock_script_args: packed::Bytes,
     /// Assets amount to be provided by the local party
     pub local_amount: u64,

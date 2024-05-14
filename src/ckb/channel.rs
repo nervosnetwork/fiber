@@ -508,7 +508,7 @@ impl ChannelActor {
         Ok(())
     }
 
-    pub fn handle_command(
+    pub async fn handle_command(
         &self,
         state: &mut ChannelActorState,
         command: ChannelCommand,
@@ -742,7 +742,7 @@ impl Actor for ChannelActor {
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command) {
+                if let Err(err) = self.handle_command(state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }

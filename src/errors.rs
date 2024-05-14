@@ -2,11 +2,11 @@ use ractor::{MessagingErr, SpawnErr};
 use tentacle::{error::SendErrorKind, secio::PeerId};
 use thiserror::Error;
 
-use crate::ckb::{
+use crate::{ckb::{
     channel::{ChannelActorMessage, ProcessingChannelError},
     types::Hash256,
     NetworkActorMessage,
-};
+}, ckb_chain::FundingError};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -26,6 +26,8 @@ pub enum Error {
     NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
     #[error("Failed to processing channel: {0}")]
     ChannelError(#[from] ProcessingChannelError),
+    #[error("Funding error: {0}")]
+    FundingError(#[from] FundingError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

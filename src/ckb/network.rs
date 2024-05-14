@@ -1,5 +1,6 @@
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
+use ckb_types::prelude::IntoTransactionView;
 use log::{debug, error, info, warn};
 
 use ractor::{async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef};
@@ -41,6 +42,7 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
+use crate::ckb::serde_utils::EntityWrapperHex;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::{unwrap_or_return, Error};
 
@@ -63,6 +65,11 @@ pub enum NetworkActorCommand {
     AcceptChannel(AcceptChannelCommand),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
+    UpdateChannelFunding(
+        Hash256,
+        #[serde_as(as = "EntityWrapperHex<Transaction>")] Transaction,
+        FundingRequest,
+    ),
 }
 
 #[serde_as]
@@ -177,8 +184,6 @@ pub struct PCNMessageWithChannelId {
     pub message: PCNMessage,
 }
 
-const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
-
 pub struct NetworkActor {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
@@ -285,6 +290,46 @@ impl NetworkActor {
             NetworkActorCommand::ControlPcnChannel(c) => {
                 state
                     .send_command_to_channel(c.channel_id, c.command)
+                    .await?
+            }
+            NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
+                const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
+
+                let mut tx = FundingTx::new();
+                tx.update_for_self(transaction.into_view())?;
+                let tx = match call_t!(
+                    self.chain_actor.clone(),
+                    CkbChainMessage::Fund,
+                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                    tx,
+                    request
+                ) {
+                    Ok(Ok(tx)) => match tx.into_inner() {
+                        Some(tx) => tx,
+                        _ => {
+                            error!("Obtained empty funding tx");
+                            return Ok(());
+                        }
+                    },
+                    Ok(Err(err)) => {
+                        error!("Failed to fund channel: {}", err);
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        error!("Failed to call chain actor: {}", err);
+                        return Ok(());
+                    }
+                };
+                debug!("Funding transaction updated on our part: {:?}", tx);
+                state
+                    .send_command_to_channel(
+                        channel_id,
+                        ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
+                            TxUpdateCommand {
+                                transaction: tx.data(),
+                            },
+                        )),
+                    )
                     .await?
             }
         };
@@ -641,51 +686,22 @@ impl Actor for NetworkActor {
                     state.channels.insert(new, channel);
                     debug!("Channel accepted: {:?} -> {:?}", old, new);
 
+                    debug!("Starting funding channel");
                     // TODO: Here we implies the one who receives AcceptChannel message
                     // will send TxUpdate message first.
-                    let local = local as u64;
-                    let remote = remote as u64;
-                    let tx = FundingTx::new();
-                    let tx = match call_t!(
-                        self.chain_actor,
-                        CkbChainMessage::Fund,
-                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                        tx,
-                        FundingRequest {
-                            udt_info: None,
-                            funding_cell_lock_script_args: script.args(),
-                            local_amount: local,
-                            local_fee_rate: 0,
-                            remote_amount: remote,
-                        }
-                    ) {
-                        Ok(Ok(tx)) => match tx.into_inner() {
-                            Some(tx) => tx,
-                            _ => {
-                                error!("Obtained empty funding tx");
-                                return Ok(());
-                            }
-                        },
-                        Ok(Err(err)) => {
-                            error!("Failed to fund channel: {}", err);
-                            return Ok(());
-                        }
-                        Err(err) => {
-                            error!("Failed to call chain actor: {}", err);
-                            return Ok(());
-                        }
-                    };
-                    debug!("Funding transaction constructed on our part: {:?}", tx);
                     myself
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                                channel_id: new,
-                                command: ChannelCommand::TxCollaborationCommand(
-                                    TxCollaborationCommand::TxUpdate(TxUpdateCommand {
-                                        transaction: tx.data(),
-                                    }),
-                                ),
-                            }),
+                            NetworkActorCommand::UpdateChannelFunding(
+                                new,
+                                Default::default(),
+                                FundingRequest {
+                                    udt_info: None,
+                                    funding_cell_lock_script_args: script.args(),
+                                    local_amount: local as u64,
+                                    local_fee_rate: 0,
+                                    remote_amount: remote as u64,
+                                },
+                            ),
                         ))
                         .expect("myself alive");
                 }
