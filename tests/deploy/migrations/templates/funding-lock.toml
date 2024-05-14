@@ -12,6 +12,15 @@ name = "lock-dep-simple_udt"
 enable_type_id = false
 location = { file = "contracts/simple_udt" }
 
+# Dep group cells
+[[dep_groups]]
+name = "funding-lock-dev-group"
+cells = [
+  "funding-lock",
+  "lock-dep-auth",
+  "lock-dep-simple_udt",
+]
+
 # The lock script set to output cells
 [lock]
 code_hash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8"

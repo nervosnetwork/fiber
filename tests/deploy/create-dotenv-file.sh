@@ -24,14 +24,24 @@ case "${1:-}" in
     ;;
 esac
 
-ALWAYS_SUCCESS_INFO_FILE="$(ls migrations/always_success/*.json | grep -v deployment | head -n 1)"
+create_dotenv_for_contract() {
+    local CONTRACT_NAME="$1"
+    local CONTRACT_INFO_FILE="$(ls "migrations/$CONTRACT_NAME"/*.json | grep -v deployment | head -n 1)"
+    # Replace dash with underscore because envirornment variable names cannot contain dashes.
+    # Also use uppercase because environment variable names are usually uppercase.
+    CONTRACT_NAME="$(echo "$CONTRACT_NAME" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
 
-sed -n \
-    -e 's/,$//' \
-    -e 's/^ *"type_id": /NEXT_PUBLIC_ALWAYS_SUCCESS_CODE_HASH=/p' \
-    "$ALWAYS_SUCCESS_INFO_FILE" | head -1
+    sed -n \
+        -e 's/,$//' \
+        -e 's/^ *"type_id": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_CODE_HASH="/p' \
+        "$CONTRACT_INFO_FILE" | head -1
 
-sed -n \
-    -e 's/,$//' \
-    -e 's/^ *"tx_hash": /NEXT_PUBLIC_ALWAYS_SUCCESS_TX_HASH=/p' \
-    "$ALWAYS_SUCCESS_INFO_FILE" | tail -1
+    sed -n \
+        -e 's/,$//' \
+        -e 's/^ *"tx_hash": /NEXT_PUBLIC_'"$CONTRACT_NAME"'_TX_HASH=/p' \
+        "$CONTRACT_INFO_FILE" | tail -1
+}
+
+create_dotenv_for_contract always_success
+create_dotenv_for_contract funding-lock
+create_dotenv_for_contract commitment-lock

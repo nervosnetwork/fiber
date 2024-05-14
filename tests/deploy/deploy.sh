@@ -35,24 +35,28 @@ function deploy() {
     sed "s/0x8f8c79eb6671709633fe6a46de93c0fedc9c1b8a6527a18d3983879542635c9f/$GENESIS_TX0/" "$TEMPLATE_FILE" >"$CONFIG_FILE"
 
     ckb-cli deploy gen-txs --from-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqwgx292hnvmn68xf779vmzrshpmm6epn4c0cgwga \
-        --fee-rate 1000 --deployment-config "$CONFIG_FILE" --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
+        --fee-rate 100000 --deployment-config "$CONFIG_FILE" --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
 
     ckb-cli deploy sign-txs --add-signatures --info-file "$INFO_FILE" --privkey-path "$miner_key_file" --output-format json | sed -n 's/: \("[^"]*"\)/: [\1]/p'
 
-    ckb-cli deploy apply-txs --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
+    if ckb-cli deploy apply-txs --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR" | grep -q "already exists in transaction_pool"; then
+        :
+    fi
 }
 
-deploy always_success
-./generate-blocks.sh 4
-sleep 1
+generate_blocks() {
+    ./generate-blocks.sh 4
+    sleep 1
+}
 
-# # try twice in case the indexer has not updated yet
-# deploy joyid || deploy joyid
-# bin/generate-blocks.sh 4
-# sleep 1
+# try twice in case the indexer has not updated yet
+deploy_and_generate_blocks() {
+    deploy "$1" || deploy "$1"
+    generate_blocks
+}
 
-# # try twice in case the indexer has not updated yet
-# deploy omnilock || deploy omnilock
-# bin/generate-blocks.sh 4
+deploy_and_generate_blocks always_success
+deploy_and_generate_blocks funding-lock
+deploy_and_generate_blocks commitment-lock
 
 ./create-dotenv-file.sh >.env

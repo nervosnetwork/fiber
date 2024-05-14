@@ -14,12 +14,8 @@ location = { file = "contracts/simple_udt" }
 
 # Dep group cells
 [[dep_groups]]
-name = "joyid_dep_group"
-cells = [
-    "joyid",
-    "lock-dep-auth",
-    "lock-dep-simple_udt",
-]
+name = "commitment-lock-dev-group"
+cells = ["commitment-lock", "lock-dep-auth", "lock-dep-simple_udt"]
 
 # The lock script set to output cells
 [lock]
