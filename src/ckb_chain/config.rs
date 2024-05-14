@@ -1,13 +1,10 @@
-use ckb_types::{packed, prelude::*};
 use clap_serde_derive::ClapSerde;
-use molecule::prelude::*;
+
 use secp256k1::SecretKey;
 use std::{
     io::{ErrorKind, Read},
     path::PathBuf,
 };
-
-use crate::ckb::types::Hash256;
 
 pub const DEFAULT_CKB_CHAIN_BASE_DIR_NAME: &str = "ckb-chain";
 const DEFAULT_CKB_CHAIN_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -31,20 +28,6 @@ pub struct CkbChainConfig {
         help = "rpc url to connect the ckb node [default: http://127.0.0.1:8114]"
     )]
     pub rpc_url: String,
-
-    #[arg(skip)]
-    pub funding_source_lock_script_code_hash: Hash256,
-
-    #[default(ckb_jsonrpc_types::ScriptHashType::Type)]
-    #[arg(skip)]
-    pub funding_source_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType,
-
-    #[arg(skip)]
-    pub funding_cell_lock_script_code_hash: Hash256,
-
-    #[default(ckb_jsonrpc_types::ScriptHashType::Type)]
-    #[arg(skip)]
-    pub funding_cell_lock_script_hash_type: ckb_jsonrpc_types::ScriptHashType,
 }
 
 impl CkbChainConfig {
@@ -96,31 +79,5 @@ impl CkbChainConfig {
         SecretKey::from_slice(&key_bin).map_err(|_| {
             std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
         })
-    }
-
-    pub fn build_funding_source_lock_script(&self, args: packed::Bytes) -> packed::Script {
-        packed::Script::new_builder()
-            .code_hash(self.funding_source_lock_script_code_hash.into())
-            .hash_type(packed::Byte::new(
-                ckb_types::core::ScriptHashType::from(
-                    self.funding_source_lock_script_hash_type.clone(),
-                )
-                .into(),
-            ))
-            .args(args)
-            .build()
-    }
-
-    pub fn build_funding_cell_lock_script(&self, args: packed::Bytes) -> packed::Script {
-        packed::Script::new_builder()
-            .code_hash(self.funding_cell_lock_script_code_hash.into())
-            .hash_type(Byte::new(
-                ckb_types::core::ScriptHashType::from(
-                    self.funding_cell_lock_script_hash_type.clone(),
-                )
-                .into(),
-            ))
-            .args(args)
-            .build()
     }
 }

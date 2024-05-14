@@ -3,14 +3,17 @@ use ckb_types::{
     packed::{CellDep, CellDepVec, OutPoint, Script},
     prelude::{Builder, Entity, PackVec},
 };
+use log::debug;
 use once_cell::sync::OnceCell;
 use std::{
     collections::HashMap,
-    sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use std::{env, fs, path::PathBuf};
 
 use ckb_types::prelude::Pack;
+
+use super::config::CkbNetwork;
 
 fn load_contract_binary(base_dir: &str, contract: Contract) -> Bytes {
     let mut path = PathBuf::from(base_dir);
@@ -23,9 +26,10 @@ fn load_contract_binary(base_dir: &str, contract: Contract) -> Bytes {
     result.unwrap().into()
 }
 
-pub(crate) struct MockContext {
+#[derive(Debug)]
+pub struct MockContext {
     context: RwLock<Context>,
-    contracts_context: ContractsContext,
+    contracts_context: Arc<ContractsContext>,
 }
 
 impl MockContext {
@@ -43,6 +47,9 @@ impl MockContext {
                 Contract::CommitmentLock,
                 Contract::AlwaysSuccess,
                 Contract::Secp256k1Lock,
+                // These are contracts that we will call from other contracts, e.g. funding-lock.
+                Contract::CkbAuth,
+                Contract::SimpleUDT,
             ]
             .iter()
             .map(|contract| {
@@ -56,12 +63,15 @@ impl MockContext {
             })
             .unzip();
 
+            let cell_dep_vec = cell_deps.pack();
+            debug!("Loaded contracts into the mock environement: {:?}", &map);
+            debug!("Use this contracts with CellDepVec: {:?}", &cell_dep_vec);
             let context = MockContext {
                 context: RwLock::new(context),
-                contracts_context: ContractsContext {
+                contracts_context: Arc::new(ContractsContext {
                     contracts: map,
-                    cell_deps: cell_deps.pack(),
-                },
+                    cell_deps: cell_dep_vec,
+                }),
             };
             context
         });
@@ -75,6 +85,8 @@ enum Contract {
     CommitmentLock,
     Secp256k1Lock,
     AlwaysSuccess,
+    CkbAuth,
+    SimpleUDT,
 }
 
 impl Contract {
@@ -82,30 +94,46 @@ impl Contract {
         match self {
             Contract::FundingLock => "funding-lock",
             Contract::CommitmentLock => "commitment-lock",
-            Contract::Secp256k1Lock => "auth",
+            // TODO fix me.
+            // We create an secp256k1 binary here because we need to find out the tx of secp256k1 in dev chain.
+            Contract::Secp256k1Lock => "always_success",
             Contract::AlwaysSuccess => "always_success",
+            Contract::CkbAuth => "auth",
+            Contract::SimpleUDT => "simple_udt",
         }
     }
 }
 
-pub(crate) struct ContractsContext {
+#[derive(Debug)]
+pub struct ContractsContext {
     contracts: HashMap<Contract, (OutPoint, Script)>,
     // TODO: We bundle all the cell deps together, but some of they are not always needed.
     cell_deps: CellDepVec,
 }
 
-pub(crate) enum CommitmentLockContext {
+#[derive(Clone, Debug)]
+pub enum CommitmentLockContext {
     Mock(&'static MockContext),
-    Real(ContractsContext),
+    Real(Arc<ContractsContext>),
 }
 
 impl CommitmentLockContext {
-    pub(crate) fn get() -> Self {
+    pub fn new(network: CkbNetwork) -> Self {
+        match network {
+            CkbNetwork::Mocknet => Self::Mock(MockContext::get()),
+            _ => panic!("Unsupported network type {:?}", network),
+        }
+    }
+
+    pub fn get_mock() -> Self {
         Self::Mock(MockContext::get())
     }
 
     pub fn is_testing(&self) -> bool {
-        true
+        match self {
+            Self::Mock(_) => true,
+            Self::Real(_) => false,
+        }
     }
 
     fn get_contracts_map(&self) -> &HashMap<Contract, (OutPoint, Script)> {
@@ -121,18 +149,22 @@ impl CommitmentLockContext {
         }
     }
 
+    fn get_contract_info(&self, contract: Contract) -> (OutPoint, Script) {
+        self.get_contracts_map()
+            .get(&contract)
+            .expect(format!("Contract {:?} exists", contract).as_str())
+            .clone()
+    }
+
     fn get_out_point(&self, contract: Contract) -> OutPoint {
-        self.get_contracts_map().get(&contract).unwrap().0.clone()
+        self.get_contract_info(contract).0
     }
 
     fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
-        self.get_contracts_map()
-            .get(&contract)
-            .unwrap()
+        self.get_contract_info(contract)
             .1
-            .clone()
             .as_builder()
-            .args(args.to_owned().pack())
+            .args(args.pack())
             .build()
     }
 
@@ -156,6 +188,10 @@ impl CommitmentLockContext {
 
     pub fn get_secp256k1_lock_script(&self, args: &[u8]) -> Script {
         self.get_script(Contract::Secp256k1Lock, args)
+    }
+
+    pub fn get_funding_lock_script(&self, args: &[u8]) -> Script {
+        self.get_script(Contract::CommitmentLock, args)
     }
 
     pub fn get_commitment_lock_script(&self, args: &[u8]) -> Script {

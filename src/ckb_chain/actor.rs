@@ -5,9 +5,11 @@ use ractor::{
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
 };
 
+use crate::ckb::chain::CommitmentLockContext;
+
 use super::{funding::FundingContext, CkbChainConfig, FundingError, FundingRequest, FundingTx};
 
-pub struct CkbChainActor;
+pub struct CkbChainActor {}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -15,6 +17,7 @@ pub struct CkbChainState {
     config: CkbChainConfig,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
+    ctx: CommitmentLockContext,
 }
 
 #[derive(Debug)]
@@ -40,20 +43,19 @@ pub enum CkbChainMessage {
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
-    type Arguments = CkbChainConfig;
+    type Arguments = (CkbChainConfig, CommitmentLockContext);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        config: Self::Arguments,
+        (config, ctx): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
 
         let secp = secp256k1::Secp256k1::new();
         let pub_key = secret_key.public_key(&secp);
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
-        let funding_source_lock_script =
-            config.build_funding_source_lock_script((&pub_key_hash[0..20]).pack());
+        let funding_source_lock_script = ctx.get_secp256k1_lock_script(&pub_key_hash[0..20]);
         log::info!(
             "[{}] funding lock args: {}",
             myself.get_name().unwrap_or_default(),
@@ -64,6 +66,7 @@ impl Actor for CkbChainActor {
             config,
             secret_key,
             funding_source_lock_script,
+            ctx,
         })
     }
 
@@ -193,8 +196,8 @@ impl CkbChainState {
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_cell_lock_script: self
-                .config
-                .build_funding_cell_lock_script(request.funding_cell_lock_script_args.clone()),
+                .ctx
+                .get_funding_lock_script(request.funding_cell_lock_script_args.as_slice()),
         }
     }
 }

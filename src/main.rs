@@ -1,3 +1,5 @@
+use ckb_pcn_node::ckb::chain::CommitmentLockContext;
+use ckb_pcn_node::ckb::config::CkbNetwork;
 use log::{debug, error, info};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -36,22 +38,22 @@ pub async fn main() {
 
     let ckb_command_sender = match config.ckb {
         Some(ckb_config) => {
-            let ckb_chain_actor = match config.ckb_chain {
-                Some(ckb_chain_config) => {
-                    let (wallet_actor, _wallet_handle) = Actor::spawn_linked(
-                        Some("ckb-chain".to_string()),
-                        CkbChainActor {},
-                        ckb_chain_config,
-                        root_actor.get_cell(),
-                    )
-                    .await
-                    .expect("start ckb-chain actor");
-                    wallet_actor
-                }
-                // TODO: this is not a user friendly error message which has actionable information
-                // for the user to fix the error and start the node.
-                _ => panic!("ckb-chain service is required for ckb service. Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file."),
-            };
+            // TODO: this is not a super user friendly error message which has actionable information
+            // for the user to fix the error and start the node.
+            let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
+
+            let network = ckb_config.network.unwrap_or(CkbNetwork::Dev);
+            let ctx = CommitmentLockContext::new(network);
+
+            let ckb_chain_actor = Actor::spawn_linked(
+                Some("ckb-chain".to_string()),
+                CkbChainActor {},
+                (ckb_chain_config, ctx),
+                root_actor.get_cell(),
+            )
+            .await
+            .expect("start ckb-chain actor")
+            .0;
 
             const CHANNEL_SIZE: usize = 4000;
             let (command_sender, mut command_receiver) = mpsc::channel(CHANNEL_SIZE);
