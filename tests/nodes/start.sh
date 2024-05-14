@@ -8,9 +8,6 @@ nodes_dir="$(dirname "$script_dir")/nodes"
 export BINARY_PATH="$(realpath "$script_dir/../../build/release")"
 
 cd "$nodes_dir" || exit 1
-
-chmod 600 */ckb/sk
-
 start() {
     cargo run -- "$@"
 }
