@@ -35,7 +35,7 @@ use std::{
 };
 
 use crate::ckb::{
-    temp::{get_commitment_lock_context, CommitmentLockContext},
+    chain::{get_commitment_lock_context, CommitmentLockContext},
     types::Shutdown,
 };
 
@@ -43,7 +43,7 @@ use super::{
     key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
-    temp::get_always_success_script,
+    chain::get_always_success_script,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
@@ -2926,7 +2926,7 @@ fn is_testing() -> bool {
 // TODO: fill in the actual lock script.
 fn get_commitment_lock_script(args: &[u8]) -> Script {
     if is_testing() {
-        return super::temp::get_commitment_lock_script(args);
+        return super::chain::get_commitment_lock_script(args);
     } else {
         Script::new_builder().args(args.pack()).build()
     }
@@ -2941,7 +2941,7 @@ fn get_secp256k1_lock_script(args: &[u8]) -> Script {
 
 fn get_commitment_lock_outpoint() -> OutPoint {
     if is_testing() {
-        let out_point = super::temp::get_commitment_lock_outpoint();
+        let out_point = super::chain::get_commitment_lock_outpoint();
         debug!("Using commitment lock outpoint {:?}", &out_point);
         return out_point;
     }
@@ -3343,7 +3343,7 @@ mod tests {
     use crate::{
         ckb::{
             network::{AcceptChannelCommand, OpenChannelCommand},
-            temp::get_commitment_lock_context,
+            chain::get_commitment_lock_context,
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
         },
