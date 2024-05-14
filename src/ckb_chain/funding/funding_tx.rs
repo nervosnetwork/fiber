@@ -56,7 +56,7 @@ pub struct FundingRequest {
 }
 
 // TODO: trace locked cells
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FundingContext {
     pub secret_key: secp256k1::SecretKey,
     pub rpc_url: String,
@@ -186,16 +186,14 @@ impl FundingTxBuilder {
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
-        let (tx, _) = self
-            .build_unlocked(
-                &mut cell_collector,
-                &cell_dep_resolver,
-                &header_dep_resolver,
-                &tx_dep_provider,
-                &balancer,
-                &unlockers,
-            )
-            .unwrap();
+        let (tx, _) = self.build_unlocked(
+            &mut cell_collector,
+            &cell_dep_resolver,
+            &header_dep_resolver,
+            &tx_dep_provider,
+            &balancer,
+            &unlockers,
+        )?;
 
         let mut funding_tx = self.funding_tx;
         funding_tx.update_for_self(tx)?;
