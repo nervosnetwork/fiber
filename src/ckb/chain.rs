@@ -1,27 +1,12 @@
-use ckb_hash::blake2b_256;
-use ckb_sdk::Since;
+use ckb_testtool::ckb_types::bytes::Bytes;
 use ckb_testtool::context::Context;
 use ckb_types::{
-    core::{TransactionBuilder, TransactionView},
-    packed::{CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script},
-    prelude::{Builder, Entity, Pack, PackVec},
+    packed::{CellDep, CellDepVec, OutPoint, Script},
+    prelude::{Builder, Entity, PackVec},
 };
-struct AugmentedTransaction {
-    tx: TransactionView,
-    lock_script: Script,
-    witness_script: Vec<u8>,
-}
-use ckb_testtool::{
-    ckb_error::Error,
-    ckb_types::{bytes::Bytes, core::Cycle},
-};
-use std::{fs, path::PathBuf};
-
-use std::{env, sync::RwLock};
-
 use once_cell::sync::OnceCell;
-
-use super::{channel::TLC, types::Pubkey};
+use std::sync::RwLock;
+use std::{env, fs, path::PathBuf};
 
 pub struct Loader();
 impl Loader {
@@ -32,27 +17,6 @@ impl Loader {
         }
         result.unwrap().into()
     }
-}
-
-// This helper method runs Context::verify_tx, but in case error happens,
-// it also dumps current transaction to failed_txs folder.
-pub fn verify_and_dump_failed_tx(
-    context: &Context,
-    tx: &TransactionView,
-    max_cycles: u64,
-) -> Result<Cycle, Error> {
-    let result = context.verify_tx(tx, max_cycles);
-    if result.is_err() {
-        let mut path = env::current_dir().expect("current dir");
-        path.push("failed_txs");
-        std::fs::create_dir_all(&path).expect("create failed_txs dir");
-        let mock_tx = context.dump_tx(tx).expect("dump failed tx");
-        let json = serde_json::to_string_pretty(&mock_tx).expect("json");
-        path.push(format!("0x{:x}.json", tx.hash()));
-        println!("Failed tx written to {:?}", path);
-        std::fs::write(path, json).expect("write");
-    }
-    result
 }
 
 pub(crate) struct CommitmentLockContext {
@@ -132,102 +96,9 @@ impl CommitmentLockContext {
             cell_deps,
         }
     }
-
-    fn get_witnesses(
-        &self,
-        local_delay_epoch: Since,
-        local_delay_epoch_key: Pubkey,
-        revocation_key: Pubkey,
-        tlcs: Vec<TLC>,
-    ) -> Vec<u8> {
-        let witness_script = [
-            local_delay_epoch.value().to_le_bytes().to_vec(),
-            blake2b_256(local_delay_epoch_key.serialize())[0..20].to_vec(),
-            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
-            tlcs.iter()
-                .map(|tlc| tlc.serialize_to_lock_args())
-                .flatten()
-                .collect(),
-        ]
-        .concat();
-        witness_script
-    }
-
-    fn create_commitment_cell_with_aux_data(
-        &mut self,
-        capacity: u64,
-        local_delay_epoch: Since,
-        local_delay_epoch_key: Pubkey,
-        revocation_key: Pubkey,
-        tlcs: Vec<TLC>,
-    ) -> (OutPoint, Vec<u8>, Script) {
-        let witness_script = self.get_witnesses(
-            local_delay_epoch,
-            local_delay_epoch_key,
-            revocation_key,
-            tlcs,
-        );
-
-        let args = blake2b_256(&witness_script)[0..20].to_vec();
-
-        let lock_script = self
-            .context
-            .build_script(&self.commitment_lock_out_point, args.into())
-            .expect("script");
-
-        (
-            self.context.create_cell(
-                CellOutput::new_builder()
-                    .capacity(capacity.pack())
-                    .lock(lock_script.clone())
-                    .build(),
-                Bytes::new(),
-            ),
-            witness_script,
-            lock_script,
-        )
-    }
-
-    fn create_augmented_tx(
-        &mut self,
-        capacity: u64,
-        local_delay_epoch: Since,
-        local_delay_epoch_key: Pubkey,
-        revocation_key: Pubkey,
-        tlcs: Vec<TLC>,
-        outputs: Vec<CellOutput>,
-        outputs_data: Vec<Bytes>,
-    ) -> AugmentedTransaction {
-        let (input_out_point, witness_script, lock_script) = self
-            .create_commitment_cell_with_aux_data(
-                capacity,
-                local_delay_epoch,
-                local_delay_epoch_key,
-                revocation_key,
-                tlcs,
-            );
-
-        let input = CellInput::new_builder()
-            .previous_output(input_out_point.clone())
-            .build();
-
-        // build transaction with revocation unlock logic
-        let tx = TransactionBuilder::default()
-            .cell_deps(self.cell_deps.clone())
-            .input(input)
-            .outputs(outputs)
-            .outputs_data(outputs_data.pack())
-            .build();
-
-        AugmentedTransaction {
-            tx,
-            lock_script,
-            witness_script,
-        }
-    }
 }
 
-pub fn get_commitment_lock_context() -> &'static RwLock<CommitmentLockContext> {
+pub(crate) fn get_commitment_lock_context() -> &'static RwLock<CommitmentLockContext> {
     static INSTANCE: OnceCell<RwLock<CommitmentLockContext>> = OnceCell::new();
     INSTANCE.get_or_init(|| {
         let c = CommitmentLockContext::new();

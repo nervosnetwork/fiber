@@ -10,10 +10,7 @@ use ckb_types::{
 };
 
 use log::{debug, error, info, warn};
-use molecule::{
-    bytes,
-    prelude::{Builder, Entity},
-};
+use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
@@ -34,16 +31,13 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::{
-    chain::{get_commitment_lock_context, CommitmentLockContext},
-    types::Shutdown,
-};
+use crate::ckb::{chain::get_commitment_lock_context, types::Shutdown};
 
 use super::{
+    chain::get_always_success_script,
     key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
-    chain::get_always_success_script,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
@@ -3342,8 +3336,8 @@ mod tests {
 
     use crate::{
         ckb::{
-            network::{AcceptChannelCommand, OpenChannelCommand},
             chain::get_commitment_lock_context,
+            network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
         },
