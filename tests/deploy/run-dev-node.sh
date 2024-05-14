@@ -27,5 +27,7 @@ done
 
 if ! [[ -d "$data_dir" ]]; then
     ckb init -C "$data_dir" -c dev --force --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+    # Transfer some money from the default account (node 3) to node 1 for later use.
+    (sleep 3; ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key") &
 fi
 ckb run -C "$data_dir" --indexer
