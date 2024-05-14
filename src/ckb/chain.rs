@@ -47,7 +47,6 @@ impl MockContext {
                         Contract::FundingLock,
                         Contract::CommitmentLock,
                         Contract::AlwaysSuccess,
-                        Contract::Secp256k1Lock,
                         // These are contracts that we will call from other contracts, e.g. funding-lock.
                         Contract::CkbAuth,
                         Contract::SimpleUDT,
@@ -149,6 +148,8 @@ fn get_hash_from_environment_variable(
 }
 
 const ENV_PREFIX: &'static str = "NEXT_PUBLIC";
+const DEFUALT_SECP256K1_CODE_HASH: &'static str =
+    "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
 
 fn get_environment_variable(
     contract: Contract,
@@ -256,11 +257,9 @@ impl CommitmentLockContext {
                     .build();
                 let secp256k1_script = Script::new_builder()
                     .code_hash(
-                        Hash256::from_str(
-                            "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
-                        )
-                        .expect("valid hash")
-                        .into(),
+                        Hash256::from_str(DEFUALT_SECP256K1_CODE_HASH)
+                            .expect("valid hash")
+                            .into(),
                     )
                     .hash_type(ScriptHashType::Type.into())
                     .args(Bytes::new().pack())
@@ -363,7 +362,7 @@ impl CommitmentLockContext {
     }
 
     pub fn get_funding_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contract::CommitmentLock, args)
+        self.get_script(Contract::FundingLock, args)
     }
 
     pub fn get_commitment_lock_script(&self, args: &[u8]) -> Script {

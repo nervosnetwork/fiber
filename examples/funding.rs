@@ -60,8 +60,8 @@ pub async fn main() {
 
 fn prepare() -> (CkbChainConfig, CkbChainConfig) {
     let args: Vec<String> = env::args().collect();
-    let local_path = PathBuf::from(&args[1]);
-    let remote_path = PathBuf::from(&args[2]);
+    let local_path = PathBuf::from(&args.get(1).unwrap_or(&"/tmp/ckb-local".to_string()));
+    let remote_path = PathBuf::from(&args.get(2).unwrap_or(&"/tmp/ckb-remote".to_string()));
     let _ = std::fs::create_dir_all(&local_path);
     let _ = std::fs::create_dir_all(&remote_path);
 
@@ -106,9 +106,9 @@ async fn run(local: &ActorRef<CkbChainMessage>, remote: &ActorRef<CkbChainMessag
         FundingRequest {
             udt_info: None,
             funding_cell_lock_script_args: funding_cell_lock_script_args.clone(),
-            local_amount: 12000000000,
+            local_amount: 12000000,
             local_fee_rate: 0,
-            remote_amount: 10000000000,
+            remote_amount: 10000000,
         }
     )
     .expect("local calls")
@@ -124,9 +124,9 @@ async fn run(local: &ActorRef<CkbChainMessage>, remote: &ActorRef<CkbChainMessag
         FundingRequest {
             udt_info: None,
             funding_cell_lock_script_args: funding_cell_lock_script_args.clone(),
-            local_amount: 10000000000,
-            local_fee_rate: 1000,
-            remote_amount: 12000000000,
+            local_amount: 10000000,
+            local_fee_rate: 40000,
+            remote_amount: 12000000,
         }
     )
     .expect("remote calls")
