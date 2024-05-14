@@ -2533,20 +2533,6 @@ impl ChannelActorState {
         tx_builder.build()
     }
 
-    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
-        let commitment_number = if local {
-            self.holder_commitment_number
-        } else {
-            self.counterparty_commitment_number
-        };
-        dbg!(
-            "Building current commitment transaction witnesses for",
-            local,
-            commitment_number
-        );
-        self.build_commitment_transaction_witnesses(local, commitment_number)
-    }
-
     fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
         let commitment_number = if local {
             self.holder_commitment_number - 1
