@@ -4,7 +4,7 @@ use ckb_sdk::Since;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
     packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
-    prelude::{AsTransactionBuilder, IntoTransactionView, Pack},
+    prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
 use log::{debug, error, info, warn};
@@ -29,7 +29,10 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::{chain::CommitmentLockContext, types::Shutdown};
+use crate::{
+    ckb::{chain::CommitmentLockContext, types::Shutdown},
+    ckb_chain::{FundingRequest, FundingTx},
+};
 
 use super::{
     key::blake2b_hash_with_salt,
@@ -492,7 +495,7 @@ impl ChannelActor {
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
             TxCollaborationCommand::TxUpdate(tx_update) => {
-                state.update_funding_tx(tx_update.transaction)?;
+                state.update_funding_tx(tx_update.transaction, false, self.network.clone())?;
                 state.state = ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 );
@@ -1271,6 +1274,16 @@ impl ChannelActorState {
         ctx.get_funding_lock_script(&args[..20])
     }
 
+    pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
+        FundingRequest {
+            udt_info: None,
+            funding_cell_lock_script_args: self.get_funding_lock_script().args(),
+            local_amount: self.to_self_amount as u64,
+            local_fee_rate: fee_rate,
+            remote_amount: self.to_remote_amount as u64,
+        }
+    }
+
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
@@ -1457,10 +1470,10 @@ impl ChannelActorState {
                 Ok(())
             }
             PCNMessage::TxUpdate(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), network)
             }
             PCNMessage::TxComplete(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), network)
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
                 self.handle_commitment_signed_message(commitment_signed, network.clone())?;
@@ -1817,6 +1830,7 @@ impl ChannelActorState {
     pub fn handle_tx_collaboration_msg(
         &mut self,
         msg: TxCollaborationMsg,
+        network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
         let is_complete_message = match msg {
@@ -1872,7 +1886,7 @@ impl ChannelActorState {
         };
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
-                self.update_funding_tx(msg.tx)?;
+                self.update_funding_tx(msg.tx, true, network)?;
                 self.state = ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
                 );
@@ -2276,17 +2290,79 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
+    pub fn update_funding_tx(
+        &mut self,
+        tx: Transaction,
+        // If this is originally a message handling, then we need to
+        // see if there is any auto update we need to do, and send the
+        // update to the peer.
+        // If this is originally a command handling, we need to send
+        // the message to the peer directly.
+        is_message: bool,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
         // TODO: check if the tx is valid
         let tx = tx.into_view();
-        let _ = tx
+        let first_output = tx
             .outputs()
             .get(0)
             .ok_or(ProcessingChannelError::InvalidParameter(
                 "Funding transaction should have at least one output".to_string(),
             ))?;
+
+        if first_output.lock() != self.get_funding_lock_script() {
+            dbg!(&tx, first_output.lock(), self.get_funding_lock_script());
+            // TODO: return an error here. We panic because we want to move fast.
+            panic!("Invalid funding transation")
+        }
+
+        let current_capacity: u64 = first_output.capacity().unpack();
+        let is_complete = current_capacity == (self.to_self_amount + self.to_remote_amount) as u64;
+
         debug!("Updating funding transaction to {:?}", &tx);
-        self.funding_tx = Some(tx);
+        self.funding_tx = Some(tx.clone());
+
+        if !is_complete {
+            if is_message {
+                // Tell the network to do more work on our part.
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                            channel_id: self.get_id(),
+                            command: ChannelCommand::TxCollaborationCommand(
+                                TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                                    transaction: tx.data(),
+                                }),
+                            ),
+                        }),
+                    ))
+                    .expect("network alive");
+            } else {
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                            peer_id: self.peer_id.clone(),
+                            message: PCNMessage::TxUpdate(TxUpdate {
+                                channel_id: self.get_id(),
+                                tx: tx.data(),
+                            }),
+                        }),
+                    ))
+                    .expect("network alive");
+            }
+        }
+        {
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                        channel_id: self.get_id(),
+                        command: ChannelCommand::TxCollaborationCommand(
+                            TxCollaborationCommand::TxComplete(TxCompleteCommand {}),
+                        ),
+                    }),
+                ))
+                .expect("network alive");
+        }
         Ok(())
     }
 
