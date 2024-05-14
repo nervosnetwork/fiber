@@ -172,7 +172,7 @@ macro_rules! attr_getter {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbInvoice {
     pub currency: Currency,
-    pub amount: Option<u64>,
+    pub amount: Option<u128>,
     pub prefix: Option<SiPrefix>,
     pub signature: Option<InvoiceSignature>,
     pub data: InvoiceData,
@@ -299,12 +299,12 @@ impl CkbInvoice {
         Ok(())
     }
 
-    pub fn amount_ckb_shannons(&self) -> Option<u64> {
+    pub fn amount_ckb_shannons(&self) -> Option<u128> {
         self.amount.map(|v| {
             v * self
                 .prefix
                 .as_ref()
-                .map_or(100_000_000, |si| si.multiplier())
+                .map_or(100_000_000, |si| si.multiplier() as u128)
         })
     }
 
@@ -559,7 +559,7 @@ impl From<InvoiceAttr> for Attribute {
 
 pub struct InvoiceBuilder {
     currency: Currency,
-    amount: Option<u64>,
+    amount: Option<u128>,
     prefix: Option<SiPrefix>,
     payment_hash: Option<[u8; 32]>,
     attrs: Vec<Attribute>,
@@ -595,7 +595,7 @@ impl InvoiceBuilder {
         self
     }
 
-    pub fn amount(mut self, amount: Option<u64>) -> Self {
+    pub fn amount(mut self, amount: Option<u128>) -> Self {
         self.amount = amount;
         self
     }

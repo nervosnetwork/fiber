@@ -173,7 +173,7 @@ fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)
 
 pub(crate) fn parse_hrp(
     input: &str,
-) -> Result<(Currency, Option<u64>, Option<SiPrefix>), InvoiceError> {
+) -> Result<(Currency, Option<u128>, Option<SiPrefix>), InvoiceError> {
     match nom_scan_hrp(input) {
         Ok((left, (currency, amount, si_prefix))) => {
             if !left.is_empty() {

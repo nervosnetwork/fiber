@@ -3032,11 +3032,11 @@ impl AmountOpt {
     pub fn is_some(&self) -> bool {
         !self.0.is_empty()
     }
-    pub fn to_opt(&self) -> Option<Uint64> {
+    pub fn to_opt(&self) -> Option<Uint128> {
         if self.is_none() {
             None
         } else {
-            Some(Uint64::new_unchecked(self.0.clone()))
+            Some(Uint128::new_unchecked(self.0.clone()))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AmountOptReader<'r> {
@@ -3100,11 +3100,11 @@ impl<'r> AmountOptReader<'r> {
     pub fn is_some(&self) -> bool {
         !self.0.is_empty()
     }
-    pub fn to_opt(&self) -> Option<Uint64Reader<'r>> {
+    pub fn to_opt(&self) -> Option<Uint128Reader<'r>> {
         if self.is_none() {
             None
         } else {
-            Some(Uint64Reader::new_unchecked(self.as_slice()))
+            Some(Uint128Reader::new_unchecked(self.as_slice()))
         }
     }
 }
@@ -3122,15 +3122,15 @@ impl<'r> molecule::prelude::Reader<'r> for AmountOptReader<'r> {
     }
     fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
         if !slice.is_empty() {
-            Uint64Reader::verify(&slice[..], compatible)?;
+            Uint128Reader::verify(&slice[..], compatible)?;
         }
         Ok(())
     }
 }
 #[derive(Debug, Default)]
-pub struct AmountOptBuilder(pub(crate) Option<Uint64>);
+pub struct AmountOptBuilder(pub(crate) Option<Uint128>);
 impl AmountOptBuilder {
-    pub fn set(mut self, v: Option<Uint64>) -> Self {
+    pub fn set(mut self, v: Option<Uint128>) -> Self {
         self.0 = v;
         self
     }

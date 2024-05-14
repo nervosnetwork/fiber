@@ -18,7 +18,7 @@ impl InvoiceCommand {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct NewInvoiceParams {
-    pub amount: u64,
+    pub amount: u128,
     pub description: Option<String>,
     pub currency: Currency,
     pub payment_hash: Option<[u8; 32]>,
