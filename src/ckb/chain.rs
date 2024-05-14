@@ -183,9 +183,13 @@ fn get_environment_variable(
     )
 }
 
+static COMMITMENT_LOCK_CTX_INSTANCE: OnceCell<CommitmentLockContext> = OnceCell::new();
+
 impl CommitmentLockContext {
-    pub fn new(network: CkbNetwork) -> Self {
-        match network {
+    // TODO: better way to organize this? Currently CommitmentLockContext is a singleton
+    // because it is used in so many places.
+    pub fn initialize(network: CkbNetwork) -> &'static Self {
+        COMMITMENT_LOCK_CTX_INSTANCE.get_or_init(|| match network {
             CkbNetwork::Mocknet => Self::Mock(MockContext::get()),
             CkbNetwork::Dev => {
                 let mut map = HashMap::new();
@@ -285,11 +289,16 @@ impl CommitmentLockContext {
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
-        }
+        });
+        COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
     }
 
     pub fn get_mock() -> Self {
         Self::Mock(MockContext::get())
+    }
+
+    pub fn get() -> &'static Self {
+        COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
     }
 
     pub fn is_testing(&self) -> bool {

@@ -1932,7 +1932,7 @@ impl ChannelActorState {
 
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
-        let commitment_lock_context = CommitmentLockContext::get_mock();
+        let commitment_lock_context = CommitmentLockContext::get();
         // Try to create an transaction which spends the commitment transaction, to
         // verify that our code actually works.
         if commitment_lock_context.is_testing() {
@@ -2301,7 +2301,7 @@ impl ChannelActorState {
                     ));
                 }
 
-                let commtiment_lock_context = CommitmentLockContext::get_mock();
+                let commtiment_lock_context = CommitmentLockContext::get();
                 // Just create a cell with the same capacity as the first output of the funding tx.
                 // This is to test the validity of the commitment tx that spends the funding tx.
                 if commtiment_lock_context.is_testing() {
@@ -2406,7 +2406,7 @@ impl ChannelActorState {
         _holder_shutdown_script: &Script,
         _counterparty_shutdown_script: &Script,
     ) -> TransactionView {
-        let commitment_lock_context = CommitmentLockContext::get_mock();
+        let commitment_lock_context = CommitmentLockContext::get();
         let tx_builder = TransactionBuilder::default()
             .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(
@@ -2517,7 +2517,7 @@ impl ChannelActorState {
     }
 
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
-        let commitment_lock_context = CommitmentLockContext::get_mock();
+        let commitment_lock_context = CommitmentLockContext::get();
         let input = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
             .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
@@ -2682,7 +2682,7 @@ impl ChannelActorState {
             self.holder_commitment_number,
             self.counterparty_commitment_number
         );
-        let commitment_lock_ctx = CommitmentLockContext::get_mock();
+        let commitment_lock_ctx = CommitmentLockContext::get();
         let secp256k1_lock_script = commitment_lock_ctx
             .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
         let commitment_lock_script =
@@ -3543,7 +3543,7 @@ mod tests {
     #[test]
     fn test_verify_fixed_tx() {
         use ckb_types::prelude::IntoTransactionView;
-        let mock_ctx = CommitmentLockContext::get_mock();
+        let mock_ctx = CommitmentLockContext::get();
 
         let mut context = mock_ctx.write_mock_context();
         context.set_capture_debug(true);

@@ -43,12 +43,12 @@ pub async fn main() {
             let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
 
             let network = ckb_config.network.unwrap_or(CkbNetwork::Dev);
-            let ctx = CommitmentLockContext::new(network);
+            let ctx = CommitmentLockContext::initialize(network);
 
             let ckb_chain_actor = Actor::spawn_linked(
                 Some("ckb-chain".to_string()),
                 CkbChainActor {},
-                (ckb_chain_config, ctx),
+                (ckb_chain_config, ctx.clone()),
                 root_actor.get_cell(),
             )
             .await
