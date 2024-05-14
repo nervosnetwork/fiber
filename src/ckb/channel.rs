@@ -1234,7 +1234,7 @@ impl ChannelActorState {
         if local {
             self.get_current_holder_commitment_point()
         } else {
-            self.get_current_counterparty_commitment_point()
+            self.get_previous_counterparty_commitment_point()
         }
     }
 
@@ -1246,8 +1246,8 @@ impl ChannelActorState {
         self.get_holder_commitment_point(self.holder_commitment_number)
     }
 
-    pub fn get_current_counterparty_commitment_point(&self) -> Pubkey {
-        self.get_counterparty_commitment_point(self.counterparty_commitment_number)
+    pub fn get_previous_counterparty_commitment_point(&self) -> Pubkey {
+        self.get_counterparty_commitment_point(self.counterparty_commitment_number - 1)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
@@ -2248,7 +2248,7 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let per_commitment_point = self.get_current_counterparty_commitment_point();
+        let per_commitment_point = self.get_previous_counterparty_commitment_point();
         if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Invalid per_commitment_secret".to_string(),
@@ -2674,7 +2674,7 @@ impl ChannelActorState {
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
-                    self.get_current_counterparty_commitment_point(),
+                    self.get_previous_counterparty_commitment_point(),
                     self.get_counterparty_channel_parameters()
                         .payment_base_key(),
                 )
