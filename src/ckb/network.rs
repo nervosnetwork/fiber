@@ -39,6 +39,7 @@ use super::{
     CkbConfig,
 };
 
+use crate::ckb_chain::CkbChainMessage;
 use crate::{unwrap_or_return, Error};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -174,11 +175,18 @@ pub struct PCNMessageWithChannelId {
 pub struct NetworkActor {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
+    chain_actor: ActorRef<CkbChainMessage>,
 }
 
 impl NetworkActor {
-    pub fn new(event_sender: mpsc::Sender<NetworkServiceEvent>) -> Self {
-        Self { event_sender }
+    pub fn new(
+        event_sender: mpsc::Sender<NetworkServiceEvent>,
+        chain_actor: ActorRef<CkbChainMessage>,
+    ) -> Self {
+        Self {
+            event_sender,
+            chain_actor,
+        }
     }
 
     pub async fn on_service_event(&self, event: NetworkServiceEvent) {
@@ -826,13 +834,14 @@ impl ServiceHandle for Handle {
 
 pub async fn start_ckb(
     config: CkbConfig,
+    chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
     root_actor: ActorCell,
 ) -> ActorRef<NetworkActorMessage> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
-        NetworkActor { event_sender },
+        NetworkActor::new(event_sender, chain_actor),
         (config, tracker),
         root_actor,
     )
