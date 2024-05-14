@@ -31,16 +31,46 @@ create_dotenv_for_contract() {
     # Also use uppercase because environment variable names are usually uppercase.
     CONTRACT_NAME="$(echo "$CONTRACT_NAME" | tr '-' '_' | tr '[:lower:]' '[:upper:]')"
 
-    sed -n \
-        -e 's/,$//' \
-        -e 's/^ *"type_id": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_CODE_HASH="/p' \
-        "$CONTRACT_INFO_FILE" | head -1
+    if grep -Eq '"dep_group_recipes": *\[ *\]$' "$CONTRACT_INFO_FILE"; then
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"data_hash": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_CODE_HASH="/p' \
+            "$CONTRACT_INFO_FILE" | head -1
 
-    sed -n \
-        -e 's/,$//' \
-        -e 's/^ *"tx_hash": /NEXT_PUBLIC_'"$CONTRACT_NAME"'_TX_HASH=/p' \
-        "$CONTRACT_INFO_FILE" | tail -1
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"type_id": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_TYPE_HASH="/p' \
+            "$CONTRACT_INFO_FILE" | head -1
+
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"tx_hash": /NEXT_PUBLIC_'"$CONTRACT_NAME"'_TX_HASH=/p' \
+            "$CONTRACT_INFO_FILE" | head -1
+
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"index": /NEXT_PUBLIC_'"$CONTRACT_NAME"'_TX_INDEX=/p' \
+            "$CONTRACT_INFO_FILE" | head -1
+
+    else
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"data_hash": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_DEP_GROUP_CODE_HASH="/p' \
+            "$CONTRACT_INFO_FILE" | tail -1
+
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"tx_hash": "/NEXT_PUBLIC_'"$CONTRACT_NAME"'_DEP_GROUP_TX_HASH="/p' \
+            "$CONTRACT_INFO_FILE" | tail -1
+
+        sed -n \
+            -e 's/,$//' \
+            -e 's/^ *"index": /NEXT_PUBLIC_'"$CONTRACT_NAME"'_DEP_GROUP_TX_INDEX=/p' \
+            "$CONTRACT_INFO_FILE" | tail -1
+
+    fi
 }
+
 
 create_dotenv_for_contract always_success
 create_dotenv_for_contract funding-lock

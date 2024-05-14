@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use super::gen::pcn::{self as molecule_pcn, PubNonce as Byte66, SignatureVec};
 use super::serde_utils::{EntityWrapperBase64, WrapperHex};
 use anyhow::anyhow;
@@ -256,6 +258,21 @@ impl ::core::fmt::Display for Hash256 {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         let raw_data = hex::encode(self.0);
         write!(f, "Hash256(0x{})", raw_data)
+    }
+}
+
+impl FromStr for Hash256 {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim_start_matches("0x");
+        let bytes = hex::decode(s)?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("Invalid hash length"));
+        }
+        let mut data = [0u8; 32];
+        data.copy_from_slice(&bytes);
+        Ok(Hash256(data))
     }
 }
 

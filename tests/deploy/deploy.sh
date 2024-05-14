@@ -19,7 +19,7 @@ ckb-cli() {
     env HOME="$data_dir" ckb-cli "$@"
 }
 
-if echo | !ckb-cli account import --local-only --privkey-path "$miner_key_file"; then
+if ! (echo | ckb-cli account import --local-only --privkey-path "$miner_key_file"); then
     :
 fi
 

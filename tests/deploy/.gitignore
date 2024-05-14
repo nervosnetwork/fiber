@@ -1,2 +1,4 @@
 # ckb dev chain data used for tests
 /node-data/
+/.env
+/.env.local

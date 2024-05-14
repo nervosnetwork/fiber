@@ -1,5 +1,6 @@
 use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
 use ckb_types::{
+    core::{DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, OutPoint, Script},
     prelude::{Builder, Entity, PackVec},
 };
@@ -7,13 +8,14 @@ use log::debug;
 use once_cell::sync::OnceCell;
 use std::{
     collections::HashMap,
+    str::FromStr,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 use std::{env, fs, path::PathBuf};
 
 use ckb_types::prelude::Pack;
 
-use super::config::CkbNetwork;
+use super::{config::CkbNetwork, types::Hash256};
 
 fn load_contract_binary(base_dir: &str, contract: Contract) -> Bytes {
     let mut path = PathBuf::from(base_dir);
@@ -117,10 +119,163 @@ pub enum CommitmentLockContext {
     Real(Arc<ContractsContext>),
 }
 
+enum EnvironmentVariableType {
+    CodeHash,
+    TypeHash,
+    TxIndex,
+    TxHash,
+}
+
+fn get_hash_from_environment_variable(
+    contract: Contract,
+    env_type: EnvironmentVariableType,
+    dep_type: DepType,
+) -> Hash256 {
+    let string = get_environment_variable(contract, env_type, dep_type);
+    if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
+        panic!("hex string should start with 0x");
+    };
+    <[u8; 32]>::try_from(hex::decode(&string[2..]).expect("valid hex").as_slice())
+        .expect("valid hash")
+        .into()
+}
+
+const ENV_PREFIX: &'static str = "NEXT_PUBLIC";
+
+fn get_environment_variable(
+    contract: Contract,
+    env_type: EnvironmentVariableType,
+    dep_type: DepType,
+) -> String {
+    let contract_name = match contract {
+        Contract::FundingLock => "FUNDING_LOCK",
+        Contract::CommitmentLock => "COMMITMENT_LOCK",
+        Contract::AlwaysSuccess => "ALWAYS_SUCCESS",
+        _ => panic!("Unsupported contract type {:?}", contract),
+    };
+    let type_desc = match env_type {
+        EnvironmentVariableType::CodeHash => "CODE_HASH",
+        EnvironmentVariableType::TypeHash => "TYPE_HASH",
+        EnvironmentVariableType::TxIndex => "TX_INDEX",
+        EnvironmentVariableType::TxHash => "TX_HASH",
+    };
+    let maybe_dep_group = if dep_type == DepType::Code {
+        ""
+    } else {
+        "_DEP_GROUP"
+    };
+    let env = format!("{ENV_PREFIX}_{contract_name}{maybe_dep_group}_{type_desc}");
+    std::env::var(&env).expect(
+        format!(
+            "Environment variable {} for contract {:?}",
+            env.as_str(),
+            contract
+        )
+        .as_str(),
+    )
+}
+
 impl CommitmentLockContext {
     pub fn new(network: CkbNetwork) -> Self {
         match network {
             CkbNetwork::Mocknet => Self::Mock(MockContext::get()),
+            CkbNetwork::Dev => {
+                let mut map = HashMap::new();
+                let mut cell_deps = vec![];
+                for (dep_type, contracts) in [
+                    (DepType::Code, vec![Contract::AlwaysSuccess]),
+                    (
+                        DepType::DepGroup,
+                        vec![Contract::FundingLock, Contract::CommitmentLock],
+                    ),
+                ] {
+                    for contract in contracts {
+                        let type_hash = get_hash_from_environment_variable(
+                            contract,
+                            EnvironmentVariableType::CodeHash,
+                            dep_type,
+                        );
+                        let tx = get_hash_from_environment_variable(
+                            contract,
+                            EnvironmentVariableType::TxHash,
+                            dep_type,
+                        );
+                        let index: usize = get_environment_variable(
+                            contract,
+                            EnvironmentVariableType::TxIndex,
+                            dep_type,
+                        )
+                        .parse()
+                        .expect("Valid index");
+                        let out_point = OutPoint::new_builder()
+                            .tx_hash(tx.into())
+                            .index(index.pack())
+                            .build();
+                        let script = Script::new_builder()
+                            .code_hash(type_hash.into())
+                            .hash_type(ScriptHashType::Data2.into())
+                            .args(Bytes::new().pack())
+                            .build();
+                        map.insert(contract, (out_point.clone(), script));
+                        cell_deps.push(
+                            CellDep::new_builder()
+                                .out_point(out_point)
+                                .dep_type(dep_type.into())
+                                .build(),
+                        );
+                    }
+                }
+                let tx0_env_name = format!("{ENV_PREFIX}_CKB_GENESIS_TX_0");
+                let tx0 = Hash256::from_str(
+                    &env::var(&tx0_env_name)
+                        .expect(&format!("environment variable {tx0_env_name}")),
+                )
+                .expect("valid hash");
+                let tx1_env_name = format!("{ENV_PREFIX}_CKB_GENESIS_TX_1");
+                let tx1 = Hash256::from_str(
+                    &env::var(&tx1_env_name)
+                        .expect(&format!("environment variable {tx1_env_name}")),
+                )
+                .expect("valid hash");
+
+                let secp256k1_outpoint = OutPoint::new_builder()
+                    .tx_hash(tx0.into())
+                    .index(1u32.pack())
+                    .build();
+                let secp256k1_script = Script::new_builder()
+                    .code_hash(
+                        Hash256::from_str(
+                            "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+                        )
+                        .expect("valid hash")
+                        .into(),
+                    )
+                    .hash_type(ScriptHashType::Type.into())
+                    .args(Bytes::new().pack())
+                    .build();
+                map.insert(
+                    Contract::Secp256k1Lock,
+                    (secp256k1_outpoint, secp256k1_script),
+                );
+                cell_deps.push(
+                    CellDep::new_builder()
+                        .out_point(
+                            OutPoint::new_builder()
+                                .tx_hash(tx1.into())
+                                .index(0u32.pack())
+                                .build(),
+                        )
+                        .dep_type(DepType::DepGroup.into())
+                        .build(),
+                );
+
+                debug!("Loaded contracts into the real environement: {:?}", &map);
+                debug!("Use this contracts with CellDepVec: {:?}", &cell_deps);
+                Self::Real(Arc::new(ContractsContext {
+                    contracts: map,
+                    cell_deps: cell_deps.pack(),
+                }))
+            }
             _ => panic!("Unsupported network type {:?}", network),
         }
     }

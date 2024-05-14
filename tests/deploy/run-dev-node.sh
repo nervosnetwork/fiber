@@ -10,6 +10,13 @@ data_dir="$script_dir/node-data"
 while getopts "f" opt; do
     case $opt in
     f)
+        # TODO: this is a linux only command.
+        for pid in $(pgrep "^ckb$"); do
+            # grep with exact match
+            if grep -Fq "$data_dir" "/proc/$pid/cmdline"; then
+                kill "$pid"
+            fi
+        done
         rm -rf "$data_dir"
         ;;
     \?)
