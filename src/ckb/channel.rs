@@ -29,10 +29,7 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::{
-    chain::{get_commitment_lock_context, CommitmentLockContext},
-    types::Shutdown,
-};
+use crate::ckb::{chain::CommitmentLockContext, types::Shutdown};
 
 use super::{
     key::blake2b_hash_with_salt,
@@ -1953,8 +1950,8 @@ impl ChannelActorState {
                 commitment_tx.witnesses()
             );
 
-            let context = get_commitment_lock_context().write().unwrap();
-            let context = &mut context.context.clone();
+            let context = commitment_lock_context.read_mock_context();
+            let context = &mut context.clone();
 
             let revocation_keys = [
                 "8172cbf168dcb988d2849ea229603f843614a038e1baa83783aee2f9aeac32ea",
@@ -2310,8 +2307,8 @@ impl ChannelActorState {
                 if commtiment_lock_context.is_testing() {
                     let always_success = commtiment_lock_context
                         .get_always_success_script(b"funding transaction test");
-                    let mut context = get_commitment_lock_context().write().unwrap();
-                    let context = &mut context.context;
+                    let mut context = commtiment_lock_context.write_mock_context();
+                    let context = &mut context;
                     let funding_tx = Transaction::default()
                         .as_advanced_builder()
                         .outputs([CellOutput::new_builder()
@@ -3276,7 +3273,7 @@ mod tests {
 
     use crate::{
         ckb::{
-            chain::get_commitment_lock_context,
+            chain::get,
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3548,7 +3545,7 @@ mod tests {
     fn test_verify_fixed_tx() {
         use ckb_types::prelude::IntoTransactionView;
 
-        let mut context = get_commitment_lock_context().write().unwrap();
+        let mut context = get().write().unwrap();
         context.context.set_capture_debug(true);
         // These three transactions are are respectively funding tx, commitment tx
         // and revocation tx that tries to revoke a commitment tx.
