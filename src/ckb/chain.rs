@@ -12,9 +12,9 @@ use std::{env, fs, path::PathBuf};
 
 use ckb_types::prelude::Pack;
 
-pub fn load_binary(base_dir: &str, name: &str) -> Bytes {
+fn load_contract_binary(base_dir: &str, contract: Contract) -> Bytes {
     let mut path = PathBuf::from(base_dir);
-    path.push(PathBuf::from(name));
+    path.push(PathBuf::from(contract.binary_name()));
 
     let result = fs::read(&path);
     if result.is_err() {
@@ -23,7 +23,7 @@ pub fn load_binary(base_dir: &str, name: &str) -> Bytes {
     result.unwrap().into()
 }
 
-struct MockContext {
+pub(crate) struct MockContext {
     context: RwLock<Context>,
     contracts_context: ContractsContext,
 }
@@ -38,95 +38,30 @@ impl MockContext {
 
             let mut context = Context::default();
 
-            let funding_lock_bin = load_binary(base_dir.as_str(), "funding-lock");
-            let commitment_lock_bin = load_binary(base_dir.as_str(), "commitment-lock");
-            let auth_bin = load_binary(base_dir.as_str(), "auth");
-            let always_success_bin = load_binary(base_dir.as_str(), "always_success");
-            let funding_lock_out_point: OutPoint = context.deploy_cell(funding_lock_bin);
-            let commitment_lock_out_point = context.deploy_cell(commitment_lock_bin);
-            let auth_out_point: OutPoint = context.deploy_cell(auth_bin);
-            let always_success_out_point = context.deploy_cell(always_success_bin);
-
-            dbg!(
-                &funding_lock_out_point,
-                &commitment_lock_out_point,
-                &auth_out_point,
-                &always_success_out_point
-            );
-            // prepare cell deps
-            let funding_lock_dep = CellDep::new_builder()
-                .out_point(funding_lock_out_point.clone())
-                .build();
-            let commitment_lock_dep = CellDep::new_builder()
-                .out_point(commitment_lock_out_point.clone())
-                .build();
-            dbg!(&commitment_lock_out_point);
-            let auth_dep = CellDep::new_builder()
-                .out_point(auth_out_point.clone())
-                .build();
-            let always_success_dep = CellDep::new_builder()
-                .out_point(always_success_out_point.clone())
-                .build();
-            dbg!(
-                &funding_lock_dep,
-                &commitment_lock_dep,
-                &auth_dep,
-                &always_success_dep
-            );
-            let cell_deps = vec![
-                funding_lock_dep,
-                commitment_lock_dep,
-                auth_dep,
-                always_success_dep,
+            let (map, cell_deps): (HashMap<Contract, _>, Vec<CellDep>) = [
+                Contract::FundingLock,
+                Contract::CommitmentLock,
+                Contract::AlwaysSuccess,
+                Contract::Secp256k1Lock,
             ]
-            .pack();
-            context.set_capture_debug(true);
-            let mut map = HashMap::new();
-            map.insert(
-                Contracts::FundingLock,
-                (
-                    funding_lock_out_point.clone(),
-                    context
-                        .build_script(&funding_lock_out_point, Bytes::new())
-                        .expect("Build script"),
-                ),
-            );
-            map.insert(
-                Contracts::CommitmentLock,
-                (
-                    commitment_lock_out_point.clone(),
-                    context
-                        .build_script(&commitment_lock_out_point, Bytes::new())
-                        .expect("Build script"),
-                ),
-            );
-            map.insert(
-                Contracts::Secp256k1Lock,
-                (
-                    auth_out_point.clone(),
-                    context
-                        .build_script(&auth_out_point, Bytes::new())
-                        .expect("Build script"),
-                ),
-            );
-            map.insert(
-                Contracts::AlwaysSuccess,
-                (
-                    always_success_out_point.clone(),
-                    context
-                        .build_script(&always_success_out_point, Bytes::new())
-                        .expect("Build script"),
-                ),
-            );
+            .iter()
+            .map(|contract| {
+                let binary = load_contract_binary(base_dir.as_str(), *contract);
+                let out_point = context.deploy_cell(binary);
+                let script = context
+                    .build_script(&out_point, Bytes::new())
+                    .expect("Build script");
+                let cell_dep = CellDep::new_builder().out_point(out_point.clone()).build();
+                ((*contract, (out_point, script)), cell_dep)
+            })
+            .unzip();
 
-            let cc = ContractsContext {
-                contracts: map,
-                cell_deps: cell_deps,
-            };
-            let lock = RwLock::new(context);
             let context = MockContext {
-                context: lock,
-                contracts_context: cc,
+                context: RwLock::new(context),
+                contracts_context: ContractsContext {
+                    contracts: map,
+                    cell_deps: cell_deps.pack(),
+                },
             };
             context
         });
@@ -135,15 +70,27 @@ impl MockContext {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-enum Contracts {
+enum Contract {
     FundingLock,
     CommitmentLock,
     Secp256k1Lock,
     AlwaysSuccess,
 }
 
-struct ContractsContext {
-    contracts: HashMap<Contracts, (OutPoint, Script)>,
+impl Contract {
+    fn binary_name(&self) -> &'static str {
+        match self {
+            Contract::FundingLock => "funding-lock",
+            Contract::CommitmentLock => "commitment-lock",
+            Contract::Secp256k1Lock => "auth",
+            Contract::AlwaysSuccess => "always_success",
+        }
+    }
+}
+
+pub(crate) struct ContractsContext {
+    contracts: HashMap<Contract, (OutPoint, Script)>,
+    // TODO: We bundle all the cell deps together, but some of they are not always needed.
     cell_deps: CellDepVec,
 }
 
@@ -153,7 +100,7 @@ pub(crate) enum CommitmentLockContext {
 }
 
 impl CommitmentLockContext {
-    pub fn get() -> Self {
+    pub(crate) fn get() -> Self {
         Self::Mock(MockContext::get())
     }
 
@@ -161,7 +108,7 @@ impl CommitmentLockContext {
         true
     }
 
-    fn get_contracts_map(&self) -> &HashMap<Contracts, (OutPoint, Script)> {
+    fn get_contracts_map(&self) -> &HashMap<Contract, (OutPoint, Script)> {
         match self {
             Self::Mock(mock) => &mock.contracts_context.contracts,
             Self::Real(real) => &real.contracts,
@@ -174,11 +121,11 @@ impl CommitmentLockContext {
         }
     }
 
-    fn get_out_point(&self, contract: Contracts) -> OutPoint {
+    fn get_out_point(&self, contract: Contract) -> OutPoint {
         self.get_contracts_map().get(&contract).unwrap().0.clone()
     }
 
-    fn get_script(&self, contract: Contracts, args: &[u8]) -> Script {
+    fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
             .unwrap()
@@ -204,15 +151,15 @@ impl CommitmentLockContext {
     }
 
     pub fn get_commitment_lock_outpoint(&self) -> OutPoint {
-        self.get_out_point(Contracts::CommitmentLock)
+        self.get_out_point(Contract::CommitmentLock)
     }
 
     pub fn get_secp256k1_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contracts::Secp256k1Lock, args)
+        self.get_script(Contract::Secp256k1Lock, args)
     }
 
     pub fn get_commitment_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contracts::CommitmentLock, args)
+        self.get_script(Contract::CommitmentLock, args)
     }
 
     pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
@@ -220,10 +167,10 @@ impl CommitmentLockContext {
     }
 
     pub fn get_always_success_outpoint(&self) -> OutPoint {
-        self.get_out_point(Contracts::AlwaysSuccess)
+        self.get_out_point(Contract::AlwaysSuccess)
     }
 
     pub fn get_always_success_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contracts::AlwaysSuccess, args)
+        self.get_script(Contract::AlwaysSuccess, args)
     }
 }
