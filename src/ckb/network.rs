@@ -1,7 +1,8 @@
 use ckb_types::core::TransactionView;
-use ckb_types::packed::{OutPoint, Transaction};
+use ckb_types::packed::{OutPoint, Script, Transaction};
 use log::{debug, error, info, warn};
-use ractor::{async_trait as rasync_trait, Actor, ActorCell, ActorProcessingErr, ActorRef};
+
+use ractor::{async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::HashSet;
@@ -39,7 +40,8 @@ use super::{
     CkbConfig,
 };
 
-use crate::ckb_chain::CkbChainMessage;
+use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
+use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx};
 use crate::{unwrap_or_return, Error};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -114,8 +116,11 @@ pub enum NetworkActorEvent {
 
     /// A new channel is created and the peer id and actor reference is given here.
     ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
-    /// A channel has been accepted. The two Hash256 are respectively newly agreed channel id and temp channel id.
-    ChannelAccepted(Hash256, Hash256),
+    /// A channel has been accepted.
+    /// The two Hash256 are respectively newly agreed channel id and temp channel id,
+    /// The two u128 are respectively local and remote funding amount,
+    /// and the script is the lock script of the agreed funding cell.
+    ChannelAccepted(Hash256, Hash256, u128, u128, Script),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
     /// A channel is being shutting down.
@@ -171,6 +176,8 @@ pub struct PCNMessageWithChannelId {
     pub channel_id: Hash256,
     pub message: PCNMessage,
 }
+
+const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 
 pub struct NetworkActor {
     // An event emitter to notify ourside observers.
@@ -628,11 +635,59 @@ impl Actor for NetworkActor {
                         ))
                         .expect("myself alive");
                 }
-                NetworkActorEvent::ChannelAccepted(new, old) => {
+                NetworkActorEvent::ChannelAccepted(new, old, local, remote, script) => {
                     assert_ne!(new, old, "new and old channel id must be different");
                     let channel = state.channels.remove(&old).expect("channel exists");
                     state.channels.insert(new, channel);
                     debug!("Channel accepted: {:?} -> {:?}", old, new);
+
+                    // TODO: Here we implies the one who receives AcceptChannel message
+                    // will send TxUpdate message first.
+                    let local = local as u64;
+                    let remote = remote as u64;
+                    let tx = FundingTx::new();
+                    let tx = match call_t!(
+                        self.chain_actor,
+                        CkbChainMessage::Fund,
+                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                        tx,
+                        FundingRequest {
+                            udt_info: None,
+                            funding_cell_lock_script_args: script.args(),
+                            local_amount: local,
+                            local_fee_rate: 0,
+                            remote_amount: remote,
+                        }
+                    ) {
+                        Ok(Ok(tx)) => match tx.into_inner() {
+                            Some(tx) => tx,
+                            _ => {
+                                error!("Obtained empty funding tx");
+                                return Ok(());
+                            }
+                        },
+                        Ok(Err(err)) => {
+                            error!("Failed to fund channel: {}", err);
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            error!("Failed to call chain actor: {}", err);
+                            return Ok(());
+                        }
+                    };
+                    debug!("Funding transaction constructed on our part: {:?}", tx);
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                                channel_id: new,
+                                command: ChannelCommand::TxCollaborationCommand(
+                                    TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                                        transaction: tx.data(),
+                                    }),
+                                ),
+                            }),
+                        ))
+                        .expect("myself alive");
                 }
                 NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
                     info!(

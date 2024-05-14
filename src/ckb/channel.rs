@@ -1258,6 +1258,19 @@ impl ChannelActorState {
         self.counterparty_commitment_points[index]
     }
 
+    pub fn get_funding_lock_script(&self) -> Script {
+        let agg_ctx = self.get_musig2_agg_context();
+        let ctx = CommitmentLockContext::get();
+        let agg_pub_key: Pubkey = agg_ctx.aggregated_pubkey();
+        let args = blake2b_256(agg_pub_key.serialize());
+        debug!(
+            "Aggregated pubkey: {:?}, hash: {:?}",
+            agg_pub_key,
+            hex::encode(&args[..20])
+        );
+        ctx.get_funding_lock_script(&args[..20])
+    }
+
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
@@ -1432,7 +1445,13 @@ impl ChannelActorState {
                 self.fill_in_channel_id();
                 network
                     .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelAccepted(self.get_id(), self.temp_id),
+                        NetworkActorEvent::ChannelAccepted(
+                            self.get_id(),
+                            self.temp_id,
+                            self.to_self_amount,
+                            self.to_remote_amount,
+                            self.get_funding_lock_script(),
+                        ),
                     ))
                     .expect("network actor alive");
                 Ok(())

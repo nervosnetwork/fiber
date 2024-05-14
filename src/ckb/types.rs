@@ -321,6 +321,12 @@ impl From<PublicKey> for Pubkey {
     }
 }
 
+impl From<Point> for Pubkey {
+    fn from(point: Point) -> Self {
+        PublicKey::from(point).into()
+    }
+}
+
 impl Pubkey {
     pub fn serialize(&self) -> [u8; 33] {
         PublicKey::from(self).serialize()
