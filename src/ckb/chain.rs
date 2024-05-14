@@ -19,7 +19,7 @@ impl Loader {
     }
 }
 
-pub(crate) struct CommitmentLockContext {
+pub(crate) struct InnerCommitmentLockContext {
     pub(crate) context: Context,
     pub(crate) funding_lock_out_point: OutPoint,
     pub(crate) commitment_lock_out_point: OutPoint,
@@ -27,7 +27,7 @@ pub(crate) struct CommitmentLockContext {
     pub(crate) cell_deps: CellDepVec,
 }
 
-impl CommitmentLockContext {
+impl InnerCommitmentLockContext {
     fn new() -> Self {
         // deploy contract
         let base_dir = env::var("BINARY_PATH")
@@ -98,38 +98,62 @@ impl CommitmentLockContext {
     }
 }
 
-pub(crate) fn get_commitment_lock_context() -> &'static RwLock<CommitmentLockContext> {
-    static INSTANCE: OnceCell<RwLock<CommitmentLockContext>> = OnceCell::new();
+pub(crate) fn get_commitment_lock_context() -> &'static RwLock<InnerCommitmentLockContext> {
+    static INSTANCE: OnceCell<RwLock<InnerCommitmentLockContext>> = OnceCell::new();
     INSTANCE.get_or_init(|| {
-        let c = CommitmentLockContext::new();
+        let c = InnerCommitmentLockContext::new();
         RwLock::new(c) // run
     })
 }
 
-pub fn get_commitment_lock_outpoint() -> OutPoint {
-    let context = get_commitment_lock_context().read().unwrap();
-    context.commitment_lock_out_point.clone()
+pub struct CommitmentLockContext {
+    pub(crate) inner: &'static RwLock<InnerCommitmentLockContext>,
 }
 
-pub fn get_commitment_lock_script(args: &[u8]) -> Script {
-    let context = get_commitment_lock_context().read().unwrap();
-    let commitment_lock_out_point = context.commitment_lock_out_point.clone();
-    context
-        .context
-        .build_script(&commitment_lock_out_point, args.to_owned().into())
-        .expect("Build script")
-}
+impl CommitmentLockContext {
+    pub fn get() -> Self {
+        CommitmentLockContext {
+            inner: get_commitment_lock_context(),
+        }
+    }
 
-pub fn get_always_success_outpoint() -> OutPoint {
-    let context = get_commitment_lock_context().read().unwrap();
-    context.always_success_out_point.clone()
-}
+    pub fn is_testing(&self) -> bool {
+        true
+    }
 
-pub fn get_always_success_script(args: &[u8]) -> Script {
-    let context = get_commitment_lock_context().read().unwrap();
-    let always_success_out_point = context.always_success_out_point.clone();
-    context
-        .context
-        .build_script(&always_success_out_point, args.to_owned().into())
-        .expect("Build script")
+    pub fn get_commitment_lock_outpoint(&self) -> OutPoint {
+        let context = self.inner.read().unwrap();
+        context.commitment_lock_out_point.clone()
+    }
+
+    pub fn get_secp256k1_lock_script(&self, args: &[u8]) -> Script {
+        self.get_always_success_script(args)
+    }
+
+    pub fn get_commitment_lock_script(&self, args: &[u8]) -> Script {
+        let context = self.inner.read().unwrap();
+        let commitment_lock_out_point = context.commitment_lock_out_point.clone();
+        context
+            .context
+            .build_script(&commitment_lock_out_point, args.to_owned().into())
+            .expect("Build script")
+    }
+
+    pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
+        self.inner.read().unwrap().cell_deps.clone()
+    }
+
+    pub fn get_always_success_outpoint(&self) -> OutPoint {
+        let context = self.inner.read().unwrap();
+        context.always_success_out_point.clone()
+    }
+
+    pub fn get_always_success_script(&self, args: &[u8]) -> Script {
+        let context = self.inner.read().unwrap();
+        let always_success_out_point = context.always_success_out_point.clone();
+        context
+            .context
+            .build_script(&always_success_out_point, args.to_owned().into())
+            .expect("Build script")
+    }
 }

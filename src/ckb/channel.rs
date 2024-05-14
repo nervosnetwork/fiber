@@ -2,11 +2,9 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
-    core::{DepType, TransactionBuilder, TransactionView},
-    packed::{
-        Byte32, Bytes, CellDep, CellDepVec, CellInput, CellOutput, OutPoint, Script, Transaction,
-    },
-    prelude::{AsTransactionBuilder, IntoTransactionView, Pack, PackVec},
+    core::{TransactionBuilder, TransactionView},
+    packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    prelude::{AsTransactionBuilder, IntoTransactionView, Pack},
 };
 
 use log::{debug, error, info, warn};
@@ -31,10 +29,12 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::{chain::get_commitment_lock_context, types::Shutdown};
+use crate::ckb::{
+    chain::{get_commitment_lock_context, CommitmentLockContext},
+    types::Shutdown,
+};
 
 use super::{
-    chain::get_always_success_script,
     key::blake2b_hash_with_salt,
     network::{OpenChannelCommand, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
@@ -1209,23 +1209,6 @@ impl ChannelActorState {
             .expect("Funding transaction output is present")
     }
 
-    pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
-        if is_testing() {
-            get_commitment_lock_context()
-                .read()
-                .unwrap()
-                .cell_deps
-                .clone()
-        } else {
-            // TODO: Fill in the actual cell deps here.
-            [CellDep::new_builder()
-                .out_point(get_commitment_lock_outpoint())
-                .dep_type(DepType::Code.into())
-                .build()]
-            .pack()
-        }
-    }
-
     pub fn get_holder_shutdown_script(&self) -> &Script {
         // TODO: what is the best strategy for shutdown script here?
         self.holder_shutdown_script
@@ -1952,11 +1935,12 @@ impl ChannelActorState {
 
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
+        let commitment_lock_context = CommitmentLockContext::get();
         // Try to create an transaction which spends the commitment transaction, to
         // verify that our code actually works.
-        if is_testing() {
+        if commitment_lock_context.is_testing() {
             dbg!("Since we are in testing model, we will now create a revocation transaction to test our construction works");
-            let output_lock_script = get_always_success_script(b"whatever");
+            let output_lock_script = commitment_lock_context.get_always_success_script(b"whatever");
 
             let commitment_tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
 
@@ -2320,10 +2304,12 @@ impl ChannelActorState {
                     ));
                 }
 
+                let commtiment_lock_context = CommitmentLockContext::get();
                 // Just create a cell with the same capacity as the first output of the funding tx.
                 // This is to test the validity of the commitment tx that spends the funding tx.
-                if is_testing() {
-                    let always_success = get_always_success_script(b"funding transaction test");
+                if commtiment_lock_context.is_testing() {
+                    let always_success = commtiment_lock_context
+                        .get_always_success_script(b"funding transaction test");
                     let mut context = get_commitment_lock_context().write().unwrap();
                     let context = &mut context.context;
                     let funding_tx = Transaction::default()
@@ -2423,8 +2409,9 @@ impl ChannelActorState {
         _holder_shutdown_script: &Script,
         _counterparty_shutdown_script: &Script,
     ) -> TransactionView {
+        let commitment_lock_context = CommitmentLockContext::get();
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(self.get_commitment_transaction_cell_deps())
+            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(
                 CellInput::new_builder()
                     .previous_output(self.get_funding_transaction_outpoint())
@@ -2533,9 +2520,10 @@ impl ChannelActorState {
     }
 
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
+        let commitment_lock_context = CommitmentLockContext::get();
         let input = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(self.get_commitment_transaction_cell_deps())
+            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(CellInput::new_builder().previous_output(input).build());
 
         let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
@@ -2711,9 +2699,11 @@ impl ChannelActorState {
             self.holder_commitment_number,
             self.counterparty_commitment_number
         );
-        let secp256k1_lock_script =
-            get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
-        let commitment_lock_script = get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
+        let commitment_lock_script = CommitmentLockContext::get();
+        let secp256k1_lock_script = commitment_lock_script
+            .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
+        let commitment_lock_script =
+            commitment_lock_script.get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
 
         let outputs = vec![
             CellOutput::new_builder()
@@ -2911,42 +2901,6 @@ impl Musig2SignContext {
             message,
         )?)
     }
-}
-
-fn is_testing() -> bool {
-    true
-}
-
-// TODO: fill in the actual lock script.
-fn get_commitment_lock_script(args: &[u8]) -> Script {
-    if is_testing() {
-        return super::chain::get_commitment_lock_script(args);
-    } else {
-        Script::new_builder().args(args.pack()).build()
-    }
-}
-
-// TODO: fill in the actual lock script.
-fn get_secp256k1_lock_script(args: &[u8]) -> Script {
-    // Just need a script that can be found by ckb to pass the test.
-    // So we use commitment lock script instead of a non-existing secp256k1 lock script.
-    get_always_success_script(args)
-}
-
-fn get_commitment_lock_outpoint() -> OutPoint {
-    if is_testing() {
-        let out_point = super::chain::get_commitment_lock_outpoint();
-        debug!("Using commitment lock outpoint {:?}", &out_point);
-        return out_point;
-    }
-
-    // TODO: Use real commitment lock outpoint here.
-    let commitment_lock_outpoint = OutPoint::new_builder()
-        .tx_hash(Byte32::zero())
-        .index(0u32.pack())
-        .build();
-
-    commitment_lock_outpoint
 }
 
 fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
