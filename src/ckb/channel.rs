@@ -1147,6 +1147,14 @@ impl ChannelActorState {
             counterparty_shutdown_signature: None,
         }
     }
+
+    fn update_state(&mut self, new_state: ChannelState) {
+        debug!(
+            "Updating channel state from {:?} to {:?}",
+            &self.state, &new_state
+        );
+        self.state = new_state;
+    }
 }
 
 // Properties for the channel actor state.
@@ -1277,7 +1285,7 @@ impl ChannelActorState {
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
         FundingRequest {
             udt_info: None,
-            funding_cell_lock_script_args: self.get_funding_lock_script().args(),
+            script: self.get_funding_lock_script(),
             local_amount: self.to_self_amount as u64,
             local_fee_rate: fee_rate,
             remote_amount: self.to_remote_amount as u64,
@@ -1853,7 +1861,7 @@ impl ChannelActorState {
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!("Beginning processing tx collaboration message");
+                debug!("Started negotiating funding tx collaboration");
                 CollaboratingFundingTxFlags::empty()
             }
             ChannelState::CollaboratingFundingTx(_)
@@ -2303,6 +2311,11 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         // TODO: check if the tx is valid
         let tx = tx.into_view();
+        if Some(&tx) == self.funding_tx.as_ref() {
+            debug!("Received the same funding transaction, ignoring");
+            return Ok(());
+        }
+
         let first_output = tx
             .outputs()
             .get(0)
@@ -2319,39 +2332,44 @@ impl ChannelActorState {
         let current_capacity: u64 = first_output.capacity().unpack();
         let is_complete = current_capacity == (self.to_self_amount + self.to_remote_amount) as u64;
 
-        debug!("Updating funding transaction to {:?}", &tx);
+        debug!(
+            "Updating funding transaction to {:?}, is_complete: {}",
+            &tx, is_complete
+        );
         self.funding_tx = Some(tx.clone());
 
-        if !is_complete {
-            if is_message {
-                // Tell the network to do more work on our part.
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                            channel_id: self.get_id(),
-                            command: ChannelCommand::TxCollaborationCommand(
-                                TxCollaborationCommand::TxUpdate(TxUpdateCommand {
-                                    transaction: tx.data(),
-                                }),
-                            ),
-                        }),
-                    ))
-                    .expect("network alive");
-            } else {
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                            peer_id: self.peer_id.clone(),
-                            message: PCNMessage::TxUpdate(TxUpdate {
-                                channel_id: self.get_id(),
-                                tx: tx.data(),
+        // We received the message from the peer, we need to tell network
+        // actor to do more work on our part.
+        if is_message {
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                        channel_id: self.get_id(),
+                        command: ChannelCommand::TxCollaborationCommand(
+                            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
+                                transaction: tx.data(),
                             }),
-                        }),
-                    ))
-                    .expect("network alive");
-            }
+                        ),
+                    }),
+                ))
+                .expect("network alive");
+            return Ok(());
         }
-        {
+
+        // Otherwise, we need to send the message to the peer directly.
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: PCNMessage::TxUpdate(TxUpdate {
+                        channel_id: self.get_id(),
+                        tx: tx.data(),
+                    }),
+                }),
+            ))
+            .expect("network alive");
+
+        if is_complete {
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {

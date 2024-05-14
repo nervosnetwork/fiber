@@ -195,9 +195,7 @@ impl CkbChainState {
             secret_key: self.secret_key.clone(),
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
-            funding_cell_lock_script: self
-                .ctx
-                .get_funding_lock_script(request.funding_cell_lock_script_args.as_slice()),
+            funding_cell_lock_script: request.script.clone(),
         }
     }
 }

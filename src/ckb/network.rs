@@ -1,6 +1,6 @@
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
-use ckb_types::prelude::IntoTransactionView;
+use ckb_types::prelude::{Entity, IntoTransactionView, Unpack};
 use log::{debug, error, info, warn};
 
 use ractor::{async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef};
@@ -689,6 +689,7 @@ impl Actor for NetworkActor {
                     debug!("Starting funding channel");
                     // TODO: Here we implies the one who receives AcceptChannel message
                     // will send TxUpdate message first.
+                    dbg!(&script);
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::UpdateChannelFunding(
@@ -696,7 +697,7 @@ impl Actor for NetworkActor {
                                 Default::default(),
                                 FundingRequest {
                                     udt_info: None,
-                                    funding_cell_lock_script_args: script.args(),
+                                    script,
                                     local_amount: local as u64,
                                     local_fee_rate: 0,
                                     remote_amount: remote as u64,

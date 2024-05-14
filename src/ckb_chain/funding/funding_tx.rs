@@ -16,7 +16,7 @@ use ckb_sdk::{
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
-    packed,
+    packed::{self, Script},
     prelude::*,
 };
 use molecule::{
@@ -53,8 +53,8 @@ pub struct FundingRequest {
     /// UDT channel info
     pub udt_info: Option<FundingUdtInfo>,
     /// The funding cell lock script args
-    #[serde_as(as = "EntityWrapperHex<packed::Bytes>")]
-    pub funding_cell_lock_script_args: packed::Bytes,
+    #[serde_as(as = "EntityWrapperHex<Script>")]
+    pub script: Script,
     /// Assets amount to be provided by the local party
     pub local_amount: u64,
     /// Fee to be provided by the local party
