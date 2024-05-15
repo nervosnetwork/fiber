@@ -41,7 +41,7 @@ use super::{
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxSignatures, TxUpdate,
+        TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -1204,6 +1204,12 @@ impl ChannelActorState {
         }
     }
 
+    pub fn get_funding_transaction(&self) -> &TransactionView {
+        self.funding_tx
+            .as_ref()
+            .expect("Funding transaction is present")
+    }
+
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
         let tx = self
             .funding_tx
@@ -1493,14 +1499,14 @@ impl ChannelActorState {
                 Ok(())
             }
             PCNMessage::TxSignatures(tx_signatures) => {
-                // We're the one who send tx_signature first, and we received a tx_signature message.
+                // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
                 if self.should_holder_send_tx_signatures_first() {
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                Transaction::default(),
+                                self.get_funding_transaction().data(),
                                 self.get_funding_transaction_outpoint(),
                                 self.get_id(),
                             ),
@@ -2215,7 +2221,7 @@ impl ChannelActorState {
         let flags = if partial_witnesses.is_some() {
             flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT
         } else {
-            flags
+            flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
         };
         self.update_state(ChannelState::AwaitingTxSignatures(flags));
 
@@ -2226,73 +2232,19 @@ impl ChannelActorState {
                 "Funding transaction is not present".to_string(),
             ))?;
 
-        let msg = match partial_witnesses {
-            Some(ref _partial_witnesses) => {
-                // TODO: filling the whole witnesses here.
-                let full_witnesses: Vec<ckb_types::packed::Bytes> = vec![];
-                let full_witnesses_u8 = full_witnesses
-                    .iter()
-                    .map(|w| w.as_slice().to_vec())
-                    .collect();
-
-                let funding_tx = funding_tx
-                    .as_advanced_builder()
-                    .set_witnesses(full_witnesses)
-                    .build();
-                self.funding_tx = Some(funding_tx.clone());
-                self.update_state(ChannelState::AwaitingTxSignatures(
-                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
-                ));
-
-                // Since we have received a valid tx_signatures message, we're now sure that
-                // we can broadcast a valid transaction to the network, i.e. we can wait for
-                // the funding transaction to be confirmed.
-                network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::FundingTransactionPending(
-                            Transaction::default(),
-                            self.get_funding_transaction_outpoint(),
-                            self.get_id(),
-                        ),
-                    ))
-                    .expect("network actor alive");
-
-                PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::TxSignatures(TxSignatures {
-                        channel_id: self.get_id(),
-                        witnesses: full_witnesses_u8,
-                        tx_hash: funding_tx.hash().into(),
-                    }),
-                }
-            }
-            None => {
-                // TODO: creating partial witnesses here.
-                let partial_witnesses = vec![];
-                let new_state = ChannelState::AwaitingTxSignatures(
-                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
-                );
-                self.update_state(new_state);
-
-                PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::TxSignatures(TxSignatures {
-                        channel_id: self.get_id(),
-                        witnesses: partial_witnesses,
-                        tx_hash: funding_tx.hash().into(),
-                    }),
-                }
-            }
-        };
-        debug!(
-            "Handled tx_signatures, peer: {:?}, previous witnesses: {:?}, messge to send: {:?}",
-            &self.peer_id, &partial_witnesses, &msg
-        );
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(msg),
+                NetworkActorCommand::SignTx(
+                    self.peer_id.clone(),
+                    self.get_id(),
+                    funding_tx.data(),
+                    partial_witnesses,
+                ),
             ))
-            .expect("network actor alive");
+            .expect("network alive");
+        let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+        self.update_state(ChannelState::AwaitingTxSignatures(flags));
+
         Ok(())
     }
 

@@ -16,7 +16,7 @@ use ckb_sdk::{
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
-    packed::{self, Script},
+    packed::{self, Script, Transaction},
     prelude::*,
 };
 use molecule::{
@@ -32,6 +32,20 @@ use serde_with::serde_as;
 #[derive(Clone, Debug, Default)]
 pub struct FundingTx {
     tx: Option<TransactionView>,
+}
+
+impl From<TransactionView> for FundingTx {
+    fn from(tx: TransactionView) -> Self {
+        Self { tx: Some(tx) }
+    }
+}
+
+impl From<Transaction> for FundingTx {
+    fn from(tx: Transaction) -> Self {
+        Self {
+            tx: Some(tx.into_view()),
+        }
+    }
 }
 
 #[allow(dead_code)]
