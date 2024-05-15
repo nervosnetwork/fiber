@@ -31,7 +31,7 @@ use std::{
 
 use crate::{
     ckb::{chain::CommitmentLockContext, types::Shutdown},
-    ckb_chain::{FundingRequest, FundingTx},
+    ckb_chain::FundingRequest,
 };
 
 use super::{
@@ -158,31 +158,6 @@ impl ChannelActor {
         Self { peer_id, network }
     }
 
-    pub fn send_tx_collaboration_command(
-        &self,
-        state: &mut ChannelActorState,
-        command: TxCollaborationCommand,
-    ) -> Result<(), ProcessingChannelError> {
-        let pcn_msg = match command {
-            TxCollaborationCommand::TxUpdate(tx_update) => PCNMessage::TxUpdate(TxUpdate {
-                channel_id: state.get_id(),
-                tx: tx_update.transaction.clone(),
-            }),
-            TxCollaborationCommand::TxComplete(_) => PCNMessage::TxComplete(TxComplete {
-                channel_id: state.get_id(),
-            }),
-        };
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
-                    self.peer_id.clone(),
-                    pcn_msg,
-                )),
-            ))
-            .expect("network actor alive");
-        Ok(())
-    }
-
     pub fn handle_commitment_signed_command(
         &self,
         state: &mut ChannelActorState,
@@ -263,12 +238,12 @@ impl ChannelActor {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                state.state = ChannelState::SigningCommitment(flags);
+                state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
             }
             CommitmentSignedFlags::ChannelReady(flags) => {
                 let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
-                state.state = ChannelState::ChannelReady(flags);
+                state.update_state(ChannelState::ChannelReady(flags));
             }
         }
         Ok(())
@@ -417,7 +392,7 @@ impl ChannelActor {
             .expect("network actor alive");
         state.holder_shutdown_script = Some(command.close_script.clone());
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-        state.state = ChannelState::ShuttingDown(flags);
+        state.update_state(ChannelState::ShuttingDown(flags));
         debug!(
             "Channel state updated to {:?} after processing shutdown command",
             &state.state
@@ -469,12 +444,6 @@ impl ChannelActor {
                 )));
             }
             ChannelState::CollaboratingFundingTx(flags) => {
-                if flags.contains(CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT) {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Trying to process a tx collaboration command {:?} while in collaboration already completed on our side",
-                        &command
-                    )));
-                }
                 debug!(
                     "Processing tx collaboration command {:?} for state {:?}",
                     &command, &state.state
@@ -489,22 +458,49 @@ impl ChannelActor {
             }
         };
 
-        self.send_tx_collaboration_command(state, command.clone())?;
-
         // TODO: Note that we may deadlock here if send_tx_collaboration_command does successfully send the message,
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
             TxCollaborationCommand::TxUpdate(tx_update) => {
-                state.update_funding_tx(tx_update.transaction, false, self.network.clone())?;
-                state.state = ChannelState::CollaboratingFundingTx(
+                let pcn_msg = PCNMessage::TxUpdate(TxUpdate {
+                    channel_id: state.get_id(),
+                    tx: tx_update.clone().transaction,
+                });
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                            self.peer_id.clone(),
+                            pcn_msg,
+                        )),
+                    ))
+                    .expect("network actor alive");
+
+                state.update_state(ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
-                );
+                ));
+                state.funding_tx = Some(tx_update.transaction.clone().into_view());
+                state.maybe_complete_tx_collaboration(
+                    tx_update.transaction.clone(),
+                    self.network.clone(),
+                )?;
             }
             TxCollaborationCommand::TxComplete(_) => {
+                let pcn_msg = PCNMessage::TxComplete(TxComplete {
+                    channel_id: state.get_id(),
+                });
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                            self.peer_id.clone(),
+                            pcn_msg,
+                        )),
+                    ))
+                    .expect("network actor alive");
+
                 state.check_tx_complete_preconditions()?;
-                state.state = ChannelState::CollaboratingFundingTx(
+                state.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
-                );
+                ));
             }
         }
 
@@ -636,7 +632,9 @@ impl Actor for ChannelActor {
                         ),
                     ))
                     .expect("peer actor alive");
-                state.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+                state.update_state(ChannelState::NegotiatingFunding(
+                    NegotiatingFundingFlags::INIT_SENT,
+                ));
                 Ok(state)
             }
             ChannelInitializationParameter::OpenChannel(funding_amount, seed) => {
@@ -773,9 +771,9 @@ impl Actor for ChannelActor {
                         ))
                         .expect("network actor alive");
                     let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
-                    state.state = ChannelState::AwaitingChannelReady(flags);
+                    state.update_state(ChannelState::AwaitingChannelReady(flags));
                     if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                        state.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                        state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::ChannelReady(
@@ -1283,6 +1281,7 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
+        debug!("Generating funding request");
         FundingRequest {
             udt_info: None,
             script: self.get_funding_lock_script(),
@@ -1517,7 +1516,7 @@ impl ChannelActorState {
             }
             PCNMessage::RevokeAndAck(revoke_and_ack) => {
                 self.handle_revoke_and_ack_message(revoke_and_ack, network.clone())?;
-                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
@@ -1540,14 +1539,14 @@ impl ChannelActorState {
                     }
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
-                self.state = ChannelState::AwaitingChannelReady(flags);
+                self.update_state(ChannelState::AwaitingChannelReady(flags));
                 debug!(
                     "ChannelReady: {:?}, current state: {:?}",
                     &channel_ready, &self.state
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                    self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -1670,7 +1669,7 @@ impl ChannelActorState {
                 self.counterparty_shutdown_script = Some(shutdown.close_script);
 
                 let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-                self.state = ChannelState::ShuttingDown(flags);
+                self.update_state(ChannelState::ShuttingDown(flags));
                 debug!(
                     "Channel state updated to {:?} after processing shutdown command",
                     &self.state
@@ -1723,9 +1722,9 @@ impl ChannelActorState {
                 self.counterparty_shutdown_signature = Some(partial_signature);
 
                 let flags = flags | ShuttingDownFlags::THEIR_CLOSING_SIGNED;
-                self.state = ChannelState::ShuttingDown(flags);
+                self.update_state(ChannelState::ShuttingDown(flags));
                 if flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
-                    self.state = ChannelState::Closed;
+                    self.update_state(ChannelState::Closed);
                     let partial_signatures = self.order_things_for_musig2(
                         self.holder_shutdown_signature.unwrap(),
                         self.counterparty_shutdown_signature.unwrap(),
@@ -1767,7 +1766,9 @@ impl ChannelActorState {
         // TODO: should automatically check this periodically.
         if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) && !self.any_tlc_pending() {
             debug!("All pending tlcs are resolved, transitioning to ClosingSigned");
-            self.state = ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
+            self.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::DROPPING_PENDING,
+            ));
 
             let signature = self.build_and_sign_shutdown_tx(
                 self.get_holder_shutdown_script(),
@@ -1812,7 +1813,9 @@ impl ChannelActorState {
             )));
         }
 
-        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+        self.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::INIT_SENT,
+        ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.counterparty_nonce = Some(accept_channel.next_local_nonce.clone());
 
@@ -1875,8 +1878,8 @@ impl ChannelActorState {
             ChannelState::CollaboratingFundingTx(flags) => {
                 if flags.contains(CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT) {
                     return Err(ProcessingChannelError::InvalidState(format!(
-                        "Trying to process a tx collaboration message {:?} while in collaboration already completed on our side",
-                        &msg
+                        "Received a tx collaboration message {:?}, but we are already in the state {:?} where the remote has sent a complete message",
+                        &msg, &self.state
                     )));
                 }
                 debug!(
@@ -1894,16 +1897,30 @@ impl ChannelActorState {
         };
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
-                self.update_funding_tx(msg.tx, true, network)?;
-                self.state = ChannelState::CollaboratingFundingTx(
-                    CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
-                );
+                // TODO check if the tx is valid.
+                self.funding_tx = Some(msg.tx.clone().into_view());
+                if self.is_tx_final(&msg.tx)? {
+                    self.maybe_complete_tx_collaboration(msg.tx, network)?;
+                } else {
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::UpdateChannelFunding(
+                                self.get_id(),
+                                msg.tx.clone(),
+                                self.get_funding_request(2000),
+                            ),
+                        ))
+                        .expect("network alive");
+                    self.update_state(ChannelState::CollaboratingFundingTx(
+                        CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+                    ));
+                }
             }
             TxCollaborationMsg::TxComplete(_msg) => {
                 self.check_tx_complete_preconditions()?;
-                self.state = ChannelState::CollaboratingFundingTx(
+                self.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT,
-                );
+                ));
             }
         }
         Ok(())
@@ -2101,7 +2118,7 @@ impl ChannelActorState {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
-                self.state = ChannelState::SigningCommitment(flags);
+                self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady(_) => {
@@ -2127,7 +2144,7 @@ impl ChannelActorState {
                         }),
                     ))
                     .expect("network actor alive");
-                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
             }
         }
         Ok(())
@@ -2140,7 +2157,9 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
             debug!("Commitment signed message sent by both sides, tranitioning to AwaitingTxSignatures state");
-            self.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+            self.update_state(ChannelState::AwaitingTxSignatures(
+                AwaitingTxSignaturesFlags::empty(),
+            ));
             if self.should_holder_send_tx_signatures_first() {
                 debug!("It is our turn to send tx_signatures, so we will do it now.");
                 self.handle_tx_signatures(network, None)?;
@@ -2198,11 +2217,11 @@ impl ChannelActorState {
         } else {
             flags
         };
-        self.state = ChannelState::AwaitingTxSignatures(flags);
+        self.update_state(ChannelState::AwaitingTxSignatures(flags));
 
         let funding_tx = self
             .funding_tx
-            .as_ref()
+            .clone()
             .ok_or(ProcessingChannelError::InvalidState(
                 "Funding transaction is not present".to_string(),
             ))?;
@@ -2221,9 +2240,9 @@ impl ChannelActorState {
                     .set_witnesses(full_witnesses)
                     .build();
                 self.funding_tx = Some(funding_tx.clone());
-                self.state = ChannelState::AwaitingTxSignatures(
+                self.update_state(ChannelState::AwaitingTxSignatures(
                     flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
-                );
+                ));
 
                 // Since we have received a valid tx_signatures message, we're now sure that
                 // we can broadcast a valid transaction to the network, i.e. we can wait for
@@ -2250,9 +2269,10 @@ impl ChannelActorState {
             None => {
                 // TODO: creating partial witnesses here.
                 let partial_witnesses = vec![];
-                self.state = ChannelState::AwaitingTxSignatures(
+                let new_state = ChannelState::AwaitingTxSignatures(
                     flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
                 );
+                self.update_state(new_state);
 
                 PCNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
@@ -2298,23 +2318,9 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn update_funding_tx(
-        &mut self,
-        tx: Transaction,
-        // If this is originally a message handling, then we need to
-        // see if there is any auto update we need to do, and send the
-        // update to the peer.
-        // If this is originally a command handling, we need to send
-        // the message to the peer directly.
-        is_message: bool,
-        network: ActorRef<NetworkActorMessage>,
-    ) -> ProcessingChannelResult {
+    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         // TODO: check if the tx is valid
-        let tx = tx.into_view();
-        if Some(&tx) == self.funding_tx.as_ref() {
-            debug!("Received the same funding transaction, ignoring");
-            return Ok(());
-        }
+        let tx = tx.clone().into_view();
 
         let first_output = tx
             .outputs()
@@ -2331,43 +2337,20 @@ impl ChannelActorState {
 
         let current_capacity: u64 = first_output.capacity().unpack();
         let is_complete = current_capacity == (self.to_self_amount + self.to_remote_amount) as u64;
+        Ok(is_complete)
+    }
+
+    pub fn maybe_complete_tx_collaboration(
+        &mut self,
+        tx: Transaction,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        let is_complete = self.is_tx_final(&tx)?;
 
         debug!(
-            "Updating funding transaction to {:?}, is_complete: {}",
+            "Checking if funding transaction {:?} is complete: {}",
             &tx, is_complete
         );
-        self.funding_tx = Some(tx.clone());
-
-        // We received the message from the peer, we need to tell network
-        // actor to do more work on our part.
-        if is_message {
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                        channel_id: self.get_id(),
-                        command: ChannelCommand::TxCollaborationCommand(
-                            TxCollaborationCommand::TxUpdate(TxUpdateCommand {
-                                transaction: tx.data(),
-                            }),
-                        ),
-                    }),
-                ))
-                .expect("network alive");
-            return Ok(());
-        }
-
-        // Otherwise, we need to send the message to the peer directly.
-        network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::TxUpdate(TxUpdate {
-                        channel_id: self.get_id(),
-                        tx: tx.data(),
-                    }),
-                }),
-            ))
-            .expect("network alive");
 
         if is_complete {
             network
@@ -2380,6 +2363,17 @@ impl ChannelActorState {
                     }),
                 ))
                 .expect("network alive");
+            let old_flags = match self.state {
+                ChannelState::CollaboratingFundingTx(flags) => flags,
+                _ => {
+                    panic!(
+                        "Must be in CollaboratingFundingTx state while running update_funding_tx"
+                    );
+                }
+            };
+            self.update_state(ChannelState::CollaboratingFundingTx(
+                old_flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
+            ));
         }
         Ok(())
     }
