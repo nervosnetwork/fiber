@@ -20,7 +20,7 @@ body:json {
     "request": {
       "AcceptChannel": {
         "temp_channel_id": "{{TEMP_CHANNEL_ID}}",
-        "funding_amount": 1000
+        "funding_amount": 10000000000
       }
     }
   }
@@ -32,5 +32,5 @@ assert {
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 5000));
 }

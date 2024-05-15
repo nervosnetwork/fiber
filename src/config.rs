@@ -9,7 +9,7 @@ use home::home_dir;
 use log::error;
 use serde::{Deserialize, Serialize};
 
-use crate::{CchConfig, CkbConfig, LdkConfig, RpcConfig};
+use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_CKB_DIR_NAME: &str = "ckb";
@@ -37,6 +37,8 @@ enum Service {
     CCH,
     #[serde(alias = "rpc", alias = "RPC")]
     RPC,
+    #[serde(alias = "ckb_chain", alias = "CKB_CHAIN")]
+    CkbChain,
 }
 
 impl FromStr for Service {
@@ -47,6 +49,7 @@ impl FromStr for Service {
             "ldk" | "LDK" => Ok(Self::LDK),
             "cch" | "CCH" => Ok(Self::CCH),
             "rpc" | "RPC" => Ok(Self::RPC),
+            "ckb_chain" | "CKB_CHAIN" => Ok(Self::CkbChain),
             _ => Err(format!("invalid service {}", s)),
         }
     }
@@ -85,6 +88,10 @@ struct Args {
     /// config for rpc
     #[command(flatten)]
     pub rpc: <RpcConfig as ClapSerde>::Opt,
+
+    /// config for ckb chain
+    #[command(flatten)]
+    pub ckb_chain: <CkbChainConfig as ClapSerde>::Opt,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +101,7 @@ struct SerializedConfig {
     ldk: Option<<LdkConfig as ClapSerde>::Opt>,
     cch: Option<<CchConfig as ClapSerde>::Opt>,
     rpc: Option<<RpcConfig as ClapSerde>::Opt>,
+    ckb_chain: Option<<CkbChainConfig as ClapSerde>::Opt>,
 }
 
 #[derive(Debug)]
@@ -106,6 +114,8 @@ pub struct Config {
     pub cch: Option<CchConfig>,
     // rpc server config, None represents that we should not run rpc service
     pub rpc: Option<RpcConfig>,
+    // ckb chain actor config, None represents that we should not run ckb chain actor
+    pub ckb_chain: Option<CkbChainConfig>,
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
@@ -160,8 +170,11 @@ impl Config {
         // Set default ckb/ldk base directory. These may be overridden by values explicitly set by the user.
         args.ckb.base_dir = Some(Some(base_dir.join(DEFAULT_CKB_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
+        args.ckb_chain.base_dir = Some(Some(
+            base_dir.join(crate::ckb_chain::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
+        ));
 
-        let (ckb, ldk, cch, rpc) = match config_from_file
+        let (ckb, ldk, cch, rpc, ckb_chain) = match config_from_file
             .map(|x| match x {
                 SerializedConfig {
                     services: _,
@@ -169,21 +182,24 @@ impl Config {
                     ldk,
                     cch,
                     rpc,
+                    ckb_chain,
                 } => (
                     // Successfully read config file, merging these options with the default ones.
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                     ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
                     cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
                     rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
+                    ckb_chain.map(|c| CkbChainConfig::from(c).merge(&mut args.ckb_chain)),
                 ),
             })
-            .unwrap_or((None, None, None, None))
+            .unwrap_or((None, None, None, None, None))
         {
-            (ckb, ldk, cch, rpc) => (
+            (ckb, ldk, cch, rpc, ckb_chain) => (
                 ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
                 ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
                 cch.unwrap_or(CchConfig::from(&mut args.cch)),
                 rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
+                ckb_chain.unwrap_or(CkbChainConfig::from(&mut args.ckb_chain)),
             ),
         };
 
@@ -191,6 +207,13 @@ impl Config {
         let ldk = services.contains(&Service::LDK).then_some(ldk);
         let cch = services.contains(&Service::CCH).then_some(cch);
         let rpc = services.contains(&Service::RPC).then_some(rpc);
-        Self { ckb, ldk, cch, rpc }
+        let ckb_chain = services.contains(&Service::CkbChain).then_some(ckb_chain);
+        Self {
+            ckb,
+            ldk,
+            cch,
+            rpc,
+            ckb_chain,
+        }
     }
 }

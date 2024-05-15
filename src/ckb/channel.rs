@@ -2,9 +2,9 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
-    core::{DepType, TransactionBuilder, TransactionView},
-    packed::{Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
-    prelude::{IntoTransactionView, Pack},
+    core::{TransactionBuilder, TransactionView},
+    packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
 use log::{debug, error, info, warn};
@@ -16,6 +16,7 @@ use musig2::{
     PartialSignature, PubNonce, SecNonce,
 };
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+
 use serde::Deserialize;
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
@@ -28,7 +29,10 @@ use std::{
     fmt::Debug,
 };
 
-use crate::ckb::types::Shutdown;
+use crate::{
+    ckb::{chain::CommitmentLockContext, types::Shutdown},
+    ckb_chain::FundingRequest,
+};
 
 use super::{
     key::blake2b_hash_with_salt,
@@ -37,7 +41,7 @@ use super::{
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxSignatures, TxUpdate,
+        TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -154,31 +158,6 @@ impl ChannelActor {
         Self { peer_id, network }
     }
 
-    pub fn send_tx_collaboration_command(
-        &self,
-        state: &mut ChannelActorState,
-        command: TxCollaborationCommand,
-    ) -> Result<(), ProcessingChannelError> {
-        let pcn_msg = match command {
-            TxCollaborationCommand::TxUpdate(tx_update) => PCNMessage::TxUpdate(TxUpdate {
-                channel_id: state.get_id(),
-                tx: tx_update.transaction.clone(),
-            }),
-            TxCollaborationCommand::TxComplete(_) => PCNMessage::TxComplete(TxComplete {
-                channel_id: state.get_id(),
-            }),
-        };
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
-                    self.peer_id.clone(),
-                    pcn_msg,
-                )),
-            ))
-            .expect("network actor alive");
-        Ok(())
-    }
-
     pub fn handle_commitment_signed_command(
         &self,
         state: &mut ChannelActorState,
@@ -256,16 +235,15 @@ impl ChannelActor {
             ))
             .expect("network actor alive");
 
-        state.holder_commitment_number = state.get_next_commitment_number(true);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                state.state = ChannelState::SigningCommitment(flags);
+                state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
             }
             CommitmentSignedFlags::ChannelReady(flags) => {
                 let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
-                state.state = ChannelState::ChannelReady(flags);
+                state.update_state(ChannelState::ChannelReady(flags));
             }
         }
         Ok(())
@@ -414,7 +392,7 @@ impl ChannelActor {
             .expect("network actor alive");
         state.holder_shutdown_script = Some(command.close_script.clone());
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-        state.state = ChannelState::ShuttingDown(flags);
+        state.update_state(ChannelState::ShuttingDown(flags));
         debug!(
             "Channel state updated to {:?} after processing shutdown command",
             &state.state
@@ -466,12 +444,6 @@ impl ChannelActor {
                 )));
             }
             ChannelState::CollaboratingFundingTx(flags) => {
-                if flags.contains(CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT) {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Trying to process a tx collaboration command {:?} while in collaboration already completed on our side",
-                        &command
-                    )));
-                }
                 debug!(
                     "Processing tx collaboration command {:?} for state {:?}",
                     &command, &state.state
@@ -486,29 +458,56 @@ impl ChannelActor {
             }
         };
 
-        self.send_tx_collaboration_command(state, command.clone())?;
-
         // TODO: Note that we may deadlock here if send_tx_collaboration_command does successfully send the message,
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
             TxCollaborationCommand::TxUpdate(tx_update) => {
-                state.update_funding_tx(tx_update.transaction)?;
-                state.state = ChannelState::CollaboratingFundingTx(
+                let pcn_msg = PCNMessage::TxUpdate(TxUpdate {
+                    channel_id: state.get_id(),
+                    tx: tx_update.clone().transaction,
+                });
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                            self.peer_id.clone(),
+                            pcn_msg,
+                        )),
+                    ))
+                    .expect("network actor alive");
+
+                state.update_state(ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
-                );
+                ));
+                state.funding_tx = Some(tx_update.transaction.clone().into_view());
+                state.maybe_complete_tx_collaboration(
+                    tx_update.transaction.clone(),
+                    self.network.clone(),
+                )?;
             }
             TxCollaborationCommand::TxComplete(_) => {
+                let pcn_msg = PCNMessage::TxComplete(TxComplete {
+                    channel_id: state.get_id(),
+                });
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                            self.peer_id.clone(),
+                            pcn_msg,
+                        )),
+                    ))
+                    .expect("network actor alive");
+
                 state.check_tx_complete_preconditions()?;
-                state.state = ChannelState::CollaboratingFundingTx(
+                state.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
-                );
+                ));
             }
         }
 
         Ok(())
     }
 
-    pub fn handle_command(
+    pub async fn handle_command(
         &self,
         state: &mut ChannelActorState,
         command: ChannelCommand,
@@ -633,7 +632,9 @@ impl Actor for ChannelActor {
                         ),
                     ))
                     .expect("peer actor alive");
-                state.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+                state.update_state(ChannelState::NegotiatingFunding(
+                    NegotiatingFundingFlags::INIT_SENT,
+                ));
                 Ok(state)
             }
             ChannelInitializationParameter::OpenChannel(funding_amount, seed) => {
@@ -742,7 +743,7 @@ impl Actor for ChannelActor {
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command) {
+                if let Err(err) = self.handle_command(state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
@@ -770,9 +771,9 @@ impl Actor for ChannelActor {
                         ))
                         .expect("network actor alive");
                     let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
-                    state.state = ChannelState::AwaitingChannelReady(flags);
+                    state.update_state(ChannelState::AwaitingChannelReady(flags));
                     if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                        state.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                        state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::ChannelReady(
@@ -1061,9 +1062,12 @@ impl ChannelActorState {
             &counterparty_pubkeys.revocation_base_key,
         );
 
+        let counterparty_commitment_number = 1;
+
         debug!(
-            "Generated channel id ({:?}) for temporary channel {:?}",
-            &channel_id, &temp_channel_id
+            "Generated channel id ({:?}) for temporary channel {:?} with local commitment number {:?} and remote commitment number {:?}",
+            &channel_id, &temp_channel_id,
+            commitment_number, counterparty_commitment_number
         );
 
         Self {
@@ -1090,7 +1094,7 @@ impl ChannelActorState {
                 selected_contest_delay: counterparty_delay,
             }),
             holder_commitment_number: commitment_number,
-            counterparty_commitment_number: 1,
+            counterparty_commitment_number,
             counterparty_shutdown_script: None,
             counterparty_nonce: Some(counterparty_nonce),
             counterparty_commitment_points: vec![
@@ -1110,7 +1114,7 @@ impl ChannelActorState {
     ) -> Self {
         let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
-        let commitment_number = 0;
+        let commitment_number = 1;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
@@ -1140,6 +1144,14 @@ impl ChannelActorState {
             holder_shutdown_signature: None,
             counterparty_shutdown_signature: None,
         }
+    }
+
+    fn update_state(&mut self, new_state: ChannelState) {
+        debug!(
+            "Updating channel state from {:?} to {:?}",
+            &self.state, &new_state
+        );
+        self.state = new_state;
     }
 }
 
@@ -1192,6 +1204,12 @@ impl ChannelActorState {
         }
     }
 
+    pub fn get_funding_transaction(&self) -> &TransactionView {
+        self.funding_tx
+            .as_ref()
+            .expect("Funding transaction is present")
+    }
+
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
         let tx = self
             .funding_tx
@@ -1228,7 +1246,7 @@ impl ChannelActorState {
         if local {
             self.get_current_holder_commitment_point()
         } else {
-            self.get_current_counterparty_commitment_point()
+            self.get_previous_counterparty_commitment_point()
         }
     }
 
@@ -1240,14 +1258,43 @@ impl ChannelActorState {
         self.get_holder_commitment_point(self.holder_commitment_number)
     }
 
-    pub fn get_current_counterparty_commitment_point(&self) -> Pubkey {
-        self.get_counterparty_commitment_point(self.counterparty_commitment_number)
+    pub fn get_previous_counterparty_commitment_point(&self) -> Pubkey {
+        self.get_counterparty_commitment_point(self.counterparty_commitment_number - 1)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
     pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> Pubkey {
         let index = commitment_number as usize;
+        dbg!(
+            "getting counterparty commitment point",
+            index,
+            &self.counterparty_commitment_points
+        );
         self.counterparty_commitment_points[index]
+    }
+
+    pub fn get_funding_lock_script(&self) -> Script {
+        let agg_ctx = self.get_musig2_agg_context();
+        let ctx = CommitmentLockContext::get();
+        let agg_pub_key: Pubkey = agg_ctx.aggregated_pubkey();
+        let args = blake2b_256(agg_pub_key.serialize());
+        debug!(
+            "Aggregated pubkey: {:?}, hash: {:?}",
+            agg_pub_key,
+            hex::encode(&args[..20])
+        );
+        ctx.get_funding_lock_script(&args[..20])
+    }
+
+    pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
+        debug!("Generating funding request");
+        FundingRequest {
+            udt_info: None,
+            script: self.get_funding_lock_script(),
+            local_amount: self.to_self_amount as u64,
+            local_fee_rate: fee_rate,
+            remote_amount: self.to_remote_amount as u64,
+        }
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
@@ -1424,16 +1471,22 @@ impl ChannelActorState {
                 self.fill_in_channel_id();
                 network
                     .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelAccepted(self.get_id(), self.temp_id),
+                        NetworkActorEvent::ChannelAccepted(
+                            self.get_id(),
+                            self.temp_id,
+                            self.to_self_amount,
+                            self.to_remote_amount,
+                            self.get_funding_lock_script(),
+                        ),
                     ))
                     .expect("network actor alive");
                 Ok(())
             }
             PCNMessage::TxUpdate(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx))
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), network)
             }
             PCNMessage::TxComplete(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx))
+                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), network)
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
                 self.handle_commitment_signed_message(commitment_signed, network.clone())?;
@@ -1443,18 +1496,17 @@ impl ChannelActorState {
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
                     }
                 }
-                {}
                 Ok(())
             }
             PCNMessage::TxSignatures(tx_signatures) => {
-                // We're the one who send tx_signature first, and we received a tx_signature message.
+                // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
                 if self.should_holder_send_tx_signatures_first() {
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                Transaction::default(),
+                                self.get_funding_transaction().data(),
                                 self.get_funding_transaction_outpoint(),
                                 self.get_id(),
                             ),
@@ -1470,7 +1522,7 @@ impl ChannelActorState {
             }
             PCNMessage::RevokeAndAck(revoke_and_ack) => {
                 self.handle_revoke_and_ack_message(revoke_and_ack, network.clone())?;
-                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
             PCNMessage::ChannelReady(channel_ready) => {
@@ -1493,14 +1545,14 @@ impl ChannelActorState {
                     }
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
-                self.state = ChannelState::AwaitingChannelReady(flags);
+                self.update_state(ChannelState::AwaitingChannelReady(flags));
                 debug!(
                     "ChannelReady: {:?}, current state: {:?}",
                     &channel_ready, &self.state
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                    self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -1623,7 +1675,7 @@ impl ChannelActorState {
                 self.counterparty_shutdown_script = Some(shutdown.close_script);
 
                 let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-                self.state = ChannelState::ShuttingDown(flags);
+                self.update_state(ChannelState::ShuttingDown(flags));
                 debug!(
                     "Channel state updated to {:?} after processing shutdown command",
                     &self.state
@@ -1676,9 +1728,9 @@ impl ChannelActorState {
                 self.counterparty_shutdown_signature = Some(partial_signature);
 
                 let flags = flags | ShuttingDownFlags::THEIR_CLOSING_SIGNED;
-                self.state = ChannelState::ShuttingDown(flags);
+                self.update_state(ChannelState::ShuttingDown(flags));
                 if flags.contains(ShuttingDownFlags::DROPPING_PENDING) {
-                    self.state = ChannelState::Closed;
+                    self.update_state(ChannelState::Closed);
                     let partial_signatures = self.order_things_for_musig2(
                         self.holder_shutdown_signature.unwrap(),
                         self.counterparty_shutdown_signature.unwrap(),
@@ -1720,7 +1772,9 @@ impl ChannelActorState {
         // TODO: should automatically check this periodically.
         if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) && !self.any_tlc_pending() {
             debug!("All pending tlcs are resolved, transitioning to ClosingSigned");
-            self.state = ChannelState::ShuttingDown(flags | ShuttingDownFlags::DROPPING_PENDING);
+            self.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::DROPPING_PENDING,
+            ));
 
             let signature = self.build_and_sign_shutdown_tx(
                 self.get_holder_shutdown_script(),
@@ -1765,7 +1819,9 @@ impl ChannelActorState {
             )));
         }
 
-        self.state = ChannelState::NegotiatingFunding(NegotiatingFundingFlags::INIT_SENT);
+        self.update_state(ChannelState::NegotiatingFunding(
+            NegotiatingFundingFlags::INIT_SENT,
+        ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.counterparty_nonce = Some(accept_channel.next_local_nonce.clone());
 
@@ -1791,6 +1847,7 @@ impl ChannelActorState {
     pub fn handle_tx_collaboration_msg(
         &mut self,
         msg: TxCollaborationMsg,
+        network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
         let is_complete_message = match msg {
@@ -1813,7 +1870,7 @@ impl ChannelActorState {
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!("Beginning processing tx collaboration message");
+                debug!("Started negotiating funding tx collaboration");
                 CollaboratingFundingTxFlags::empty()
             }
             ChannelState::CollaboratingFundingTx(_)
@@ -1827,8 +1884,8 @@ impl ChannelActorState {
             ChannelState::CollaboratingFundingTx(flags) => {
                 if flags.contains(CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT) {
                     return Err(ProcessingChannelError::InvalidState(format!(
-                        "Trying to process a tx collaboration message {:?} while in collaboration already completed on our side",
-                        &msg
+                        "Received a tx collaboration message {:?}, but we are already in the state {:?} where the remote has sent a complete message",
+                        &msg, &self.state
                     )));
                 }
                 debug!(
@@ -1846,16 +1903,30 @@ impl ChannelActorState {
         };
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
-                self.update_funding_tx(msg.tx)?;
-                self.state = ChannelState::CollaboratingFundingTx(
-                    CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
-                );
+                // TODO check if the tx is valid.
+                self.funding_tx = Some(msg.tx.clone().into_view());
+                if self.is_tx_final(&msg.tx)? {
+                    self.maybe_complete_tx_collaboration(msg.tx, network)?;
+                } else {
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::UpdateChannelFunding(
+                                self.get_id(),
+                                msg.tx.clone(),
+                                self.get_funding_request(2000),
+                            ),
+                        ))
+                        .expect("network alive");
+                    self.update_state(ChannelState::CollaboratingFundingTx(
+                        CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
+                    ));
+                }
             }
             TxCollaborationMsg::TxComplete(_msg) => {
                 self.check_tx_complete_preconditions()?;
-                self.state = ChannelState::CollaboratingFundingTx(
+                self.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT,
-                );
+                ));
             }
         }
         Ok(())
@@ -1925,6 +1996,124 @@ impl ChannelActorState {
 
         let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
 
+        let commitment_lock_context = CommitmentLockContext::get();
+        // Try to create an transaction which spends the commitment transaction, to
+        // verify that our code actually works.
+        if commitment_lock_context.is_testing() {
+            dbg!("Since we are in testing model, we will now create a revocation transaction to test our construction works");
+            let output_lock_script = commitment_lock_context.get_always_success_script(b"whatever");
+
+            let commitment_tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+
+            println!("The complete commitment transaction is {:?}", commitment_tx);
+            dbg!(
+                commitment_tx.hash(),
+                commitment_tx.cell_deps(),
+                commitment_tx.inputs(),
+                commitment_tx.outputs(),
+                commitment_tx.witnesses()
+            );
+
+            let context = commitment_lock_context.read_mock_context();
+            let context = &mut context.clone();
+
+            let revocation_keys = [
+                "8172cbf168dcb988d2849ea229603f843614a038e1baa83783aee2f9aeac32ea",
+                "e16a04c9d5d3d80bc0bb03c19dceddfc34a5017a885a57b9316bd9944022a088",
+            ]
+            .iter()
+            .map(|x| hex::decode(x).unwrap())
+            .collect::<Vec<_>>();
+            dbg!(&revocation_keys);
+
+            // Use the second output as an input to the new transaction.
+            // The first output is an immediate spendable output,
+            // while the second output is a delayed output locked by commitment lock.
+            let commitment_lock_index = 1;
+            let commitment_out_point = &commitment_tx.output_pts()[commitment_lock_index];
+            dbg!("commitment_out_point: {:?}", commitment_out_point);
+            let commitment_out_point = commitment_tx
+                .output_pts()
+                .get(commitment_lock_index)
+                .unwrap()
+                .clone();
+            let (commitment_lock_cell, commitment_lock_cell_data) = commitment_tx
+                .output_with_data(commitment_lock_index)
+                .unwrap();
+            dbg!("inputs to new_tx saved: {:?}", &commitment_tx);
+            dbg!("outpoint: {:?}", &commitment_out_point);
+            dbg!("Cell: {:?}", &commitment_lock_cell);
+            context.create_cell_with_out_point(
+                commitment_out_point.clone(),
+                commitment_lock_cell,
+                commitment_lock_cell_data,
+            );
+            // We can verify revocation tx works by
+            // verify the funding tx, commitment tx and revocation tx verify successfully.
+            dbg!(
+                "add the funding tx to test_verify_fixed_tx to verify our construction works",
+                &self.funding_tx
+            );
+            dbg!(
+                "add the commitment tx to test_verify_fixed_tx to verify our construction works",
+                &commitment_tx
+            );
+
+            let input = CellInput::new_builder()
+                .previous_output(commitment_out_point.clone())
+                .build();
+
+            dbg!("input: {:?}", &input);
+            let revocation_tx = TransactionBuilder::default()
+                .cell_deps(commitment_tx.cell_deps().clone())
+                .inputs(vec![input])
+                .outputs(vec![CellOutput::new_builder()
+                    .capacity(20.pack())
+                    .lock(output_lock_script.clone())
+                    .build()])
+                .outputs_data(vec![Default::default()])
+                .build();
+            dbg!(
+                "Built spending transaction with cell deps and inputs: {:?}",
+                &revocation_tx
+            );
+            let message: [u8; 32] = revocation_tx.hash().as_slice().try_into().unwrap();
+            dbg!("message: {:?}", hex::encode(&message));
+            let results = revocation_keys
+                    .iter()
+                    .map(|key| {
+                        let signature = ckb_crypto::secp::Privkey::from_slice(&key)
+                            .sign_recoverable(&message.into())
+                            .unwrap()
+                            .serialize();
+                        let witness_script = self.build_previous_commitment_transaction_witnesses(false);
+                        let witness = [witness_script.clone(), vec![0xFF], signature].concat();
+
+                        let revocation_tx = revocation_tx
+                            .as_advanced_builder()
+                            .witnesses(vec![witness.pack()])
+                            .build();
+
+                            dbg!("add the revocation tx to test_verify_fixed_tx to verify our construction works", &revocation_tx);
+
+                        dbg!(
+                            "Verifying spending transaction of commitment tx: {:?}",
+                            &revocation_tx
+                        );
+
+                        let result = context.verify_tx(&revocation_tx, 10_000_000);
+                        dbg!(&result);
+                        result.is_ok()
+                    })
+                    .collect::<Vec<_>>();
+            dbg!("validating results", &results);
+            // The person who firstly signs the transaction will give the other one
+            // the right to revoke the commitment transaction. While the other one
+            // can't revoke the commitment transaction, as this is not signed to
+            // allow his revocation key to revoke the commitment transaction.
+            assert!(results == vec![false, true] || results == vec![true, false]);
+        }
+
         debug!(
             "Successfully handled commitment signed message: {:?}, tx: {:?}",
             &commitment_signed, &tx
@@ -1935,7 +2124,7 @@ impl ChannelActorState {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
-                self.state = ChannelState::SigningCommitment(flags);
+                self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady(_) => {
@@ -1961,7 +2150,7 @@ impl ChannelActorState {
                         }),
                     ))
                     .expect("network actor alive");
-                self.state = ChannelState::ChannelReady(ChannelReadyFlags::empty());
+                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
             }
         }
         Ok(())
@@ -1974,7 +2163,9 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
             debug!("Commitment signed message sent by both sides, tranitioning to AwaitingTxSignatures state");
-            self.state = ChannelState::AwaitingTxSignatures(AwaitingTxSignaturesFlags::empty());
+            self.update_state(ChannelState::AwaitingTxSignatures(
+                AwaitingTxSignaturesFlags::empty(),
+            ));
             if self.should_holder_send_tx_signatures_first() {
                 debug!("It is our turn to send tx_signatures, so we will do it now.");
                 self.handle_tx_signatures(network, None)?;
@@ -2030,83 +2221,30 @@ impl ChannelActorState {
         let flags = if partial_witnesses.is_some() {
             flags | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT
         } else {
-            flags
+            flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT
         };
-        self.state = ChannelState::AwaitingTxSignatures(flags);
+        self.update_state(ChannelState::AwaitingTxSignatures(flags));
 
         let funding_tx = self
             .funding_tx
-            .as_ref()
+            .clone()
             .ok_or(ProcessingChannelError::InvalidState(
                 "Funding transaction is not present".to_string(),
             ))?;
 
-        let msg = match partial_witnesses {
-            Some(ref _partial_witnesses) => {
-                // TODO: filling the whole witnesses here.
-                let full_witnesses: Vec<ckb_types::packed::Bytes> = vec![];
-                let full_witnesses_u8 = full_witnesses
-                    .iter()
-                    .map(|w| w.as_slice().to_vec())
-                    .collect();
-
-                let funding_tx = funding_tx
-                    .as_advanced_builder()
-                    .set_witnesses(full_witnesses)
-                    .build();
-                self.funding_tx = Some(funding_tx.clone());
-                self.state = ChannelState::AwaitingTxSignatures(
-                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
-                );
-
-                // Since we have received a valid tx_signatures message, we're now sure that
-                // we can broadcast a valid transaction to the network, i.e. we can wait for
-                // the funding transaction to be confirmed.
-                network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::FundingTransactionPending(
-                            Transaction::default(),
-                            self.get_funding_transaction_outpoint(),
-                            self.get_id(),
-                        ),
-                    ))
-                    .expect("network actor alive");
-
-                PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::TxSignatures(TxSignatures {
-                        channel_id: self.get_id(),
-                        witnesses: full_witnesses_u8,
-                        tx_hash: funding_tx.hash().into(),
-                    }),
-                }
-            }
-            None => {
-                // TODO: creating partial witnesses here.
-                let partial_witnesses = vec![];
-                self.state = ChannelState::AwaitingTxSignatures(
-                    flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT,
-                );
-
-                PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::TxSignatures(TxSignatures {
-                        channel_id: self.get_id(),
-                        witnesses: partial_witnesses,
-                        tx_hash: funding_tx.hash().into(),
-                    }),
-                }
-            }
-        };
-        debug!(
-            "Handled tx_signatures, peer: {:?}, previous witnesses: {:?}, messge to send: {:?}",
-            &self.peer_id, &partial_witnesses, &msg
-        );
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(msg),
+                NetworkActorCommand::SignTx(
+                    self.peer_id.clone(),
+                    self.get_id(),
+                    funding_tx.data(),
+                    partial_witnesses,
+                ),
             ))
-            .expect("network actor alive");
+            .expect("network alive");
+        let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
+        self.update_state(ChannelState::AwaitingTxSignatures(flags));
+
         Ok(())
     }
 
@@ -2120,7 +2258,7 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let per_commitment_point = self.get_current_counterparty_commitment_point();
+        let per_commitment_point = self.get_previous_counterparty_commitment_point();
         if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Invalid per_commitment_secret".to_string(),
@@ -2132,33 +2270,68 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn update_funding_tx(&mut self, tx: Transaction) -> ProcessingChannelResult {
+    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         // TODO: check if the tx is valid
-        let tx = tx.into_view();
-        debug!("Updating funding transaction to {:?}", &tx);
+        let tx = tx.clone().into_view();
+
         let first_output = tx
             .outputs()
             .get(0)
             .ok_or(ProcessingChannelError::InvalidParameter(
                 "Funding transaction should have at least one output".to_string(),
             ))?;
-        debug!("New funding transaction output: {:?}", &first_output);
-        match self.funding_tx {
-            Some(ref current_tx) => {
-                debug!("Current funding transaction: {:?}", &current_tx);
-                debug!(
-                    "Current funding transaction output: {:?}",
-                    &current_tx.outputs().get(0)
-                );
-            }
-            None => {}
+
+        if first_output.lock() != self.get_funding_lock_script() {
+            dbg!(&tx, first_output.lock(), self.get_funding_lock_script());
+            // TODO: return an error here. We panic because we want to move fast.
+            panic!("Invalid funding transation")
         }
-        self.funding_tx = Some(tx);
+
+        let current_capacity: u64 = first_output.capacity().unpack();
+        let is_complete = current_capacity == (self.to_self_amount + self.to_remote_amount) as u64;
+        Ok(is_complete)
+    }
+
+    pub fn maybe_complete_tx_collaboration(
+        &mut self,
+        tx: Transaction,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        let is_complete = self.is_tx_final(&tx)?;
+
+        debug!(
+            "Checking if funding transaction {:?} is complete: {}",
+            &tx, is_complete
+        );
+
+        if is_complete {
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                        channel_id: self.get_id(),
+                        command: ChannelCommand::TxCollaborationCommand(
+                            TxCollaborationCommand::TxComplete(TxCompleteCommand {}),
+                        ),
+                    }),
+                ))
+                .expect("network alive");
+            let old_flags = match self.state {
+                ChannelState::CollaboratingFundingTx(flags) => flags,
+                _ => {
+                    panic!(
+                        "Must be in CollaboratingFundingTx state while running update_funding_tx"
+                    );
+                }
+            };
+            self.update_state(ChannelState::CollaboratingFundingTx(
+                old_flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
+            ));
+        }
         Ok(())
     }
 
     // TODO: More checks to the funding tx.
-    fn check_tx_complete_preconditions(&self) -> ProcessingChannelResult {
+    fn check_tx_complete_preconditions(&mut self) -> ProcessingChannelResult {
         match self.funding_tx.as_ref() {
             None => {
                 return Err(ProcessingChannelError::InvalidState(
@@ -2185,6 +2358,41 @@ impl ChannelActorState {
                     return Err(ProcessingChannelError::InvalidParameter(
                         format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount) 
                     ));
+                }
+
+                let commtiment_lock_context = CommitmentLockContext::get();
+                // Just create a cell with the same capacity as the first output of the funding tx.
+                // This is to test the validity of the commitment tx that spends the funding tx.
+                if commtiment_lock_context.is_testing() {
+                    let always_success = commtiment_lock_context
+                        .get_always_success_script(b"funding transaction test");
+                    let mut context = commtiment_lock_context.write_mock_context();
+                    let context = &mut context;
+                    let funding_tx = Transaction::default()
+                        .as_advanced_builder()
+                        .outputs([CellOutput::new_builder()
+                            .capacity(first_output.capacity())
+                            .lock(always_success)
+                            .build()])
+                        .outputs_data(vec![Default::default()])
+                        .build();
+                    dbg!("funding_tx before completion: {:?}", &funding_tx);
+                    let funding_tx = context.complete_tx(funding_tx);
+
+                    dbg!("funding_tx after completion: {:?}", &funding_tx);
+
+                    let result = context.verify_tx(&funding_tx, 10_000_000);
+                    dbg!(&result);
+                    assert!(result.is_ok());
+
+                    // Save this transaction so that we can find it later.
+                    let outpoint = funding_tx.output_pts().get(0).unwrap().clone();
+                    let (cell, cell_data) = funding_tx.output_with_data(0).unwrap();
+                    dbg!("funding_tx saved: {:?}", &funding_tx);
+                    dbg!("outpoint: {:?}", &outpoint);
+                    dbg!("Cell: {:?}", &cell);
+                    context.create_cell_with_out_point(outpoint, cell, cell_data);
+                    self.funding_tx = Some(funding_tx);
                 }
             }
         }
@@ -2257,13 +2465,9 @@ impl ChannelActorState {
         _holder_shutdown_script: &Script,
         _counterparty_shutdown_script: &Script,
     ) -> TransactionView {
+        let commitment_lock_context = CommitmentLockContext::get();
         let tx_builder = TransactionBuilder::default()
-            .cell_dep(
-                CellDep::new_builder()
-                    .out_point(get_commitment_lock_outpoint())
-                    .dep_type(DepType::Code.into())
-                    .build(),
-            )
+            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(
                 CellInput::new_builder()
                     .previous_output(self.get_funding_transaction_outpoint())
@@ -2297,7 +2501,7 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(self);
         let signature = sign_ctx.sign(message.as_slice())?;
         debug!(
-            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            "Signed shutdown tx ({:?}) message {:?} with signature {:?}",
             &tx, &message, &signature,
         );
         Ok(signature)
@@ -2372,14 +2576,10 @@ impl ChannelActorState {
     }
 
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
+        let commitment_lock_context = CommitmentLockContext::get();
         let input = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
-            .cell_dep(
-                CellDep::new_builder()
-                    .out_point(get_commitment_lock_outpoint())
-                    .dep_type(DepType::Code.into())
-                    .build(),
-            )
+            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(CellInput::new_builder().previous_output(input).build());
 
         let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
@@ -2389,31 +2589,37 @@ impl ChannelActorState {
         tx_builder.build()
     }
 
-    fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
-        let (to_broadcaster_value, to_countersignatory_value) =
-            self.get_broadcaster_and_countersignatory_amounts(local);
-
-        let immediate_payment_key = {
-            let (commitment_point, base_payment_key) = if local {
-                (
-                    self.get_current_counterparty_commitment_point(),
-                    self.get_counterparty_channel_parameters()
-                        .payment_base_key(),
-                )
-            } else {
-                (
-                    self.get_current_holder_commitment_point(),
-                    self.get_holder_channel_parameters().payment_base_key(),
-                )
-            };
-            derive_payment_pubkey(base_payment_key, &commitment_point)
+    fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+        let commitment_number = if local {
+            self.holder_commitment_number - 1
+        } else {
+            self.counterparty_commitment_number - 1
         };
+        dbg!(
+            "Building previous commitment transaction witnesses for",
+            local,
+            commitment_number
+        );
+        self.build_commitment_transaction_witnesses(local, commitment_number)
+    }
+
+    // We need this function both for building new commitment transaction and revoking old commitment transaction.
+    fn build_commitment_transaction_witnesses(
+        &self,
+        local: bool,
+        commitment_number: u64,
+    ) -> Vec<u8> {
+        dbg!(
+            "Building commitment transaction witnesses for commitment number",
+            commitment_number,
+            local
+        );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
                 (
                     self.get_holder_channel_parameters().selected_contest_delay,
-                    self.get_current_holder_commitment_point(),
+                    self.get_holder_commitment_point(commitment_number),
                     self.get_holder_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_holder_channel_parameters().revocation_base_key(),
@@ -2422,13 +2628,14 @@ impl ChannelActorState {
                 (
                     self.get_counterparty_channel_parameters()
                         .selected_contest_delay,
-                    self.get_current_counterparty_commitment_point(),
+                    self.get_counterparty_commitment_point(commitment_number),
                     self.get_counterparty_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_counterparty_channel_parameters()
                         .revocation_base_key(),
                 )
             };
+            dbg!(delay, base_delayed_payment_key, base_revocation_key);
             (
                 delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
@@ -2437,6 +2644,8 @@ impl ChannelActorState {
         };
 
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
+        // TODO: we actually need a historical snapshot of tlcs for the commitment number.
+        // This currently only works for the current commitment number.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.pending_received_tlcs
@@ -2466,11 +2675,18 @@ impl ChannelActorState {
             b.sort_by(|x, y| x.id.cmp(&y.id));
             [a, b].concat()
         };
-        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
-        // In the commitment transaction, we need also to include the amount of the TLCs.
-        let to_broadcaster_value =
-            to_broadcaster_value as u64 + tlcs.iter().map(|tlc| tlc.amount).sum::<u128>() as u64;
 
+        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
+        let revocation_key_hash = blake2b_256(revocation_key.serialize());
+
+        dbg!(
+            &tlcs,
+            local,
+            delayed_payment_key,
+            hex::encode(&delayed_payment_key_hash[..20]),
+            revocation_key,
+            hex::encode(&revocation_key_hash[..20])
+        );
         let witnesses: Vec<u8> = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
@@ -2481,29 +2697,64 @@ impl ChannelActorState {
                 .collect(),
         ]
         .concat();
+        witnesses
+    }
 
-        // TODO: fill in the actual lock script.
-        let secp256k1_lock_script = Script::default();
-        let commitment_lock_script = Script::default();
+    fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
+        let (to_broadcaster_value, to_countersignatory_value) =
+            self.get_broadcaster_and_countersignatory_amounts(local);
+
+        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
+        // In the commitment transaction, we need also to include the amount of the TLCs.
+        let to_broadcaster_value = to_broadcaster_value as u64
+            + self
+                .get_all_tlcs()
+                .iter()
+                .map(|tlc| tlc.amount)
+                .sum::<u128>() as u64;
+
+        let immediate_payment_key = {
+            let (commitment_point, base_payment_key) = if local {
+                (
+                    self.get_previous_counterparty_commitment_point(),
+                    self.get_counterparty_channel_parameters()
+                        .payment_base_key(),
+                )
+            } else {
+                (
+                    self.get_current_holder_commitment_point(),
+                    self.get_holder_channel_parameters().payment_base_key(),
+                )
+            };
+            derive_payment_pubkey(base_payment_key, &commitment_point)
+        };
+
+        let witnesses: Vec<u8> = self.build_previous_commitment_transaction_witnesses(local);
+
+        let hash = blake2b_256(&witnesses);
+        dbg!(
+            "witness in host",
+            hex::encode(&witnesses),
+            "witness hash",
+            hex::encode(&hash[..20]),
+            local,
+            self.holder_commitment_number,
+            self.counterparty_commitment_number
+        );
+        let commitment_lock_ctx = CommitmentLockContext::get();
+        let secp256k1_lock_script = commitment_lock_ctx
+            .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
+        let commitment_lock_script =
+            commitment_lock_ctx.get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
 
         let outputs = vec![
             CellOutput::new_builder()
                 .capacity((to_countersignatory_value as u64).pack())
-                .lock(
-                    secp256k1_lock_script
-                        .as_builder()
-                        .args(blake2b_256(immediate_payment_key.serialize())[0..20].pack())
-                        .build(),
-                )
+                .lock(secp256k1_lock_script)
                 .build(),
             CellOutput::new_builder()
                 .capacity((to_broadcaster_value as u64).pack())
-                .lock(
-                    commitment_lock_script
-                        .as_builder()
-                        .args(blake2b_256(witnesses)[0..20].pack())
-                        .build(),
-                )
+                .lock(commitment_lock_script)
                 .build(),
         ];
         let outputs_data = vec![Bytes::default(); outputs.len()];
@@ -2517,6 +2768,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let verify_ctx = Musig2VerifyContext::from(self);
 
+        dbg!("Calling build_commitment_tx from build_and_verify_commitment_tx");
         let tx = self.build_commitment_tx(false);
         let message = get_tx_message_to_sign(&tx);
         debug!(
@@ -2532,6 +2784,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let sign_ctx = Musig2SignContext::from(self);
 
+        dbg!("Calling build_commitment_tx from build_and_sign_commitment_tx");
         let tx = self.build_commitment_tx(true);
         let message = get_tx_message_to_sign(&tx);
 
@@ -2542,6 +2795,44 @@ impl ChannelActorState {
         );
 
         Ok(PartiallySignedCommitmentTransaction { tx, signature })
+    }
+
+    /// Verify the partial signature from the peer and create a complete transaction
+    /// with valid witnesses.
+    pub fn verify_and_complete_tx(
+        &self,
+        signature: PartialSignature,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        dbg!("Calling build_commitment_tx from verify_and_complete_tx");
+        let tx = self.build_and_verify_commitment_tx(signature)?;
+        dbg!(
+            "verify_and_complete_tx build_and_verify_commitment_tx tx: {:?}",
+            &tx.tx,
+            tx.tx.hash(),
+            tx.tx.cell_deps(),
+            tx.tx.inputs(),
+            tx.tx.outputs(),
+            tx.tx.witnesses()
+        );
+        let sign_ctx = Musig2SignContext::from(self);
+
+        let message = get_tx_message_to_sign(&tx.tx);
+
+        let signature2 = sign_ctx.sign(message.as_slice())?;
+        debug!(
+            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
+            &tx, &message, &signature2,
+        );
+
+        let signatures = self.order_things_for_musig2(signature, signature2);
+        let tx = aggregate_partial_signatures_for_tx(
+            tx.tx,
+            Musig2VerifyContext::from(&*self),
+            signatures,
+        )
+        .expect("The validity of the signatures verified");
+        dbg!("verify_and_complete_tx tx: {:?}", &tx);
+        Ok(tx)
     }
 }
 
@@ -2654,16 +2945,6 @@ impl Musig2SignContext {
     }
 }
 
-fn get_commitment_lock_outpoint() -> OutPoint {
-    // TODO: Use real commitment lock outpoint here.
-    let commitment_lock_outpoint = OutPoint::new_builder()
-        .tx_hash(Byte32::zero())
-        .index(0u32.pack())
-        .build();
-
-    commitment_lock_outpoint
-}
-
 fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
     let hash = tx.hash();
     hash
@@ -2674,6 +2955,8 @@ pub fn aggregate_partial_signatures_for_tx(
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
 ) -> Result<TransactionView, ProcessingChannelError> {
+    debug!("Aggregating partial signatures for tx {:?}", &tx);
+
     let message = get_tx_message_to_sign(&tx);
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
@@ -3005,6 +3288,12 @@ impl InMemorySigner {
 
     pub fn derive_revocation_key(&self, commitment_number: u64) -> Privkey {
         let per_commitment_point = self.get_commitment_point(commitment_number);
+        debug!(
+            "Revocation key: {}",
+            hex::encode(
+                derive_private_key(&self.revocation_base_key, &per_commitment_point).as_ref()
+            )
+        );
         derive_private_key(&self.revocation_base_key, &per_commitment_point)
     }
 
@@ -3036,12 +3325,13 @@ mod tests {
     use ckb_types::{
         core::{DepType, ScriptHashType},
         packed::{CellDep, CellInput, CellOutput, OutPoint, Transaction},
-        prelude::{AsTransactionBuilder, Pack},
+        prelude::{AsTransactionBuilder, Pack, Unpack},
     };
     use molecule::prelude::{Builder, Entity};
 
     use crate::{
         ckb::{
+            chain::CommitmentLockContext,
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3307,5 +3597,51 @@ mod tests {
                 _ => false,
             })
             .await;
+    }
+
+    #[test]
+    fn test_verify_fixed_tx() {
+        use ckb_types::prelude::IntoTransactionView;
+        let mock_ctx = CommitmentLockContext::get();
+
+        let mut context = mock_ctx.write_mock_context();
+        context.set_capture_debug(true);
+        // These three transactions are are respectively funding tx, commitment tx
+        // and revocation tx that tries to revoke a commitment tx.
+        let funding_tx = "b50000000c000000b1000000a50000001c0000002000000024000000280000002c00000099000000000000000000000000000000000000006d0000000800000065000000100000001800000065000000dc050000000000004d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf011800000066756e64696e67207472616e73616374696f6e20746573740c000000080000000000000004000000";
+        let commitment_tx = "260200000c000000da010000ce0100001c00000020000000b8000000bc000000ec000000ba0100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef68229591000000000000000000010000000000000000000000396a405a3fc223ce968a7e6cd7907fcdb9c18d0d40eed8c7ee5d75060d6c646900000000ce0000000c0000006d00000061000000100000001800000061000000e8030000000000004900000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf01140000009a480101f0c18c6ef7dbcdf54b6278212be5138961000000100000001800000061000000f40100000000000049000000100000003000000031000000c5421e17391f3acfb8093c02a4c434d6d9a812abb7ae59270ee680e1ab318fcf011400000051dcdb6df954a4108e46ce2dba4e677298af9028140000000c0000001000000000000000000000004c000000080000004000000068c8433bd151fa8d30f819d46d67835bcfba9d3ed5784ab7c07e0de3203393dcc137f3b7f80e74e49b01160d31ce558a8c8d21da315d95882620221f2c60350d";
+        let revocation_tx_1 = "df0100000c00000061010000550100001c00000020000000b8000000bc000000ec000000490100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef682295910000000000000000000100000000000000000000000793996ad02bd5d606c8c6d2796530d25264f6ba0c3e8ca3cbf6d5300427f5d7010000005d000000080000005500000010000000180000005500000014000000000000003d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf010800000077686174657665720c00000008000000000000007e00000008000000720000000a00000000000080f2aa0645547c88cd9ed0934c57f113acc4dca6c4ba781a397bbb0499b92db1a9b001bd32fb2437f0ff1bde73b64d5884297d6383ae16bd07ea1b6ca0537d233325a2e6482845b31ce27ffc61fd95d9696af95a05c44547902ea4ea95e109778934d90386c0bc8275d201";
+        let revocation_tx_2 = "df0100000c00000061010000550100001c00000020000000b8000000bc000000ec000000490100000000000004000000e568e3de32f5b76dbc0be25d79766dcdb58db2235d89f81a8bc814ea3f0e34230000000000f35610d6419f54554eccb5c2d2b5b372c9968c53fb6235e434c0cf0c766406e60000000000f70d0547fe8e1cbcca65b00d5f8c48306d0c314aa0bea8111992e27baea28b280000000000d827a2c78f8cf89f39b63b66a878f4537b7601021e1c2dba8534edef682295910000000000000000000100000000000000000000000793996ad02bd5d606c8c6d2796530d25264f6ba0c3e8ca3cbf6d5300427f5d7010000005d000000080000005500000010000000180000005500000014000000000000003d00000010000000300000003100000079c1c32b392db873b38b9c76c3fcd4b2858e53698c004a7c23a08997db457ebf010800000077686174657665720c00000008000000000000007e00000008000000720000000a00000000000080f2aa0645547c88cd9ed0934c57f113acc4dca6c4ba781a397bbb0499b92db1a9b001bd32fb2437f0ffba865a25ccf672437b7041d0d5c6733a72d8051dee7ba9686671bee606c23b9f71a401a354abe792e821947dd353bca4a090ae4373d997624eeedfe2041ce18d01";
+        for (i, tx) in [funding_tx, commitment_tx, revocation_tx_1, revocation_tx_2]
+            .iter()
+            .enumerate()
+        {
+            dbg!("Processing tx", i);
+            let tx = Transaction::from_slice(hex::decode(tx).unwrap().as_slice())
+                .unwrap()
+                .into_view();
+            let result = context.verify_tx(&tx, 10_000_000);
+            dbg!("Verifying tx", &tx);
+            let mock_tx = context.dump_tx(&tx);
+            dbg!(
+                &result,
+                &tx,
+                &serde_json::to_writer_pretty(
+                    std::fs::File::create(format!("foo{i}.json")).unwrap(),
+                    &mock_tx.unwrap()
+                )
+            );
+            for outpoint in tx.output_pts_iter() {
+                let index: u32 = outpoint.index().unpack();
+                let (cell, cell_data) = tx.output_with_data(index as usize).unwrap();
+                dbg!(
+                    "Creating cell with celloutput and data",
+                    &outpoint,
+                    &cell,
+                    &cell_data
+                );
+                context.create_cell_with_out_point(outpoint, cell, cell_data);
+            }
+        }
     }
 }

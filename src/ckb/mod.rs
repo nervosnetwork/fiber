@@ -1,4 +1,4 @@
-mod config;
+pub mod config;
 pub use config::CkbConfig;
 
 mod network;
@@ -20,3 +20,5 @@ pub mod serde_utils;
 
 #[cfg(test)]
 pub mod test_utils;
+
+pub mod chain;

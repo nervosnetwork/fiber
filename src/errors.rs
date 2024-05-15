@@ -2,11 +2,11 @@ use ractor::{MessagingErr, SpawnErr};
 use tentacle::{error::SendErrorKind, secio::PeerId};
 use thiserror::Error;
 
-use crate::ckb::{
+use crate::{ckb::{
     channel::{ChannelActorMessage, ProcessingChannelError},
     types::Hash256,
     NetworkActorMessage,
-};
+}, ckb_chain::FundingError};
 
 use crate::invoice::InvoiceError;
 
@@ -30,6 +30,8 @@ pub enum Error {
     ChannelError(#[from] ProcessingChannelError),
     #[error("Invoice error: {0:?}")]
     CkbInvoiceError(#[from] InvoiceError),
+    #[error("Funding error: {0}")]
+    FundingError(#[from] FundingError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

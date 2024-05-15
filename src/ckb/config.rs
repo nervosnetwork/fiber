@@ -1,9 +1,12 @@
 use std::{fs, path::PathBuf};
 
+use ckb_sdk::NetworkType;
+use clap::ValueEnum;
 use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
+use serde::Deserialize;
 
 use crate::Result;
 
@@ -39,6 +42,33 @@ pub struct CkbConfig {
         env
     )]
     pub(crate) announced_node_name: String,
+
+    /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
+    #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]
+    pub network: Option<CkbNetwork>,
+}
+
+// Basically ckb_sdk::types::NetworkType. But we added a `Mocknet` variant.
+// And we can't use `ckb_sdk::types::NetworkType` directly because it is not `ValueEnum`.
+#[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
+pub enum CkbNetwork {
+    Mocknet,
+    Mainnet,
+    Testnet,
+    Staging,
+    Dev,
+}
+
+impl From<CkbNetwork> for Option<NetworkType> {
+    fn from(network: CkbNetwork) -> Self {
+        match network {
+            CkbNetwork::Mocknet => None,
+            CkbNetwork::Mainnet => Some(NetworkType::Mainnet),
+            CkbNetwork::Testnet => Some(NetworkType::Testnet),
+            CkbNetwork::Staging => Some(NetworkType::Staging),
+            CkbNetwork::Dev => Some(NetworkType::Dev),
+        }
+    }
 }
 
 impl CkbConfig {
