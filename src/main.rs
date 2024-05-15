@@ -1,7 +1,7 @@
-use ckb_pcn_node::invoice::start_invoice;
-use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use ckb_pcn_node::ckb::chain::CommitmentLockContext;
 use ckb_pcn_node::ckb::config::CkbNetwork;
+use ckb_pcn_node::invoice::start_invoice;
+use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use log::{debug, error, info};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -67,7 +67,7 @@ pub async fn main() {
             );
             for bootnode in &ckb_config.bootnode_addrs {
                 let addr = Multiaddr::from_str(bootnode).expect("valid bootnode");
-                let command = (NetworkActorCommand::ConnectPeer(addr), None);
+                let command = NetworkActorCommand::ConnectPeer(addr);
                 command_sender
                     .send(command)
                     .await
@@ -110,6 +110,7 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
+            let cloned_ckb_actor = ckb_actor.clone();
             // TODO: we should really pass the created actor to other components.
             new_tokio_task_tracker().spawn(async move {
                 debug!("Starting command receiver");
@@ -122,9 +123,9 @@ pub async fn main() {
                                     debug!("Command receiver completed");
                                     break;
                                 }
-                                Some((command, sender)) => {
+                                Some(command) => {
                                     debug!("Received command: {:?}", command);
-                                    ckb_actor.send_message(NetworkActorMessage::Command(command, sender)).expect("network actor alive");
+                                    cloned_ckb_actor.send_message(NetworkActorMessage::new_command(command)).expect("network actor alive");
                                 }
                             }
                         }
@@ -136,8 +137,7 @@ pub async fn main() {
                 }
                 debug!("Command sender service exited");
             });
-
-            Some(command_sender)
+            Some(ckb_actor)
         }
         None => None,
     };

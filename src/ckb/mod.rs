@@ -1,7 +1,7 @@
 pub mod config;
 pub use config::CkbConfig;
 
-mod network;
+pub mod network;
 pub use network::start_ckb;
 pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,

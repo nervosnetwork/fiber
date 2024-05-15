@@ -18,10 +18,12 @@ headers {
 body:json {
   {
     "request": {
-      "OpenChannel": {
-        "peer_id": "{{NODE1_PEERID}}",
-        "funding_amount": 50000000000
-      }
+      "OpenChannel": [
+        {
+          "peer_id": "{{NODE1_PEERID}}",
+          "funding_amount": 50000000000
+        }
+      ]
     }
   }
 }

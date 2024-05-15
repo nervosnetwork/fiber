@@ -36,7 +36,7 @@ use crate::{
 
 use super::{
     key::blake2b_hash_with_salt,
-    network::{OpenChannelCommand, PCNMessageWithPeerId},
+    network::PCNMessageWithPeerId,
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
@@ -122,25 +122,11 @@ pub struct TxUpdateCommand {
 #[derive(Clone, Debug, Deserialize)]
 pub struct TxCompleteCommand {}
 
-impl OpenChannelCommand {
-    pub fn create_channel(&self) -> Result<ChannelActorState, ProcessingChannelError> {
-        // Use a deterministic RNG for now to facilitate development.
-        let seed = 42u64.to_le_bytes();
-
-        Ok(ChannelActorState::new_outbound_channel(
-            &seed,
-            self.peer_id.clone(),
-            self.funding_amount,
-            LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
-        ))
-    }
-}
-
 pub enum ChannelInitializationParameter {
-    /// To open a new channel to another peer, the funding amount and
-    /// a unique channel seed to generate unique channel id,
-    /// must be given.
-    OpenChannel(u128, [u8; 32]),
+    /// To open a new channel to another peer, the funding amount,
+    /// the temporary channel id a unique channel seed to generate
+    /// channel secrets must be given.
+    OpenChannel(u128, Hash256, [u8; 32]),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// and original OpenChannel message must be given.
@@ -637,12 +623,13 @@ impl Actor for ChannelActor {
                 ));
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannel(funding_amount, seed) => {
+            ChannelInitializationParameter::OpenChannel(funding_amount, temp_channel_id, seed) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     &seed,
+                    temp_channel_id,
                     self.peer_id.clone(),
                     funding_amount,
                     LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
@@ -996,7 +983,7 @@ pub enum ChannelState {
     Closed,
 }
 
-fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
+pub fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
     blake2b_256(seed).into()
 }
 
@@ -1108,11 +1095,11 @@ impl ChannelActorState {
 
     pub fn new_outbound_channel(
         seed: &[u8],
+        new_channel_id: Hash256,
         peer_id: PeerId,
         value: u128,
         to_self_delay: LockTime,
     ) -> Self {
-        let new_channel_id = new_channel_id_from_seed(seed);
         let signer = InMemorySigner::generate_from_seed(seed);
         let commitment_number = 1;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
@@ -1914,7 +1901,7 @@ impl ChannelActorState {
                                 self.get_id(),
                                 msg.tx.clone(),
                                 // TODO: use fee rate set by the user.
-                                self.get_funding_request(20000), 
+                                self.get_funding_request(20000),
                             ),
                         ))
                         .expect("network alive");
@@ -3525,7 +3512,7 @@ mod tests {
         node_a
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(open_channel_command),
+                NetworkActorCommand::OpenChannel(open_channel_command, None),
             ))
             .expect("node_a alive");
         node_b
@@ -3550,10 +3537,13 @@ mod tests {
         node_a
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(OpenChannelCommand {
-                    peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
-                }),
+                NetworkActorCommand::OpenChannel(
+                    OpenChannelCommand {
+                        peer_id: node_b.peer_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
             ))
             .expect("node_a alive");
         let channel_id = node_b

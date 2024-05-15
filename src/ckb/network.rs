@@ -5,8 +5,9 @@ use log::{debug, error, info, warn};
 
 use ractor::{
     async_trait as rasync_trait, call_t, cast, Actor, ActorCell, ActorProcessingErr, ActorRef,
+    RpcReplyPort,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::HashSet;
 use std::{collections::HashMap, str};
@@ -32,8 +33,8 @@ use tokio::sync::mpsc;
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
-    ProcessingChannelResult,
+    new_channel_id_from_seed, ChannelActorMessage, ChannelCommandWithId, ChannelEvent,
+    ProcessingChannelError, ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -53,6 +54,11 @@ pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 
+#[derive(Debug, Serialize)]
+pub struct OpenChannelResponse {
+    pub channel_id: Hash256,
+}
+
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub enum NetworkActorCommand {
@@ -65,7 +71,12 @@ pub enum NetworkActorCommand {
     // Directly send a message to session
     SendPcnMessageToSession(PCNMessageWithSessionId),
     // Open a channel to a peer.
-    OpenChannel(OpenChannelCommand),
+    OpenChannel(
+        OpenChannelCommand,
+        // The following field is used to send the result back to the caller.
+        // This field is set only when the message is constructed from `ractor::rpc::call`.
+        #[serde(skip)] Option<RpcReplyPort<Result<OpenChannelResponse, ProcessingChannelError>>>,
+    ),
     // Accept a channel to a peer.
     AcceptChannel(AcceptChannelCommand),
     // Send a command to a channel.
@@ -103,7 +114,7 @@ impl NetworkActorMessage {
     }
 
     pub fn new_command(command: NetworkActorCommand) -> Self {
-        Self::Command(command, None)
+        Self::Command(command)
     }
 }
 
@@ -159,11 +170,7 @@ pub enum NetworkActorEvent {
 
 #[derive(Debug)]
 pub enum NetworkActorMessage {
-    Command(
-        NetworkActorCommand,
-        // TODO: we may need to refine the following type according to each commands.
-        Option<mpsc::Sender<crate::Result<()>>>,
-    ),
+    Command(NetworkActorCommand),
     Event(NetworkActorEvent),
 }
 
@@ -292,8 +299,11 @@ impl NetworkActor {
                 // may receive errors like DialerError.
             }
 
-            NetworkActorCommand::OpenChannel(open_channel) => {
-                state.create_outbound_channel(open_channel).await?;
+            NetworkActorCommand::OpenChannel(open_channel, reply) => {
+                let (channel_id, _) = state.create_outbound_channel(open_channel).await?;
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
+                }
             }
             NetworkActorCommand::AcceptChannel(accept_channel) => {
                 state.create_inbound_channel(accept_channel).await?;
@@ -481,23 +491,25 @@ impl NetworkActorState {
     pub async fn create_outbound_channel(
         &mut self,
         open_channel: OpenChannelCommand,
-    ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
+    ) -> Result<(Hash256, ActorRef<ChannelActorMessage>), ProcessingChannelError> {
         let network = self.network.clone();
         let OpenChannelCommand {
             peer_id,
             funding_amount,
         } = open_channel;
-        Ok(Actor::spawn_linked(
-            None,
-            ChannelActor::new(peer_id.clone(), network.clone()),
-            ChannelInitializationParameter::OpenChannel(
-                funding_amount,
-                self.generate_channel_seed(),
-            ),
-            network.clone().get_cell(),
-        )
-        .await?
-        .0)
+        let seed = self.generate_channel_seed();
+        let temp_channel_id = new_channel_id_from_seed(seed.as_slice());
+        Ok((
+            temp_channel_id,
+            Actor::spawn_linked(
+                None,
+                ChannelActor::new(peer_id.clone(), network.clone()),
+                ChannelInitializationParameter::OpenChannel(funding_amount, temp_channel_id, seed),
+                network.clone().get_cell(),
+            )
+            .await?
+            .0,
+        ))
     }
 
     pub async fn create_inbound_channel(
@@ -896,10 +908,10 @@ impl Actor for NetworkActor {
                     state.on_funding_transaction_confirmed(outpoint).await?
                 }
             },
-            NetworkActorMessage::Command(command, sender) => {
+            NetworkActorMessage::Command(command) => {
                 let result = self.handle_command(myself, state, command).await;
-                if let Some(sender) = sender {
-                    sender.send(result).await.expect("receiver not closed");
+                if let Err(err) = result {
+                    error!("Failed to handle ckb network command: {}", err);
                 }
             }
         }
