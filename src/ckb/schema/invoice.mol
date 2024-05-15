@@ -1,0 +1,91 @@
+import blockchain;
+
+array PaymentHash [byte; 32];
+array Preimage [byte; 32];
+array Signature [byte; 104];
+option ExpiryTimeOpt (Duration);
+option SignatureOpt (Signature);
+
+option AmountOpt (Uint128);
+
+// SI prefix comes from: https://en.wikipedia.org/wiki/International_System_of_Units
+option SiPrefixOpt (byte);
+option FeatureOpt (Uint32);
+
+table Duration {
+    seconds: Uint64,
+    nanos: Uint64,
+}
+
+table FinalHtlcTimeout {
+    attr_id: byte,
+    value: Uint64,
+}
+
+table FinalHtlcMinimumCltvExpiry {
+    attr_id: byte,
+    value: Uint64,
+}
+
+table ExpiryTime {
+    attr_id: byte,
+    value: Duration,
+}
+
+table Description {
+    attr_id: byte,
+    value: Bytes,
+}
+
+table FallbackAddr {
+    attr_id: byte,
+    value: Bytes,
+}
+
+table Feature {
+    attr_id: byte,
+    value: Uint64,
+}
+
+table UdtScript {
+    attr_id: byte,
+    value: Script,
+}
+
+table PayeePublicKey {
+    attr_id: byte,
+    value: Bytes,
+}
+
+table PaymentPreimage {
+    attr_id: byte,
+    value: Preimage,
+}
+
+union InvoiceAttr {
+    ExpiryTime,
+    Description,
+    FinalHtlcTimeout,
+    FinalHtlcMinimumCltvExpiry,
+    FallbackAddr,
+    Feature,
+    UdtScript,
+    PayeePublicKey,
+    PaymentPreimage,
+}
+
+vector InvoiceAttrsVec <InvoiceAttr>;
+
+table RawInvoiceData {
+    timestamp: Uint128,
+    payment_hash: PaymentHash,
+    attrs: InvoiceAttrsVec,
+}
+
+table RawCkbInvoice {
+    currency: byte,
+    amount: AmountOpt,
+    prefix: SiPrefixOpt,
+    signature: SignatureOpt,
+    data: RawInvoiceData,
+}

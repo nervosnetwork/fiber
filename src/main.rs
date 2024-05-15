@@ -1,3 +1,5 @@
+use ckb_pcn_node::invoice::start_invoice;
+use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use ckb_pcn_node::ckb::chain::CommitmentLockContext;
 use ckb_pcn_node::ckb::config::CkbNetwork;
 use log::{debug, error, info};
@@ -157,10 +159,27 @@ pub async fn main() {
         None => None,
     };
 
+    let invoice_command_sender = {
+        const CHANNEL_SIZE: usize = 4000;
+        let (command_sender, command_receiver) =
+            mpsc::channel::<InvoiceCommandWithReply>(CHANNEL_SIZE);
+        info!("Starting cch");
+        start_invoice(
+            command_receiver,
+            new_tokio_cancellation_token(),
+            new_tokio_task_tracker(),
+        )
+        .await;
+        Some(command_sender)
+    };
+
     // Start rpc service
     if let Some(rpc_config) = config.rpc {
-        if ckb_command_sender.is_none() && cch_command_sender.is_none() {
-            error!("Rpc service requires ckb or chh service to be started. Exiting.");
+        if ckb_command_sender.is_none()
+            && cch_command_sender.is_none()
+            && invoice_command_sender.is_none()
+        {
+            error!("Rpc service requires ckb, chh and invoice service to be started. Exiting.");
             return;
         }
 
@@ -173,6 +192,7 @@ pub async fn main() {
                 rpc_config,
                 ckb_command_sender,
                 cch_command_sender,
+                invoice_command_sender,
                 shutdown_signal,
             )
             .await;

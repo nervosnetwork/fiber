@@ -1,0 +1,35 @@
+meta {
+  name: generate duplicate invoice
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE3_RPC_URL}}/invoice
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+    {
+        "request": {
+            "NewInvoice": {
+                "amount": 100,
+                "currency": "Ckb",
+                "description": "test invoice",
+                "expiry": 3600,
+                "payment_hash":  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "final_cltv": 40
+            }
+        }
+    }
+}
+
+assert {
+  res.status: eq 400
+}

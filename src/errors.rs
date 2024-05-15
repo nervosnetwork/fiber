@@ -8,6 +8,8 @@ use crate::{ckb::{
     NetworkActorMessage,
 }, ckb_chain::FundingError};
 
+use crate::invoice::InvoiceError;
+
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("IO error: {0}")]
@@ -26,6 +28,8 @@ pub enum Error {
     NetworkMessagingErr(#[from] MessagingErr<NetworkActorMessage>),
     #[error("Failed to processing channel: {0}")]
     ChannelError(#[from] ProcessingChannelError),
+    #[error("Invoice error: {0:?}")]
+    CkbInvoiceError(#[from] InvoiceError),
     #[error("Funding error: {0}")]
     FundingError(#[from] FundingError),
 }
