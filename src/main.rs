@@ -21,10 +21,15 @@ use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[tokio::main]
 pub async fn main() {
-    let log_surffix = std::env::var("LOG_SURFFIX").unwrap();
-    env_logger::builder()
-        .format_suffix(log_surffix.leak())
-        .init();
+    let mut builder = env_logger::builder();
+    match std::env::var("LOG_SURFFIX") {
+        Ok(log_surffix) => {
+            info!("Setting log surffix to: {}", &log_surffix);
+            builder.format_suffix(log_surffix.leak());
+        }
+        Err(_) => {}
+    }
+    builder.init();
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);
