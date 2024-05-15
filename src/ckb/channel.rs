@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc::error::TrySendError, oneshot};
 
 use std::{
     borrow::Borrow,
@@ -129,8 +129,14 @@ pub enum ChannelInitializationParameter {
     OpenChannel(u128, Hash256, [u8; 32]),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
-    /// and original OpenChannel message must be given.
-    AcceptChannel(u128, [u8; 32], OpenChannel),
+    /// original OpenChannel message and an oneshot
+    /// channel to receive the new channel ID must be given.
+    AcceptChannel(
+        u128,
+        [u8; 32],
+        OpenChannel,
+        Option<oneshot::Sender<Hash256>>,
+    ),
 }
 
 #[derive(Debug)]
@@ -527,6 +533,7 @@ impl Actor for ChannelActor {
                 my_funding_amount,
                 seed,
                 open_channel,
+                oneshot_channel,
             ) => {
                 let peer_id = self.peer_id.clone();
                 debug!(
@@ -621,6 +628,9 @@ impl Actor for ChannelActor {
                 state.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::INIT_SENT,
                 ));
+                if let Some(sender) = oneshot_channel {
+                    sender.send(state.get_id()).expect("Receive not dropped");
+                }
                 Ok(state)
             }
             ChannelInitializationParameter::OpenChannel(funding_amount, temp_channel_id, seed) => {
@@ -3559,10 +3569,13 @@ mod tests {
         node_b
             .network_actor
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::AcceptChannel(AcceptChannelCommand {
-                    temp_channel_id: channel_id.clone(),
-                    funding_amount: 1000,
-                }),
+                NetworkActorCommand::AcceptChannel(
+                    AcceptChannelCommand {
+                        temp_channel_id: channel_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
             ))
             .expect("node_a alive");
 

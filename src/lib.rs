@@ -11,7 +11,7 @@ pub mod cch;
 pub use cch::{start_cch, CchConfig};
 
 pub mod rpc;
-pub use rpc::{start_rpc, RpcConfig};
+pub use rpc::{start_rpc, RpcConfig, RpcError};
 pub mod invoice;
 
 mod errors;

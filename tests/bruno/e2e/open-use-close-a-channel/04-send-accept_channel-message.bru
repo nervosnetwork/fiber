@@ -18,10 +18,12 @@ headers {
 body:json {
   {
     "request": {
-      "AcceptChannel": {
-        "temp_channel_id": "{{TEMP_CHANNEL_ID}}",
-        "funding_amount": 100000000000
-      }
+      "AcceptChannel": [
+        {
+          "temp_channel_id": "{{TEMP_CHANNEL_ID}}",
+          "funding_amount": 100000000000
+        }
+      ]
     }
   }
 }

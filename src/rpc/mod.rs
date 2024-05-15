@@ -31,6 +31,38 @@ pub struct HttpBody<T> {
     pub request: T,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpcError {
+    code: u16,
+    message: String,
+}
+
+impl From<&ProcessingChannelError> for RpcError {
+    fn from(err: &ProcessingChannelError) -> Self {
+        RpcError {
+            code: StatusCode::BAD_REQUEST.as_u16(),
+            message: format!("{:?}", err),
+        }
+    }
+}
+
+impl From<ProcessingChannelError> for RpcError {
+    fn from(err: ProcessingChannelError) -> Self {
+        Self::from(&err)
+    }
+}
+
+impl IntoResponse for RpcError {
+    fn into_response(self) -> Response {
+        // Also set the http status code
+        (
+            StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            Json(self),
+        )
+            .into_response()
+    }
+}
+
 type CkbRpcRequest = HttpBody<NetworkActorCommand>;
 type CchRpcRequest = HttpBody<CchCommand>;
 type InvoiceRpcRequest = HttpBody<InvoiceCommand>;
@@ -41,14 +73,14 @@ pub struct CkbRpcState {
 
 pub const TIMEOUT_MS: u64 = 60000;
 
-async fn call_network_actor<TReply, TMsgBuilder>(
+async fn call_network_actor<Error, TReply, TMsgBuilder>(
     actor: &ActorRef<NetworkActorMessage>,
     msg_builder: TMsgBuilder,
 ) -> Response
 where
+    Error: Into<RpcError> + core::fmt::Debug,
     TReply: Serialize,
-    TMsgBuilder:
-        FnOnce(RpcReplyPort<Result<TReply, ProcessingChannelError>>) -> NetworkActorCommand,
+    TMsgBuilder: FnOnce(RpcReplyPort<Result<TReply, Error>>) -> NetworkActorCommand,
 {
     let builder = |x| NetworkActorMessage::new_command(msg_builder(x));
     match ractor::rpc::call(
@@ -90,6 +122,12 @@ impl CkbRpcState {
             NetworkActorCommand::OpenChannel(open_channel, _) => {
                 call_network_actor(&self.ckb_network_actor, |reply_port| {
                     NetworkActorCommand::OpenChannel(open_channel, Some(reply_port))
+                })
+                .await
+            }
+            NetworkActorCommand::AcceptChannel(accept_channel, _) => {
+                call_network_actor(&self.ckb_network_actor, |reply_port| {
+                    NetworkActorCommand::AcceptChannel(accept_channel, Some(reply_port))
                 })
                 .await
             }

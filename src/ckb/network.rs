@@ -29,7 +29,7 @@ use tentacle::{
     ProtocolId, SessionId,
 };
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
@@ -48,7 +48,7 @@ use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::serde_utils::EntityWrapperHex;
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx};
-use crate::{unwrap_or_return, Error};
+use crate::{unwrap_or_return, Error, RpcError};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -59,6 +59,17 @@ pub struct OpenChannelResponse {
     pub channel_id: Hash256,
 }
 
+#[derive(Copy, Clone, Debug, Serialize)]
+pub struct AcceptChannelResponse {
+    pub old_channel_id: Hash256,
+    pub new_channel_id: Hash256,
+}
+
+/// The struct here is used both internally and as an API to the outside world.
+/// If we want to send a reply to the caller, we need to wrap the message with
+/// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
+/// need to hide it from the API. So in case a reply is needed, we need to put
+/// an optional RpcReplyPort in the of the definition of this message.
 #[serde_as]
 #[derive(Debug, Deserialize)]
 pub enum NetworkActorCommand {
@@ -73,12 +84,13 @@ pub enum NetworkActorCommand {
     // Open a channel to a peer.
     OpenChannel(
         OpenChannelCommand,
-        // The following field is used to send the result back to the caller.
-        // This field is set only when the message is constructed from `ractor::rpc::call`.
         #[serde(skip)] Option<RpcReplyPort<Result<OpenChannelResponse, ProcessingChannelError>>>,
     ),
     // Accept a channel to a peer.
-    AcceptChannel(AcceptChannelCommand),
+    AcceptChannel(
+        AcceptChannelCommand,
+        #[serde(skip)] Option<RpcReplyPort<Result<AcceptChannelResponse, RpcError>>>,
+    ),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
     UpdateChannelFunding(
@@ -305,8 +317,18 @@ impl NetworkActor {
                     let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                 }
             }
-            NetworkActorCommand::AcceptChannel(accept_channel) => {
-                state.create_inbound_channel(accept_channel).await?;
+            NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
+                let result = state.create_inbound_channel(accept_channel).await.map(
+                    |(_, old_id, new_id)| AcceptChannelResponse {
+                        old_channel_id: old_id,
+                        new_channel_id: new_id,
+                    },
+                );
+                debug!("Processed accept channel command, result: {:?}", &result);
+                if let Some(reply) = reply {
+                    let _ = reply.send(result.as_ref().map_err(Into::into).map(Clone::clone));
+                }
+                result?;
             }
 
             NetworkActorCommand::ControlPcnChannel(c) => {
@@ -515,7 +537,7 @@ impl NetworkActorState {
     pub async fn create_inbound_channel(
         &mut self,
         accept_channel: AcceptChannelCommand,
-    ) -> Result<ActorRef<ChannelActorMessage>, ProcessingChannelError> {
+    ) -> Result<(ActorRef<ChannelActorMessage>, Hash256, Hash256), ProcessingChannelError> {
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
@@ -531,22 +553,26 @@ impl NetworkActorState {
         let id = open_channel.channel_id;
         if let Some(channel) = self.channels.get(&id) {
             warn!("A channel of id {:?} is already created, returning it", &id);
-            return Ok(channel.clone());
+            return Ok((channel.clone(), temp_channel_id, id));
         }
 
+        let seed = self.generate_channel_seed();
+        let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone()),
             ChannelInitializationParameter::AcceptChannel(
                 funding_amount,
-                self.generate_channel_seed(),
+                seed,
                 open_channel,
+                Some(tx),
             ),
             network.clone().get_cell(),
         )
         .await?
         .0;
-        Ok(channel)
+        let new_id = rx.await.expect("msg received");
+        Ok((channel, temp_channel_id, new_id))
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
