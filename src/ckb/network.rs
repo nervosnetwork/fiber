@@ -3,7 +3,9 @@ use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use log::{debug, error, info, warn};
 
-use ractor::{async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef};
+use ractor::{
+    async_trait as rasync_trait, call_t, cast, Actor, ActorCell, ActorProcessingErr, ActorRef,
+};
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::HashSet;
@@ -459,6 +461,8 @@ pub struct NetworkActorState {
     to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
     // Channels in this hashmap are pending for funding transaction confirmation.
     pending_channels: HashMap<OutPoint, Hash256>,
+    // Used to broadcast and query network info.
+    chain_actor: ActorRef<CkbChainMessage>,
 }
 
 impl NetworkActorState {
@@ -652,6 +656,18 @@ impl NetworkActorState {
             "Funding transaction (outpoint {:?}) for channel {:?} is now ready. We can broadcast transaction {:?} now.",
             &outpoint, &channel_id, &transaction
         );
+        let transaction = transaction.into_view();
+        debug!("Trying to broadcast funding transaction {:?}", &transaction);
+        cast!(
+            self.chain_actor,
+            CkbChainMessage::SendTx(transaction.clone())
+        )
+        .expect("chain actor alive");
+        info!(
+            "Funding transactoin sent to the network: {}",
+            transaction.hash()
+        );
+
         Ok(())
     }
 
@@ -736,6 +752,7 @@ impl Actor for NetworkActor {
             channels: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
+            chain_actor: self.chain_actor.clone(),
         })
     }
 
