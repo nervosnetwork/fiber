@@ -1913,7 +1913,8 @@ impl ChannelActorState {
                             NetworkActorCommand::UpdateChannelFunding(
                                 self.get_id(),
                                 msg.tx.clone(),
-                                self.get_funding_request(2000),
+                                // TODO: use fee rate set by the user.
+                                self.get_funding_request(20000), 
                             ),
                         ))
                         .expect("network alive");
