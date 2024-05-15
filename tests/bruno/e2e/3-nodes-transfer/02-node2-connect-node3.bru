@@ -1,0 +1,35 @@
+meta {
+  name: connect peer
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{NODE2_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "ConnectPeer": "{{NODE3_ADDR}}"
+    }
+  }
+
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Dialing a peer is async in tentacle. Sleep for some time to make sure
+  // we're connected to the peer.
+  await new Promise(r => setTimeout(r, 1000));
+}

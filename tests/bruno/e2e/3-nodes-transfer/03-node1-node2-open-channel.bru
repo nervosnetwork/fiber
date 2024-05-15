@@ -1,0 +1,31 @@
+meta {
+  name: Node1 open a channel to Node2
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE1_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "OpenChannel": {
+        "peer_id": "{{NODE2_PEERID}}",
+        "funding_amount": 5000000
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
