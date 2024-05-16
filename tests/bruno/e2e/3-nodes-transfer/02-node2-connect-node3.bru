@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE2_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -18,7 +18,7 @@ headers {
 body:json {
   {
     "request": {
-      "ConnectPeer": "{{NODE3_ADDR}}"
+      "ConnectPeer": "{{NODE2_ADDR}}"
     }
   }
 
