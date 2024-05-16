@@ -12,7 +12,7 @@ check_deps() {
     done
 }
 
-check_deps ckb ckb-cli
+check_deps ckb ckb-cli perl
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 data_dir="$script_dir/node-data"
@@ -34,7 +34,8 @@ if ! [[ -d "$data_dir" ]]; then
     ckb init -C "$data_dir" -c dev --force --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
     # Enable the IntegrationTest module (required to generate blocks).
     if ! grep -E '^modules.*IntegrationTest' "$data_dir/ckb.toml"; then
-        sed -i 's/\("Debug"\)/\1, "IntegrationTest"/' "$data_dir/ckb.toml"
+        # -i.bak is required to sed work on both Linux and macOS.
+        sed -i.bak 's/\("Debug"\)/\1, "IntegrationTest"/' "$data_dir/ckb.toml"
     fi
 
     ckb run -C "$data_dir" --indexer &
