@@ -29,7 +29,7 @@ if ! [[ -d "$data_dir" ]]; then
     ckb init -C "$data_dir" -c dev --force --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
     # Enable the IntegrationTest module (required to generate blocks).
     if ! grep -E '^modules.*IntegrationTest' "$data_dir/ckb.toml"; then
-        sed -E -i 's/^(modules.*)\[(.*)\]/\1[\2,"IntegrationTest"]/' "$data_dir/ckb.toml"
+        sed -i '' 's/\("Debug"\)/\1, "IntegrationTest"/' "$data_dir"/ckb.toml
     fi
     # Transfer some money from the default account (node 3) to node 1 for later use.
     (
