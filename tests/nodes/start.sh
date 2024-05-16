@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,ckb_pcn_node=debug
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
