@@ -1500,6 +1500,18 @@ impl ChannelActorState {
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
                 if self.should_holder_send_tx_signatures_first() {
+                    let new_witnesses = tx_signatures.witnesses.into_iter().map(|x| x.pack());
+                    debug!(
+                        "Updating funding tx {:?} witnesses to {:?}",
+                        self.get_funding_transaction().hash(),
+                        &new_witnesses
+                    );
+                    self.funding_tx = Some(
+                        self.get_funding_transaction()
+                            .as_advanced_builder()
+                            .witnesses(new_witnesses)
+                            .build(),
+                    );
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
@@ -1514,6 +1526,7 @@ impl ChannelActorState {
                         ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
                     return Ok(());
                 };
+
                 self.handle_tx_signatures(network, Some(tx_signatures.witnesses))?;
                 Ok(())
             }

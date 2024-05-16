@@ -380,11 +380,11 @@ impl NetworkActor {
                 funding_tx,
                 partial_witnesses,
             ) => {
-                debug!("SignTx request received, trying to sign transaction {:?} with partial witnesses {:?}", &funding_tx, &partial_witnesses);
                 let msg = match partial_witnesses {
                     Some(partial_witnesses) => {
-                        dbg!(
-                            "Received tx_signatures message from counterparty {:?}",
+                        debug!(
+                            "Received SignTx request with for transaction {:?} and partial witnesses {:?}",
+                            &funding_tx,
                             partial_witnesses
                                 .iter()
                                 .map(|x| hex::encode(x))
@@ -439,6 +439,10 @@ impl NetworkActor {
                         }
                     }
                     None => {
+                        debug!(
+                            "Received SignTx request with for transaction {:?} without partial witnesses, so start signing it now",
+                            &funding_tx,
+                        );
                         let mut funding_tx = call_t!(
                             self.chain_actor,
                             CkbChainMessage::Sign,
@@ -462,7 +466,7 @@ impl NetworkActor {
                     }
                 };
                 debug!(
-                    "Handled tx_signatures, peer: {:?},, messge to send: {:?}",
+                    "Handled tx_signatures, peer: {:?}, messge to send: {:?}",
                     &peer_id, &msg
                 );
                 myself
