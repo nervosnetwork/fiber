@@ -77,6 +77,7 @@ pub enum TxCollaborationCommand {
 pub struct AddTlcCommand {
     amount: u128,
     preimage: Option<Hash256>,
+    payment_hash: Option<Hash256>,
     expiry: LockTime,
 }
 
@@ -314,11 +315,13 @@ impl ChannelActor {
                     }),
                 };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
-                    if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
+                    let filled_payment_preimage: Hash256 =
+                        blake2b_256(fulfill.payment_preimage).into();
+                    if tlc.payment_hash != filled_payment_preimage {
                         state.pending_received_tlcs.insert(tlc.id, tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Preimage {:?} is hashed to {:?}, which does not match payment hash {:?}",
-                            fulfill.payment_preimage, blake2b_256(fulfill.payment_preimage), tlc.payment_hash,
+                            "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
+                            fulfill.payment_preimage, filled_payment_preimage, tlc.payment_hash,
                         )));
                     }
                 }
@@ -1382,11 +1385,14 @@ impl ChannelActorState {
         );
 
         let preimage = command.preimage.unwrap_or(get_random_preimage());
-        let hash = blake2b_256(&preimage);
+        let payment_hash = command
+            .payment_hash
+            .unwrap_or(blake2b_256(&preimage).into());
+
         TLC {
             id,
             amount: command.amount,
-            payment_hash: hash.into(),
+            payment_hash,
             lock_time: command.expiry,
             is_offered: true,
             payment_preimage: Some(preimage),

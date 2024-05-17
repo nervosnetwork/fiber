@@ -44,7 +44,7 @@ if ! [[ -d "$data_dir" ]]; then
     # Don't continue until the default account has some money.
     # Transfer some money from the default account (node 3) to node 1 for later use.
     echo "begin to setup wallet states for nodes"
-    sleep 5
+    sleep 3
 
     # Transfer some money to the 3.
     ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqtrnd9f2lh5vlwlj23dedf7jje65cdj8qs7q4awr --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/deployer/ckb-chain/key"
