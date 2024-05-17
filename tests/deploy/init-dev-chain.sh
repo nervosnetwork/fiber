@@ -43,8 +43,22 @@ if ! [[ -d "$data_dir" ]]; then
     # Make some accounts with default balances, and deploy the contracts to the network.
     # Don't continue until the default account has some money.
     # Transfer some money from the default account (node 3) to node 1 for later use.
-    sleep 3
-    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key"
+    echo "begin to setup wallet states for nodes"
+    sleep 5
+
+    # Transfer some money to the 3.
+    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqtrnd9f2lh5vlwlj23dedf7jje65cdj8qs7q4awr --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/deployer/ckb-chain/key"
+    sleep 1
+    "$script_dir/generate-blocks.sh" 6
+    sleep 1
+
+    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/deployer/ckb-chain/key"
+    sleep 1
+    "$script_dir/generate-blocks.sh" 6
+    sleep 1
+
+    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqt4vqqyehpxn47deg5l6eeqtkfrt5kfkfchkwv62 --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/deployer/ckb-chain/key"
+    sleep 1
     # Generate a few blocks so that above transaction is confirmed.
     "$script_dir/generate-blocks.sh" 4
 
