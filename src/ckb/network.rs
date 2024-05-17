@@ -1,3 +1,4 @@
+use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -47,7 +48,7 @@ use super::{
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::serde_utils::EntityWrapperHex;
 use crate::ckb::types::TxSignatures;
-use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx};
+use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error, RpcError};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -174,6 +175,9 @@ pub enum NetworkActorEvent {
 
     /// A funding transaction has been confirmed.
     FundingTransactionConfirmed(OutPoint),
+
+    /// A funding transaction has been confirmed.
+    FundingTransactionFailed(OutPoint),
 
     /// Network service events to be sent to outside observers.
     /// We will not do any processing on these events.
@@ -710,10 +714,55 @@ impl NetworkActorState {
             CkbChainMessage::SendTx(transaction.clone())
         )
         .expect("chain actor alive");
-        info!(
-            "Funding transactoin sent to the network: {}",
-            transaction.hash()
-        );
+
+        let hash = transaction.hash().into();
+
+        info!("Funding transactoin sent to the network: {}", hash);
+
+        // Trace the transaction status.
+
+        // TODO: make number of confirmation to transaction configurable.
+        const NUM_CONFIRMATIONS: u64 = 4;
+        let request = TraceTxRequest {
+            tx_hash: hash,
+            confirmations: NUM_CONFIRMATIONS,
+        };
+        let chain = self.chain_actor.clone();
+        let network = self.network.clone();
+        // Spawn a new task to avoid blocking current actor message processing.
+        ractor::concurrency::tokio_primatives::spawn(async move {
+            debug!("Tracing transaction status {:?}", &request.tx_hash);
+            let message = match call_t!(
+                chain,
+                CkbChainMessage::TraceTx,
+                DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                request.clone()
+            ) {
+                Ok(status) if status == Status::Committed => {
+                    info!("Funding transaction {:?} confirmed", &request.tx_hash,);
+                    NetworkActorEvent::FundingTransactionConfirmed(outpoint)
+                }
+                Ok(status) => {
+                    error!(
+                        "Funding transaction {:?} failed to be confirmed with final status {:?}",
+                        &request.tx_hash, &status
+                    );
+                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to trace transaction {:?}: {:?}",
+                        &request.tx_hash, &err
+                    );
+                    NetworkActorEvent::FundingTransactionFailed(outpoint)
+                }
+            };
+
+            // Notify outside observers.
+            network
+                .send_message(NetworkActorMessage::new_event(message))
+                .expect("myself alive");
+        });
 
         Ok(())
     }
@@ -722,10 +771,16 @@ impl NetworkActorState {
         &mut self,
         outpoint: OutPoint,
     ) -> Result<(), ActorProcessingErr> {
-        let channel_id = self
-            .pending_channels
-            .remove(&outpoint)
-            .expect("channel id exists");
+        let channel_id = match self.pending_channels.remove(&outpoint) {
+            Some(channel_id) => channel_id,
+            None => {
+                warn!(
+                    "Funding transaction confirmed for outpoint {:?} but no channel found",
+                    &outpoint
+                );
+                return Ok(());
+            }
+        };
         let channel = self.channels.get(&channel_id).expect("channel exists");
         channel
             .send_message(ChannelActorMessage::Event(
@@ -929,18 +984,12 @@ impl Actor for NetworkActor {
                     state
                         .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                         .await?;
-
-                    // TODO: Although we should really wait for the funding transaction to be confirmed,
-                    // we have not integrated ckb rpc yet. So we will just send a
-                    // FundingTransactionConfirmed notification here.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionConfirmed(outpoint),
-                        ))
-                        .expect("network actor alive");
                 }
                 NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
                     state.on_funding_transaction_confirmed(outpoint).await?
+                }
+                NetworkActorEvent::FundingTransactionFailed(_outpoint) => {
+                    unimplemented!("handling funding transaction failed");
                 }
             },
             NetworkActorMessage::Command(command) => {

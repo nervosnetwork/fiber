@@ -20,7 +20,7 @@ pub struct CkbChainState {
     ctx: CommitmentLockContext,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TraceTxRequest {
     pub tx_hash: packed::Byte32,
     // How many confirmations required to consider the transaction committed.
