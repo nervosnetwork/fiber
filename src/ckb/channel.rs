@@ -1498,16 +1498,20 @@ impl ChannelActorState {
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
                 if self.should_holder_send_tx_signatures_first() {
-                    let new_witnesses = tx_signatures.witnesses.into_iter().map(|x| x.pack());
+                    let new_witnesses: Vec<_> = tx_signatures
+                        .witnesses
+                        .into_iter()
+                        .map(|x| x.pack())
+                        .collect();
                     debug!(
-                        "Updating funding tx {:?} witnesses to {:?}",
+                        "Updating funding tx witnesses of {:?} to {:?}",
                         self.get_funding_transaction().hash(),
-                        &new_witnesses
+                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
                     );
                     self.funding_tx = Some(
                         self.get_funding_transaction()
                             .as_advanced_builder()
-                            .witnesses(new_witnesses)
+                            .set_witnesses(new_witnesses)
                             .build(),
                     );
                     network
