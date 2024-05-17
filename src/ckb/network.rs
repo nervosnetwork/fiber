@@ -337,8 +337,13 @@ impl NetworkActor {
                     .await?
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
+                let old_tx = transaction.into_view();
+                debug!(
+                    "Updating channel funding for channel {:?}, current tx: {:?}",
+                    &channel_id, old_tx
+                );
                 let mut tx = FundingTx::new();
-                tx.update_for_self(transaction.into_view())?;
+                tx.update_for_self(old_tx)?;
                 let tx = match call_t!(
                     self.chain_actor.clone(),
                     CkbChainMessage::Fund,
