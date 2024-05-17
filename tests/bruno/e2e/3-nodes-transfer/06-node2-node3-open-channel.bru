@@ -1,11 +1,11 @@
 meta {
-  name: Node1 open a channel to Node2
+  name: Node2 open a channel to Node3
   type: http
-  seq: 3
+  seq: 6
 }
 
 post {
-  url: {{NODE2_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -21,7 +21,7 @@ body:json {
       "OpenChannel":
       [
         {
-          "peer_id": "{{NODE1_PEERID}}",
+          "peer_id": "{{NODE2_PEERID}}",
           "funding_amount": 61000000000000
         }
       ]
@@ -35,6 +35,6 @@ assert {
 
 script:post-response {
   await new Promise(r => setTimeout(r, 100));
-  console.log("N1N2 response: ", res.body.channel_id);
-  bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.channel_id);
+  console.log("N2N3 response: ", res.body.channel_id);
+  bru.setVar("N2N3_TEMP_CHANNEL_ID", res.body.channel_id);
 }

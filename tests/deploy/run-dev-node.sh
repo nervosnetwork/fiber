@@ -31,14 +31,22 @@ if ! [[ -d "$data_dir" ]]; then
     if ! grep -E '^modules.*IntegrationTest' "$data_dir/ckb.toml"; then
         sed -i.bak 's/\("Debug"\)/\1, "IntegrationTest"/' "$data_dir"/ckb.toml
     fi
-    # Transfer some money from the default account (node 3) to node 1 and node 2 for later use.
-    (
-        sleep 3
-        ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key"
-        sleep 3
-        ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqt4vqqyehpxn47deg5l6eeqtkfrt5kfkfchkwv62 --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key"
-        # Generate a few blocks so that above transaction is confirmed.
-        "$script_dir/generate-blocks.sh" 4
-    ) &
 fi
+
+# Transfer some money from the default account (node 3) to node 1 and node 2 for later use.
+(
+    echo "begin to setup wallet states for nodes"
+    sleep 10
+    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key"
+    sleep 1
+    "$script_dir/generate-blocks.sh" 6
+    sleep 1
+
+    ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqt4vqqyehpxn47deg5l6eeqtkfrt5kfkfchkwv62 --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/3/ckb-chain/key"
+    sleep 1
+    # Generate a few blocks so that above transaction is confirmed.
+    echo "begin to generate blocks for wallet updating..."
+    "$script_dir/generate-blocks.sh" 6
+)&
+
 ckb run -C "$data_dir" --indexer

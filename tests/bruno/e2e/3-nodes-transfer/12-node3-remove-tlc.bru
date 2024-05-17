@@ -1,7 +1,7 @@
 meta {
   name: remove tlc from NODE3
   type: http
-  seq: 11
+  seq: 12
 }
 
 post {
@@ -19,7 +19,7 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{}}",
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
           "RemoveTlc": {
             "id": 1,

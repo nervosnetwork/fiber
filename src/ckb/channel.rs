@@ -1362,10 +1362,11 @@ impl ChannelActorState {
             ChannelState::ChannelReady(_) => Ok(()),
             ChannelState::ShuttingDown(_) => Ok(()),
             _ => {
+                eprintln!("now channel state: {:?}", self.state);
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Invalid state {:?} for adding tlc",
                     self.state
-                )))
+                )));
             }
         }
     }
@@ -2354,7 +2355,7 @@ impl ChannelActorState {
 
                 if self.to_self_amount + self.to_remote_amount != first_output_capacity {
                     return Err(ProcessingChannelError::InvalidParameter(
-                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount) 
+                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount)
                     ));
                 }
 

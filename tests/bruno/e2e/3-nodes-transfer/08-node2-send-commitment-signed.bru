@@ -1,7 +1,7 @@
 meta {
-  name: Node1 open a channel to Node2
+  name: send commitment_signed message
   type: http
-  seq: 3
+  seq: 8
 }
 
 post {
@@ -18,13 +18,12 @@ headers {
 body:json {
   {
     "request": {
-      "OpenChannel":
-      [
-        {
-          "peer_id": "{{NODE1_PEERID}}",
-          "funding_amount": 61000000000000
+      "ControlPcnChannel": {
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
+        "command": {
+          "CommitmentSigned": []
         }
-      ]
+      }
     }
   }
 }
@@ -34,7 +33,6 @@ assert {
 }
 
 script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("N1N2 response: ", res.body.channel_id);
-  bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.channel_id);
 }

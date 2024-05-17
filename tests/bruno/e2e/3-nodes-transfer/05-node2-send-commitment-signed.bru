@@ -1,7 +1,7 @@
 meta {
-  name: add tlc from NODE3
+  name: send commitment_signed message
   type: http
-  seq: 9
+  seq: 5
 }
 
 post {
@@ -21,11 +21,7 @@ body:json {
       "ControlPcnChannel": {
         "channel_id": "{{N1N2_CHANNEL_ID}}",
         "command": {
-          "AddTlc": {
-            "amount": {{payment_amount}},
-            "preimage": "0x{{payment_hash}}",
-            "expiry": 40
-          }
+          "CommitmentSigned": []
         }
       }
     }
@@ -34,11 +30,6 @@ body:json {
 
 assert {
   res.status: eq 200
-}
-
-script:pre-request {
-  console.log("sending node2 AddTlc:", bru.getVar("payment_hash"));
-  console.log("amount: ", bru.getVar("payment_amount"));
 }
 
 script:post-response {
