@@ -73,7 +73,10 @@ impl MockContext {
             };
             let cell_dep_vec = cell_deps.pack();
             debug!("Loaded contracts into the mock environement: {:?}", &map);
-            debug!("Use this contracts with CellDepVec: {:?}", &cell_dep_vec);
+            debug!(
+                "Use these contracts by specifying cell deps to {:?}",
+                &cell_dep_vec
+            );
 
             let context = MockContext {
                 context: RwLock::new(context),
@@ -280,11 +283,15 @@ impl CommitmentLockContext {
                         .build(),
                 );
 
+                let cell_dep_vec = cell_deps.pack();
                 debug!("Loaded contracts into the real environement: {:?}", &map);
-                debug!("Use this contracts with CellDepVec: {:?}", &cell_deps);
+                debug!(
+                    "Use these contracts by specifying cell deps to {:?}",
+                    &cell_dep_vec
+                );
                 Self::Real(Arc::new(ContractsContext {
                     contracts: map,
-                    cell_deps: cell_deps.pack(),
+                    cell_deps: cell_dep_vec,
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
