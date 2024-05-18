@@ -229,7 +229,7 @@ impl CommitmentLockContext {
                             .build();
                         let script = Script::new_builder()
                             .code_hash(program_code_hash.into())
-                            .hash_type(ScriptHashType::Data2.into())
+                            .hash_type(ScriptHashType::Data1.into())
                             .args(Bytes::new().pack())
                             .build();
                         map.insert(contract, (dep_group_out_point.clone(), script));

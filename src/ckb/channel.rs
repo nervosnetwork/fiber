@@ -1275,14 +1275,17 @@ impl ChannelActorState {
         self.counterparty_commitment_points[index]
     }
 
+    pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
+        let point: musig2::secp::Point = self.get_musig2_agg_context().aggregated_pubkey();
+        point.serialize_xonly()
+    }
+
     pub fn get_funding_lock_script(&self) -> Script {
-        let agg_ctx = self.get_musig2_agg_context();
-        let ctx = CommitmentLockContext::get();
-        let agg_pub_key: Pubkey = agg_ctx.aggregated_pubkey();
-        let args = blake2b_256(agg_pub_key.serialize());
+        let ctx: &CommitmentLockContext = CommitmentLockContext::get();
+        let args = blake2b_256(self.get_funding_lock_script_xonly());
         debug!(
             "Aggregated pubkey: {:?}, hash: {:?}",
-            agg_pub_key,
+            hex::encode(&args),
             hex::encode(&args[..20])
         );
         ctx.get_funding_lock_script(&args[..20])
@@ -1749,10 +1752,7 @@ impl ChannelActorState {
         // - `pubkey`: 32 bytes, x only aggregated public key
         // - `signature`: 64 bytes, aggregated signature
         let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
-        let xonly = {
-            let point: musig2::secp::Point = self.get_musig2_agg_context().aggregated_pubkey();
-            point.serialize_xonly()
-        };
+        let xonly = self.get_funding_lock_script_xonly();
         let version = version.unwrap_or(u64::MAX);
         for bytes in [
             version.to_le_bytes().as_ref(),
@@ -1811,10 +1811,11 @@ impl ChannelActorState {
         // Create our shutdown signature if we haven't already.
         match self.holder_shutdown_signature {
             None => {
-                debug!("Building our shutdown signature");
-
                 let message = get_tx_message_to_sign(&shutdown_tx);
-
+                debug!(
+                    "Building our shutdown signature for message {:?}",
+                    hex::encode(message.as_slice())
+                );
                 let signature = sign_ctx.clone().sign(message.as_slice())?;
                 self.holder_shutdown_signature = Some(signature);
                 debug!(
@@ -2859,10 +2860,13 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let sign_ctx = Musig2SignContext::from(self);
 
-        dbg!("Calling build_commitment_tx from build_and_sign_commitment_tx");
         let tx = self.build_commitment_tx(true);
         let message = get_tx_message_to_sign(&tx);
 
+        debug!(
+            "Signing commitment tx with message {:?}",
+            hex::encode(message.as_slice())
+        );
         let signature = sign_ctx.sign(message.as_slice())?;
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
@@ -2893,6 +2897,10 @@ impl ChannelActorState {
 
         let message = get_tx_message_to_sign(&tx.tx);
 
+        debug!(
+            "Signing and verifying commitment tx with message {:?}",
+            hex::encode(message.as_slice())
+        );
         let signature2 = sign_ctx.sign(message.as_slice())?;
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
@@ -3023,6 +3031,7 @@ pub struct Musig2SignContext {
 
 impl Musig2SignContext {
     pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
+        debug!("Musig2 signing partial message {:?}", hex::encode(&message));
         Ok(sign_partial(
             &self.key_agg_ctx,
             self.seckey,
@@ -3046,6 +3055,10 @@ pub fn aggregate_partial_signatures_for_tx(
     debug!("Aggregating partial signatures for tx {:?}", tx);
 
     let message = get_tx_message_to_sign(tx);
+    debug!(
+        "Message to aggregate signatures: {:?}",
+        hex::encode(message.as_bytes())
+    );
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
         &verify_ctx.agg_nonce,
@@ -3483,7 +3496,7 @@ mod tests {
 
         let funding_tx_lock_script = ckb_types::packed::Script::new_builder()
             .code_hash([2u8; 32].pack())
-            .hash_type(ScriptHashType::Data2.into())
+            .hash_type(ScriptHashType::Data1.into())
             .args([3u8; 20].pack())
             .build();
 
