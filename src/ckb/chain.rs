@@ -201,41 +201,41 @@ impl CommitmentLockContext {
                 for (dep_type, contracts) in [
                     (DepType::Code, vec![Contract::AlwaysSuccess]),
                     (
-                        DepType::DepGroup,
+                        DepType::Code,
                         vec![Contract::FundingLock, Contract::CommitmentLock],
                     ),
                 ] {
                     for contract in contracts {
-                        let type_hash = get_hash_from_environment_variable(
+                        let program_code_hash = get_hash_from_environment_variable(
                             contract,
                             EnvironmentVariableType::CodeHash,
                             dep_type,
                         );
-                        let tx = get_hash_from_environment_variable(
+                        let dep_group_tx = get_hash_from_environment_variable(
                             contract,
                             EnvironmentVariableType::TxHash,
                             dep_type,
                         );
-                        let index: usize = get_environment_variable(
+                        let dep_group_index: usize = get_environment_variable(
                             contract,
                             EnvironmentVariableType::TxIndex,
                             dep_type,
                         )
                         .parse()
                         .expect("Valid index");
-                        let out_point = OutPoint::new_builder()
-                            .tx_hash(tx.into())
-                            .index(index.pack())
+                        let dep_group_out_point = OutPoint::new_builder()
+                            .tx_hash(dep_group_tx.into())
+                            .index(dep_group_index.pack())
                             .build();
                         let script = Script::new_builder()
-                            .code_hash(type_hash.into())
+                            .code_hash(program_code_hash.into())
                             .hash_type(ScriptHashType::Data2.into())
                             .args(Bytes::new().pack())
                             .build();
-                        map.insert(contract, (out_point.clone(), script));
+                        map.insert(contract, (dep_group_out_point.clone(), script));
                         cell_deps.push(
                             CellDep::new_builder()
-                                .out_point(out_point)
+                                .out_point(dep_group_out_point)
                                 .dep_type(dep_type.into())
                                 .build(),
                         );
