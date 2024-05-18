@@ -5,7 +5,7 @@ use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use log::{debug, error, info, warn};
 
 use ractor::{
-    async_trait as rasync_trait, call_t, cast, Actor, ActorCell, ActorProcessingErr, ActorRef,
+    async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RpcReplyPort,
 };
 use serde::{Deserialize, Serialize};
@@ -709,11 +709,9 @@ impl NetworkActorState {
         );
         let transaction = transaction.into_view();
         debug!("Trying to broadcast funding transaction {:?}", &transaction);
-        cast!(
-            self.chain_actor,
-            CkbChainMessage::SendTx(transaction.clone())
-        )
-        .expect("chain actor alive");
+        self.chain_actor
+            .send_message(CkbChainMessage::SendTx(transaction.clone()))
+            .expect("chain actor alive");
 
         let hash = transaction.hash().into();
 
@@ -963,6 +961,9 @@ impl Actor for NetworkActor {
                         "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
                         channel_id, peer_id, tx
                     );
+                    self.chain_actor
+                        .send_message(CkbChainMessage::SendTx(tx.clone()))
+                        .expect("chain actor alive");
                     // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(

@@ -2513,6 +2513,7 @@ impl ChannelActorState {
             .build();
         let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
         let tx_builder = tx_builder.set_outputs(outputs.to_vec());
+        let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
         Ok(tx_builder.build())
     }
 
