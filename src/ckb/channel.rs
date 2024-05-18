@@ -91,6 +91,7 @@ pub struct RemoveTlcCommand {
 pub struct ShutdownCommand {
     #[serde_as(as = "EntityWrapperHex<Script>")]
     close_script: Script,
+    fee: u128,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -383,6 +384,7 @@ impl ChannelActor {
             ))
             .expect("network actor alive");
         state.holder_shutdown_script = Some(command.close_script.clone());
+        state.holder_shutdown_fee = Some(command.fee);
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
         state.update_state(ChannelState::ShuttingDown(flags));
         debug!(
@@ -857,7 +859,9 @@ pub struct ChannelActorState {
     pub counterparty_commitment_points: Vec<Pubkey>,
     pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
     pub holder_shutdown_signature: Option<PartialSignature>,
+    pub holder_shutdown_fee: Option<u128>,
     pub counterparty_shutdown_signature: Option<PartialSignature>,
+    pub counterparty_shutdown_fee: Option<u128>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1093,7 +1097,9 @@ impl ChannelActorState {
                 counterparty_commitment_point,
             ],
             holder_shutdown_signature: None,
+            holder_shutdown_fee: None,
             counterparty_shutdown_signature: None,
+            counterparty_shutdown_fee: None,
         }
     }
 
@@ -1131,7 +1137,9 @@ impl ChannelActorState {
             counterparty_commitment_number: 1,
             counterparty_commitment_points: vec![],
             holder_shutdown_script: None,
+            holder_shutdown_fee: None,
             counterparty_shutdown_script: None,
+            counterparty_shutdown_fee: None,
             holder_shutdown_signature: None,
             counterparty_shutdown_signature: None,
         }
@@ -1696,7 +1704,7 @@ impl ChannelActorState {
                 let ClosingSigned {
                     partial_signature,
                     channel_id,
-                    fee: _,
+                    fee,
                 } = closing;
 
                 if channel_id != self.get_id() {
@@ -1712,6 +1720,7 @@ impl ChannelActorState {
                 // We may change this in the future.
                 // We also didn't check the state here.
                 self.counterparty_shutdown_signature = Some(partial_signature);
+                self.counterparty_shutdown_fee = Some(fee as u128);
 
                 self.maybe_transition_to_shutdown(network)?;
                 Ok(())
@@ -1775,7 +1784,8 @@ impl ChannelActorState {
                             message: PCNMessage::ClosingSigned(ClosingSigned {
                                 partial_signature: signature,
                                 channel_id: self.get_id(),
-                                fee: 0,
+                                fee: self.holder_shutdown_fee.expect("holder shutdown fee set")
+                                    as u64,
                             }),
                         }),
                     ))
@@ -2478,17 +2488,34 @@ impl ChannelActorState {
         // Don't use get_holder_shutdown_script and get_counterparty_shutdown_script here
         // as they will panic if the scripts are not present.
         // This function may be called in a state where the scripts are not present.
-        let (holder_shutdown_script, counterparty_shutdown_script) = match (
+        let (
+            holder_shutdown_script,
+            counterparty_shutdown_script,
+            holder_shutdown_fee,
+            counterparty_shutdown_fee,
+        ) = match (
             self.holder_shutdown_script.clone(),
             self.counterparty_shutdown_script.clone(),
+            self.holder_shutdown_fee,
+            self.counterparty_shutdown_fee,
         ) {
-            (Some(holder_shutdown_script), Some(counterparty_shutdown_script)) => {
-                (holder_shutdown_script, counterparty_shutdown_script)
-            }
+            (
+                Some(holder_shutdown_script),
+                Some(counterparty_shutdown_script),
+                Some(holder_shutdown_fee),
+                Some(counterparty_shutdown_fee),
+            ) => (
+                holder_shutdown_script,
+                counterparty_shutdown_script,
+                holder_shutdown_fee,
+                counterparty_shutdown_fee,
+            ),
             _ => {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Shutdown scripts are not present".to_string(),
-                ));
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Shutdown scripts are not present: holder_shutdown_script {:?}, counterparty_shutdown_script {:?}, holder_shutdown_fee {:?}, counterparty_shutdown_fee {:?}",
+                    &self.holder_shutdown_script, &self.counterparty_shutdown_script,
+                    &self.holder_shutdown_fee, &self.counterparty_shutdown_fee
+                )));
             }
         };
         let commitment_lock_context = CommitmentLockContext::get();
@@ -2501,8 +2528,12 @@ impl ChannelActorState {
             );
 
         // TODO: Check UDT type, if it is ckb then convert it into u64.
-        let holder_value = self.to_self_amount as u64;
-        let counterparty_value = self.to_remote_amount as u64;
+        let holder_value = (self.to_self_amount - holder_shutdown_fee) as u64;
+        let counterparty_value = (self.to_remote_amount - counterparty_shutdown_fee) as u64;
+        debug!(
+            "Building shutdown transaction with values: {} {}",
+            holder_value, counterparty_value
+        );
         let holder_output = CellOutput::new_builder()
             .capacity(holder_value.pack())
             .lock(holder_shutdown_script)
