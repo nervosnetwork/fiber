@@ -46,6 +46,8 @@ use super::{
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
 
+const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
+
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
     /// It is normally generated from a user request.
@@ -1297,6 +1299,10 @@ impl ChannelActorState {
         }
     }
 
+    pub fn get_musig2_agg_pubkey(&self) -> Pubkey {
+        self.get_musig2_agg_context().aggregated_pubkey()
+    }
+
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
         let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
         let counterparty_pubkey = self
@@ -1733,6 +1739,45 @@ impl ChannelActorState {
         }
     }
 
+    pub fn create_witness_for_funding_cell(
+        &self,
+        signature: CompactSignature,
+        version: Option<u64>,
+    ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
+        // - `version`: 8 bytes, u64 in little-endian
+        // - `funding_out_point`: 36 bytes, out point of the funding transaction
+        // - `pubkey`: 32 bytes, x only aggregated public key
+        // - `signature`: 64 bytes, aggregated signature
+        let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
+        let xonly = {
+            let point: musig2::secp::Point = self.get_musig2_agg_context().aggregated_pubkey();
+            point.serialize_xonly()
+        };
+        let version = version.unwrap_or(u64::MAX);
+        for bytes in [
+            version.to_le_bytes().as_ref(),
+            self.get_funding_transaction_outpoint().as_slice(),
+            xonly.as_slice(),
+            signature.serialize().as_slice(),
+        ] {
+            debug!(
+                "Extending witness with {} bytes: {:?}",
+                bytes.len(),
+                hex::encode(bytes)
+            );
+            witness.extend_from_slice(bytes);
+        }
+
+        debug!(
+            "Building shutdown tx with witness: {:?}",
+            hex::encode(&witness)
+        );
+
+        witness
+            .try_into()
+            .expect("Witness length should be correct")
+    }
+
     pub fn maybe_transition_to_shutdown(
         &mut self,
         network: ActorRef<NetworkActorMessage>,
@@ -1807,11 +1852,19 @@ impl ChannelActorState {
                     holder_shutdown_signature,
                     counterparty_shutdown_signature,
                 );
-                let tx = aggregate_partial_signatures_for_tx(
-                    shutdown_tx,
+
+                let signature = aggregate_partial_signatures_for_tx(
+                    &shutdown_tx,
                     sign_ctx.into(),
                     partial_signatures,
                 )?;
+
+                let witness = self.create_witness_for_funding_cell(signature, None);
+
+                let tx = shutdown_tx
+                    .as_advanced_builder()
+                    .set_witnesses(vec![witness.pack()])
+                    .build();
 
                 network
                     .send_message(NetworkActorMessage::new_event(
@@ -2847,8 +2900,8 @@ impl ChannelActorState {
         );
 
         let signatures = self.order_things_for_musig2(signature, signature2);
-        let tx = aggregate_partial_signatures_for_tx(
-            tx.tx,
+        let tx = aggregate_partial_signatures_for_commitment_tx(
+            &tx.tx,
             Musig2VerifyContext::from(&*self),
             signatures,
         )
@@ -2986,21 +3039,29 @@ fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
 }
 
 pub fn aggregate_partial_signatures_for_tx(
-    tx: TransactionView,
+    tx: &TransactionView,
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
-) -> Result<TransactionView, ProcessingChannelError> {
-    debug!("Aggregating partial signatures for tx {:?}", &tx);
+) -> Result<CompactSignature, ProcessingChannelError> {
+    debug!("Aggregating partial signatures for tx {:?}", tx);
 
-    let message = get_tx_message_to_sign(&tx);
+    let message = get_tx_message_to_sign(tx);
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
         &verify_ctx.agg_nonce,
         partial_signatures,
         message.as_bytes(),
     )?;
+    Ok(signature)
+}
 
-    // TODO: check the witness format of commitment transaction.
+pub fn aggregate_partial_signatures_for_commitment_tx(
+    tx: &TransactionView,
+    verify_ctx: Musig2VerifyContext,
+    partial_signatures: [PartialSignature; 2],
+) -> Result<TransactionView, ProcessingChannelError> {
+    let signature = aggregate_partial_signatures_for_tx(tx, verify_ctx, partial_signatures)?;
+
     Ok(tx
         .as_advanced_builder()
         .set_witnesses(vec![signature.to_bytes().pack()])
