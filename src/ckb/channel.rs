@@ -379,6 +379,7 @@ impl ChannelActor {
                     message: PCNMessage::Shutdown(Shutdown {
                         channel_id: state.get_id(),
                         close_script: command.close_script.clone(),
+                        fee: command.fee,
                     }),
                 }),
             ))
@@ -1689,6 +1690,7 @@ impl ChannelActorState {
                     }
                 };
                 self.counterparty_shutdown_script = Some(shutdown.close_script);
+                self.counterparty_shutdown_fee = Some(shutdown.fee);
 
                 let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
                 self.update_state(ChannelState::ShuttingDown(flags));
@@ -1704,7 +1706,6 @@ impl ChannelActorState {
                 let ClosingSigned {
                     partial_signature,
                     channel_id,
-                    fee,
                 } = closing;
 
                 if channel_id != self.get_id() {
@@ -1720,7 +1721,6 @@ impl ChannelActorState {
                 // We may change this in the future.
                 // We also didn't check the state here.
                 self.counterparty_shutdown_signature = Some(partial_signature);
-                self.counterparty_shutdown_fee = Some(fee as u128);
 
                 self.maybe_transition_to_shutdown(network)?;
                 Ok(())
@@ -1784,8 +1784,6 @@ impl ChannelActorState {
                             message: PCNMessage::ClosingSigned(ClosingSigned {
                                 partial_signature: signature,
                                 channel_id: self.get_id(),
-                                fee: self.holder_shutdown_fee.expect("holder shutdown fee set")
-                                    as u64,
                             }),
                         }),
                     ))

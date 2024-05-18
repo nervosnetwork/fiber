@@ -827,6 +827,7 @@ pub struct Shutdown {
     pub channel_id: Hash256,
     #[serde_as(as = "EntityWrapperBase64<Script>")]
     pub close_script: Script,
+    pub fee: u128,
 }
 
 impl From<Shutdown> for molecule_pcn::Shutdown {
@@ -834,6 +835,7 @@ impl From<Shutdown> for molecule_pcn::Shutdown {
         molecule_pcn::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
+            .fee(shutdown.fee.pack())
             .build()
     }
 }
@@ -845,6 +847,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
+            fee: shutdown.fee().unpack(),
         })
     }
 }
@@ -853,8 +856,6 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosingSigned {
     pub channel_id: Hash256,
-    // TODO: fee is actually not used for now.
-    pub fee: u64,
     pub partial_signature: PartialSignature,
 }
 
@@ -862,7 +863,6 @@ impl From<ClosingSigned> for molecule_pcn::ClosingSigned {
     fn from(closing_signed: ClosingSigned) -> Self {
         molecule_pcn::ClosingSigned::new_builder()
             .channel_id(closing_signed.channel_id.into())
-            .fee(closing_signed.fee.pack())
             .partial_signature(partial_signature_to_molecule(
                 closing_signed.partial_signature,
             ))
@@ -876,7 +876,6 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
     fn try_from(closing_signed: molecule_pcn::ClosingSigned) -> Result<Self, Self::Error> {
         Ok(ClosingSigned {
             channel_id: closing_signed.channel_id().into(),
-            fee: closing_signed.fee().unpack(),
             partial_signature: PartialSignature::from_slice(
                 closing_signed.partial_signature().as_slice(),
             )
