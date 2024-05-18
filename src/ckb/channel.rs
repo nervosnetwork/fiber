@@ -1811,7 +1811,11 @@ impl ChannelActorState {
         // Create our shutdown signature if we haven't already.
         match self.holder_shutdown_signature {
             None => {
-                let message = get_tx_message_to_sign(&shutdown_tx);
+                let message = get_funding_cell_message_to_sign(
+                    None,
+                    self.get_funding_transaction_outpoint(),
+                    &shutdown_tx,
+                );
                 debug!(
                     "Building our shutdown signature for message {:?}",
                     hex::encode(message.as_slice())
@@ -1853,9 +1857,18 @@ impl ChannelActorState {
                     holder_shutdown_signature,
                     counterparty_shutdown_signature,
                 );
-
-                let signature = aggregate_partial_signatures_for_tx(
+                let message = get_funding_cell_message_to_sign(
+                    None,
+                    self.get_funding_transaction_outpoint(),
                     &shutdown_tx,
+                );
+                debug!(
+                    "Get message to sign for shutdown tx {:?}",
+                    hex::encode(message.as_slice())
+                );
+
+                let signature = aggregate_partial_signatures_for_msg(
+                    message.as_slice(),
                     sign_ctx.into(),
                     partial_signatures,
                 )?;
@@ -3047,23 +3060,33 @@ fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
     hash
 }
 
-pub fn aggregate_partial_signatures_for_tx(
+fn get_funding_cell_message_to_sign(
+    version: Option<u64>,
+    funding_out_point: OutPoint,
     tx: &TransactionView,
+) -> [u8; 32] {
+    let version = version.unwrap_or(u64::MAX).to_le_bytes();
+    let version = version.as_slice();
+    let funding_out_point = funding_out_point.as_slice();
+    let tx_hash = tx.hash();
+    let tx_hash = tx_hash.as_slice();
+    blake2b_256([version, funding_out_point, tx_hash].concat())
+}
+
+pub fn aggregate_partial_signatures_for_msg(
+    message: &[u8],
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
 ) -> Result<CompactSignature, ProcessingChannelError> {
-    debug!("Aggregating partial signatures for tx {:?}", tx);
-
-    let message = get_tx_message_to_sign(tx);
     debug!(
         "Message to aggregate signatures: {:?}",
-        hex::encode(message.as_bytes())
+        hex::encode(&message)
     );
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,
         &verify_ctx.agg_nonce,
         partial_signatures,
-        message.as_bytes(),
+        message,
     )?;
     Ok(signature)
 }
@@ -3073,7 +3096,11 @@ pub fn aggregate_partial_signatures_for_commitment_tx(
     verify_ctx: Musig2VerifyContext,
     partial_signatures: [PartialSignature; 2],
 ) -> Result<TransactionView, ProcessingChannelError> {
-    let signature = aggregate_partial_signatures_for_tx(tx, verify_ctx, partial_signatures)?;
+    debug!("Aggregating partial signatures for tx {:?}", tx);
+    let message = get_tx_message_to_sign(tx);
+
+    let signature =
+        aggregate_partial_signatures_for_msg(message.as_slice(), verify_ctx, partial_signatures)?;
 
     Ok(tx
         .as_advanced_builder()
