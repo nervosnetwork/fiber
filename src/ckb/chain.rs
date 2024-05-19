@@ -153,7 +153,7 @@ fn get_hash_from_environment_variable(
 }
 
 const ENV_PREFIX: &'static str = "NEXT_PUBLIC";
-const DEFUALT_SECP256K1_CODE_HASH: &'static str =
+const DEFUALT_SECP256K1_TYPE_HASH: &'static str =
     "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
 
 fn get_environment_variable(
@@ -253,7 +253,7 @@ impl CommitmentLockContext {
 
                 let secp256k1_script = Script::new_builder()
                     .code_hash(
-                        Hash256::from_str(DEFUALT_SECP256K1_CODE_HASH)
+                        Hash256::from_str(DEFUALT_SECP256K1_TYPE_HASH)
                             .expect("valid hash")
                             .into(),
                     )
@@ -282,6 +282,74 @@ impl CommitmentLockContext {
                 Self::Real(Arc::new(ContractsContext {
                     contract_default_scripts: map,
                     cell_deps: cell_dep_vec,
+                }))
+            }
+            CkbNetwork::Testnet => {
+                let map = [
+                    (
+                        Contract::FundingLock,
+                        "0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c",
+                    ),
+                    (
+                        Contract::CommitmentLock,
+                        "0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8",
+                    ),
+                    (Contract::Secp256k1Lock, DEFUALT_SECP256K1_TYPE_HASH),
+                ]
+                .into_iter()
+                .map(|(contract, type_hash)| {
+                    (
+                        contract,
+                        Script::new_builder()
+                            .code_hash(Hash256::from_str(type_hash).expect("valid hash").into())
+                            .hash_type(ScriptHashType::Type.into())
+                            .args(Bytes::new().pack())
+                            .build(),
+                    )
+                })
+                .collect();
+                let cell_dep_vec = [
+                    (
+                        Contract::Secp256k1Lock,
+                        "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37",
+                        0,
+                        DepType::DepGroup,
+                    ),
+                    (
+                        Contract::CkbAuth,
+                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
+                        0u32,
+                        DepType::Code,
+                    ),
+                    (
+                        Contract::FundingLock,
+                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
+                        1,
+                        DepType::Code,
+                    ),
+                    (
+                        Contract::CommitmentLock,
+                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
+                        2,
+                        DepType::Code,
+                    ),
+                ]
+                .into_iter()
+                .map(|(_contract, tx, index, dep_type)| {
+                    CellDep::new_builder()
+                        .out_point(
+                            OutPoint::new_builder()
+                                .tx_hash(Hash256::from_str(tx).unwrap().into())
+                                .index(index.pack())
+                                .build(),
+                        )
+                        .dep_type(dep_type.into())
+                        .build()
+                })
+                .pack();
+                Self::Real(Arc::new(ContractsContext {
+                    contract_default_scripts: map,
+                    cell_deps: cell_dep_vec.pack(),
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
