@@ -131,6 +131,8 @@ pub enum CommitmentLockContext {
 
 enum EnvironmentVariableType {
     CodeHash,
+    // FIXME(yukang): warning suppression
+    #[allow(dead_code)]
     TypeHash,
     TxIndex,
     TxHash,

@@ -1,7 +1,7 @@
 meta {
-  name: add tlc from NODE3
+  name: Node2 add tlc
   type: http
-  seq: 12
+  seq: 13
 }
 
 post {
@@ -19,7 +19,7 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
           "AddTlc": {
             "amount": {{payment_amount}},
@@ -37,12 +37,12 @@ assert {
 }
 
 script:pre-request {
-  console.log("sending node2 AddTlc:", bru.getVar("payment_hash"));
+  console.log("sending node3 AddTlc:", bru.getVar("payment_hash"));
   console.log("amount: ", bru.getVar("payment_amount"));
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("response from node2 AddTlc:", res.body);
+  console.log("response from node3 AddTlc:", res.body);
 }

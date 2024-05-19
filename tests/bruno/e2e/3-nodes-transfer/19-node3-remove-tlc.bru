@@ -1,11 +1,11 @@
 meta {
-  name: add tlc from NODE3
+  name: Node2 remove tlc
   type: http
-  seq: 13
+  seq: 19
 }
 
 post {
-  url: {{NODE2_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -21,10 +21,13 @@ body:json {
       "ControlPcnChannel": {
         "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
-          "AddTlc": {
-            "amount": {{payment_amount}},
-            "payment_hash": "{{payment_hash}}",
-            "expiry": 40
+          "RemoveTlc": {
+            "id": 1,
+            "reason": {
+              "RemoveTlcFulfill": {
+                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000003"
+              }
+            }
           }
         }
       }
@@ -36,13 +39,7 @@ assert {
   res.status: eq 200
 }
 
-script:pre-request {
-  console.log("sending node3 AddTlc:", bru.getVar("payment_hash"));
-  console.log("amount: ", bru.getVar("payment_amount"));
-}
-
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("response from node3 AddTlc:", res.body);
 }
