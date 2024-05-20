@@ -200,10 +200,11 @@ impl CommitmentLockContext {
             CkbNetwork::Dev => {
                 let mut map = HashMap::new();
                 let mut cell_deps = vec![];
-                for (dep_type, contracts) in [
-                    (DepType::Code, vec![Contract::AlwaysSuccess]),
+                for (program_dep_type, group_dep_type, contracts) in [
+                    (DepType::Code, DepType::Code, vec![Contract::AlwaysSuccess]),
                     (
                         DepType::Code,
+                        DepType::DepGroup,
                         vec![Contract::FundingLock, Contract::CommitmentLock],
                     ),
                 ] {
@@ -211,23 +212,23 @@ impl CommitmentLockContext {
                         let program_code_hash = get_hash_from_environment_variable(
                             contract,
                             EnvironmentVariableType::CodeHash,
-                            dep_type,
+                            program_dep_type,
                         );
-                        let dep_group_tx = get_hash_from_environment_variable(
+                        let group_tx = get_hash_from_environment_variable(
                             contract,
                             EnvironmentVariableType::TxHash,
-                            dep_type,
+                            group_dep_type,
                         );
-                        let dep_group_index: usize = get_environment_variable(
+                        let group_index: usize = get_environment_variable(
                             contract,
                             EnvironmentVariableType::TxIndex,
-                            dep_type,
+                            group_dep_type,
                         )
                         .parse()
                         .expect("Valid index");
                         let dep_group_out_point = OutPoint::new_builder()
-                            .tx_hash(dep_group_tx.into())
-                            .index(dep_group_index.pack())
+                            .tx_hash(group_tx.into())
+                            .index(group_index.pack())
                             .build();
                         let script = Script::new_builder()
                             .code_hash(program_code_hash.into())
@@ -238,7 +239,7 @@ impl CommitmentLockContext {
                         cell_deps.push(
                             CellDep::new_builder()
                                 .out_point(dep_group_out_point)
-                                .dep_type(dep_type.into())
+                                .dep_type(group_dep_type.into())
                                 .build(),
                         );
                     }
