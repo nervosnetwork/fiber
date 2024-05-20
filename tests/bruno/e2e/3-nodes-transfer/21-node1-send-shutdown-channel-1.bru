@@ -1,0 +1,41 @@
+meta {
+  name: Node1 send shutdown channel1
+  type: http
+  seq: 21
+}
+
+post {
+  url: {{NODE1_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "ControlPcnChannel": {
+        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "command": {
+          "Shutdown": {
+            "close_script": "0x490000001000000030000000310000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a00140000000101010101010101010101010101010101010101",
+            "fee": 200000000
+          }
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+}
