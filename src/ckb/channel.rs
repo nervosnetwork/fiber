@@ -15,7 +15,9 @@ use musig2::{
     sign_partial, verify_partial, AggNonce, BinaryEncoding, CompactSignature, KeyAggContext,
     PartialSignature, PubNonce, SecNonce,
 };
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use ractor::{
+    async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
+};
 
 use serde::Deserialize;
 use serde_with::serde_as;
@@ -32,11 +34,12 @@ use std::{
 use crate::{
     ckb::{chain::CommitmentLockContext, types::Shutdown},
     ckb_chain::FundingRequest,
+    RpcError,
 };
 
 use super::{
     key::blake2b_hash_with_salt,
-    network::PCNMessageWithPeerId,
+    network::{ControlChannelResponse, PCNMessageWithPeerId},
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
@@ -58,13 +61,16 @@ pub enum ChannelActorMessage {
     PeerMessage(PCNMessage),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(AddTlcCommand),
+    AddTlc(
+        AddTlcCommand,
+        #[serde(skip)] Option<RpcReplyPort<Result<ControlChannelResponse, RpcError>>>,
+    ),
     RemoveTlc(RemoveTlcCommand),
     Shutdown(ShutdownCommand),
 }
@@ -103,7 +109,7 @@ fn get_random_preimage() -> Hash256 {
     preimage.into()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ChannelCommandWithId {
     pub channel_id: Hash256,
     pub command: ChannelCommand,
@@ -249,7 +255,7 @@ impl ChannelActor {
         &self,
         state: &mut ChannelActorState,
         command: AddTlcCommand,
-    ) -> ProcessingChannelResult {
+    ) -> Result<u64, ProcessingChannelError> {
         state.check_state_for_tlc_update()?;
 
         let tlc = state.create_outbounding_tlc(command);
@@ -297,7 +303,7 @@ impl ChannelActor {
             "Balance after addtlccommand: to_self_amount: {} to_remote_amount: {}",
             state.to_self_amount, state.to_remote_amount
         );
-        Ok(())
+        Ok(tlc.id)
     }
 
     pub fn handle_remove_tlc_command(
@@ -517,7 +523,13 @@ impl ChannelActor {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
-            ChannelCommand::AddTlc(command) => self.handle_add_tlc_command(state, command),
+            ChannelCommand::AddTlc(command, reply) => {
+                let tlc_id = self.handle_add_tlc_command(state, command)?;
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(ControlChannelResponse::TlcId(tlc_id)));
+                }
+                Ok(())
+            }
             ChannelCommand::RemoveTlc(command) => self.handle_remove_tlc_command(state, command),
             ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
         }

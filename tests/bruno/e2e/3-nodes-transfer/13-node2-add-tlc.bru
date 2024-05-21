@@ -21,11 +21,11 @@ body:json {
       "ControlPcnChannel": {
         "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
-          "AddTlc": {
+          "AddTlc": [{
             "amount": {{payment_amount}},
             "payment_hash": "{{payment_hash}}",
             "expiry": 40
-          }
+          }]
         }
       }
     }
@@ -37,12 +37,13 @@ assert {
 }
 
 script:pre-request {
-  console.log("sending node3 AddTlc:", bru.getVar("payment_hash"));
+  console.log("sending node2 AddTlc:", bru.getVar("payment_hash"));
   console.log("amount: ", bru.getVar("payment_amount"));
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("response from node3 AddTlc:", res.body);
+  bru.setVar("N2N3_TLC_ID1", res.body.TlcId);
+  console.log("response from node2 AddTlc:", res.body);
 }

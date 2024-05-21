@@ -66,6 +66,11 @@ pub struct AcceptChannelResponse {
     pub new_channel_id: Hash256,
 }
 
+#[derive(Copy, Clone, Debug, Serialize)]
+pub enum ControlChannelResponse {
+    TlcId(u64),
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
