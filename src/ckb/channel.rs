@@ -129,7 +129,7 @@ pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
-    OpenChannel(u128, Hash256, [u8; 32]),
+    OpenChannel(u128, [u8; 32], oneshot::Sender<Hash256>),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// original OpenChannel message and an oneshot
@@ -638,13 +638,12 @@ impl Actor for ChannelActor {
                 }
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannel(funding_amount, temp_channel_id, seed) => {
+            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     &seed,
-                    temp_channel_id,
                     self.peer_id.clone(),
                     funding_amount,
                     LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
@@ -727,6 +726,8 @@ impl Actor for ChannelActor {
                         ),
                     ))
                     .expect("network actor alive");
+
+                tx.send(channel.get_id()).expect("Receive not dropped");
                 Ok(channel)
             }
         }
@@ -813,8 +814,7 @@ impl From<Transaction> for FundingTxInput {
 pub struct ChannelActorState {
     pub state: ChannelState,
     pub peer_id: PeerId,
-    pub temp_id: Hash256,
-
+    pub id: Hash256,
     pub funding_tx: Option<TransactionView>,
 
     // Is this channel initially inbound?
@@ -839,7 +839,6 @@ pub struct ChannelActorState {
 
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
-    pub id: Option<Hash256>,
 
     // The id of our next offering tlc, must increment by 1 for each new offered tlc.
     pub next_offering_tlc_id: u64,
@@ -1004,18 +1003,15 @@ fn derive_channel_id_from_revocation_keys(
 ) -> Hash256 {
     let holder_revocation = revocation_basepoint1.0.serialize();
     let counterparty_revocation = revocation_basepoint2.0.serialize();
+    let mut preimage = [holder_revocation, counterparty_revocation];
+    preimage.sort();
+    new_channel_id_from_seed(&preimage.concat())
+}
 
-    let preimage = if holder_revocation >= counterparty_revocation {
-        counterparty_revocation
-            .into_iter()
-            .chain(holder_revocation)
-            .collect::<Vec<_>>()
-    } else {
-        holder_revocation
-            .into_iter()
-            .chain(counterparty_revocation)
-            .collect()
-    };
+fn derive_temp_channel_id_from_revocation_key(revocation_basepoint: &Pubkey) -> Hash256 {
+    let revocation = revocation_basepoint.0.serialize();
+    let zero_point = [0; 33];
+    let preimage = [zero_point, revocation].concat();
     new_channel_id_from_seed(&preimage)
 }
 
@@ -1074,8 +1070,7 @@ impl ChannelActorState {
             funding_tx: None,
             is_acceptor: true,
             to_self_amount: holder_value,
-            temp_id: temp_channel_id,
-            id: Some(channel_id),
+            id: channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
@@ -1108,7 +1103,6 @@ impl ChannelActorState {
 
     pub fn new_outbound_channel(
         seed: &[u8],
-        new_channel_id: Hash256,
         peer_id: PeerId,
         value: u128,
         to_self_delay: LockTime,
@@ -1116,14 +1110,15 @@ impl ChannelActorState {
         let signer = InMemorySigner::generate_from_seed(seed);
         let commitment_number = 1;
         let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
+        let temp_channel_id =
+            derive_temp_channel_id_from_revocation_key(&holder_pubkeys.revocation_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
             is_acceptor: false,
             to_self_amount: value,
-            temp_id: new_channel_id,
-            id: None,
+            id: temp_channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
@@ -1160,7 +1155,7 @@ impl ChannelActorState {
 // Properties for the channel actor state.
 impl ChannelActorState {
     pub fn get_id(&self) -> Hash256 {
-        self.id.unwrap_or(self.temp_id)
+        self.id
     }
 
     pub fn get_holder_nonce(&self) -> impl Borrow<PubNonce> {
@@ -1477,12 +1472,13 @@ impl ChannelActorState {
             }
             PCNMessage::AcceptChannel(accept_channel) => {
                 self.handle_accept_channel_message(accept_channel)?;
+                let old_id = self.get_id();
                 self.fill_in_channel_id();
                 network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelAccepted(
                             self.get_id(),
-                            self.temp_id,
+                            old_id,
                             self.to_self_amount,
                             self.to_remote_amount,
                             self.get_funding_lock_script(),
@@ -2447,7 +2443,7 @@ impl ChannelActorState {
 
                 if self.to_self_amount + self.to_remote_amount != first_output_capacity {
                     return Err(ProcessingChannelError::InvalidParameter(
-                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount) 
+                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount)
                     ));
                 }
 
@@ -2491,7 +2487,6 @@ impl ChannelActorState {
     }
 
     pub fn fill_in_channel_id(&mut self) {
-        assert!(self.id.is_none(), "Channel id is already filled in");
         assert!(
             self.counterparty_channel_parameters.is_some(),
             "Counterparty pubkeys is required to derive actual channel id"
@@ -2507,12 +2502,9 @@ impl ChannelActorState {
         let channel_id =
             derive_channel_id_from_revocation_keys(holder_revocation, counterparty_revocation);
 
-        self.id = Some(channel_id);
-        debug!(
-            "Channel Id changed from {:?} to {:?}",
-            &self.temp_id,
-            &self.id.unwrap()
-        );
+        debug!("Channel Id changed from {:?} to {:?}", self.id, channel_id,);
+
+        self.id = channel_id;
     }
 
     // Whose pubkey should go first in musig2?
