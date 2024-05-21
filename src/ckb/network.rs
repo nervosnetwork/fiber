@@ -34,8 +34,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    new_channel_id_from_seed, ChannelActorMessage, ChannelCommandWithId, ChannelEvent,
-    ProcessingChannelError, ProcessingChannelResult,
+    ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
+    ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -316,7 +316,7 @@ impl NetworkActor {
             }
 
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                let (channel_id, _) = state.create_outbound_channel(open_channel).await?;
+                let (_, channel_id) = state.create_outbound_channel(open_channel).await?;
                 if let Some(reply) = reply {
                     let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                 }
@@ -526,25 +526,24 @@ impl NetworkActorState {
     pub async fn create_outbound_channel(
         &mut self,
         open_channel: OpenChannelCommand,
-    ) -> Result<(Hash256, ActorRef<ChannelActorMessage>), ProcessingChannelError> {
+    ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
         let network = self.network.clone();
         let OpenChannelCommand {
             peer_id,
             funding_amount,
         } = open_channel;
         let seed = self.generate_channel_seed();
-        let temp_channel_id = new_channel_id_from_seed(seed.as_slice());
-        Ok((
-            temp_channel_id,
-            Actor::spawn_linked(
-                None,
-                ChannelActor::new(peer_id.clone(), network.clone()),
-                ChannelInitializationParameter::OpenChannel(funding_amount, temp_channel_id, seed),
-                network.clone().get_cell(),
-            )
-            .await?
-            .0,
-        ))
+        let (tx, rx) = oneshot::channel::<Hash256>();
+        let channel = Actor::spawn_linked(
+            None,
+            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
+            network.clone().get_cell(),
+        )
+        .await?
+        .0;
+        let temp_channel_id = rx.await.expect("msg received");
+        Ok((channel, temp_channel_id))
     }
 
     pub async fn create_inbound_channel(
