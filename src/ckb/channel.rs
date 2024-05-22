@@ -19,7 +19,7 @@ use ractor::{
     async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -39,7 +39,7 @@ use crate::{
 
 use super::{
     key::blake2b_hash_with_salt,
-    network::{ControlChannelResponse, PCNMessageWithPeerId},
+    network::PCNMessageWithPeerId,
     serde_utils::EntityWrapperHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
@@ -61,6 +61,11 @@ pub enum ChannelActorMessage {
     PeerMessage(PCNMessage),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddTlcResponse {
+    pub tlc_id: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
@@ -69,7 +74,7 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(
         AddTlcCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<ControlChannelResponse, RpcError>>>,
+        #[serde(skip)] Option<RpcReplyPort<Result<AddTlcResponse, RpcError>>>,
     ),
     RemoveTlc(RemoveTlcCommand),
     Shutdown(ShutdownCommand),
@@ -526,7 +531,7 @@ impl ChannelActor {
             ChannelCommand::AddTlc(command, reply) => {
                 let tlc_id = self.handle_add_tlc_command(state, command)?;
                 if let Some(reply) = reply {
-                    let _ = reply.send(Ok(ControlChannelResponse::TlcId(tlc_id)));
+                    let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                 }
                 Ok(())
             }
