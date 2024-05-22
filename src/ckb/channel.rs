@@ -329,13 +329,12 @@ impl ChannelActor {
                     }),
                 };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
-                    let filled_payment_preimage: Hash256 =
-                        blake2b_256(fulfill.payment_preimage).into();
-                    if tlc.payment_hash != filled_payment_preimage {
+                    let filled_payment_hash: Hash256 = blake2b_256(fulfill.payment_preimage).into();
+                    if tlc.payment_hash != filled_payment_hash {
                         state.pending_received_tlcs.insert(tlc.id, tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
-                            fulfill.payment_preimage, filled_payment_preimage, tlc.payment_hash,
+                            fulfill.payment_preimage, filled_payment_hash, tlc.payment_hash,
                         )));
                     }
                 }
