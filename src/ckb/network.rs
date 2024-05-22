@@ -6,7 +6,7 @@ use log::{debug, error, info, warn};
 
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RpcReplyPort,
+    RpcReplyPort, SupervisionEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, FromInto};
@@ -45,7 +45,7 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::ckb::serde_utils::EntityWrapperHex;
+use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error, RpcError};
@@ -75,6 +75,7 @@ pub struct AcceptChannelResponse {
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
+    DisconnectPeer(#[serde_as(as = "DisplayFromStr")] PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -95,13 +96,13 @@ pub enum NetworkActorCommand {
     ControlPcnChannel(ChannelCommandWithId),
     UpdateChannelFunding(
         Hash256,
-        #[serde_as(as = "EntityWrapperHex<Transaction>")] Transaction,
+        #[serde_as(as = "EntityHex")] Transaction,
         FundingRequest,
     ),
     SignTx(
         #[serde_as(as = "DisplayFromStr")] PeerId,
         Hash256,
-        #[serde_as(as = "EntityWrapperHex<Transaction>")] Transaction,
+        #[serde_as(as = "EntityHex")] Transaction,
         Option<Vec<Vec<u8>>>,
     ),
 }
@@ -312,6 +313,16 @@ impl NetworkActor {
                 // TODO: note that the dial function does not return error immediately even if dial fails.
                 // Tentacle sends an event by calling handle_error function instead, which
                 // may receive errors like DialerError.
+            }
+
+            NetworkActorCommand::DisconnectPeer(peer_id) => {
+                debug!(
+                    "DisconnectPeer command received, disconnecting peer {:?}",
+                    &peer_id
+                );
+                if let Some(session) = state.get_peer_session(&peer_id) {
+                    state.control.disconnect(session).await?;
+                }
             }
 
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
@@ -627,9 +638,34 @@ impl NetworkActorState {
         }
     }
 
+<<<<<<< HEAD
     fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
         debug!("Peer connected: {:?}, session id: {}", &id, session.id);
         self.peer_session_map.insert(id.clone(), session.id);
+=======
+    async fn on_peer_connected<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
+        &mut self,
+        peer_id: &PeerId,
+        session: &SessionContext,
+        store: S,
+    ) {
+        debug!("Peer connected: {:?}, session id: {}", &peer_id, session.id);
+        self.peer_session_map.insert(peer_id.clone(), session.id);
+
+        for channel_id in store.get_channels(&peer_id) {
+            debug!("Reestablishing channel {:?}", &channel_id);
+            if let Ok((channel, _)) = Actor::spawn_linked(
+                None,
+                ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
+                ChannelInitializationParameter::ReestablishChannel(channel_id),
+                self.network.get_cell(),
+            )
+            .await
+            {
+                self.on_channel_created(channel_id, peer_id, channel);
+            }
+        }
+>>>>>>> f1fde85 (parent 63b234516064ce2480c4a2c238a20bcad255840e)
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
@@ -817,7 +853,7 @@ impl Actor for NetworkActor {
         let handle = Handle::new(myself.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
-            .key_pair(secio_kp)
+            .handshake_type(secio_kp.into())
             .build(handle);
         let listen_addr = service
             .listen(
@@ -879,7 +915,9 @@ impl Actor for NetworkActor {
                     self.on_service_event(e).await;
                 }
                 NetworkActorEvent::PeerConnected(id, session) => {
-                    state.on_peer_connected(&id, &session);
+                    state
+                        .on_peer_connected(&id, &session, self.store.clone())
+                        .await;
                     // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
@@ -1028,6 +1066,24 @@ impl Actor for NetworkActor {
             error!("Failed to close tentacle service: {}", err);
         }
         debug!("Network service for {:?} shutdown", state.peer_id);
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SupervisionEvent::ActorTerminated(who, _, _) => {
+                debug!("Actor {:?} terminated", who);
+            }
+            SupervisionEvent::ActorPanicked(who, _) => {
+                error!("Actor {:?} panicked", who);
+            }
+            _ => {}
+        }
         Ok(())
     }
 }

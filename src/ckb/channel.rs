@@ -20,7 +20,7 @@ use ractor::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::{mpsc::error::TrySendError, oneshot};
@@ -40,7 +40,7 @@ use crate::{
 use super::{
     key::blake2b_hash_with_salt,
     network::PCNMessageWithPeerId,
-    serde_utils::EntityWrapperHex,
+    serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
         OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
@@ -103,7 +103,7 @@ pub struct RemoveTlcCommand {
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct ShutdownCommand {
-    #[serde_as(as = "EntityWrapperHex<Script>")]
+    #[serde_as(as = "EntityHex")]
     close_script: Script,
     fee: u128,
 }
@@ -130,7 +130,7 @@ pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct TxUpdateCommand {
-    #[serde_as(as = "EntityWrapperHex<Transaction>")]
+    #[serde_as(as = "EntityHex")]
     pub transaction: Transaction,
 }
 
@@ -152,6 +152,8 @@ pub enum ChannelInitializationParameter {
         OpenChannel,
         Option<oneshot::Sender<Hash256>>,
     ),
+    /// Reestablish a channel with given channel id.
+    ReestablishChannel(Hash256),
 }
 
 #[derive(Debug)]
@@ -488,7 +490,7 @@ impl ChannelActor {
                 state.update_state(ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 ));
-                state.funding_tx = Some(tx_update.transaction.clone().into_view());
+                state.funding_tx = Some(tx_update.transaction.clone());
                 state.maybe_complete_tx_collaboration(
                     tx_update.transaction.clone(),
                     self.network.clone(),
@@ -749,6 +751,23 @@ impl Actor for ChannelActor {
                 tx.send(channel.get_id()).expect("Receive not dropped");
                 Ok(channel)
             }
+            ChannelInitializationParameter::ReestablishChannel(channel_id) => {
+                let channel = self
+                    .store
+                    .get_channel_actor_state(&channel_id)
+                    .expect("channel should exist");
+
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelCreated(
+                            channel.get_id(),
+                            self.peer_id.clone(),
+                            myself,
+                        ),
+                    ))
+                    .expect("network actor alive");
+                Ok(channel)
+            }
         }
     }
 
@@ -811,6 +830,7 @@ impl Actor for ChannelActor {
                 }
             },
         }
+        self.store.insert_channel_actor_state(state.clone());
         Ok(())
     }
 }
@@ -832,12 +852,14 @@ impl From<Transaction> for FundingTxInput {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelActorState {
     pub state: ChannelState,
+    #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub id: Hash256,
-    pub funding_tx: Option<TransactionView>,
+    pub funding_tx: Option<Transaction>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -852,6 +874,7 @@ pub struct ChannelActorState {
     // Cached channel parameter for easier of access.
     pub local_channel_parameters: ChannelParametersOneParty,
     // The holder has set a shutdown script.
+    #[serde_as(as = "Option<EntityHex>")]
     pub local_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
@@ -874,6 +897,7 @@ pub struct ChannelActorState {
     pub pending_received_tlcs: HashMap<u64, TLC>,
 
     // The counterparty has already sent a shutdown message with this script.
+    #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
 
     pub remote_nonce: Option<PubNonce>,
@@ -924,14 +948,16 @@ pub enum ProcessingChannelError {
 }
 
 bitflags! {
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct NegotiatingFundingFlags: u32 {
         const OUR_INIT_SENT = 1;
         const THEIR_INIT_SENT = 1 << 1;
         const INIT_SENT = NegotiatingFundingFlags::OUR_INIT_SENT.bits() | NegotiatingFundingFlags::THEIR_INIT_SENT.bits();
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct CollaboratingFundingTxFlags: u32 {
         const AWAITING_REMOTE_TX_COLLABORATION_MSG = 1;
         const PREPARING_LOCAL_TX_COLLABORATION_MSG = 1 << 1;
@@ -940,28 +966,32 @@ bitflags! {
         const COLLABRATION_COMPLETED = CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT.bits() | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT.bits();
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct SigningCommitmentFlags: u32 {
         const OUR_COMMITMENT_SIGNED_SENT = 1;
         const THEIR_COMMITMENT_SIGNED_SENT = 1 << 1;
         const COMMITMENT_SIGNED_SENT = SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT.bits() | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT.bits();
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct AwaitingTxSignaturesFlags: u32 {
         const OUR_TX_SIGNATURES_SENT = 1;
         const THEIR_TX_SIGNATURES_SENT = 1 << 1;
         const TX_SIGNATURES_SENT = AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT.bits() | AwaitingTxSignaturesFlags::THEIR_TX_SIGNATURES_SENT.bits();
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct AwaitingChannelReadyFlags: u32 {
         const OUR_CHANNEL_READY = 1;
         const THEIR_CHANNEL_READY = 1 << 1;
         const CHANNEL_READY = AwaitingChannelReadyFlags::OUR_CHANNEL_READY.bits() | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY.bits();
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct ChannelReadyFlags: u32 {
         /// Indicates that we have sent a `commitment_signed` but are awaiting the responding
         ///	`revoke_and_ack` message. During this period, we can't generate new messages as
@@ -970,7 +1000,8 @@ bitflags! {
         const AWAITING_REMOTE_REVOKE = 1;
     }
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
     pub struct ShuttingDownFlags: u32 {
         /// Indicates that we have sent a `shutdown` message.
         const OUR_SHUTDOWN_SENT = 1;
@@ -992,7 +1023,7 @@ enum CommitmentSignedFlags {
     ChannelReady(ChannelReadyFlags),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
@@ -1221,21 +1252,16 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_funding_transaction(&self) -> &TransactionView {
+    pub fn get_funding_transaction(&self) -> &Transaction {
         self.funding_tx
             .as_ref()
             .expect("Funding transaction is present")
     }
 
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
-        let tx = self
-            .funding_tx
-            .as_ref()
-            .expect("Funding transaction is present");
+        let tx = self.get_funding_transaction();
         // By convention, the funding tx output for the channel is the first output.
-        tx.output_pts_iter()
-            .next()
-            .expect("Funding transaction output is present")
+        OutPoint::new(tx.calc_tx_hash(), 0)
     }
 
     pub fn get_local_shutdown_script(&self) -> &Script {
@@ -1523,19 +1549,20 @@ impl ChannelActorState {
                         .collect();
                     debug!(
                         "Updating funding tx witnesses of {:?} to {:?}",
-                        self.get_funding_transaction().hash(),
+                        self.get_funding_transaction().calc_tx_hash(),
                         new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
                     );
                     self.funding_tx = Some(
                         self.get_funding_transaction()
                             .as_advanced_builder()
                             .set_witnesses(new_witnesses)
-                            .build(),
+                            .build()
+                            .data(),
                     );
                     network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                self.get_funding_transaction().data(),
+                                self.get_funding_transaction().clone(),
                                 self.get_funding_transaction_outpoint(),
                                 self.get_id(),
                             ),
@@ -1996,7 +2023,7 @@ impl ChannelActorState {
         match msg {
             TxCollaborationMsg::TxUpdate(msg) => {
                 // TODO check if the tx is valid.
-                self.funding_tx = Some(msg.tx.clone().into_view());
+                self.funding_tx = Some(msg.tx.clone());
                 if self.is_tx_final(&msg.tx)? {
                     self.maybe_complete_tx_collaboration(msg.tx, network)?;
                 } else {
@@ -2330,7 +2357,7 @@ impl ChannelActorState {
                 NetworkActorCommand::SignTx(
                     self.peer_id.clone(),
                     self.get_id(),
-                    funding_tx.data(),
+                    funding_tx,
                     partial_witnesses,
                 ),
             ))
@@ -2437,7 +2464,8 @@ impl ChannelActorState {
                     tx
                 );
                 let first_output =
-                    tx.outputs()
+                    tx.raw()
+                        .outputs()
                         .get(0)
                         .ok_or(ProcessingChannelError::InvalidParameter(
                             "Funding transaction should have at least one output".to_string(),
@@ -2485,7 +2513,7 @@ impl ChannelActorState {
                     dbg!("outpoint: {:?}", &outpoint);
                     dbg!("Cell: {:?}", &cell);
                     context.create_cell_with_out_point(outpoint, cell, cell_data);
-                    self.funding_tx = Some(funding_tx);
+                    self.funding_tx = Some(funding_tx.data());
                 }
             }
         }
@@ -2881,6 +2909,11 @@ impl ChannelActorState {
         Ok(tx)
     }
 }
+pub trait ChannelActorStateStore {
+    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
+    fn insert_channel_actor_state(&self, state: ChannelActorState);
+    fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256>;
+}
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
 /// the ckb transaction.
@@ -3031,7 +3064,7 @@ pub fn aggregate_partial_signatures_for_commitment_tx(
         .build())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelParametersOneParty {
     pub pubkeys: ChannelBasePublicKeys,
     pub selected_contest_delay: LockTime,
@@ -3060,7 +3093,7 @@ impl ChannelParametersOneParty {
 }
 
 /// One counterparty's public keys which do not change over the life of a channel.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelBasePublicKeys {
     /// The public key which is used to sign all commitment transactions, as it appears in the
     /// on-chain channel lock-in 2-of-2 multisig output.
@@ -3110,7 +3143,7 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
 type ShortHash = [u8; 20];
 
 /// A tlc output.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TLC {
     /// The id of a received TLC. Must be empty if this is an offered HTLC.
     /// We will fill in the id when we send this tlc to the counterparty.
@@ -3215,7 +3248,7 @@ pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> P
 ///
 /// This implementation performs no policy checks and is insufficient by itself as
 /// a secure external signer.
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub struct InMemorySigner {
     /// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
     /// holder's anchor output in a commitment transaction, if one is present.
@@ -3601,6 +3634,123 @@ mod tests {
                 ),
             ))
             .expect("node_a alive");
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_reestablish_channel() {
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::OpenChannel(
+                    OpenChannelCommand {
+                        peer_id: node_b.peer_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
+            ))
+            .expect("node_a alive");
+        let channel_id = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    Some(channel_id.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_b
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::AcceptChannel(
+                    AcceptChannelCommand {
+                        temp_channel_id: channel_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
+            ))
+            .expect("node_a alive");
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::DisconnectPeer(node_b.peer_id.clone()),
+            ))
+            .expect("node_a alive");
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::PeerDisConnected(peer_id, _) => {
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_a.connect_to(&node_b).await;
 
         node_a
             .expect_event(|event| match event {

@@ -61,26 +61,26 @@ where
     serializer.serialize_str(&format!("0x{}", &hex::encode(e.as_ref())))
 }
 
-pub struct WrapperHex<E>(pub E);
+pub struct SliceHex;
 
-impl<E> SerializeAs<E> for WrapperHex<E>
+impl<T> SerializeAs<T> for SliceHex
 where
-    E: AsRef<[u8]>,
+    T: AsRef<[u8]>,
 {
-    fn serialize_as<S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize_as<S>(source: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        to_hex(e, serializer)
+        to_hex(source, serializer)
     }
 }
 
-impl<'de, E> DeserializeAs<'de, E> for WrapperHex<E>
+impl<'de, T> DeserializeAs<'de, T> for SliceHex
 where
-    E: TryFrom<Vec<u8>>,
-    E::Error: core::fmt::Debug,
+    T: TryFrom<Vec<u8>>,
+    T::Error: core::fmt::Debug,
 {
-    fn deserialize_as<D>(deserializer: D) -> Result<E, D::Error>
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -88,56 +88,29 @@ where
     }
 }
 
-pub struct EntityWrapperBase64<E: Entity>(pub E);
+pub struct EntityHex;
 
-impl<E> SerializeAs<E> for EntityWrapperBase64<E>
+impl<T> SerializeAs<T> for EntityHex
 where
-    E: Entity,
+    T: Entity,
 {
-    fn serialize_as<S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize_as<S>(source: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        to_base64(e.as_slice(), serializer)
+        to_hex(source.as_slice(), serializer)
     }
 }
 
-impl<'de, E> DeserializeAs<'de, E> for EntityWrapperBase64<E>
+impl<'de, T> DeserializeAs<'de, T> for EntityHex
 where
-    E: Entity,
+    T: Entity,
 {
-    fn deserialize_as<D>(deserializer: D) -> Result<E, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let v: Vec<u8> = from_base64(deserializer)?;
-        E::from_slice(&v).map_err(serde::de::Error::custom)
-    }
-}
-
-pub struct EntityWrapperHex<E: Entity>(pub E);
-
-impl<E> SerializeAs<E> for EntityWrapperHex<E>
-where
-    E: Entity,
-{
-    fn serialize_as<S>(e: &E, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        to_hex(e.as_slice(), serializer)
-    }
-}
-
-impl<'de, E> DeserializeAs<'de, E> for EntityWrapperHex<E>
-where
-    E: Entity,
-{
-    fn deserialize_as<D>(deserializer: D) -> Result<E, D::Error>
+    fn deserialize_as<D>(deserializer: D) -> Result<T, D::Error>
     where
         D: Deserializer<'de>,
     {
         let v: Vec<u8> = from_hex(deserializer)?;
-        E::from_slice(&v).map_err(serde::de::Error::custom)
+        T::from_slice(&v).map_err(serde::de::Error::custom)
     }
 }

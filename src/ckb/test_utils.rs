@@ -206,6 +206,43 @@ impl NetworkNode {
     }
 }
 
+#[derive(Clone, Default)]
+struct MemoryStore {
+    channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
+}
+
+impl ChannelActorStateStore for MemoryStore {
+    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_actor_state_map
+            .read()
+            .unwrap()
+            .get(id)
+            .cloned()
+    }
+
+    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_actor_state_map
+            .write()
+            .unwrap()
+            .insert(state.id.clone(), state);
+    }
+
+    fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256> {
+        self.channel_actor_state_map
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|state| {
+                if peer_id == &state.peer_id {
+                    Some(state.id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::NetworkNode;

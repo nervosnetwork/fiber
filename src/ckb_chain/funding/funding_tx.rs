@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::super::FundingError;
-use crate::ckb::serde_utils::EntityWrapperHex;
+use crate::ckb::serde_utils::EntityHex;
 
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
@@ -53,7 +53,7 @@ impl From<Transaction> for FundingTx {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FundingUdtInfo {
     /// The UDT type script
-    #[serde_as(as = "EntityWrapperHex<packed::Script>")]
+    #[serde_as(as = "EntityHex")]
     type_script: packed::Script,
     /// CKB amount to be provided by the local party.
     local_ckb_amount: u64,
@@ -67,7 +67,7 @@ pub struct FundingRequest {
     /// UDT channel info
     pub udt_info: Option<FundingUdtInfo>,
     /// The funding cell lock script args
-    #[serde_as(as = "EntityWrapperHex<Script>")]
+    #[serde_as(as = "EntityHex")]
     pub script: Script,
     /// Assets amount to be provided by the local party
     pub local_amount: u64,

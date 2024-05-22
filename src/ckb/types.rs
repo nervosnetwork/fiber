@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::gen::pcn::{self as molecule_pcn, PubNonce as Byte66, SignatureVec};
-use super::serde_utils::{EntityWrapperBase64, WrapperHex};
+use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
 use ckb_types::packed::Uint64;
@@ -192,7 +192,7 @@ impl AsRef<[u8; 32]> for Privkey {
 
 #[serde_as]
 #[derive(Copy, Clone, Serialize, Deserialize, Hash, Eq, PartialEq, Default)]
-pub struct Hash256(#[serde_as(as = "WrapperHex<[u8; 32]>")] [u8; 32]);
+pub struct Hash256(#[serde_as(as = "SliceHex")] [u8; 32]);
 
 impl From<[u8; 32]> for Hash256 {
     fn from(value: [u8; 32]) -> Self {
@@ -429,7 +429,7 @@ impl TryFrom<Byte66> for PubNonce {
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
-    #[serde_as(as = "Option<EntityWrapperBase64<Script>>")]
+    #[serde_as(as = "Option<EntityHex>")]
     pub funding_type_script: Option<Script>,
     pub funding_amount: u128,
     pub funding_fee_rate: u64,
@@ -698,7 +698,7 @@ pub enum TxCollaborationMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxUpdate {
     pub channel_id: Hash256,
-    #[serde_as(as = "EntityWrapperBase64<Transaction>")]
+    #[serde_as(as = "EntityHex")]
     pub tx: Transaction,
 }
 
@@ -825,7 +825,7 @@ impl TryFrom<molecule_pcn::TxAckRBF> for TxAckRBF {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shutdown {
     pub channel_id: Hash256,
-    #[serde_as(as = "EntityWrapperBase64<Script>")]
+    #[serde_as(as = "EntityHex")]
     pub close_script: Script,
     pub fee: u128,
 }
