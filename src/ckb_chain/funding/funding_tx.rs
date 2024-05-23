@@ -1,14 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::super::FundingError;
 use crate::ckb::serde_utils::EntityHex;
 
+use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
     traits::{
-        CellCollector, CellDepResolver, DefaultCellCollector, DefaultCellDepResolver,
-        DefaultHeaderDepResolver, DefaultTransactionDependencyProvider, HeaderDepResolver,
-        SecpCkbRawKeySigner, TransactionDependencyProvider,
+        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
+        DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
+        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -16,9 +17,10 @@ use ckb_sdk::{
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
-    packed::{self, Script, Transaction},
+    packed::{self, CellInput, Script, Transaction},
     prelude::*,
 };
+use log::warn;
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
@@ -96,11 +98,41 @@ struct FundingTxBuilder {
 impl TxBuilder for FundingTxBuilder {
     fn build_base(
         &self,
-        _cell_collector: &mut dyn CellCollector,
-        _cell_dep_resolver: &dyn CellDepResolver,
+        cell_collector: &mut dyn CellCollector,
+        cell_dep_resolver: &dyn CellDepResolver,
         _header_dep_resolver: &dyn HeaderDepResolver,
         _tx_dep_provider: &dyn TransactionDependencyProvider,
     ) -> Result<TransactionView, TxBuilderError> {
+        // Build inputs
+        let mut inputs = vec![];
+        let mut cell_deps = HashSet::new();
+        if let Some(ref udt_info) = self.request.udt_info {
+            let udt_type_script = udt_info.type_script.clone();
+            let owner = self.context.funding_source_lock_script.clone();
+            let owner_query = {
+                let mut query = CellQueryOptions::new_lock(udt_type_script.clone());
+                query.secondary_script_len_range = Some(ValueRangeOption::new_exact(0));
+                query.data_len_range = Some(ValueRangeOption::new_exact(0));
+                query
+            };
+
+            let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
+            if owner_cells.is_empty() {
+                return Err(TxBuilderError::Other(anyhow!("owner cell not found")));
+            }
+            inputs = vec![CellInput::new(owner_cells[0].out_point.clone(), 0)];
+
+            let owner_cell_dep = cell_dep_resolver
+                .resolve(&owner)
+                .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(owner.clone()))?;
+            let udt_cell_dep = cell_dep_resolver
+                .resolve(&udt_type_script)
+                .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script.clone()))?;
+            #[allow(clippy::mutable_key_type)]
+            cell_deps.insert(owner_cell_dep);
+            cell_deps.insert(udt_cell_dep);
+        }
+
         let funding_cell = self
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
@@ -121,8 +153,10 @@ impl TxBuilder for FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
         let tx = builder
+            .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
+            .set_cell_deps(cell_deps.into_iter().collect())
             .build();
 
         Ok(tx)
@@ -175,6 +209,7 @@ impl FundingTxBuilder {
                     .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
+                warn!("yukang debug ckb_output: {:?}", ckb_output);
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
