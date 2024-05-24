@@ -10,8 +10,7 @@ use ractor::{
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, FromInto};
-use std::collections::HashSet;
-use std::{collections::HashMap, str};
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::SecioKeyPair;
 
 use tentacle::{
@@ -162,7 +161,7 @@ pub enum NetworkActorEvent {
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
     /// and the script is the lock script of the agreed funding cell.
-    ChannelAccepted(Hash256, Hash256, u128, u128, Script),
+    ChannelAccepted(PeerId, Hash256, Hash256, u128, u128, Script),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
     /// A channel is being shutting down.
@@ -499,7 +498,8 @@ pub struct NetworkActorState {
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
     control: ServiceAsyncControl,
-    peers: HashMap<PeerId, HashSet<SessionId>>,
+    peer_session_map: HashMap<PeerId, SessionId>,
+    session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
@@ -588,9 +588,7 @@ impl NetworkActorState {
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
-        self.peers
-            .get(peer_id)
-            .and_then(|sessions| sessions.iter().next().cloned())
+        self.peer_session_map.get(peer_id).cloned()
     }
 
     async fn send_message_to_session(
@@ -630,17 +628,21 @@ impl NetworkActorState {
     }
 
     fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
-        debug!("Peer connected: {:?}", &id);
-        let sessions = self.peers.entry(id.clone()).or_default();
-        sessions.insert(session.id);
+        debug!("Peer connected: {:?}, session id: {}", &id, session.id);
+        self.peer_session_map.insert(id.clone(), session.id);
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
-        debug!("Peer disconnected: {:?}", &id);
-        if let Some(sessions) = self.peers.get_mut(id) {
-            sessions.remove(&session.id);
-            if sessions.is_empty() {
-                self.peers.remove(id);
+        debug!("Peer disconnected: {:?}, session id: {}", &id, session.id);
+        if let Some(session) = self.peer_session_map.remove(id) {
+            if let Some(channel_ids) = self.session_channels_map.remove(&session) {
+                for channel_id in channel_ids {
+                    if let Some(channel) = self.channels.remove(&channel_id) {
+                        let _ = channel.send_message(ChannelActorMessage::Event(
+                            ChannelEvent::PeerDisconnected,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -652,7 +654,13 @@ impl NetworkActorState {
         actor: ActorRef<ChannelActorMessage>,
     ) {
         debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
-        self.channels.insert(id, actor);
+        if let Some(session) = self.get_peer_session(peer_id) {
+            self.channels.insert(id, actor);
+            self.session_channels_map
+                .entry(session)
+                .or_insert_with(HashSet::new)
+                .insert(id);
+        }
     }
 
     pub async fn on_open_channel_msg(
@@ -778,12 +786,13 @@ impl NetworkActorState {
                 return Ok(());
             }
         };
-        let channel = self.channels.get(&channel_id).expect("channel exists");
-        channel
-            .send_message(ChannelActorMessage::Event(
-                ChannelEvent::FundingTransactionConfirmed(),
-            ))
-            .expect("channel actor alive");
+        if let Some(channel) = self.channels.get(&channel_id) {
+            channel
+                .send_message(ChannelActorMessage::Event(
+                    ChannelEvent::FundingTransactionConfirmed,
+                ))
+                .expect("channel actor alive");
+        }
         Ok(())
     }
 }
@@ -847,7 +856,8 @@ impl Actor for NetworkActor {
             entropy,
             network: myself,
             control,
-            peers: Default::default(),
+            peer_session_map: Default::default(),
+            session_channels_map: Default::default(),
             channels: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
@@ -901,31 +911,38 @@ impl Actor for NetworkActor {
                         ))
                         .expect("myself alive");
                 }
-                NetworkActorEvent::ChannelAccepted(new, old, local, remote, script) => {
+                NetworkActorEvent::ChannelAccepted(peer_id, new, old, local, remote, script) => {
                     assert_ne!(new, old, "new and old channel id must be different");
-                    let channel = state.channels.remove(&old).expect("channel exists");
-                    state.channels.insert(new, channel);
-                    debug!("Channel accepted: {:?} -> {:?}", old, new);
+                    if let Some(session) = state.get_peer_session(&peer_id) {
+                        if let Some(channel) = state.channels.remove(&old) {
+                            debug!("Channel accepted: {:?} -> {:?}", old, new);
+                            state.channels.insert(new, channel);
+                            state.session_channels_map.get_mut(&session).map(|set| {
+                                set.remove(&old);
+                                set.insert(new);
+                            });
 
-                    debug!("Starting funding channel");
-                    // TODO: Here we implies the one who receives AcceptChannel message
-                    // will send TxUpdate message first.
-                    dbg!(&script);
-                    myself
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::UpdateChannelFunding(
-                                new,
-                                Default::default(),
-                                FundingRequest {
-                                    udt_info: None,
-                                    script,
-                                    local_amount: local as u64,
-                                    local_fee_rate: 0,
-                                    remote_amount: remote as u64,
-                                },
-                            ),
-                        ))
-                        .expect("myself alive");
+                            debug!("Starting funding channel");
+                            // TODO: Here we implies the one who receives AcceptChannel message
+                            // will send TxUpdate message first.
+                            dbg!(&script);
+                            myself
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::UpdateChannelFunding(
+                                        new,
+                                        Default::default(),
+                                        FundingRequest {
+                                            udt_info: None,
+                                            script,
+                                            local_amount: local as u64,
+                                            local_fee_rate: 0,
+                                            remote_amount: remote as u64,
+                                        },
+                                    ),
+                                ))
+                                .expect("myself alive");
+                        }
+                    }
                 }
                 NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
                     info!(

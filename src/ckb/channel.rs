@@ -735,7 +735,7 @@ impl Actor for ChannelActor {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -751,7 +751,7 @@ impl Actor for ChannelActor {
                 }
             }
             ChannelActorMessage::Event(e) => match e {
-                ChannelEvent::FundingTransactionConfirmed() => {
+                ChannelEvent::FundingTransactionConfirmed => {
                     let flags = match state.state {
                         ChannelState::AwaitingChannelReady(flags) => flags,
                         ChannelState::AwaitingTxSignatures(f)
@@ -786,6 +786,9 @@ impl Actor for ChannelActor {
                             ))
                             .expect("network actor alive");
                     }
+                }
+                ChannelEvent::PeerDisconnected => {
+                    myself.stop(Some("PeerDisconnected".to_string()));
                 }
             },
         }
@@ -871,7 +874,8 @@ pub struct ClosedChannel {}
 
 #[derive(Debug)]
 pub enum ChannelEvent {
-    FundingTransactionConfirmed(),
+    FundingTransactionConfirmed,
+    PeerDisconnected,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
@@ -1477,6 +1481,7 @@ impl ChannelActorState {
                 network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelAccepted(
+                            self.peer_id.clone(),
                             self.get_id(),
                             old_id,
                             self.to_self_amount,
