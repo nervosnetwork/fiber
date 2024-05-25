@@ -97,12 +97,16 @@ pub enum NetworkActorCommand {
 pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_type_script: Option<Script>,
 }
 
 #[derive(Debug)]
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_type_script: Option<Script>,
 }
 
 impl NetworkActorMessage {
@@ -365,6 +369,7 @@ where
                     "Updating channel funding for channel {:?}, current tx: {:?}",
                     &channel_id, old_tx
                 );
+                warn!("anan fundingrequest: {:?}", request);
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
                 let tx = match call_t!(
@@ -382,6 +387,7 @@ where
                         }
                     },
                     Ok(Err(err)) => {
+                        // FIXME(yukang): we need to handle this error properly
                         error!("Failed to fund channel: {}", err);
                         return Ok(());
                     }
@@ -554,13 +560,19 @@ impl NetworkActorState {
         let OpenChannelCommand {
             peer_id,
             funding_amount,
+            funding_type_script,
         } = open_channel;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
+            ChannelInitializationParameter::OpenChannel(
+                funding_amount,
+                seed,
+                funding_type_script,
+                tx,
+            ),
             network.clone().get_cell(),
         )
         .await?
@@ -577,6 +589,7 @@ impl NetworkActorState {
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
+            funding_type_script,
         } = accept_channel;
         let (peer_id, open_channel) = self
             .to_be_accepted_channels
@@ -592,6 +605,26 @@ impl NetworkActorState {
             return Ok((channel.clone(), temp_channel_id, id));
         }
 
+        warn!(
+            "anan create_inbound_channel: our_funding_type: {:?}, remote_funding_type: {:?}",
+            funding_type_script, open_channel.funding_type_script
+        );
+
+        match (
+            open_channel.funding_type_script.as_ref(),
+            funding_type_script.as_ref(),
+        ) {
+            (Some(_open_script), Some(_script)) => {
+                // TODO: may need to check the same UDT type script
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Funding type script must both provided, or both not provided".to_string(),
+                ));
+            }
+        }
+
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -601,6 +634,7 @@ impl NetworkActorState {
                 funding_amount,
                 seed,
                 open_channel,
+                funding_type_script,
                 Some(tx),
             ),
             network.clone().get_cell(),

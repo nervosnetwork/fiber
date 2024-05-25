@@ -2,8 +2,8 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
-    core::{TransactionBuilder, TransactionView},
-    packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    core::{Capacity, TransactionBuilder, TransactionView},
+    packed::{self, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
@@ -35,7 +35,7 @@ use crate::{
     ckb::types::Shutdown,
     ckb_chain::{
         contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
-        FundingRequest,
+        FundingRequest, FundingUdtInfo,
     },
     NetworkServiceEvent,
 };
@@ -146,7 +146,7 @@ pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
-    OpenChannel(u128, [u8; 32], oneshot::Sender<Hash256>),
+    OpenChannel(u128, [u8; 32], Option<Script>, oneshot::Sender<Hash256>),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// original OpenChannel message and an oneshot
@@ -155,6 +155,7 @@ pub enum ChannelInitializationParameter {
         u128,
         [u8; 32],
         OpenChannel,
+        Option<Script>,
         Option<oneshot::Sender<Hash256>>,
     ),
     /// Reestablish a channel with given channel id.
@@ -868,6 +869,7 @@ where
                 my_funding_amount,
                 seed,
                 open_channel,
+                my_funding_type_script,
                 oneshot_channel,
             ) => {
                 let peer_id = self.peer_id.clone();
@@ -896,17 +898,15 @@ where
                     ))));
                 }
 
-                if funding_type_script.is_some() {
-                    // We have not implemented funding type script yet.
-                    // But don't panic, otherwise adversary can easily take us down.
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Funding type script is not none, but we are currently unable to process this".to_string(),
-                    )));
-                }
+                warn!(
+                    "anan accept_channel funding_type_script: {:?} my_funding_type_script: {:?}",
+                    funding_type_script, my_funding_type_script
+                );
 
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     my_funding_amount,
+                    my_funding_type_script.clone(),
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
@@ -968,7 +968,12 @@ where
                 }
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx) => {
+            ChannelInitializationParameter::OpenChannel(
+                funding_amount,
+                seed,
+                funding_type_script,
+                tx,
+            ) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
@@ -983,7 +988,7 @@ where
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
-                    funding_type_script: None,
+                    funding_type_script,
                     funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
@@ -1181,6 +1186,9 @@ pub struct ChannelActorState {
     pub id: Hash256,
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
+
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_type_script: Option<Script>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -1410,6 +1418,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
         local_value: u128,
+        funding_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
         remote_value: u128,
@@ -1432,11 +1441,17 @@ impl ChannelActorState {
             &channel_id, &temp_channel_id,
         );
 
+        warn!(
+            "anan new_inbound_channel funding_type_script: {:?}",
+            funding_type_script
+        );
+
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             peer_id,
             funding_tx: None,
             is_acceptor: true,
+            funding_type_script,
             to_local_amount: local_value,
             id: channel_id,
             next_offering_tlc_id: 0,
@@ -1480,6 +1495,7 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
+            funding_type_script: None,
             is_acceptor: false,
             to_local_amount: value,
             id: temp_channel_id,
@@ -1649,9 +1665,20 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
-        debug!("Generating funding request");
+        debug!("anan Generating funding request");
+        let udt_info = if let Some(type_script) = &self.funding_type_script {
+            Some(FundingUdtInfo {
+                type_script: type_script.clone(),
+                // FIXME(yukang): this is hardcoded to 61 * 10^8 * 4 shannons
+                local_ckb_amount: 24400000000,
+                remote_ckb_amount: 24400000000,
+            })
+        } else {
+            None
+        };
+        warn!("anan udt_info: {:?}", udt_info);
         FundingRequest {
-            udt_info: None,
+            udt_info,
             script: self.get_funding_lock_script(),
             local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
@@ -2520,35 +2547,71 @@ impl ChannelActorState {
                     .build(),
             );
 
-        // TODO: Check UDT type, if it is ckb then convert it into u64.
-        let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
-        let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
-        debug!(
-            "Building shutdown transaction with values: {} {}",
-            local_value, remote_value
-        );
-        let local_output = CellOutput::new_builder()
-            .capacity(local_value.pack())
-            .lock(local_shutdown_script)
-            .build();
-        let remote_output = CellOutput::new_builder()
-            .capacity(remote_value.pack())
-            .lock(remote_shutdown_script)
-            .build();
-        let outputs = self.order_things_for_musig2(local_output, remote_output);
-        let tx_builder = tx_builder.set_outputs(outputs.to_vec());
-        let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
-        let tx = tx_builder.build();
-        let message = get_funding_cell_message_to_sign(
-            u64::MAX,
-            self.get_funding_transaction_outpoint(),
-            &tx,
-        );
-        debug!(
-            "Building message to sign for shutdown transaction {:?}",
-            hex::encode(message.as_slice())
-        );
-        Ok((tx, message))
+        if let Some(type_script) = &self.funding_type_script {
+            // FIXME(yukang): how to handle the CKB amount here,
+            // after substracting tx fee, we should return the lefted CKB to the holder
+            let minimal_capacity = 61_0000_0000 as u64;
+            let holder_output = CellOutput::new_builder()
+                .capacity(minimal_capacity.pack())
+                .type_(Some(type_script.clone()).pack())
+                .lock(local_shutdown_script)
+                .build();
+            let holder_output_data = self.to_local_amount.to_le_bytes().pack();
+
+            let counterparty_output = CellOutput::new_builder()
+                .capacity(minimal_capacity.pack())
+                .type_(Some(type_script.clone()).pack())
+                .lock(remote_shutdown_script)
+                .build();
+            let counterparty_output_data = self.to_remote_amount.to_le_bytes().pack();
+
+            let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
+            let tx_builder = tx_builder.set_outputs(outputs.to_vec());
+            let tx_builder =
+                tx_builder.set_outputs_data(vec![holder_output_data, counterparty_output_data]);
+            let tx = tx_builder.build();
+            let message = get_funding_cell_message_to_sign(
+                u64::MAX,
+                self.get_funding_transaction_outpoint(),
+                &tx,
+            );
+            debug!(
+                "Building message to sign for shutdown transaction {:?}",
+                hex::encode(message.as_slice())
+            );
+            Ok((tx, message))
+        } else {
+            // TODO: Check UDT type, if it is ckb then convert it into u64.
+            let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
+            let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
+            debug!(
+                "Building shutdown transaction with values: {} {}",
+                local_value, remote_value
+            );
+            let local_output = CellOutput::new_builder()
+                .capacity(local_value.pack())
+                .lock(local_shutdown_script)
+                .build();
+            let remote_output = CellOutput::new_builder()
+                .capacity(remote_value.pack())
+                .lock(remote_shutdown_script)
+                .build();
+            let outputs = self.order_things_for_musig2(local_output, remote_output);
+            let tx_builder = tx_builder.set_outputs(outputs.to_vec());
+            let tx_builder =
+                tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
+            let tx = tx_builder.build();
+            let message = get_funding_cell_message_to_sign(
+                u64::MAX,
+                self.get_funding_transaction_outpoint(),
+                &tx,
+            );
+            debug!(
+                "Building message to sign for shutdown transaction {:?}",
+                hex::encode(message.as_slice())
+            );
+            Ok((tx, message))
+        }
     }
 
     // The parameter `local` here specifies whether we are building the commitment transaction
@@ -2752,19 +2815,38 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
-        let outputs = vec![
-            CellOutput::new_builder()
-                .capacity((immediately_spendable_value as u64).pack())
-                .lock(immediate_secp256k1_lock_script)
-                .build(),
-            CellOutput::new_builder()
-                .capacity((time_locked_value as u64).pack())
-                .lock(commitment_lock_script)
-                .build(),
-        ];
-        let outputs_data = vec![Bytes::default(); outputs.len()];
+        if let Some(type_script) = &self.funding_type_script {
+            let immediate_output = packed::CellOutput::new_builder()
+                .capacity(Capacity::shannons(6100000000).pack())
+                .lock(immediate_secp256k1_lock_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .build();
+            let immediate_output_data: Bytes = immediately_spendable_value.to_le_bytes().pack();
 
-        (outputs, outputs_data)
+            let commitment_lock_output = packed::CellOutput::new_builder()
+                .capacity(Capacity::shannons(6100000000).pack())
+                .lock(commitment_lock_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .build();
+            let commitment_lock_output_data: Bytes = time_locked_value.to_le_bytes().pack();
+
+            let outputs = vec![immediate_output, commitment_lock_output];
+            let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
+            (outputs, outputs_data)
+        } else {
+            let outputs = vec![
+                CellOutput::new_builder()
+                    .capacity((immediately_spendable_value as u64).pack())
+                    .lock(immediate_secp256k1_lock_script)
+                    .build(),
+                CellOutput::new_builder()
+                    .capacity((time_locked_value as u64).pack())
+                    .lock(commitment_lock_script)
+                    .build(),
+            ];
+            let outputs_data = vec![Bytes::default(); outputs.len()];
+            (outputs, outputs_data)
+        }
     }
 
     pub fn build_and_verify_commitment_tx(
@@ -3360,6 +3442,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3392,6 +3475,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3416,6 +3500,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3440,6 +3525,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3463,6 +3549,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 1000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3555,6 +3642,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3579,6 +3667,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
+                    funding_type_script: None,
                 },
                 rpc_reply,
             ))
