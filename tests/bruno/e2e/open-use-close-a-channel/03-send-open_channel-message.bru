@@ -28,6 +28,12 @@ body:json {
   }
 }
 
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  bru.setVar("TEMP_CHANNEL_ID", res.body.channel_id);
+}
+
+
 assert {
   res.status: eq 200
 }
