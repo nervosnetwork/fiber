@@ -1,11 +1,11 @@
 meta {
-  name: add tlc from NODE3
+  name: Node1 remove tlc
   type: http
-  seq: 12
+  seq: 19
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE2_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -19,13 +19,16 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{CHANNEL_ID}}",
+        "channel_id": "{{N1N2_CHANNEL_ID}}",
         "command": {
-          "AddTlc": [{
-            "amount": 100000000,
-            "preimage": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "expiry": 40
-          }]
+          "RemoveTlc": {
+            "id": {{N1N2_TLC_ID2}},
+            "reason": {
+              "RemoveTlcFulfill": {
+                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000003"
+              }
+            }
+          }
         }
       }
     }

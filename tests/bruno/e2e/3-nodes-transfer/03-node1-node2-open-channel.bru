@@ -1,0 +1,40 @@
+meta {
+  name: Node1 open a channel to Node2
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE2_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "OpenChannel":
+      [
+        {
+          "peer_id": "{{NODE1_PEERID}}",
+          "funding_amount": 61000000000000
+        }
+      ]
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("N1N2 response: ", res.body.channel_id);
+  bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.channel_id);
+}

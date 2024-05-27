@@ -15,9 +15,11 @@ use musig2::{
     sign_partial, verify_partial, AggNonce, BinaryEncoding, CompactSignature, KeyAggContext,
     PartialSignature, PubNonce, SecNonce,
 };
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SpawnErr};
+use ractor::{
+    async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
+};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -32,6 +34,7 @@ use std::{
 use crate::{
     ckb::{chain::CommitmentLockContext, types::Shutdown},
     ckb_chain::FundingRequest,
+    RpcError,
 };
 
 use super::{
@@ -58,13 +61,21 @@ pub enum ChannelActorMessage {
     PeerMessage(PCNMessage),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddTlcResponse {
+    pub tlc_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(AddTlcCommand),
+    AddTlc(
+        AddTlcCommand,
+        #[serde(skip)] Option<RpcReplyPort<Result<AddTlcResponse, RpcError>>>,
+    ),
     RemoveTlc(RemoveTlcCommand),
     Shutdown(ShutdownCommand),
 }
@@ -79,6 +90,7 @@ pub enum TxCollaborationCommand {
 pub struct AddTlcCommand {
     amount: u128,
     preimage: Option<Hash256>,
+    payment_hash: Option<Hash256>,
     expiry: LockTime,
 }
 
@@ -102,7 +114,7 @@ fn get_random_preimage() -> Hash256 {
     preimage.into()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ChannelCommandWithId {
     pub channel_id: Hash256,
     pub command: ChannelCommand,
@@ -248,7 +260,7 @@ impl ChannelActor {
         &self,
         state: &mut ChannelActorState,
         command: AddTlcCommand,
-    ) -> ProcessingChannelResult {
+    ) -> Result<u64, ProcessingChannelError> {
         state.check_state_for_tlc_update()?;
 
         let tlc = state.create_outbounding_tlc(command);
@@ -296,7 +308,7 @@ impl ChannelActor {
             "Balance after addtlccommand: to_self_amount: {} to_remote_amount: {}",
             state.to_self_amount, state.to_remote_amount
         );
-        Ok(())
+        Ok(tlc.id)
     }
 
     pub fn handle_remove_tlc_command(
@@ -317,11 +329,12 @@ impl ChannelActor {
                     }),
                 };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
-                    if tlc.payment_hash != blake2b_256(fulfill.payment_preimage).into() {
+                    let filled_payment_hash: Hash256 = blake2b_256(fulfill.payment_preimage).into();
+                    if tlc.payment_hash != filled_payment_hash {
                         state.pending_received_tlcs.insert(tlc.id, tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Preimage {:?} is hashed to {:?}, which does not match payment hash {:?}",
-                            fulfill.payment_preimage, blake2b_256(fulfill.payment_preimage), tlc.payment_hash,
+                            "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
+                            fulfill.payment_preimage, filled_payment_hash, tlc.payment_hash,
                         )));
                     }
                 }
@@ -514,7 +527,13 @@ impl ChannelActor {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
-            ChannelCommand::AddTlc(command) => self.handle_add_tlc_command(state, command),
+            ChannelCommand::AddTlc(command, reply) => {
+                let tlc_id = self.handle_add_tlc_command(state, command)?;
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
+                }
+                Ok(())
+            }
             ChannelCommand::RemoveTlc(command) => self.handle_remove_tlc_command(state, command),
             ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
         }
@@ -1372,12 +1391,10 @@ impl ChannelActorState {
         match self.state {
             ChannelState::ChannelReady(_) => Ok(()),
             ChannelState::ShuttingDown(_) => Ok(()),
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Invalid state {:?} for adding tlc",
-                    self.state
-                )))
-            }
+            _ => Err(ProcessingChannelError::InvalidState(format!(
+                "Invalid state {:?} for adding tlc",
+                self.state
+            ))),
         }
     }
 
@@ -1395,11 +1412,14 @@ impl ChannelActorState {
         );
 
         let preimage = command.preimage.unwrap_or(get_random_preimage());
-        let hash = blake2b_256(&preimage);
+        let payment_hash = command
+            .payment_hash
+            .unwrap_or(blake2b_256(&preimage).into());
+
         TLC {
             id,
             amount: command.amount,
-            payment_hash: hash.into(),
+            payment_hash,
             lock_time: command.expiry,
             is_offered: true,
             payment_preimage: Some(preimage),

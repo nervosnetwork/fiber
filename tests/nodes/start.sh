@@ -3,6 +3,7 @@
 export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,ckb_pcn_node=debug
 
+should_remove_old_state="${REMOVE_OLD_STATE:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
@@ -22,6 +23,10 @@ if [[ ! -f "$deploy_dir/.env" ]]; then
     echo "In case of issue pesisting, run $deploy_dir/init-dev-chain.sh -f to reintialize the devchain"
     exit 1
 else
+    if [ -n "$should_remove_old_state" ]; then
+        echo "starting to reset ...."
+        $deploy_dir/init-dev-chain.sh -f
+    fi
     export $(xargs <"$deploy_dir/.env")
 fi
 if [[ -f "$deploy_dir/.env.local" ]]; then

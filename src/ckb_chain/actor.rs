@@ -1,4 +1,4 @@
-use ckb_sdk::CkbRpcClient;
+use ckb_sdk::{CkbRpcClient, RpcError};
 use ckb_types::{core::TransactionView, packed, prelude::*};
 use ractor::{
     concurrency::{sleep, Duration},
@@ -106,11 +106,24 @@ impl Actor for CkbChainActor {
                 tokio::task::block_in_place(move || {
                     let ckb_client = CkbRpcClient::new(&rpc_url);
                     if let Err(err) = ckb_client.send_transaction(tx.data().into(), None) {
-                        log::error!(
-                            "[{}] send transaction failed: {:?}",
-                            myself.get_name().unwrap_or_default(),
-                            err
-                        );
+                        //FIXME(yukang): RBF or duplicated transaction handling
+                        match err {
+                            RpcError::Rpc(e)
+                                if (e.code.code() == -1107 || e.code.code() == -1111) =>
+                            {
+                                log::warn!(
+                                    "[{}] transaction already in pool",
+                                    myself.get_name().unwrap_or_default()
+                                );
+                            }
+                            _ => {
+                                log::error!(
+                                    "[{}] send transaction failed: {:?}",
+                                    myself.get_name().unwrap_or_default(),
+                                    err
+                                );
+                            }
+                        }
                     }
                 });
             }

@@ -12,6 +12,7 @@ use std::io::{Cursor, Result as IoResult};
 
 use super::invoice_impl::{Currency, SiPrefix};
 use super::InvoiceError;
+use crate::ckb::types::Hash256;
 use std::str::FromStr;
 
 /// Encodes bytes and returns the compressed form
@@ -214,15 +215,9 @@ pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
     res
 }
 
-#[cfg(test)]
-pub(crate) fn rand_u8_vector(num: usize) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-    (0..num).map(|_| rng.gen()).collect()
-}
-
-pub(crate) fn rand_sha256_hash() -> [u8; 32] {
+pub(crate) fn rand_sha256_hash() -> Hash256 {
     let mut rng = rand::thread_rng();
     let mut result = [0u8; 32];
     rng.fill(&mut result[..]);
-    result
+    result.into()
 }

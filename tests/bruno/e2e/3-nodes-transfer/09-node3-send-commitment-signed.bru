@@ -1,7 +1,7 @@
 meta {
-  name: add tlc from NODE3
+  name: send commitment_signed message
   type: http
-  seq: 12
+  seq: 9
 }
 
 post {
@@ -19,13 +19,9 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{CHANNEL_ID}}",
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
-          "AddTlc": [{
-            "amount": 100000000,
-            "preimage": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "expiry": 40
-          }]
+          "CommitmentSigned": []
         }
       }
     }
@@ -38,5 +34,5 @@ assert {
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 1000));
 }

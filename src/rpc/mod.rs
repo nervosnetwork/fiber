@@ -21,7 +21,10 @@ pub type InvoiceCommandWithReply = (InvoiceCommand, Option<mpsc::Sender<crate::R
 
 use crate::{
     cch::CchCommand,
-    ckb::{channel::ProcessingChannelError, NetworkActorCommand, NetworkActorMessage},
+    ckb::{
+        channel::{ChannelCommand, ChannelCommandWithId, ProcessingChannelError},
+        NetworkActorCommand, NetworkActorMessage,
+    },
     invoice::InvoiceCommand,
 };
 
@@ -128,6 +131,19 @@ impl CkbRpcState {
             NetworkActorCommand::AcceptChannel(accept_channel, _) => {
                 call_network_actor(&self.ckb_network_actor, |reply_port| {
                     NetworkActorCommand::AcceptChannel(accept_channel, Some(reply_port))
+                })
+                .await
+            }
+            NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::AddTlc(cmd, _),
+            }) => {
+                call_network_actor(&self.ckb_network_actor, |reply_port| {
+                    let new_cmd = ChannelCommandWithId {
+                        channel_id,
+                        command: ChannelCommand::AddTlc(cmd, Some(reply_port)),
+                    };
+                    NetworkActorCommand::ControlPcnChannel(new_cmd)
                 })
                 .await
             }

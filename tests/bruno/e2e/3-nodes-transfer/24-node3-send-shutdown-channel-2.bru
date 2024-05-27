@@ -1,7 +1,7 @@
 meta {
-  name: add tlc from NODE3
+  name: Node3 send shutdown
   type: http
-  seq: 12
+  seq: 22
 }
 
 post {
@@ -19,13 +19,12 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{CHANNEL_ID}}",
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
-          "AddTlc": [{
-            "amount": 100000000,
-            "preimage": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "expiry": 40
-          }]
+          "Shutdown": {
+            "close_script": "0x490000001000000030000000310000002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a00140000000101010101010101010101010101010101010101",
+            "fee": 200000002
+          }
         }
       }
     }
