@@ -146,7 +146,10 @@ impl InvoiceStore for Store {
 
     fn insert_invoice(&self, invoice: CkbInvoice) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::CkbInvoice(invoice.hash().into(), invoice));
+        batch.put_kv(KeyValue::CkbInvoice(
+            invoice.payment_hash().clone(),
+            invoice,
+        ));
         batch.commit();
     }
 }

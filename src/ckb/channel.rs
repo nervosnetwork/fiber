@@ -157,14 +157,19 @@ pub enum ChannelInitializationParameter {
 }
 
 #[derive(Debug)]
-pub struct ChannelActor {
+pub struct ChannelActor<S> {
     peer_id: PeerId,
     network: ActorRef<NetworkActorMessage>,
+    store: S,
 }
 
-impl ChannelActor {
-    pub fn new(peer_id: PeerId, network: ActorRef<NetworkActorMessage>) -> Self {
-        Self { peer_id, network }
+impl<S> ChannelActor<S> {
+    pub fn new(peer_id: PeerId, network: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        Self {
+            peer_id,
+            network,
+            store,
+        }
     }
 
     pub fn handle_commitment_signed_command(
@@ -543,7 +548,10 @@ impl ChannelActor {
 }
 
 #[rasync_trait]
-impl Actor for ChannelActor {
+impl<S> Actor for ChannelActor<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
     type Arguments = ChannelInitializationParameter;
@@ -859,6 +867,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub id: Hash256,
+    #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
     // Is this channel initially inbound?

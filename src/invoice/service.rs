@@ -1,4 +1,4 @@
-use super::{InvoiceCommand, InvoicesDb, NewInvoiceParams};
+use super::{InvoiceCommand, InvoiceStore, NewInvoiceParams};
 use crate::{invoice::*, rpc::InvoiceCommandWithReply};
 use anyhow::Result;
 use serde_json::json;
@@ -6,27 +6,31 @@ use std::time::Duration;
 use tokio::{select, sync::mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-pub async fn start_invoice(
+pub async fn start_invoice<S: InvoiceStore + Send + 'static>(
     command_receiver: mpsc::Receiver<InvoiceCommandWithReply>,
     token: CancellationToken,
     tracker: TaskTracker,
+    store: S,
 ) {
     let service = InvoiceService {
         command_receiver,
         token,
-        invoices_db: Default::default(),
+        store,
     };
     tracker.spawn(async move {
         service.run().await;
     });
 }
-struct InvoiceService {
+struct InvoiceService<S> {
     token: CancellationToken,
     command_receiver: mpsc::Receiver<InvoiceCommandWithReply>,
-    invoices_db: InvoicesDb,
+    store: S,
 }
 
-impl InvoiceService {
+impl<S> InvoiceService<S>
+where
+    S: InvoiceStore,
+{
     pub async fn run(mut self) {
         loop {
             select! {
@@ -113,7 +117,7 @@ impl InvoiceService {
 
         let invoice = invoice_builder.build();
         if let Ok(invoice) = &invoice {
-            self.invoices_db.insert_invoice(invoice.clone())?;
+            self.store.insert_invoice(invoice.clone());
         }
         invoice
     }

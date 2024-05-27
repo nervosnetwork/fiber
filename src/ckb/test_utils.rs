@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     env,
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -23,7 +25,11 @@ use crate::{
     CkbConfig, NetworkServiceEvent,
 };
 
-use super::{NetworkActor, NetworkActorCommand, NetworkActorMessage};
+use super::{
+    channel::{ChannelActorState, ChannelActorStateStore},
+    types::Hash256,
+    NetworkActor, NetworkActorCommand, NetworkActorMessage,
+};
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -108,7 +114,11 @@ impl NetworkNode {
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender, noop_chain_actor.clone()),
+            NetworkActor::new(
+                event_sender,
+                noop_chain_actor.clone(),
+                MemoryStore::default(),
+            ),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )

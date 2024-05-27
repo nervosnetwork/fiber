@@ -33,8 +33,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
-    ProcessingChannelResult,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
+    ProcessingChannelError, ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -218,20 +218,26 @@ pub struct PCNMessageWithChannelId {
     pub message: PCNMessage,
 }
 
-pub struct NetworkActor {
+pub struct NetworkActor<S> {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
+    store: S,
 }
 
-impl NetworkActor {
+impl<S> NetworkActor<S>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+{
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
+        store: S,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
+            store,
         }
     }
 
@@ -326,18 +332,21 @@ impl NetworkActor {
             }
 
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                let (_, channel_id) = state.create_outbound_channel(open_channel).await?;
+                let (_, channel_id) = state
+                    .create_outbound_channel(open_channel, self.store.clone())
+                    .await?;
                 if let Some(reply) = reply {
                     let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
-                let result = state.create_inbound_channel(accept_channel).await.map(
-                    |(_, old_id, new_id)| AcceptChannelResponse {
+                let result = state
+                    .create_inbound_channel(accept_channel, self.store.clone())
+                    .await
+                    .map(|(_, old_id, new_id)| AcceptChannelResponse {
                         old_channel_id: old_id,
                         new_channel_id: new_id,
-                    },
-                );
+                    });
                 debug!("Processed accept channel command, result: {:?}", &result);
                 if let Some(reply) = reply {
                     let _ = reply.send(result.as_ref().map_err(Into::into).map(Clone::clone));
@@ -534,9 +543,10 @@ impl NetworkActorState {
         result
     }
 
-    pub async fn create_outbound_channel(
+    pub async fn create_outbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
         &mut self,
         open_channel: OpenChannelCommand,
+        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
         let network = self.network.clone();
         let OpenChannelCommand {
@@ -547,7 +557,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
-            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
             network.clone().get_cell(),
         )
@@ -557,9 +567,10 @@ impl NetworkActorState {
         Ok((channel, temp_channel_id))
     }
 
-    pub async fn create_inbound_channel(
+    pub async fn create_inbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
         &mut self,
         accept_channel: AcceptChannelCommand,
+        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256, Hash256), ProcessingChannelError> {
         let AcceptChannelCommand {
             temp_channel_id,
@@ -583,7 +594,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
-            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(
                 funding_amount,
                 seed,
@@ -638,11 +649,6 @@ impl NetworkActorState {
         }
     }
 
-<<<<<<< HEAD
-    fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
-        debug!("Peer connected: {:?}, session id: {}", &id, session.id);
-        self.peer_session_map.insert(id.clone(), session.id);
-=======
     async fn on_peer_connected<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
         &mut self,
         peer_id: &PeerId,
@@ -665,7 +671,6 @@ impl NetworkActorState {
                 self.on_channel_created(channel_id, peer_id, channel);
             }
         }
->>>>>>> f1fde85 (parent 63b234516064ce2480c4a2c238a20bcad255840e)
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
@@ -834,7 +839,10 @@ impl NetworkActorState {
 }
 
 #[rasync_trait]
-impl Actor for NetworkActor {
+impl<S> Actor for NetworkActor<S>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+{
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
     type Arguments = (CkbConfig, TaskTracker);
@@ -1195,16 +1203,17 @@ impl ServiceHandle for Handle {
     }
 }
 
-pub async fn start_ckb(
+pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
     config: CkbConfig,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
     root_actor: ActorCell,
+    store: S,
 ) -> ActorRef<NetworkActorMessage> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
-        NetworkActor::new(event_sender, chain_actor),
+        NetworkActor::new(event_sender, chain_actor, store),
         (config, tracker),
         root_actor,
     )
