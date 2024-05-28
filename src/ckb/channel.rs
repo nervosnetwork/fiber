@@ -125,7 +125,7 @@ pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
-pub const DEFAULT_TO_SELF_DELAY_BLOCKS: u64 = 10;
+pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
@@ -227,7 +227,7 @@ impl ChannelActor {
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             partial_signature: signature,
-            next_local_nonce: state.get_next_holder_nonce(),
+            next_local_nonce: state.get_next_local_nonce(),
         };
         debug!(
             "Sending built commitment_signed message: {:?}",
@@ -290,7 +290,7 @@ impl ChannelActor {
 
         // Update the state for this tlc.
         state.pending_offered_tlcs.insert(tlc.id, tlc);
-        state.to_self_amount -= tlc.amount;
+        state.to_local_amount -= tlc.amount;
         state.next_offering_tlc_id += 1;
         debug!(
             "Added tlc with id {:?} to pending offered tlcs: {:?}",
@@ -305,8 +305,8 @@ impl ChannelActor {
             &state.pending_received_tlcs
         );
         debug!(
-            "Balance after addtlccommand: to_self_amount: {} to_remote_amount: {}",
-            state.to_self_amount, state.to_remote_amount
+            "Balance after addtlccommand: to_local_amount: {} to_remote_amount: {}",
+            state.to_local_amount, state.to_remote_amount
         );
         Ok(tlc.id)
     }
@@ -348,7 +348,7 @@ impl ChannelActor {
                         state.to_remote_amount += tlc.amount;
                     }
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
-                        state.to_self_amount += tlc.amount;
+                        state.to_local_amount += tlc.amount;
                     }
                 }
             }
@@ -360,8 +360,8 @@ impl ChannelActor {
             }
         }
         debug!(
-            "Balance after removetlccommand: to_self_amount: {} to_remote_amount: {}",
-            state.to_self_amount, state.to_remote_amount
+            "Balance after removetlccommand: to_local_amount: {} to_remote_amount: {}",
+            state.to_local_amount, state.to_remote_amount
         );
         state.maybe_transition_to_shutdown(self.network.clone())?;
 
@@ -399,8 +399,8 @@ impl ChannelActor {
                 }),
             ))
             .expect("network actor alive");
-        state.holder_shutdown_script = Some(command.close_script.clone());
-        state.holder_shutdown_fee = Some(command.fee);
+        state.local_shutdown_script = Some(command.close_script.clone());
+        state.local_shutdown_fee = Some(command.fee);
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
         state.update_state(ChannelState::ShuttingDown(flags));
         debug!(
@@ -571,7 +571,7 @@ impl Actor for ChannelActor {
                     chain_hash,
                     funding_type_script,
                     funding_amount,
-                    to_self_delay,
+                    to_local_delay,
                     first_per_commitment_point,
                     second_per_commitment_point,
                     next_local_nonce,
@@ -599,7 +599,7 @@ impl Actor for ChannelActor {
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
-                    *to_self_delay,
+                    *to_local_delay,
                     counterpart_pubkeys,
                     next_local_nonce.clone(),
                     *first_per_commitment_point,
@@ -613,7 +613,7 @@ impl Actor for ChannelActor {
                     funding_amount: my_funding_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
-                    to_self_delay: *to_self_delay,
+                    to_local_delay: *to_local_delay,
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     revocation_basepoint: state.signer.revocation_base_key.pubkey(),
                     payment_basepoint: state.signer.payment_key.pubkey(),
@@ -626,7 +626,7 @@ impl Actor for ChannelActor {
                     second_per_commitment_point: state
                         .signer
                         .get_commitment_point(commitment_number + 1),
-                    next_local_nonce: state.get_holder_musig2_pubnonce(),
+                    next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
                 let command = PCNMessageWithPeerId {
@@ -665,7 +665,7 @@ impl Actor for ChannelActor {
                     &seed,
                     self.peer_id.clone(),
                     funding_amount,
-                    LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
+                    LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
                 let commitment_number = 0;
@@ -673,13 +673,13 @@ impl Actor for ChannelActor {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
                     funding_type_script: None,
-                    funding_amount: channel.to_self_amount,
+                    funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    to_self_delay: LockTime::new(DEFAULT_TO_SELF_DELAY_BLOCKS),
+                    to_local_delay: LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                     channel_flags: 0,
                     first_per_commitment_point: channel
                         .signer
@@ -688,23 +688,23 @@ impl Actor for ChannelActor {
                         .signer
                         .get_commitment_point(commitment_number + 1),
                     funding_pubkey: channel
-                        .get_holder_channel_parameters()
+                        .get_local_channel_parameters()
                         .pubkeys
                         .funding_pubkey,
                     revocation_basepoint: channel
-                        .get_holder_channel_parameters()
+                        .get_local_channel_parameters()
                         .pubkeys
                         .revocation_base_key,
                     payment_basepoint: channel
-                        .get_holder_channel_parameters()
+                        .get_local_channel_parameters()
                         .pubkeys
                         .payment_base_key,
                     delayed_payment_basepoint: channel
-                        .get_holder_channel_parameters()
+                        .get_local_channel_parameters()
                         .pubkeys
                         .delayed_payment_base_key,
-                    tlc_basepoint: channel.get_holder_channel_parameters().pubkeys.tlc_base_key,
-                    next_local_nonce: channel.get_holder_musig2_pubnonce(),
+                    tlc_basepoint: channel.get_local_channel_parameters().pubkeys.tlc_base_key,
+                    next_local_nonce: channel.get_local_musig2_pubnonce(),
                 });
 
                 debug!(
@@ -843,21 +843,21 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
-    pub to_self_amount: u128,
+    pub to_local_amount: u128,
     pub to_remote_amount: u128,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
 
     // Cached channel parameter for easier of access.
-    pub holder_channel_parameters: ChannelParametersOneParty,
+    pub local_channel_parameters: ChannelParametersOneParty,
     // The holder has set a shutdown script.
-    pub holder_shutdown_script: Option<Script>,
+    pub local_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
     // This value is guaranteed to be 1 when channel is just created.
-    pub holder_commitment_number: u64,
-    pub counterparty_commitment_number: u64,
+    pub local_commitment_number: u64,
+    pub remote_commitment_number: u64,
 
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
@@ -874,18 +874,18 @@ pub struct ChannelActorState {
     pub pending_received_tlcs: HashMap<u64, TLC>,
 
     // The counterparty has already sent a shutdown message with this script.
-    pub counterparty_shutdown_script: Option<Script>,
+    pub remote_shutdown_script: Option<Script>,
 
-    pub counterparty_nonce: Option<PubNonce>,
+    pub remote_nonce: Option<PubNonce>,
 
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
-    pub counterparty_commitment_points: Vec<Pubkey>,
-    pub counterparty_channel_parameters: Option<ChannelParametersOneParty>,
-    pub holder_shutdown_signature: Option<PartialSignature>,
-    pub holder_shutdown_fee: Option<u128>,
-    pub counterparty_shutdown_signature: Option<PartialSignature>,
-    pub counterparty_shutdown_fee: Option<u128>,
+    pub remote_commitment_points: Vec<Pubkey>,
+    pub remote_channel_parameters: Option<ChannelParametersOneParty>,
+    pub local_shutdown_signature: Option<PartialSignature>,
+    pub local_shutdown_fee: Option<u128>,
+    pub remote_shutdown_signature: Option<PartialSignature>,
+    pub remote_shutdown_fee: Option<u128>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1024,9 +1024,9 @@ fn derive_channel_id_from_revocation_keys(
     revocation_basepoint1: &Pubkey,
     revocation_basepoint2: &Pubkey,
 ) -> Hash256 {
-    let holder_revocation = revocation_basepoint1.0.serialize();
-    let counterparty_revocation = revocation_basepoint2.0.serialize();
-    let mut preimage = [holder_revocation, counterparty_revocation];
+    let local_revocation = revocation_basepoint1.0.serialize();
+    let remote_revocation = revocation_basepoint2.0.serialize();
+    let mut preimage = [local_revocation, remote_revocation];
     preimage.sort();
     new_channel_id_from_seed(&preimage.concat())
 }
@@ -1060,31 +1060,31 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
-        holder_value: u128,
+        local_value: u128,
         seed: &[u8],
         peer_id: PeerId,
-        counterparty_value: u128,
-        counterparty_delay: LockTime,
-        counterparty_pubkeys: ChannelBasePublicKeys,
-        counterparty_nonce: PubNonce,
-        counterparty_commitment_point: Pubkey,
-        counterparty_prev_commitment_point: Pubkey,
+        remote_value: u128,
+        remote_delay: LockTime,
+        remote_pubkeys: ChannelBasePublicKeys,
+        remote_nonce: PubNonce,
+        remote_commitment_point: Pubkey,
+        remote_prev_commitment_point: Pubkey,
     ) -> Self {
         let commitment_number = 1;
         let signer = InMemorySigner::generate_from_seed(seed);
-        let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
+        let local_pubkeys = signer.to_channel_public_keys(commitment_number);
 
         let channel_id = derive_channel_id_from_revocation_keys(
-            &holder_pubkeys.revocation_base_key,
-            &counterparty_pubkeys.revocation_base_key,
+            &local_pubkeys.revocation_base_key,
+            &remote_pubkeys.revocation_base_key,
         );
 
-        let counterparty_commitment_number = 1;
+        let remote_commitment_number = 1;
 
         debug!(
             "Generated channel id ({:?}) for temporary channel {:?} with local commitment number {:?} and remote commitment number {:?}",
             &channel_id, &temp_channel_id,
-            commitment_number, counterparty_commitment_number
+            commitment_number, remote_commitment_number
         );
 
         Self {
@@ -1092,35 +1092,32 @@ impl ChannelActorState {
             peer_id,
             funding_tx: None,
             is_acceptor: true,
-            to_self_amount: holder_value,
+            to_local_amount: local_value,
             id: channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_remote_amount: counterparty_value,
-            holder_shutdown_script: None,
-            holder_channel_parameters: ChannelParametersOneParty {
-                pubkeys: holder_pubkeys,
-                selected_contest_delay: counterparty_delay,
+            to_remote_amount: remote_value,
+            local_shutdown_script: None,
+            local_channel_parameters: ChannelParametersOneParty {
+                pubkeys: local_pubkeys,
+                selected_contest_delay: remote_delay,
             },
             signer,
-            counterparty_channel_parameters: Some(ChannelParametersOneParty {
-                pubkeys: counterparty_pubkeys,
-                selected_contest_delay: counterparty_delay,
+            remote_channel_parameters: Some(ChannelParametersOneParty {
+                pubkeys: remote_pubkeys,
+                selected_contest_delay: remote_delay,
             }),
-            holder_commitment_number: commitment_number,
-            counterparty_commitment_number,
-            counterparty_shutdown_script: None,
-            counterparty_nonce: Some(counterparty_nonce),
-            counterparty_commitment_points: vec![
-                counterparty_prev_commitment_point,
-                counterparty_commitment_point,
-            ],
-            holder_shutdown_signature: None,
-            holder_shutdown_fee: None,
-            counterparty_shutdown_signature: None,
-            counterparty_shutdown_fee: None,
+            local_commitment_number: commitment_number,
+            remote_commitment_number,
+            remote_shutdown_script: None,
+            remote_nonce: Some(remote_nonce),
+            remote_commitment_points: vec![remote_prev_commitment_point, remote_commitment_point],
+            local_shutdown_signature: None,
+            local_shutdown_fee: None,
+            remote_shutdown_signature: None,
+            remote_shutdown_fee: None,
         }
     }
 
@@ -1128,19 +1125,19 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u128,
-        to_self_delay: LockTime,
+        to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let commitment_number = 1;
-        let holder_pubkeys = signer.to_channel_public_keys(commitment_number);
+        let local_pubkeys = signer.to_channel_public_keys(commitment_number);
         let temp_channel_id =
-            derive_temp_channel_id_from_revocation_key(&holder_pubkeys.revocation_base_key);
+            derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
             is_acceptor: false,
-            to_self_amount: value,
+            to_local_amount: value,
             id: temp_channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
@@ -1148,21 +1145,21 @@ impl ChannelActorState {
             pending_received_tlcs: Default::default(),
             to_remote_amount: 0,
             signer,
-            holder_channel_parameters: ChannelParametersOneParty {
-                pubkeys: holder_pubkeys,
-                selected_contest_delay: to_self_delay,
+            local_channel_parameters: ChannelParametersOneParty {
+                pubkeys: local_pubkeys,
+                selected_contest_delay: to_local_delay,
             },
-            counterparty_channel_parameters: None,
-            holder_commitment_number: commitment_number,
-            counterparty_nonce: None,
-            counterparty_commitment_number: 1,
-            counterparty_commitment_points: vec![],
-            holder_shutdown_script: None,
-            holder_shutdown_fee: None,
-            counterparty_shutdown_script: None,
-            counterparty_shutdown_fee: None,
-            holder_shutdown_signature: None,
-            counterparty_shutdown_signature: None,
+            remote_channel_parameters: None,
+            local_commitment_number: commitment_number,
+            remote_nonce: None,
+            remote_commitment_number: 1,
+            remote_commitment_points: vec![],
+            local_shutdown_script: None,
+            local_shutdown_fee: None,
+            remote_shutdown_script: None,
+            remote_shutdown_fee: None,
+            local_shutdown_signature: None,
+            remote_shutdown_signature: None,
         }
     }
 
@@ -1181,46 +1178,46 @@ impl ChannelActorState {
         self.id
     }
 
-    pub fn get_holder_nonce(&self) -> impl Borrow<PubNonce> {
-        self.get_next_next_secnonce().public_nonce()
+    pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
+        self.get_next_local_secnonce().public_nonce()
     }
 
-    pub fn get_next_next_secnonce(&self) -> SecNonce {
+    pub fn get_next_local_secnonce(&self) -> SecNonce {
         self.signer
             .derive_musig2_nonce(self.get_next_commitment_number(true))
     }
 
-    pub fn get_next_holder_nonce(&self) -> PubNonce {
+    pub fn get_next_local_nonce(&self) -> PubNonce {
         self.signer
             .derive_musig2_nonce(self.get_next_commitment_number(true))
             .public_nonce()
     }
 
-    pub fn get_counterparty_nonce(&self) -> &PubNonce {
-        self.counterparty_nonce.as_ref().unwrap()
+    pub fn get_remote_nonce(&self) -> &PubNonce {
+        self.remote_nonce.as_ref().unwrap()
     }
 
     pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
         if local {
-            self.get_holder_channel_parameters()
+            self.get_local_channel_parameters()
         } else {
-            self.get_counterparty_channel_parameters()
+            self.get_remote_channel_parameters()
         }
     }
 
-    pub fn get_holder_channel_parameters(&self) -> &ChannelParametersOneParty {
-        &self.holder_channel_parameters
+    pub fn get_local_channel_parameters(&self) -> &ChannelParametersOneParty {
+        &self.local_channel_parameters
     }
 
-    pub fn get_counterparty_channel_parameters(&self) -> &ChannelParametersOneParty {
-        self.counterparty_channel_parameters.as_ref().unwrap()
+    pub fn get_remote_channel_parameters(&self) -> &ChannelParametersOneParty {
+        self.remote_channel_parameters.as_ref().unwrap()
     }
 
     pub fn get_next_commitment_number(&self, local: bool) -> u64 {
         if local {
-            self.holder_commitment_number + 1
+            self.local_commitment_number + 1
         } else {
-            self.counterparty_commitment_number + 1
+            self.remote_commitment_number + 1
         }
     }
 
@@ -1241,56 +1238,56 @@ impl ChannelActorState {
             .expect("Funding transaction output is present")
     }
 
-    pub fn get_holder_shutdown_script(&self) -> &Script {
+    pub fn get_local_shutdown_script(&self) -> &Script {
         // TODO: what is the best strategy for shutdown script here?
-        self.holder_shutdown_script
+        self.local_shutdown_script
             .as_ref()
             .expect("Holder shutdown script is present")
     }
 
-    pub fn get_counterparty_shutdown_script(&self) -> &Script {
-        self.counterparty_shutdown_script
+    pub fn get_remote_shutdown_script(&self) -> &Script {
+        self.remote_shutdown_script
             .as_ref()
             .expect("Counterparty shutdown script is present")
     }
 
     pub fn get_commitment_point(&self, local: bool, commitment_number: u64) -> Pubkey {
         if local {
-            self.get_holder_commitment_point(commitment_number)
+            self.get_local_commitment_point(commitment_number)
         } else {
-            self.get_counterparty_commitment_point(commitment_number)
+            self.get_remote_commitment_point(commitment_number)
         }
     }
 
     pub fn get_current_commitment_point(&self, local: bool) -> Pubkey {
         if local {
-            self.get_current_holder_commitment_point()
+            self.get_current_local_commitment_point()
         } else {
-            self.get_previous_counterparty_commitment_point()
+            self.get_previous_remote_commitment_point()
         }
     }
 
-    pub fn get_holder_commitment_point(&self, commitment_number: u64) -> Pubkey {
+    pub fn get_local_commitment_point(&self, commitment_number: u64) -> Pubkey {
         self.signer.get_commitment_point(commitment_number)
     }
 
-    pub fn get_current_holder_commitment_point(&self) -> Pubkey {
-        self.get_holder_commitment_point(self.holder_commitment_number)
+    pub fn get_current_local_commitment_point(&self) -> Pubkey {
+        self.get_local_commitment_point(self.local_commitment_number)
     }
 
-    pub fn get_previous_counterparty_commitment_point(&self) -> Pubkey {
-        self.get_counterparty_commitment_point(self.counterparty_commitment_number - 1)
+    pub fn get_previous_remote_commitment_point(&self) -> Pubkey {
+        self.get_remote_commitment_point(self.remote_commitment_number - 1)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
-    pub fn get_counterparty_commitment_point(&self, commitment_number: u64) -> Pubkey {
+    pub fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
         let index = commitment_number as usize;
         dbg!(
             "getting counterparty commitment point",
             index,
-            &self.counterparty_commitment_points
+            &self.remote_commitment_points
         );
-        self.counterparty_commitment_points[index]
+        self.remote_commitment_points[index]
     }
 
     pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
@@ -1314,7 +1311,7 @@ impl ChannelActorState {
         FundingRequest {
             udt_info: None,
             script: self.get_funding_lock_script(),
-            local_amount: self.to_self_amount as u64,
+            local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
             remote_amount: self.to_remote_amount as u64,
         }
@@ -1325,38 +1322,27 @@ impl ChannelActorState {
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
-        let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
-        let counterparty_pubkey = self
-            .get_counterparty_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
-        let keys = self.order_things_for_musig2(holder_pubkey, counterparty_pubkey);
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
         KeyAggContext::new(keys).expect("Valid pubkeys")
     }
 
-    pub fn get_holder_musig2_secnonce(&self) -> SecNonce {
+    pub fn get_local_musig2_secnonce(&self) -> SecNonce {
         self.signer
-            .derive_musig2_nonce(self.holder_commitment_number)
+            .derive_musig2_nonce(self.local_commitment_number)
     }
 
-    pub fn get_holder_musig2_pubnonce(&self) -> PubNonce {
-        self.get_holder_musig2_secnonce().public_nonce()
+    pub fn get_local_musig2_pubnonce(&self) -> PubNonce {
+        self.get_local_musig2_secnonce().public_nonce()
     }
 
     pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
-        let holder_nonce = self.get_holder_nonce();
-        let holder_nonce = holder_nonce.borrow();
-        let counterparty_nonce = self.get_counterparty_nonce();
-        let nonces = self.order_things_for_musig2(holder_nonce, counterparty_nonce);
+        let local_nonce = self.get_local_nonce();
+        let local_nonce = local_nonce.borrow();
+        let remote_nonce = self.get_remote_nonce();
+        let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
         AggNonce::sum(nonces)
-    }
-
-    pub fn get_broadcaster_and_countersignatory_amounts(&self, local: bool) -> (u128, u128) {
-        if local {
-            (self.to_self_amount, self.to_remote_amount)
-        } else {
-            (self.to_remote_amount, self.to_self_amount)
-        }
     }
 
     pub fn get_all_tlcs(&self) -> Vec<TLC> {
@@ -1380,11 +1366,8 @@ impl ChannelActorState {
         !self.pending_offered_tlcs.is_empty() || !self.pending_received_tlcs.is_empty()
     }
 
-    pub fn get_counterparty_funding_pubkey(&self) -> &Pubkey {
-        &self
-            .get_counterparty_channel_parameters()
-            .pubkeys
-            .funding_pubkey
+    pub fn get_remote_funding_pubkey(&self) -> &Pubkey {
+        &self.get_remote_channel_parameters().pubkeys.funding_pubkey
     }
 
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
@@ -1423,16 +1406,16 @@ impl ChannelActorState {
             lock_time: command.expiry,
             is_offered: true,
             payment_preimage: Some(preimage),
-            local_commitment_number: self.holder_commitment_number,
-            remote_commitment_number: self.counterparty_commitment_number,
+            local_commitment_number: self.local_commitment_number,
+            remote_commitment_number: self.remote_commitment_number,
             local_payment_key_hash: None,
             remote_payment_key_hash: None,
         }
     }
 
     pub fn create_inbounding_tlc(&self, message: AddTlc) -> TLC {
-        let local_commitment_number = self.holder_commitment_number;
-        let remote_commitment_number = self.counterparty_commitment_number;
+        let local_commitment_number = self.local_commitment_number;
+        let remote_commitment_number = self.remote_commitment_number;
         TLC {
             id: message.tlc_id,
             amount: message.amount,
@@ -1453,10 +1436,10 @@ impl From<&ChannelActorState> for Musig2Context {
         Musig2Context {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            holder_seckey: value.signer.funding_key,
-            holder_secnonce: value.get_holder_musig2_secnonce(),
-            counterparty_pubkey: *value.get_counterparty_funding_pubkey(),
-            counterparty_pubnonce: value.get_counterparty_nonce().clone(),
+            local_seckey: value.signer.funding_key,
+            local_secnonce: value.get_local_musig2_secnonce(),
+            remote_pubkey: *value.get_remote_funding_pubkey(),
+            remote_pubnonce: value.get_remote_nonce().clone(),
         }
     }
 }
@@ -1467,7 +1450,7 @@ impl From<&ChannelActorState> for Musig2SignContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
             seckey: value.signer.funding_key,
-            secnonce: value.get_holder_musig2_secnonce(),
+            secnonce: value.get_local_musig2_secnonce(),
         }
     }
 }
@@ -1477,8 +1460,8 @@ impl From<&ChannelActorState> for Musig2VerifyContext {
         Musig2VerifyContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            pubkey: *value.get_counterparty_funding_pubkey(),
-            pubnonce: value.get_counterparty_nonce().clone(),
+            pubkey: *value.get_remote_funding_pubkey(),
+            pubnonce: value.get_remote_nonce().clone(),
         }
     }
 }
@@ -1504,7 +1487,7 @@ impl ChannelActorState {
                             self.peer_id.clone(),
                             self.get_id(),
                             old_id,
-                            self.to_self_amount,
+                            self.to_local_amount,
                             self.to_remote_amount,
                             self.get_funding_lock_script(),
                         ),
@@ -1532,7 +1515,7 @@ impl ChannelActorState {
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
-                if self.should_holder_send_tx_signatures_first() {
+                if self.should_local_send_tx_signatures_first() {
                     let new_witnesses: Vec<_> = tx_signatures
                         .witnesses
                         .into_iter()
@@ -1648,8 +1631,8 @@ impl ChannelActorState {
                     &self.pending_offered_tlcs
                 );
                 debug!(
-                    "Balance after tlc added: to_self_amount: {}, to_remote_amount: {}",
-                    self.to_self_amount, self.to_remote_amount
+                    "Balance after tlc added: to_local_amount: {}, to_remote_amount: {}",
+                    self.to_local_amount, self.to_remote_amount
                 );
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
@@ -1668,8 +1651,8 @@ impl ChannelActorState {
                         match remove_tlc.reason {
                             RemoveTlcReason::RemoveTlcFail(fail) => {
                                 debug!("TLC {:?} failed with code {}", &current, &fail.error_code);
-                                self.to_self_amount += current.amount;
-                                debug!("Balance after tlc removed: to_self_amount: {}, to_remote_amount: {}", self.to_self_amount, self.to_remote_amount);
+                                self.to_local_amount += current.amount;
+                                debug!("Balance after tlc removed: to_local_amount: {}, to_remote_amount: {}", self.to_local_amount, self.to_remote_amount);
                             }
                             RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
                                 let preimage = fulfill.payment_preimage;
@@ -1683,7 +1666,7 @@ impl ChannelActorState {
                                     ));
                                 }
                                 self.to_remote_amount += current.amount;
-                                debug!("Balance after tlc removed: to_self_amount: {}, to_remote_amount: {}", self.to_self_amount, self.to_remote_amount);
+                                debug!("Balance after tlc removed: to_local_amount: {}, to_remote_amount: {}", self.to_local_amount, self.to_remote_amount);
                             }
                         }
                         entry.remove();
@@ -1719,8 +1702,8 @@ impl ChannelActorState {
                         )));
                     }
                 };
-                self.counterparty_shutdown_script = Some(shutdown.close_script);
-                self.counterparty_shutdown_fee = Some(shutdown.fee);
+                self.remote_shutdown_script = Some(shutdown.close_script);
+                self.remote_shutdown_fee = Some(shutdown.fee);
 
                 let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
                 self.update_state(ChannelState::ShuttingDown(flags));
@@ -1750,7 +1733,7 @@ impl ChannelActorState {
                 // We do this to simplify the handling of the message.
                 // We may change this in the future.
                 // We also didn't check the state here.
-                self.counterparty_shutdown_signature = Some(partial_signature);
+                self.remote_shutdown_signature = Some(partial_signature);
 
                 self.maybe_transition_to_shutdown(network)?;
                 Ok(())
@@ -1830,7 +1813,7 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
-        match self.holder_shutdown_signature {
+        match self.local_shutdown_signature {
             None => {
                 let message = get_funding_cell_message_to_sign(
                     None,
@@ -1842,7 +1825,7 @@ impl ChannelActorState {
                     hex::encode(message.as_slice())
                 );
                 let signature = sign_ctx.clone().sign(message.as_slice())?;
-                self.holder_shutdown_signature = Some(signature);
+                self.local_shutdown_signature = Some(signature);
                 debug!(
                     "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
                     &shutdown_tx, &message, &signature,
@@ -1869,15 +1852,13 @@ impl ChannelActorState {
         }
 
         match (
-            self.holder_shutdown_signature,
-            self.counterparty_shutdown_signature,
+            self.local_shutdown_signature,
+            self.remote_shutdown_signature,
         ) {
-            (Some(holder_shutdown_signature), Some(counterparty_shutdown_signature)) => {
+            (Some(local_shutdown_signature), Some(remote_shutdown_signature)) => {
                 self.update_state(ChannelState::Closed);
-                let partial_signatures = self.order_things_for_musig2(
-                    holder_shutdown_signature,
-                    counterparty_shutdown_signature,
-                );
+                let partial_signatures = self
+                    .order_things_for_musig2(local_shutdown_signature, remote_shutdown_signature);
                 let message = get_funding_cell_message_to_sign(
                     None,
                     self.get_funding_transaction_outpoint(),
@@ -1934,16 +1915,16 @@ impl ChannelActorState {
             NegotiatingFundingFlags::INIT_SENT,
         ));
         self.to_remote_amount = accept_channel.funding_amount;
-        self.counterparty_nonce = Some(accept_channel.next_local_nonce.clone());
+        self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
 
-        let counterparty_pubkeys = (&accept_channel).into();
-        self.counterparty_channel_parameters = Some(ChannelParametersOneParty {
-            pubkeys: counterparty_pubkeys,
-            selected_contest_delay: accept_channel.to_self_delay,
+        let remote_pubkeys = (&accept_channel).into();
+        self.remote_channel_parameters = Some(ChannelParametersOneParty {
+            pubkeys: remote_pubkeys,
+            selected_contest_delay: accept_channel.to_local_delay,
         });
-        self.counterparty_commitment_points
+        self.remote_commitment_points
             .push(accept_channel.first_per_commitment_point);
-        self.counterparty_commitment_points
+        self.remote_commitment_points
             .push(accept_channel.second_per_commitment_point);
 
         debug!(
@@ -2232,7 +2213,7 @@ impl ChannelActorState {
         );
 
         debug!("Updating peer next local nonce");
-        self.counterparty_nonce = Some(commitment_signed.next_local_nonce);
+        self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
@@ -2243,13 +2224,13 @@ impl ChannelActorState {
                 // Now we should revoke previous transation by revealing preimage.
                 let revocation_preimage = self
                     .signer
-                    .get_commitment_secret(self.holder_commitment_number - 1);
+                    .get_commitment_secret(self.local_commitment_number - 1);
                 debug!(
                     "Revealing preimage for revocation: {:?}",
                     &revocation_preimage
                 );
-                self.holder_commitment_number = self.get_next_commitment_number(true);
-                let next_commitment_point = self.get_current_holder_commitment_point();
+                self.local_commitment_number = self.get_next_commitment_number(true);
+                let next_commitment_point = self.get_current_local_commitment_point();
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
@@ -2278,7 +2259,7 @@ impl ChannelActorState {
             self.update_state(ChannelState::AwaitingTxSignatures(
                 AwaitingTxSignaturesFlags::empty(),
             ));
-            if self.should_holder_send_tx_signatures_first() {
+            if self.should_local_send_tx_signatures_first() {
                 debug!("It is our turn to send tx_signatures, so we will do it now.");
                 self.handle_tx_signatures(network, None)?;
             }
@@ -2370,15 +2351,15 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let per_commitment_point = self.get_previous_counterparty_commitment_point();
+        let per_commitment_point = self.get_previous_remote_commitment_point();
         if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(
                 "Invalid per_commitment_secret".to_string(),
             ));
         }
-        self.counterparty_commitment_points
+        self.remote_commitment_points
             .push(next_per_commitment_point);
-        self.counterparty_commitment_number = self.get_next_commitment_number(false);
+        self.remote_commitment_number = self.get_next_commitment_number(false);
         Ok(())
     }
 
@@ -2400,7 +2381,7 @@ impl ChannelActorState {
         }
 
         let current_capacity: u64 = first_output.capacity().unpack();
-        let is_complete = current_capacity == (self.to_self_amount + self.to_remote_amount) as u64;
+        let is_complete = current_capacity == (self.to_local_amount + self.to_remote_amount) as u64;
         Ok(is_complete)
     }
 
@@ -2466,9 +2447,9 @@ impl ChannelActorState {
                     u64::from_le_bytes(first_output.capacity().as_slice().try_into().unwrap())
                         as u128;
 
-                if self.to_self_amount + self.to_remote_amount != first_output_capacity {
+                if self.to_local_amount + self.to_remote_amount != first_output_capacity {
                     return Err(ProcessingChannelError::InvalidParameter(
-                        format!("Funding transaction output amount mismatch ({} given, {} to self , {} to remote)", first_output_capacity, self.to_self_amount, self.to_remote_amount)
+                        format!("Funding transaction output amount mismatch ({} given, {} to local , {} to remote)", first_output_capacity, self.to_local_amount, self.to_remote_amount)
                     ));
                 }
 
@@ -2513,19 +2494,19 @@ impl ChannelActorState {
 
     pub fn fill_in_channel_id(&mut self) {
         assert!(
-            self.counterparty_channel_parameters.is_some(),
+            self.remote_channel_parameters.is_some(),
             "Counterparty pubkeys is required to derive actual channel id"
         );
-        let counterparty_revocation = &self
-            .get_counterparty_channel_parameters()
+        let remote_revocation = &self
+            .get_remote_channel_parameters()
             .pubkeys
             .revocation_base_key;
-        let holder_revocation = &self
-            .get_holder_channel_parameters()
+        let local_revocation = &self
+            .get_local_channel_parameters()
             .pubkeys
             .revocation_base_key;
         let channel_id =
-            derive_channel_id_from_revocation_keys(holder_revocation, counterparty_revocation);
+            derive_channel_id_from_revocation_keys(local_revocation, remote_revocation);
 
         debug!("Channel Id changed from {:?} to {:?}", self.id, channel_id,);
 
@@ -2535,18 +2516,15 @@ impl ChannelActorState {
     // Whose pubkey should go first in musig2?
     // We define a definitive order for the pubkeys in musig2 to makes it easier
     // to aggregate musig2 signatures.
-    fn should_holder_go_first_in_musig2(&self) -> bool {
-        let holder_pubkey = self.get_holder_channel_parameters().pubkeys.funding_pubkey;
-        let counterparty_pubkey = self
-            .get_counterparty_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
-        holder_pubkey <= counterparty_pubkey
+    fn should_local_go_first_in_musig2(&self) -> bool {
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        local_pubkey <= remote_pubkey
     }
 
     // Order some items (like pubkey and nonce) from holders and counterparty in musig2.
     fn order_things_for_musig2<T>(&self, holder: T, counterparty: T) -> [T; 2] {
-        if self.should_holder_go_first_in_musig2() {
+        if self.should_local_go_first_in_musig2() {
             [holder, counterparty]
         } else {
             [counterparty, holder]
@@ -2560,43 +2538,43 @@ impl ChannelActorState {
     // else if the amount to self is equal to the amount to remote and we have
     // smaller funding_pubkey, then we should send first. Otherwise, we should wait
     // the counterparty to send tx_signatures first.
-    fn should_holder_send_tx_signatures_first(&self) -> bool {
-        self.to_self_amount < self.to_remote_amount
-            || self.to_self_amount == self.to_remote_amount
-                && self.should_holder_go_first_in_musig2()
+    fn should_local_send_tx_signatures_first(&self) -> bool {
+        self.to_local_amount < self.to_remote_amount
+            || self.to_local_amount == self.to_remote_amount
+                && self.should_local_go_first_in_musig2()
     }
 
     pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
-        // Don't use get_holder_shutdown_script and get_counterparty_shutdown_script here
+        // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
-        // This function may be called in a state where the scripts are not present.
+        // This function may be called in a state where these scripts are not present.
         let (
-            holder_shutdown_script,
-            counterparty_shutdown_script,
-            holder_shutdown_fee,
-            counterparty_shutdown_fee,
+            local_shutdown_script,
+            remote_shutdown_script,
+            local_shutdown_fee,
+            remote_shutdown_fee,
         ) = match (
-            self.holder_shutdown_script.clone(),
-            self.counterparty_shutdown_script.clone(),
-            self.holder_shutdown_fee,
-            self.counterparty_shutdown_fee,
+            self.local_shutdown_script.clone(),
+            self.remote_shutdown_script.clone(),
+            self.local_shutdown_fee,
+            self.remote_shutdown_fee,
         ) {
             (
-                Some(holder_shutdown_script),
-                Some(counterparty_shutdown_script),
-                Some(holder_shutdown_fee),
-                Some(counterparty_shutdown_fee),
+                Some(local_shutdown_script),
+                Some(remote_shutdown_script),
+                Some(local_shutdown_fee),
+                Some(remote_shutdown_fee),
             ) => (
-                holder_shutdown_script,
-                counterparty_shutdown_script,
-                holder_shutdown_fee,
-                counterparty_shutdown_fee,
+                local_shutdown_script,
+                remote_shutdown_script,
+                local_shutdown_fee,
+                remote_shutdown_fee,
             ),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                    "Shutdown scripts are not present: holder_shutdown_script {:?}, counterparty_shutdown_script {:?}, holder_shutdown_fee {:?}, counterparty_shutdown_fee {:?}",
-                    &self.holder_shutdown_script, &self.counterparty_shutdown_script,
-                    &self.holder_shutdown_fee, &self.counterparty_shutdown_fee
+                    "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee {:?}, remote_shutdown_fee {:?}",
+                    &self.local_shutdown_script, &self.remote_shutdown_script,
+                    &self.local_shutdown_fee, &self.remote_shutdown_fee
                 )));
             }
         };
@@ -2610,77 +2588,32 @@ impl ChannelActorState {
             );
 
         // TODO: Check UDT type, if it is ckb then convert it into u64.
-        let holder_value = (self.to_self_amount - holder_shutdown_fee) as u64;
-        let counterparty_value = (self.to_remote_amount - counterparty_shutdown_fee) as u64;
+        let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
+        let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
         debug!(
             "Building shutdown transaction with values: {} {}",
-            holder_value, counterparty_value
+            local_value, remote_value
         );
-        let holder_output = CellOutput::new_builder()
-            .capacity(holder_value.pack())
-            .lock(holder_shutdown_script)
+        let local_output = CellOutput::new_builder()
+            .capacity(local_value.pack())
+            .lock(local_shutdown_script)
             .build();
-        let counterparty_output = CellOutput::new_builder()
-            .capacity(counterparty_value.pack())
-            .lock(counterparty_shutdown_script)
+        let remote_output = CellOutput::new_builder()
+            .capacity(remote_value.pack())
+            .lock(remote_shutdown_script)
             .build();
-        let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
+        let outputs = self.order_things_for_musig2(local_output, remote_output);
         let tx_builder = tx_builder.set_outputs(outputs.to_vec());
         let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
         Ok(tx_builder.build())
     }
 
-    pub fn build_tx_creation_keys(&self, local: bool, commitment_number: u64) -> TxCreationKeys {
-        debug!(
-            "Building commitment transaction #{} for {}",
-            commitment_number,
-            if local { "us" } else { "them" },
-        );
-        let (
-            broadcaster,
-            countersignatory,
-            broadcaster_commitment_point,
-            countersignatory_commitment_point,
-        ) = if local {
-            (
-                self.get_holder_channel_parameters(),
-                self.get_counterparty_channel_parameters(),
-                self.get_holder_commitment_point(commitment_number),
-                self.get_counterparty_commitment_point(commitment_number),
-            )
-        } else {
-            (
-                self.get_counterparty_channel_parameters(),
-                self.get_holder_channel_parameters(),
-                self.get_counterparty_commitment_point(commitment_number),
-                self.get_holder_commitment_point(commitment_number),
-            )
-        };
-        let tx_creation_keys = TxCreationKeys {
-            broadcaster_delayed_payment_key: derive_delayed_payment_pubkey(
-                broadcaster.delayed_payment_base_key(),
-                &broadcaster_commitment_point,
-            ),
-            countersignatory_payment_key: derive_payment_pubkey(
-                countersignatory.payment_base_key(),
-                &countersignatory_commitment_point,
-            ),
-            countersignatory_revocation_key: derive_revocation_pubkey(
-                countersignatory.revocation_base_key(),
-                &countersignatory_commitment_point,
-            ),
-            broadcaster_tlc_key: derive_tlc_pubkey(
-                broadcaster.tlc_base_key(),
-                &broadcaster_commitment_point,
-            ),
-            countersignatory_tlc_key: derive_tlc_pubkey(
-                countersignatory.tlc_base_key(),
-                &countersignatory_commitment_point,
-            ),
-        };
-        tx_creation_keys
-    }
-
+    // The parameter `local` here specifies whether we are building the commitment transaction
+    // for the local party or the remote party. If `local` is true, then we are building a
+    // commitment transaction which can be broadcasted by ourself (with valid partial
+    // signature from the other party), else we are building a commitment transaction
+    // for the remote party (we build this commitment transaction
+    // normally because we want to send a partial signature to remote).
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
         let commitment_lock_context = CommitmentLockContext::get();
         let input = self.get_funding_transaction_outpoint();
@@ -2697,9 +2630,9 @@ impl ChannelActorState {
 
     fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
         let commitment_number = if local {
-            self.holder_commitment_number - 1
+            self.local_commitment_number - 1
         } else {
-            self.counterparty_commitment_number - 1
+            self.remote_commitment_number - 1
         };
         dbg!(
             "Building previous commitment transaction witnesses for",
@@ -2724,21 +2657,19 @@ impl ChannelActorState {
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
                 (
-                    self.get_holder_channel_parameters().selected_contest_delay,
-                    self.get_holder_commitment_point(commitment_number),
-                    self.get_holder_channel_parameters()
+                    self.get_local_channel_parameters().selected_contest_delay,
+                    self.get_local_commitment_point(commitment_number),
+                    self.get_local_channel_parameters()
                         .delayed_payment_base_key(),
-                    self.get_holder_channel_parameters().revocation_base_key(),
+                    self.get_local_channel_parameters().revocation_base_key(),
                 )
             } else {
                 (
-                    self.get_counterparty_channel_parameters()
-                        .selected_contest_delay,
-                    self.get_counterparty_commitment_point(commitment_number),
-                    self.get_counterparty_channel_parameters()
+                    self.get_remote_channel_parameters().selected_contest_delay,
+                    self.get_remote_commitment_point(commitment_number),
+                    self.get_remote_channel_parameters()
                         .delayed_payment_base_key(),
-                    self.get_counterparty_channel_parameters()
-                        .revocation_base_key(),
+                    self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
             dbg!(delay, base_delayed_payment_key, base_revocation_key);
@@ -2807,12 +2738,15 @@ impl ChannelActorState {
     }
 
     fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
-        let (to_broadcaster_value, to_countersignatory_value) =
-            self.get_broadcaster_and_countersignatory_amounts(local);
+        let (time_locked_value, immediately_spendable_value) = if local {
+            (self.to_local_amount, self.to_remote_amount)
+        } else {
+            (self.to_remote_amount, self.to_local_amount)
+        };
 
-        // The to_broadcaster_value is amount of immediately spendable assets of the broadcaster.
-        // In the commitment transaction, we need also to include the amount of the TLCs.
-        let to_broadcaster_value = to_broadcaster_value as u64
+        // The time_locked_value is amount of assets locked by commitment-lock.
+        // We need also to include the total balance of all pending TLCs.
+        let time_locked_value = time_locked_value as u64
             + self
                 .get_all_tlcs()
                 .iter()
@@ -2822,14 +2756,13 @@ impl ChannelActorState {
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
-                    self.get_previous_counterparty_commitment_point(),
-                    self.get_counterparty_channel_parameters()
-                        .payment_base_key(),
+                    self.get_previous_remote_commitment_point(),
+                    self.get_remote_channel_parameters().payment_base_key(),
                 )
             } else {
                 (
-                    self.get_current_holder_commitment_point(),
-                    self.get_holder_channel_parameters().payment_base_key(),
+                    self.get_current_local_commitment_point(),
+                    self.get_local_channel_parameters().payment_base_key(),
                 )
             };
             derive_payment_pubkey(base_payment_key, &commitment_point)
@@ -2838,28 +2771,28 @@ impl ChannelActorState {
         let witnesses: Vec<u8> = self.build_previous_commitment_transaction_witnesses(local);
 
         let hash = blake2b_256(&witnesses);
-        dbg!(
-            "witness in host",
+        debug!(
+            "Building {} commitment transaction with witnesses {:?} and hash {:?} with local commitment number {} and remote commitment number {}",
+            if local { "local" } else {"remote"},
             hex::encode(&witnesses),
-            "witness hash",
             hex::encode(&hash[..20]),
-            local,
-            self.holder_commitment_number,
-            self.counterparty_commitment_number
+            self.local_commitment_number,
+            self.remote_commitment_number
         );
+
         let commitment_lock_ctx = CommitmentLockContext::get();
-        let secp256k1_lock_script = commitment_lock_ctx
+        let immediate_secp256k1_lock_script = commitment_lock_ctx
             .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
         let commitment_lock_script =
             commitment_lock_ctx.get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
 
         let outputs = vec![
             CellOutput::new_builder()
-                .capacity((to_countersignatory_value as u64).pack())
-                .lock(secp256k1_lock_script)
+                .capacity((immediately_spendable_value as u64).pack())
+                .lock(immediate_secp256k1_lock_script)
                 .build(),
             CellOutput::new_builder()
-                .capacity((to_broadcaster_value as u64).pack())
+                .capacity((time_locked_value as u64).pack())
                 .lock(commitment_lock_script)
                 .build(),
         ];
@@ -2949,33 +2882,6 @@ impl ChannelActorState {
     }
 }
 
-/// The commitment transactions are the transaction that each parties holds to
-/// spend the funding transaction and create a new partition of the channel
-/// balance between each parties. This struct contains all the information
-/// that we need to build the actual CKB transaction.
-/// Note that these commitment transactions are asymmetrical,
-/// meaning that counterparties have different resulting CKB transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitmentTransaction {
-    // The input to the commitment transactions,
-    // always the first output of the  funding transaction.
-    pub input: OutPoint,
-    // Will change after each commitment to derive new commitment secrets.
-    // Currently always 0.
-    pub commitment_number: u64,
-    // The broadcaster's balance, may be spent after timelock by the broadcaster or
-    // by the countersignatory with revocation key.
-    pub to_broadcaster_value: u128,
-    // The countersignatory's balance, may be spent immediately by the countersignatory.
-    pub to_countersignatory_value: u128,
-    // The list of TLC commitmentments. These outputs are already multisiged to another
-    // set of transactions, whose output may be spent by countersignatory with revocation key,
-    // the original sender after delay, or the receiver if they has correct preimage,
-    pub tlcs: Vec<TLCOutputInCommitment>,
-    // A cache of the parties' pubkeys required to construct the transaction.
-    pub keys: TxCreationKeys,
-}
-
 /// A wrapper on CommitmentTransaction that has a partial signature along with
 /// the ckb transaction.
 #[derive(Clone, Debug)]
@@ -2987,10 +2893,10 @@ pub struct PartiallySignedCommitmentTransaction {
 pub struct Musig2Context {
     pub key_agg_ctx: KeyAggContext,
     pub agg_nonce: AggNonce,
-    pub holder_seckey: Privkey,
-    pub holder_secnonce: SecNonce,
-    pub counterparty_pubkey: Pubkey,
-    pub counterparty_pubnonce: PubNonce,
+    pub local_seckey: Privkey,
+    pub local_secnonce: SecNonce,
+    pub remote_pubkey: Pubkey,
+    pub remote_pubnonce: PubNonce,
 }
 
 impl Musig2Context {
@@ -2998,23 +2904,23 @@ impl Musig2Context {
         let Musig2Context {
             key_agg_ctx,
             agg_nonce,
-            holder_seckey,
-            holder_secnonce,
-            counterparty_pubkey,
-            counterparty_pubnonce,
+            local_seckey,
+            local_secnonce,
+            remote_pubkey,
+            remote_pubnonce,
         } = self;
         (
             Musig2SignContext {
                 key_agg_ctx: key_agg_ctx.clone(),
                 agg_nonce: agg_nonce.clone(),
-                seckey: holder_seckey,
-                secnonce: holder_secnonce,
+                seckey: local_seckey,
+                secnonce: local_secnonce,
             },
             Musig2VerifyContext {
                 key_agg_ctx,
                 agg_nonce,
-                pubkey: counterparty_pubkey,
-                pubnonce: counterparty_pubnonce,
+                pubkey: remote_pubkey,
+                pubnonce: remote_pubnonce,
             },
         )
     }
@@ -3201,13 +3107,6 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
     }
 }
 
-pub struct CounterpartyChannelTransactionParameters {
-    /// Counter-party public keys
-    pub pubkeys: ChannelBasePublicKeys,
-    /// The contest delay selected by the counterparty, which applies to holder-broadcast transactions
-    pub selected_contest_delay: u16,
-}
-
 type ShortHash = [u8; 20];
 
 /// A tlc output.
@@ -3272,16 +3171,13 @@ impl TLC {
         };
         let (base_key, commitment_point) = if local_pubkey {
             (
-                channel.get_holder_channel_parameters().pubkeys.tlc_base_key,
-                channel.get_holder_commitment_point(commitment_number),
+                channel.get_local_channel_parameters().pubkeys.tlc_base_key,
+                channel.get_local_commitment_point(commitment_number),
             )
         } else {
             (
-                channel
-                    .get_counterparty_channel_parameters()
-                    .pubkeys
-                    .tlc_base_key,
-                channel.get_counterparty_commitment_point(commitment_number),
+                channel.get_remote_channel_parameters().pubkeys.tlc_base_key,
+                channel.get_remote_commitment_point(commitment_number),
             )
         };
         derive_tlc_pubkey(&base_key, &commitment_point)
@@ -3307,34 +3203,6 @@ impl TLC {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TLCOutputInCommitment {
     pub output: TLC,
-}
-
-/// The set of public keys which are used in the creation of one commitment transaction.
-/// These are derived from the channel base keys and per-commitment data.
-///
-/// A broadcaster key is provided from potential broadcaster of the computed transaction.
-/// A countersignatory key is coming from a protocol participant unable to broadcast the
-/// transaction.
-///
-/// These keys are assumed to be good, either because the code derived them from
-/// channel basepoints via the new function, or they were obtained via
-/// CommitmentTransaction.trust().keys() because we trusted the source of the
-/// pre-calculated keys.
-#[derive(PartialEq, Eq, Clone, Debug)]
-pub struct TxCreationKeys {
-    /// Broadcaster's Payment Key (which isn't allowed to be spent from for some delay)
-    pub broadcaster_delayed_payment_key: Pubkey,
-    /// Countersignatory's payment key, used to receiving balance that should go to
-    /// the countersignatory immediately.
-    pub countersignatory_payment_key: Pubkey,
-    /// The revocation key which is used to allow the broadcaster of the commitment
-    /// transaction to provide their counterparty the ability to punish them if they broadcast
-    /// an old state.
-    pub countersignatory_revocation_key: Pubkey,
-    /// Broadcaster's HTLC Key
-    pub broadcaster_tlc_key: Pubkey,
-    /// Countersignatory's HTLC Key
-    pub countersignatory_tlc_key: Pubkey,
 }
 
 pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
