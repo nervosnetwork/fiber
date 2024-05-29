@@ -4,24 +4,30 @@ use ckb_types::{
     packed::{CellDep, CellDepVec, OutPoint, Script},
     prelude::{Builder, Entity, PackVec},
 };
-use log::debug;
+use log::{debug, warn};
 use once_cell::sync::OnceCell;
 use std::{
     collections::HashMap,
-    env,
     str::FromStr,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
+use std::{env, fs, path::PathBuf};
 
 use ckb_types::prelude::Pack;
 
 use super::{config::CkbNetwork, types::Hash256};
 
-// TODO: MockContext should only be used in tests.
-// We previously used MockContext with CommitmentLockContext::is_testing
-// to determine if we are in a testing environment. If we are in a testing environment,
-// we try to validate transactions with ckb_testtool.
-// We should eventually remove this and write unit tests to validate transactions.
+fn load_contract_binary(base_dir: &str, contract: Contract) -> Bytes {
+    let mut path = PathBuf::from(base_dir);
+    path.push(PathBuf::from(contract.binary_name()));
+
+    let result = fs::read(&path);
+    if result.is_err() {
+        panic!("Loading binary {:?} failed: {:?}", path, result.err());
+    }
+    result.unwrap().into()
+}
+
 #[derive(Debug)]
 pub struct MockContext {
     context: RwLock<Context>,
@@ -29,81 +35,6 @@ pub struct MockContext {
 }
 
 impl MockContext {
-    // If we are using cfg(test), then directly including contracts binaries into the
-    // resulting executable is not a problem. Otherwise, we'd better read the binaries from
-    // the filesystem.
-    #[cfg(test)]
-    fn get_contract_binaries() -> Vec<(Contract, Bytes)> {
-        [
-            (
-                Contract::FundingLock,
-                Bytes::from_static(include_bytes!("../../tests/deploy/contracts/funding-lock")),
-            ),
-            (
-                Contract::CommitmentLock,
-                Bytes::from_static(include_bytes!(
-                    "../../tests/deploy/contracts/commitment-lock"
-                )),
-            ),
-            (
-                Contract::AlwaysSuccess,
-                Bytes::from_static(include_bytes!(
-                    "../../tests/deploy/contracts/always_success"
-                )),
-            ),
-            (
-                Contract::CkbAuth,
-                Bytes::from_static(include_bytes!("../../tests/deploy/contracts/auth")),
-            ),
-            (
-                Contract::SimpleUDT,
-                Bytes::from_static(include_bytes!("../../tests/deploy/contracts/simple_udt")),
-            ),
-        ]
-        .into()
-    }
-
-    #[cfg(not(test))]
-    fn get_contract_binaries() -> Vec<(Contract, Bytes)> {
-        use log::warn;
-        use std::{fs, path::PathBuf};
-
-        match env::var("TESTING_CONTRACTS_DIR") {
-            Ok(base_dir) => {
-                [
-                    (Contract::FundingLock, "funding-lock"),
-                    (Contract::CommitmentLock, "commitment-lock"),
-                    (Contract::AlwaysSuccess, "always_success"),
-                    // These are contracts that we will call from other contracts, e.g. funding-lock.
-                    (Contract::CkbAuth, "auth"),
-                    (Contract::SimpleUDT, "simple_udt"),
-                ]
-                .into_iter()
-                .map(|(contract, binary_name)| {
-                    let mut path = PathBuf::from(base_dir.clone());
-                    path.push(PathBuf::from(binary_name));
-
-                    let binary = fs::read(&path).expect(
-                        format!(
-                            "Failed to read contract binary from path: {:?}",
-                            path.as_path()
-                        )
-                        .as_str(),
-                    );
-                    (contract, binary.into())
-                })
-                .collect()
-            }
-            Err(e) => {
-                warn!(
-                    "TESTING_CONTRACTS_DIR is not set, using default contracts: {:?}",
-                    e
-                );
-                vec![]
-            }
-        }
-    }
-
     // This is used temporarily to test the functionality of the contract.
     pub fn get() -> &'static Self {
         static INSTANCE: OnceCell<MockContext> = OnceCell::new();
@@ -137,9 +68,9 @@ impl MockContext {
                         "TESTING_CONTRACTS_DIR is not set, using default contracts: {:?}",
                         e
                     );
-                    (map, cell_deps)
-                },
-            );
+                    (HashMap::new(), vec![])
+                }
+            };
             let cell_dep_vec = cell_deps.pack();
             debug!("Loaded contracts into the mock environement: {:?}", &map);
             debug!(
@@ -168,6 +99,21 @@ enum Contract {
     AlwaysSuccess,
     CkbAuth,
     SimpleUDT,
+}
+
+impl Contract {
+    fn binary_name(&self) -> &'static str {
+        match self {
+            Contract::FundingLock => "funding-lock",
+            Contract::CommitmentLock => "commitment-lock",
+            // TODO fix me.
+            // We create an secp256k1 binary here because we need to find out the tx of secp256k1 in dev chain.
+            Contract::Secp256k1Lock => "always_success",
+            Contract::AlwaysSuccess => "always_success",
+            Contract::CkbAuth => "auth",
+            Contract::SimpleUDT => "simple_udt",
+        }
+    }
 }
 
 #[derive(Debug)]
