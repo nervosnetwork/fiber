@@ -6,7 +6,7 @@ use log::{debug, error, info, warn};
 
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
-    RpcReplyPort,
+    RpcReplyPort, SupervisionEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, FromInto};
@@ -33,8 +33,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    ChannelActorMessage, ChannelCommandWithId, ChannelEvent, ProcessingChannelError,
-    ProcessingChannelResult,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
+    ProcessingChannelError, ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -45,7 +45,7 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::ckb::serde_utils::EntityWrapperHex;
+use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error, RpcError};
@@ -75,6 +75,7 @@ pub struct AcceptChannelResponse {
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
+    DisconnectPeer(#[serde_as(as = "DisplayFromStr")] PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -95,13 +96,13 @@ pub enum NetworkActorCommand {
     ControlPcnChannel(ChannelCommandWithId),
     UpdateChannelFunding(
         Hash256,
-        #[serde_as(as = "EntityWrapperHex<Transaction>")] Transaction,
+        #[serde_as(as = "EntityHex")] Transaction,
         FundingRequest,
     ),
     SignTx(
         #[serde_as(as = "DisplayFromStr")] PeerId,
         Hash256,
-        #[serde_as(as = "EntityWrapperHex<Transaction>")] Transaction,
+        #[serde_as(as = "EntityHex")] Transaction,
         Option<Vec<Vec<u8>>>,
     ),
 }
@@ -217,20 +218,26 @@ pub struct PCNMessageWithChannelId {
     pub message: PCNMessage,
 }
 
-pub struct NetworkActor {
+pub struct NetworkActor<S> {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
+    store: S,
 }
 
-impl NetworkActor {
+impl<S> NetworkActor<S>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+{
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
+        store: S,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
+            store,
         }
     }
 
@@ -314,19 +321,32 @@ impl NetworkActor {
                 // may receive errors like DialerError.
             }
 
+            NetworkActorCommand::DisconnectPeer(peer_id) => {
+                debug!(
+                    "DisconnectPeer command received, disconnecting peer {:?}",
+                    &peer_id
+                );
+                if let Some(session) = state.get_peer_session(&peer_id) {
+                    state.control.disconnect(session).await?;
+                }
+            }
+
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                let (_, channel_id) = state.create_outbound_channel(open_channel).await?;
+                let (_, channel_id) = state
+                    .create_outbound_channel(open_channel, self.store.clone())
+                    .await?;
                 if let Some(reply) = reply {
                     let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
-                let result = state.create_inbound_channel(accept_channel).await.map(
-                    |(_, old_id, new_id)| AcceptChannelResponse {
+                let result = state
+                    .create_inbound_channel(accept_channel, self.store.clone())
+                    .await
+                    .map(|(_, old_id, new_id)| AcceptChannelResponse {
                         old_channel_id: old_id,
                         new_channel_id: new_id,
-                    },
-                );
+                    });
                 debug!("Processed accept channel command, result: {:?}", &result);
                 if let Some(reply) = reply {
                     let _ = reply.send(result.as_ref().map_err(Into::into).map(Clone::clone));
@@ -523,9 +543,10 @@ impl NetworkActorState {
         result
     }
 
-    pub async fn create_outbound_channel(
+    pub async fn create_outbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
         &mut self,
         open_channel: OpenChannelCommand,
+        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
         let network = self.network.clone();
         let OpenChannelCommand {
@@ -536,7 +557,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
-            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
             network.clone().get_cell(),
         )
@@ -546,9 +567,10 @@ impl NetworkActorState {
         Ok((channel, temp_channel_id))
     }
 
-    pub async fn create_inbound_channel(
+    pub async fn create_inbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
         &mut self,
         accept_channel: AcceptChannelCommand,
+        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256, Hash256), ProcessingChannelError> {
         let AcceptChannelCommand {
             temp_channel_id,
@@ -572,7 +594,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
-            ChannelActor::new(peer_id.clone(), network.clone()),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(
                 funding_amount,
                 seed,
@@ -627,9 +649,28 @@ impl NetworkActorState {
         }
     }
 
-    fn on_peer_connected(&mut self, id: &PeerId, session: &SessionContext) {
-        debug!("Peer connected: {:?}, session id: {}", &id, session.id);
-        self.peer_session_map.insert(id.clone(), session.id);
+    async fn on_peer_connected<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
+        &mut self,
+        peer_id: &PeerId,
+        session: &SessionContext,
+        store: S,
+    ) {
+        debug!("Peer connected: {:?}, session id: {}", &peer_id, session.id);
+        self.peer_session_map.insert(peer_id.clone(), session.id);
+
+        for channel_id in store.get_channels(&peer_id) {
+            debug!("Reestablishing channel {:?}", &channel_id);
+            if let Ok((channel, _)) = Actor::spawn_linked(
+                None,
+                ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
+                ChannelInitializationParameter::ReestablishChannel(channel_id),
+                self.network.get_cell(),
+            )
+            .await
+            {
+                self.on_channel_created(channel_id, peer_id, channel);
+            }
+        }
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
@@ -798,7 +839,10 @@ impl NetworkActorState {
 }
 
 #[rasync_trait]
-impl Actor for NetworkActor {
+impl<S> Actor for NetworkActor<S>
+where
+    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+{
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
     type Arguments = (CkbConfig, TaskTracker);
@@ -817,7 +861,7 @@ impl Actor for NetworkActor {
         let handle = Handle::new(myself.clone());
         let mut service = ServiceBuilder::default()
             .insert_protocol(handle.clone().create_meta(PCN_PROTOCOL_ID))
-            .key_pair(secio_kp)
+            .handshake_type(secio_kp.into())
             .build(handle);
         let listen_addr = service
             .listen(
@@ -879,7 +923,9 @@ impl Actor for NetworkActor {
                     self.on_service_event(e).await;
                 }
                 NetworkActorEvent::PeerConnected(id, session) => {
-                    state.on_peer_connected(&id, &session);
+                    state
+                        .on_peer_connected(&id, &session, self.store.clone())
+                        .await;
                     // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
@@ -1030,6 +1076,24 @@ impl Actor for NetworkActor {
         debug!("Network service for {:?} shutdown", state.peer_id);
         Ok(())
     }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: SupervisionEvent,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            SupervisionEvent::ActorTerminated(who, _, _) => {
+                debug!("Actor {:?} terminated", who);
+            }
+            SupervisionEvent::ActorPanicked(who, _) => {
+                error!("Actor {:?} panicked", who);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1139,16 +1203,17 @@ impl ServiceHandle for Handle {
     }
 }
 
-pub async fn start_ckb(
+pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
     config: CkbConfig,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
     root_actor: ActorCell,
+    store: S,
 ) -> ActorRef<NetworkActorMessage> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
-        NetworkActor::new(event_sender, chain_actor),
+        NetworkActor::new(event_sender, chain_actor, store),
         (config, tracker),
         root_actor,
     )

@@ -2,6 +2,7 @@ use ckb_pcn_node::ckb::chain::CommitmentLockContext;
 use ckb_pcn_node::ckb::config::CkbNetwork;
 use ckb_pcn_node::invoice::start_invoice;
 use ckb_pcn_node::rpc::InvoiceCommandWithReply;
+use ckb_pcn_node::store::Store;
 use log::{debug, error, info};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -43,6 +44,8 @@ pub async fn main() {
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
 
+    let store = Store::new(config.ckb.as_ref().unwrap().store_path());
+
     let ckb_command_sender = match config.ckb {
         Some(ckb_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
@@ -74,6 +77,7 @@ pub async fn main() {
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
+                store.clone(),
             )
             .await;
 
@@ -140,6 +144,7 @@ pub async fn main() {
             command_receiver,
             new_tokio_cancellation_token(),
             new_tokio_task_tracker(),
+            store,
         )
         .await;
         Some(command_sender)

@@ -88,4 +88,12 @@ impl CkbConfig {
         self.create_base_dir()?;
         super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
     }
+
+    pub fn store_path(&self) -> PathBuf {
+        let path = self.base_dir().join("store");
+        if !path.exists() {
+            fs::create_dir_all(&path).expect("create store directory");
+        }
+        path
+    }
 }

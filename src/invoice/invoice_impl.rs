@@ -1,7 +1,7 @@
 use super::errors::VerificationError;
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
-use crate::ckb::serde_utils::EntityWrapperBase64;
+use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::types::Hash256;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
@@ -127,7 +127,7 @@ impl FromStr for SiPrefix {
 
 #[serde_as]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CkbScript(#[serde_as(as = "EntityWrapperBase64<Script>")] pub Script);
+pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 
 #[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]

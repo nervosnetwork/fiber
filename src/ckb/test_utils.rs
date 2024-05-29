@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     env,
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -23,7 +25,11 @@ use crate::{
     CkbConfig, NetworkServiceEvent,
 };
 
-use super::{NetworkActor, NetworkActorCommand, NetworkActorMessage};
+use super::{
+    channel::{ChannelActorState, ChannelActorStateStore},
+    types::Hash256,
+    NetworkActor, NetworkActorCommand, NetworkActorMessage,
+};
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -108,7 +114,11 @@ impl NetworkNode {
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender, noop_chain_actor.clone()),
+            NetworkActor::new(
+                event_sender,
+                noop_chain_actor.clone(),
+                MemoryStore::default(),
+            ),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )
@@ -203,6 +213,43 @@ impl NetworkNode {
     {
         self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
             .await;
+    }
+}
+
+#[derive(Clone, Default)]
+struct MemoryStore {
+    channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
+}
+
+impl ChannelActorStateStore for MemoryStore {
+    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
+        self.channel_actor_state_map
+            .read()
+            .unwrap()
+            .get(id)
+            .cloned()
+    }
+
+    fn insert_channel_actor_state(&self, state: ChannelActorState) {
+        self.channel_actor_state_map
+            .write()
+            .unwrap()
+            .insert(state.id.clone(), state);
+    }
+
+    fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256> {
+        self.channel_actor_state_map
+            .read()
+            .unwrap()
+            .values()
+            .filter_map(|state| {
+                if peer_id == &state.peer_id {
+                    Some(state.id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 }
 
