@@ -437,7 +437,7 @@ pub struct OpenChannel {
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u128,
-    pub to_self_delay: LockTime,
+    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
     pub payment_basepoint: Pubkey,
@@ -461,7 +461,7 @@ impl From<OpenChannel> for molecule_pcn::OpenChannel {
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(open_channel.max_accept_tlcs.pack())
             .min_tlc_value(open_channel.min_tlc_value.pack())
-            .to_self_delay(open_channel.to_self_delay.into())
+            .to_self_delay(open_channel.to_local_delay.into())
             .funding_pubkey(open_channel.funding_pubkey.into())
             .revocation_basepoint(open_channel.revocation_basepoint.into())
             .payment_basepoint(open_channel.payment_basepoint.into())
@@ -489,7 +489,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: open_channel.max_accept_tlcs().unpack(),
             min_tlc_value: open_channel.min_tlc_value().unpack(),
-            to_self_delay: open_channel.to_self_delay().try_into()?,
+            to_local_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
             revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
             payment_basepoint: open_channel.payment_basepoint().try_into()?,
@@ -513,7 +513,7 @@ pub struct AcceptChannel {
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u128,
-    pub to_self_delay: LockTime,
+    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
     pub payment_basepoint: Pubkey,
@@ -532,7 +532,7 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(accept_channel.max_accept_tlcs.pack())
             .min_tlc_value(accept_channel.min_tlc_value.pack())
-            .to_self_delay(accept_channel.to_self_delay.into())
+            .to_self_delay(accept_channel.to_local_delay.into())
             .funding_pubkey(accept_channel.funding_pubkey.into())
             .revocation_basepoint(accept_channel.revocation_basepoint.into())
             .payment_basepoint(accept_channel.payment_basepoint.into())
@@ -555,7 +555,7 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: accept_channel.max_accept_tlcs().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
-            to_self_delay: accept_channel.to_self_delay().try_into()?,
+            to_local_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
             revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
             payment_basepoint: accept_channel.payment_basepoint().try_into()?,
@@ -827,6 +827,7 @@ pub struct Shutdown {
     pub channel_id: Hash256,
     #[serde_as(as = "EntityWrapperBase64<Script>")]
     pub close_script: Script,
+    pub fee: u128,
 }
 
 impl From<Shutdown> for molecule_pcn::Shutdown {
@@ -834,6 +835,7 @@ impl From<Shutdown> for molecule_pcn::Shutdown {
         molecule_pcn::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
+            .fee(shutdown.fee.pack())
             .build()
     }
 }
@@ -845,6 +847,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
+            fee: shutdown.fee().unpack(),
         })
     }
 }
@@ -853,8 +856,6 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClosingSigned {
     pub channel_id: Hash256,
-    // TODO: fee is actually not used for now.
-    pub fee: u64,
     pub partial_signature: PartialSignature,
 }
 
@@ -862,7 +863,6 @@ impl From<ClosingSigned> for molecule_pcn::ClosingSigned {
     fn from(closing_signed: ClosingSigned) -> Self {
         molecule_pcn::ClosingSigned::new_builder()
             .channel_id(closing_signed.channel_id.into())
-            .fee(closing_signed.fee.pack())
             .partial_signature(partial_signature_to_molecule(
                 closing_signed.partial_signature,
             ))
@@ -876,7 +876,6 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
     fn try_from(closing_signed: molecule_pcn::ClosingSigned) -> Result<Self, Self::Error> {
         Ok(ClosingSigned {
             channel_id: closing_signed.channel_id().into(),
-            fee: closing_signed.fee().unpack(),
             partial_signature: PartialSignature::from_slice(
                 closing_signed.partial_signature().as_slice(),
             )

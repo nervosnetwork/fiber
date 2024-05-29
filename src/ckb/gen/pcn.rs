@@ -6372,6 +6372,7 @@ impl ::core::fmt::Display for Shutdown {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(f, ", {}: {}", "fee", self.fee())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6387,13 +6388,13 @@ impl ::core::default::Default for Shutdown {
     }
 }
 impl Shutdown {
-    const DEFAULT_VALUE: [u8; 97] = [
-        97, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0,
+    const DEFAULT_VALUE: [u8; 117] = [
+        117, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6416,11 +6417,17 @@ impl Shutdown {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn close_script(&self) -> Script {
+    pub fn fee(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn close_script(&self) -> Script {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             Script::new_unchecked(self.0.slice(start..end))
         } else {
             Script::new_unchecked(self.0.slice(start..))
@@ -6454,6 +6461,7 @@ impl molecule::prelude::Entity for Shutdown {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
+            .fee(self.fee())
             .close_script(self.close_script())
     }
 }
@@ -6477,6 +6485,7 @@ impl<'r> ::core::fmt::Display for ShutdownReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(f, ", {}: {}", "fee", self.fee())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6486,7 +6495,7 @@ impl<'r> ::core::fmt::Display for ShutdownReader<'r> {
     }
 }
 impl<'r> ShutdownReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6509,11 +6518,17 @@ impl<'r> ShutdownReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn close_script(&self) -> ScriptReader<'r> {
+    pub fn fee(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn close_script(&self) -> ScriptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[16..]) as usize;
             ScriptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             ScriptReader::new_unchecked(&self.as_slice()[start..])
@@ -6567,19 +6582,25 @@ impl<'r> molecule::prelude::Reader<'r> for ShutdownReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        ScriptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        ScriptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct ShutdownBuilder {
     pub(crate) channel_id: Byte32,
+    pub(crate) fee: Uint128,
     pub(crate) close_script: Script,
 }
 impl ShutdownBuilder {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
+        self
+    }
+    pub fn fee(mut self, v: Uint128) -> Self {
+        self.fee = v;
         self
     }
     pub fn close_script(mut self, v: Script) -> Self {
@@ -6593,6 +6614,7 @@ impl molecule::prelude::Builder for ShutdownBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
+            + self.fee.as_slice().len()
             + self.close_script.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6601,12 +6623,15 @@ impl molecule::prelude::Builder for ShutdownBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
+        total_size += self.fee.as_slice().len();
+        offsets.push(total_size);
         total_size += self.close_script.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
+        writer.write_all(self.fee.as_slice())?;
         writer.write_all(self.close_script.as_slice())?;
         Ok(())
     }
@@ -6637,7 +6662,6 @@ impl ::core::fmt::Display for ClosingSigned {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "fee", self.fee())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6653,12 +6677,12 @@ impl ::core::default::Default for ClosingSigned {
     }
 }
 impl ClosingSigned {
-    const DEFAULT_VALUE: [u8; 88] = [
-        88, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 76] = [
+        76, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6681,17 +6705,11 @@ impl ClosingSigned {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn fee(&self) -> Uint64 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
-    }
     pub fn partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             Byte32::new_unchecked(self.0.slice(start..end))
         } else {
             Byte32::new_unchecked(self.0.slice(start..))
@@ -6725,7 +6743,6 @@ impl molecule::prelude::Entity for ClosingSigned {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .fee(self.fee())
             .partial_signature(self.partial_signature())
     }
 }
@@ -6749,7 +6766,6 @@ impl<'r> ::core::fmt::Display for ClosingSignedReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "fee", self.fee())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6759,7 +6775,7 @@ impl<'r> ::core::fmt::Display for ClosingSignedReader<'r> {
     }
 }
 impl<'r> ClosingSignedReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6782,17 +6798,11 @@ impl<'r> ClosingSignedReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn fee(&self) -> Uint64Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             Byte32Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Byte32Reader::new_unchecked(&self.as_slice()[start..])
@@ -6846,25 +6856,19 @@ impl<'r> molecule::prelude::Reader<'r> for ClosingSignedReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Byte32Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Ok(())
     }
 }
 #[derive(Debug, Default)]
 pub struct ClosingSignedBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) fee: Uint64,
     pub(crate) partial_signature: Byte32,
 }
 impl ClosingSignedBuilder {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
-        self
-    }
-    pub fn fee(mut self, v: Uint64) -> Self {
-        self.fee = v;
         self
     }
     pub fn partial_signature(mut self, v: Byte32) -> Self {
@@ -6878,7 +6882,6 @@ impl molecule::prelude::Builder for ClosingSignedBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.fee.as_slice().len()
             + self.partial_signature.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6887,15 +6890,12 @@ impl molecule::prelude::Builder for ClosingSignedBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.fee.as_slice().len();
-        offsets.push(total_size);
         total_size += self.partial_signature.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.fee.as_slice())?;
         writer.write_all(self.partial_signature.as_slice())?;
         Ok(())
     }

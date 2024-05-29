@@ -1,7 +1,7 @@
-use ckb_pcn_node::invoice::start_invoice;
-use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use ckb_pcn_node::ckb::chain::CommitmentLockContext;
 use ckb_pcn_node::ckb::config::CkbNetwork;
+use ckb_pcn_node::invoice::start_invoice;
+use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use log::{debug, error, info};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -21,10 +21,15 @@ use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[tokio::main]
 pub async fn main() {
-    let log_surffix = std::env::var("LOG_SURFFIX").unwrap();
-    env_logger::builder()
-        .format_suffix(log_surffix.leak())
-        .init();
+    let mut builder = env_logger::builder();
+    match std::env::var("LOG_SURFFIX") {
+        Ok(log_surffix) => {
+            info!("Setting log surffix to: {}", &log_surffix);
+            builder.format_suffix(log_surffix.leak());
+        }
+        Err(_) => {}
+    }
+    builder.init();
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);
@@ -58,23 +63,9 @@ pub async fn main() {
             .0;
 
             const CHANNEL_SIZE: usize = 4000;
-            let (command_sender, mut command_receiver) = mpsc::channel(CHANNEL_SIZE);
-            assert!(
-                ckb_config.bootnode_addrs.len() < CHANNEL_SIZE,
-                "Too many bootnodes ({} allowed, having {})",
-                CHANNEL_SIZE,
-                ckb_config.bootnode_addrs.len()
-            );
-            for bootnode in &ckb_config.bootnode_addrs {
-                let addr = Multiaddr::from_str(bootnode).expect("valid bootnode");
-                let command = (NetworkActorCommand::ConnectPeer(addr), None);
-                command_sender
-                    .send(command)
-                    .await
-                    .expect("receiver not closed")
-            }
-
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
+
+            let bootnodes = ckb_config.bootnode_addrs.clone();
 
             info!("Starting ckb");
             let ckb_actor = start_ckb(
@@ -85,6 +76,14 @@ pub async fn main() {
                 root_actor.get_cell(),
             )
             .await;
+
+            for bootnode in bootnodes {
+                let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
+                let command = NetworkActorCommand::ConnectPeer(addr);
+                ckb_actor
+                    .send_message(NetworkActorMessage::new_command(command))
+                    .expect("ckb actor alive")
+            }
 
             new_tokio_task_tracker().spawn(async move {
                 let token = new_tokio_cancellation_token();
@@ -110,34 +109,7 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
-            // TODO: we should really pass the created actor to other components.
-            new_tokio_task_tracker().spawn(async move {
-                debug!("Starting command receiver");
-                let token = new_tokio_cancellation_token();
-                loop {
-                    select! {
-                        command = command_receiver.recv() => {
-                            match command {
-                                None => {
-                                    debug!("Command receiver completed");
-                                    break;
-                                }
-                                Some((command, sender)) => {
-                                    debug!("Received command: {:?}", command);
-                                    ckb_actor.send_message(NetworkActorMessage::Command(command, sender)).expect("network actor alive");
-                                }
-                            }
-                        }
-                        _ = token.cancelled() => {
-                            debug!("Cancellation received, event processing service");
-                            break;
-                        }
-                    }
-                }
-                debug!("Command sender service exited");
-            });
-
-            Some(command_sender)
+            Some(ckb_actor)
         }
         None => None,
     };

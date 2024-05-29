@@ -73,7 +73,7 @@ impl InvoiceService {
                 let data = json!({
                     "invoice": json!(invoice),
                     "encode_payment": invoice.to_string(),
-                    "payment_hash": invoice.payment_hash_id()
+                    "payment_hash": invoice.payment_hash(),
                 })
                 .to_string();
                 let _ = response.send(Ok(data)).await;

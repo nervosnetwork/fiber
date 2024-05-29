@@ -1,11 +1,11 @@
 meta {
-  name: send commitment_signed message
+  name: Node2 remove tlc
   type: http
-  seq: 11
+  seq: 19
 }
 
 post {
-  url: {{NODE1_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}/ckb
   body: json
   auth: none
 }
@@ -19,9 +19,16 @@ body:json {
   {
     "request": {
       "ControlPcnChannel": {
-        "channel_id": "{{CHANNEL_ID}}",
+        "channel_id": "{{N2N3_CHANNEL_ID}}",
         "command": {
-          "CommitmentSigned": []
+          "RemoveTlc": {
+            "id": {{N2N3_TLC_ID2}},
+            "reason": {
+              "RemoveTlcFulfill": {
+                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000003"
+              }
+            }
+          }
         }
       }
     }

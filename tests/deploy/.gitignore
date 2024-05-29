@@ -2,3 +2,4 @@
 /node-data/
 /.env
 /.env.local
+/migrations

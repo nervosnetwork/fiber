@@ -1,0 +1,49 @@
+meta {
+  name: Node1 add tlc
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{NODE1_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "ControlPcnChannel": {
+        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "command": {
+          "AddTlc": [{
+            "amount": {{payment_amount}},
+            "payment_hash": "{{payment_hash}}",
+            "expiry": 40
+          }]
+        }
+      }
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:pre-request {
+  console.log("round #2: sending node1 AddTlc:" + bru.getVar("payment_hash") + " channel: " + bru.getVar("N1N2_CHANNEL_ID"));
+  console.log("amount: ", bru.getVar("payment_amount"));
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  bru.setVar("N1N2_TLC_ID2", res.body.tlc_id);
+  console.log("response from node1 AddTlc:", res.body);
+}

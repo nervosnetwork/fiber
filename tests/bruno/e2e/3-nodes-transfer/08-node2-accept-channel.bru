@@ -1,0 +1,40 @@
+meta {
+  name: Node2 accept a channel from a peer
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{NODE2_RPC_URL}}/ckb
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "request": {
+      "AcceptChannel": [
+        {
+          "temp_channel_id": "{{N2N3_TEMP_CHANNEL_ID}}",
+          "funding_amount": 61000000000000
+        }
+      ]
+    }
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 2000));
+  console.log("accept channel result: ", res.body);
+  bru.setVar("N2N3_CHANNEL_ID", res.body.new_channel_id);
+}

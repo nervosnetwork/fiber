@@ -2,11 +2,14 @@ use ractor::{MessagingErr, SpawnErr};
 use tentacle::{error::SendErrorKind, secio::PeerId};
 use thiserror::Error;
 
-use crate::{ckb::{
-    channel::{ChannelActorMessage, ProcessingChannelError},
-    types::Hash256,
-    NetworkActorMessage,
-}, ckb_chain::FundingError};
+use crate::{
+    ckb::{
+        channel::{ChannelActorMessage, ProcessingChannelError},
+        types::Hash256,
+        NetworkActorMessage,
+    },
+    ckb_chain::FundingError,
+};
 
 use crate::invoice::InvoiceError;
 
