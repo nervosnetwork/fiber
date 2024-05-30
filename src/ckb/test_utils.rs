@@ -20,6 +20,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
+    ckb::{chain::CommitmentLockContext, config::CkbNetwork},
     ckb_chain::MockChainActor,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
@@ -101,6 +102,7 @@ impl NetworkNode {
             ..Default::default()
         };
 
+        CommitmentLockContext::initialize(CkbNetwork::Mocknet);
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
