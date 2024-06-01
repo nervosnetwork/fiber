@@ -3,3 +3,5 @@
 # direnv related temp files/directories
 .direnv
 /result*
+
+/tests/nodes/*/ckb/store

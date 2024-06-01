@@ -838,7 +838,15 @@ where
                 }
             },
         }
-        self.store.insert_channel_actor_state(state.clone());
+        match state.state {
+            ChannelState::Closed => {
+                myself.stop(Some("ChannelClosed".to_string()));
+                self.store.delete_channel_actor_state(&state.get_id());
+            }
+            _ => {
+                self.store.insert_channel_actor_state(state.clone());
+            }
+        }
         Ok(())
     }
 }
@@ -2921,6 +2929,7 @@ impl ChannelActorState {
 pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
+    fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256>;
 }
 

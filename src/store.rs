@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
-use bincode;
 use rocksdb::{prelude::*, WriteBatch, DB};
+use serde_json;
 use tentacle::secio::PeerId;
 
 use crate::{
@@ -50,25 +50,25 @@ impl Batch {
                 let key = [&[0], id.as_ref()].concat();
                 (
                     key,
-                    bincode::serialize(&state).expect("serialize ChannelActorState should be OK"),
+                    serde_json::to_vec(&state).expect("serialize ChannelActorState should be OK"),
                 )
             }
             KeyValue::CkbInvoice(id, invoice) => {
                 let key = [&[32], id.as_ref()].concat();
                 (
                     key,
-                    bincode::serialize(&invoice).expect("serialize CkbInvoice should be OK"),
+                    serde_json::to_vec(&invoice).expect("serialize CkbInvoice should be OK"),
                 )
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
                 let key = [&[64], peer_id.as_bytes(), channel_id.as_ref()].concat();
                 (
                     key,
-                    bincode::serialize(&state).expect("serialize ChannelState should be OK"),
+                    serde_json::to_vec(&state).expect("serialize ChannelState should be OK"),
                 )
             }
         };
-        self.put(&Into::<Vec<u8>>::into(key), &Into::<Vec<u8>>::into(value))
+        self.put(key, value)
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
@@ -107,7 +107,7 @@ impl ChannelActorStateStore for Store {
         key.extend_from_slice(id.as_ref());
 
         self.get(key).map(|v| {
-            bincode::deserialize(v.as_ref()).expect("deserialize ChannelActorState should be OK")
+            serde_json::from_slice(v.as_ref()).expect("deserialize ChannelActorState should be OK")
         })
     }
 
@@ -119,6 +119,15 @@ impl ChannelActorStateStore for Store {
             state.state,
         ));
         batch.commit();
+    }
+
+    fn delete_channel_actor_state(&self, id: &Hash256) {
+        if let Some(state) = self.get_channel_actor_state(id) {
+            let mut batch = self.batch();
+            batch.delete([&[0], id.as_ref()].concat());
+            batch.delete([&[64], state.peer_id.as_bytes(), id.as_ref()].concat());
+            batch.commit();
+        }
     }
 
     fn get_channels(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
@@ -140,8 +149,9 @@ impl InvoiceStore for Store {
         key.extend_from_slice(&[32]);
         key.extend_from_slice(id.as_ref());
 
-        self.get(key)
-            .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoice should be OK"))
+        self.get(key).map(|v| {
+            serde_json::from_slice(v.as_ref()).expect("deserialize CkbInvoice should be OK")
+        })
     }
 
     fn insert_invoice(&self, invoice: CkbInvoice) {

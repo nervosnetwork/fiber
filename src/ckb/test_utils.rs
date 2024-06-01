@@ -239,6 +239,10 @@ impl ChannelActorStateStore for MemoryStore {
             .insert(state.id.clone(), state);
     }
 
+    fn delete_channel_actor_state(&self, id: &Hash256) {
+        self.channel_actor_state_map.write().unwrap().remove(id);
+    }
+
     fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256> {
         self.channel_actor_state_map
             .read()
