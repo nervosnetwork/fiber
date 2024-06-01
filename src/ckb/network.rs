@@ -704,6 +704,15 @@ impl NetworkActorState {
         }
     }
 
+    fn on_channel_closed(&mut self, id: &Hash256, peer_id: &PeerId) {
+        self.channels.remove(&id);
+        if let Some(session) = self.get_peer_session(peer_id) {
+            self.session_channels_map.get_mut(&session).map(|set| {
+                set.remove(&id);
+            });
+        }
+    }
+
     pub async fn on_open_channel_msg(
         &mut self,
         peer_id: PeerId,
@@ -1019,6 +1028,7 @@ where
                         .expect("myself alive");
                 }
                 NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
+                    state.on_channel_closed(&channel_id, &peer_id);
                     info!(
                         "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
                         channel_id, peer_id, tx
