@@ -11,6 +11,7 @@ use ractor::{
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::{HashMap, HashSet};
+use std::time::SystemTime;
 use tentacle::secio::SecioKeyPair;
 
 use tentacle::{
@@ -861,10 +862,18 @@ where
         myself: ActorRef<Self::Msg>,
         (config, tracker): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("SystemTime::now() should after UNIX_EPOCH");
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
-        let entropy = blake2b_hash_with_salt(kp.as_ref(), b"PCN_NETWORK_ENTROPY");
+        let entropy = blake2b_hash_with_salt(
+            [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
+                .concat()
+                .as_slice(),
+            b"PCN_NETWORK_ENTROPY",
+        );
         let secio_kp = SecioKeyPair::from(kp.into());
         let secio_pk = secio_kp.public_key();
         let handle = Handle::new(myself.clone());
