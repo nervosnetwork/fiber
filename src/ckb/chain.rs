@@ -68,10 +68,18 @@ impl MockContext {
     pub fn new() -> Self {
         let mut context = Context::default();
 
-        let (map, cell_deps) = Self::get_contract_binaries().into_iter().fold(
+        let (map, cell_deps) = Self::get_contract_binaries().into_iter().enumerate().fold(
             (HashMap::new(), vec![]),
-            |(mut map, mut cell_deps), (contract, binary)| {
-                let out_point = context.deploy_cell(binary);
+            |(mut map, mut cell_deps), (i, (contract, binary))| {
+                use ckb_hash::blake2b_256;
+                use rand::{rngs::StdRng, SeedableRng};
+                let i = i + 123_456_789;
+                let seed = blake2b_256(i.to_le_bytes());
+                let mut rng = StdRng::from_seed(seed);
+                // Use a deterministic RNG to ensure that the outpoints are the same for all nodes.
+                // Otherwise, cell deps may differ for different nodes, which would make
+                // different nodes sign different messages (as transaction hashes differ).
+                let out_point = context.deploy_cell_with_rng(binary, &mut rng);
                 let script = context
                     .build_script(&out_point, Default::default())
                     .expect("valid script");
