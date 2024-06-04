@@ -1,7 +1,7 @@
 meta {
-  name: add tlc from NODE3
+  name: remove tlc from NODE1
   type: http
-  seq: 15
+  seq: 17
 }
 
 post {
@@ -19,13 +19,14 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "add_tlc",
+    "method": "remove_tlc",
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "amount": 200000000,
-        "payment_hash": "0xcb7bce98a778f130d34da522623d7e56705bddfe0dc4781bd2331211134a19a5",
-        "expiry": 40
+        "tlc_id": {{TLC_ID3}},
+        "reason": {
+          "error_code": 42
+        }
       }
     ]
   }
@@ -33,11 +34,10 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
+  res.body.result: isNull
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("TLC_ID4", res.body.result.tlc_id);
 }

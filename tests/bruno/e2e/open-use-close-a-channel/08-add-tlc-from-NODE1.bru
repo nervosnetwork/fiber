@@ -1,11 +1,11 @@
 meta {
-  name: send commitment_signed message from NODE3
+  name: add tlc from NODE1
   type: http
-  seq: 19
+  seq: 8
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,10 +19,13 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "commitment_signed",
+    "method": "add_tlc",
     "params": [
       {
-        "channel_id": "{{CHANNEL_ID}}"
+        "channel_id": "{{CHANNEL_ID}}",
+        "amount": 200000000,
+        "payment_hash": "0xcb7bce98a778f130d34da522623d7e56705bddfe0dc4781bd2331211134a19a5",
+        "expiry": 40
       }
     ]
   }
@@ -30,10 +33,11 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.result.tlc_id: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+  bru.setVar("TLC_ID2", res.body.result.tlc_id);
 }

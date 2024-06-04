@@ -1,11 +1,11 @@
 meta {
-  name: remove tlc from NODE1
+  name: send commitment_signed message
   type: http
-  seq: 22
+  seq: 4
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,14 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "commitment_signed",
     "params": [
       {
-        "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": {{TLC_ID3}},
-        "reason": {
-          "error_code": 42
-        }
+        "channel_id": "{{CHANNEL_ID}}"
       }
     ]
   }

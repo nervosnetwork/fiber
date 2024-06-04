@@ -1,7 +1,7 @@
 meta {
-  name: remove tlc from NODE3
+  name: accept a channel from a peer
   type: http
-  seq: 23
+  seq: 3
 }
 
 post {
@@ -19,14 +19,11 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "accept_channel",
     "params": [
       {
-        "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": {{TLC_ID4}},
-        "reason": {
-          "error_code": 42
-        }
+        "temporary_channel_id": "{{TEMP_CHANNEL_ID}}",
+        "funding_amount": 100000000000
       }
     ]
   }
@@ -34,10 +31,11 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.result.channel_id: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 2000));
+  bru.setVar("CHANNEL_ID", res.body.result.channel_id);
 }
