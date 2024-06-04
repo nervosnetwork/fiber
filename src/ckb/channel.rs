@@ -3630,8 +3630,27 @@ mod tests {
         node_a
             .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} ready", channel_id, peer_id);
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
                     assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
                     true
                 }
                 _ => false,
