@@ -52,6 +52,12 @@ impl MockContext {
                 )),
             ),
             (
+                Contract::Secp256k1Lock,
+                Bytes::from_static(include_bytes!(
+                    "../../tests/deploy/contracts/always_success"
+                )),
+            ),
+            (
                 Contract::CkbAuth,
                 Bytes::from_static(include_bytes!("../../tests/deploy/contracts/auth")),
             ),
