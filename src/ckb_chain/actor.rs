@@ -361,10 +361,27 @@ mod test_utils {
                     }
                 }
                 SendTx(tx) => {
-                    debug!("Sending transaction: {:?}", tx);
-                    // TODO: verify the transaction and set the relevant status.
-                    let status = ckb_jsonrpc_types::Status::Committed;
-                    debug!("Verified transaction: {:?}, status: {:?}", tx, status);
+                    const MAX_CYCLES: u64 = 100_000_000;
+                    let mut context = ctx.ctx.write();
+                    let status = match context.verify_tx(&tx, MAX_CYCLES) {
+                        Ok(c) => {
+                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                            // Also save the outputs to the context, so that we can refer to
+                            // these out points later.
+                            for outpoint in tx.output_pts().into_iter() {
+                                let index: u32 = outpoint.index().unpack();
+                                let index = index as usize;
+                                let cell = tx.outputs().get(index).unwrap();
+                                let data = tx.outputs_data().get(index).unwrap();
+                                context.create_cell_with_out_point(outpoint, cell, data.as_bytes());
+                            }
+                            ckb_jsonrpc_types::Status::Committed
+                        }
+                        Err(e) => {
+                            error!("Failed to verify transaction: {:?}, error: {:?}", tx, e);
+                            ckb_jsonrpc_types::Status::Rejected
+                        }
+                    };
                     ctx.committed_tx_status.insert(tx.hash(), status);
                 }
                 TraceTx(tx, reply_port) => {

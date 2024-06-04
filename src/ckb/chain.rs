@@ -153,6 +153,14 @@ impl MockContext {
         INSTANCE.get_or_init(|| Self::new());
         INSTANCE.get().unwrap()
     }
+
+    pub fn write(&self) -> RwLockWriteGuard<Context> {
+        self.context.write().unwrap()
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<Context> {
+        self.context.read().unwrap()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
