@@ -50,6 +50,11 @@ use super::{
 };
 
 const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
+// Some part of the code liberally gets previous commitment number, which is
+// the current commitment number minus 1. We deliberately set initial commitment number to 1,
+// so that we can get previous commitment point/number without checking if the channel
+// is funded or not.
+pub const INITIAL_COMMITMENT_NUMBER: u64 = 1;
 
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -1124,21 +1129,17 @@ impl ChannelActorState {
         remote_commitment_point: Pubkey,
         remote_prev_commitment_point: Pubkey,
     ) -> Self {
-        let commitment_number = 1;
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(commitment_number);
+        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
 
         let channel_id = derive_channel_id_from_revocation_keys(
             &local_pubkeys.revocation_base_key,
             &remote_pubkeys.revocation_base_key,
         );
 
-        let remote_commitment_number = 1;
-
         debug!(
-            "Generated channel id ({:?}) for temporary channel {:?} with local commitment number {:?} and remote commitment number {:?}",
+            "Generated channel id ({:?}) for temporary channel {:?}",
             &channel_id, &temp_channel_id,
-            commitment_number, remote_commitment_number
         );
 
         Self {
@@ -1163,8 +1164,8 @@ impl ChannelActorState {
                 pubkeys: remote_pubkeys,
                 selected_contest_delay: remote_delay,
             }),
-            local_commitment_number: commitment_number,
-            remote_commitment_number,
+            local_commitment_number: INITIAL_COMMITMENT_NUMBER,
+            remote_commitment_number: INITIAL_COMMITMENT_NUMBER,
             remote_shutdown_script: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![remote_prev_commitment_point, remote_commitment_point],
@@ -1182,8 +1183,7 @@ impl ChannelActorState {
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let commitment_number = 1;
-        let local_pubkeys = signer.to_channel_public_keys(commitment_number);
+        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
         let temp_channel_id =
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
@@ -1204,9 +1204,9 @@ impl ChannelActorState {
                 selected_contest_delay: to_local_delay,
             },
             remote_channel_parameters: None,
-            local_commitment_number: commitment_number,
+            local_commitment_number: INITIAL_COMMITMENT_NUMBER,
             remote_nonce: None,
-            remote_commitment_number: 1,
+            remote_commitment_number: INITIAL_COMMITMENT_NUMBER,
             remote_commitment_points: vec![],
             local_shutdown_script: None,
             local_shutdown_fee: None,
@@ -1560,6 +1560,18 @@ impl ChannelActorState {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
                         // TODO: maybe we should send our commitment_signed message here.
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
+                        // Notify outside observers.
+                        network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::NetworkServiceEvent(
+                                    NetworkServiceEvent::CommitmentSignaturePending(
+                                        self.peer_id.clone(),
+                                        self.get_id(),
+                                        self.get_current_commitment_number(false),
+                                    ),
+                                ),
+                            ))
+                            .expect("myself alive");
                     }
                 }
                 Ok(())
@@ -2071,9 +2083,22 @@ impl ChannelActorState {
             }
             TxCollaborationMsg::TxComplete(_msg) => {
                 self.check_tx_complete_preconditions()?;
-                self.update_state(ChannelState::CollaboratingFundingTx(
-                    flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT,
-                ));
+                let flags = flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT;
+                self.update_state(ChannelState::CollaboratingFundingTx(flags));
+                if flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) {
+                    // Notify outside observers.
+                    network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::CommitmentSignaturePending(
+                                    self.peer_id.clone(),
+                                    self.get_id(),
+                                    self.get_current_commitment_number(false),
+                                ),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
             }
         }
         Ok(())
@@ -3275,12 +3300,11 @@ mod tests {
         packed::{CellDep, CellInput, CellOutput, OutPoint, Transaction},
         prelude::{AsTransactionBuilder, Pack},
     };
-    use log::debug;
     use molecule::prelude::{Builder, Entity};
 
     use crate::{
         ckb::{
-            channel::{ChannelCommand, ChannelCommandWithId},
+            channel::{ChannelCommand, ChannelCommandWithId, INITIAL_COMMITMENT_NUMBER},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3625,9 +3649,25 @@ mod tests {
             })
             .await;
 
-        // Wait for each party to create funding txs.
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-        debug!("Sending commitment_signed to both parties");
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::CommitmentSignaturePending(
+                    peer_id,
+                    channel_id,
+                    commitment_num,
+                ) => {
+                    println!(
+                        "A commitment signature for channel {:?} to {:?} is pending",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
+                    true
+                }
+                _ => false,
+            })
+            .await;
 
         node_a
             .network_actor
@@ -3639,7 +3679,25 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        debug!("node_a send CommitmentSigned to node_b");
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::CommitmentSignaturePending(
+                    peer_id,
+                    channel_id,
+                    commitment_num,
+                ) => {
+                    println!(
+                        "A commitment signature for channel {:?} to {:?} is pending",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
+                    true
+                }
+                _ => false,
+            })
+            .await;
 
         node_b
             .network_actor
@@ -3650,8 +3708,6 @@ mod tests {
                 }),
             ))
             .expect("node_a alive");
-
-        debug!("node_b send CommitmentSigned to node_a");
 
         let _node_b_commitment_tx = node_a
             .expect_to_process_event(|event| match event {

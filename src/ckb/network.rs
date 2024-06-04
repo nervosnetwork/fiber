@@ -144,6 +144,8 @@ pub enum NetworkServiceEvent {
     ChannelReady(PeerId, Hash256),
     ChannelShutDown(PeerId, Hash256),
     ChannelClosed(PeerId, Hash256, TransactionView),
+    // A CommitmentSigned message is pending to sent to the other party.
+    CommitmentSignaturePending(PeerId, Hash256, u64),
     // The other party has signed a valid commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, PartiallySignedCommitmentTransaction),
 }
