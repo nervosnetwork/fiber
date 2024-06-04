@@ -214,29 +214,45 @@ impl CkbChainState {
 }
 
 #[cfg(test)]
-pub struct MockChainActor;
+pub use test_utils::MockChainActor;
 
 #[cfg(test)]
-#[ractor::async_trait]
-impl Actor for MockChainActor {
-    type Msg = CkbChainMessage;
-    type State = ();
-    type Arguments = ();
+mod test_utils {
+    use super::CkbChainMessage;
+    use crate::ckb::chain::MockContext;
 
-    async fn pre_start(
-        &self,
-        _: ActorRef<Self::Msg>,
-        _: Self::Arguments,
-    ) -> Result<Self::State, ActorProcessingErr> {
-        Ok(())
+    use ractor::{Actor, ActorProcessingErr, ActorRef};
+
+    pub type MockChainActorState = MockContext;
+    pub struct MockChainActor {}
+
+    impl MockChainActor {
+        pub fn new() -> Self {
+            Self {}
+        }
     }
 
-    async fn handle(
-        &self,
-        _: ActorRef<Self::Msg>,
-        _: Self::Msg,
-        _: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        Ok(())
+    #[ractor::async_trait]
+    impl Actor for MockChainActor {
+        type Msg = CkbChainMessage;
+        type State = MockChainActorState;
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Arguments,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(Self::State::new())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Msg,
+            _: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
     }
 }

@@ -104,45 +104,47 @@ impl MockContext {
         }
     }
 
+    pub fn new() -> Self {
+        let mut context = Context::default();
+
+        let (map, cell_deps) = Self::get_contract_binaries().into_iter().fold(
+            (HashMap::new(), vec![]),
+            |(mut map, mut cell_deps), (contract, binary)| {
+                let out_point = context.deploy_cell(binary);
+                let script = context
+                    .build_script(&out_point, Default::default())
+                    .expect("valid script");
+                map.insert(contract, script);
+                cell_deps.push(
+                    CellDep::new_builder()
+                        .out_point(out_point)
+                        .dep_type(DepType::Code.into())
+                        .build(),
+                );
+                (map, cell_deps)
+            },
+        );
+        let cell_dep_vec = cell_deps.pack();
+        debug!("Loaded contracts into the mock environement: {:?}", &map);
+        debug!(
+            "Use these contracts by specifying cell deps to {:?}",
+            &cell_dep_vec
+        );
+
+        let context = MockContext {
+            context: RwLock::new(context),
+            contracts_context: Arc::new(ContractsContext {
+                contract_default_scripts: map,
+                cell_deps: cell_dep_vec,
+            }),
+        };
+        context
+    }
+
     // This is used temporarily to test the functionality of the contract.
     pub fn get() -> &'static Self {
         static INSTANCE: OnceCell<MockContext> = OnceCell::new();
-        INSTANCE.get_or_init(|| {
-            let mut context = Context::default();
-
-            let (map, cell_deps) = Self::get_contract_binaries().into_iter().fold(
-                (HashMap::new(), vec![]),
-                |(mut map, mut cell_deps), (contract, binary)| {
-                    let out_point = context.deploy_cell(binary);
-                    let script = context
-                        .build_script(&out_point, Default::default())
-                        .expect("valid script");
-                    map.insert(contract, script);
-                    cell_deps.push(
-                        CellDep::new_builder()
-                            .out_point(out_point)
-                            .dep_type(DepType::Code.into())
-                            .build(),
-                    );
-                    (map, cell_deps)
-                },
-            );
-            let cell_dep_vec = cell_deps.pack();
-            debug!("Loaded contracts into the mock environement: {:?}", &map);
-            debug!(
-                "Use these contracts by specifying cell deps to {:?}",
-                &cell_dep_vec
-            );
-
-            let context = MockContext {
-                context: RwLock::new(context),
-                contracts_context: Arc::new(ContractsContext {
-                    contract_default_scripts: map,
-                    cell_deps: cell_dep_vec,
-                }),
-            };
-            context
-        });
+        INSTANCE.get_or_init(|| Self::new());
         INSTANCE.get().unwrap()
     }
 }

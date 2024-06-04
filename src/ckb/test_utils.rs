@@ -109,16 +109,17 @@ impl NetworkNode {
         let mut chain_base_dir = PathBuf::from(base_dir.as_ref());
         chain_base_dir.push("ckb-chain");
 
-        let noop_chain_actor = Actor::spawn_linked(None, MockChainActor {}, (), root.get_cell())
-            .await
-            .expect("start mock chain actor")
-            .0;
+        let mock_chain_actor =
+            Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
+                .await
+                .expect("start mock chain actor")
+                .0;
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
             NetworkActor::new(
                 event_sender,
-                noop_chain_actor.clone(),
+                mock_chain_actor.clone(),
                 MemoryStore::default(),
             ),
             (ckb_config, new_tokio_task_tracker()),
