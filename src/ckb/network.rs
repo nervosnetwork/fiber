@@ -987,7 +987,7 @@ where
                             });
 
                             debug!("Starting funding channel");
-                            // TODO: Here we implies the one who receives AcceptChannel message
+                            // TODO: Here we imply the one who receives AcceptChannel message
                             // will send TxUpdate message first.
                             dbg!(&script);
                             myself

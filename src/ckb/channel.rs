@@ -748,6 +748,9 @@ where
                 // See also the notes [state updates across multiple actors](docs/notes/state-update-across-multiple-actors.md).
                 self.network
                     .send_message(NetworkActorMessage::new_event(
+                        // TODO: The channel id here is a temporary channel id,
+                        // while the ChannelCreated event emitted by the counterpart
+                        // is a real channel id. This may cause confusion.
                         NetworkActorEvent::ChannelCreated(
                             channel.get_id(),
                             self.peer_id.clone(),
@@ -3679,6 +3682,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_channel() {
+        let _ = env_logger::try_init();
 
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
@@ -3724,26 +3728,26 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let new_channel_id = node_a
+        node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
                     println!("A channel ({:?}) to {:?} created", &channel_id, &peer_id);
                     assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &old_channel_id);
                     Some(channel_id.clone())
                 }
                 _ => None,
             })
             .await;
 
-        node_b
-            .expect_event(|event| match event {
+        let new_channel_id = node_b
+            .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} created", channel_id, peer_id);
+                    println!("A channel ({:?}) to {:?} created", &channel_id, &peer_id);
                     assert_eq!(peer_id, &node_a.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    true
+                    Some(channel_id.clone())
                 }
-                _ => false,
+                _ => None,
             })
             .await;
 
