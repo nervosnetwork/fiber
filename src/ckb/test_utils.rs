@@ -105,7 +105,7 @@ impl NetworkNode {
             ..Default::default()
         };
 
-        CommitmentLockContext::initialize(CkbNetwork::Mocknet);
+        let ctx = CommitmentLockContext::new(CkbNetwork::Mocknet);
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
@@ -119,7 +119,12 @@ impl NetworkNode {
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
+            NetworkActor::new(
+                event_sender,
+                chain_actor.clone(),
+                ctx,
+                MemoryStore::default(),
+            ),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )

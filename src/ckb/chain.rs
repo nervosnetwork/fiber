@@ -4,7 +4,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use log::debug;
-use once_cell::sync::OnceCell;
+
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 
 use super::{config::CkbNetwork, types::Hash256};
@@ -123,7 +123,7 @@ enum Contract {
     SimpleUDT,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ContractsContext {
     contract_default_scripts: HashMap<Contract, Script>,
     // TODO: We bundle all the cell deps together, but some of they are not always needed.
@@ -197,13 +197,11 @@ fn get_environment_variable(
     )
 }
 
-static COMMITMENT_LOCK_CTX_INSTANCE: OnceCell<CommitmentLockContext> = OnceCell::new();
-
 impl CommitmentLockContext {
     // TODO: better way to organize this? Currently CommitmentLockContext is a singleton
     // because it is used in so many places.
-    pub fn initialize(network: CkbNetwork) -> &'static Self {
-        COMMITMENT_LOCK_CTX_INSTANCE.get_or_init(|| match network {
+    pub fn new(network: CkbNetwork) -> Self {
+        match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
                 log::warn!("Initializing mock context for testing.");
@@ -365,12 +363,7 @@ impl CommitmentLockContext {
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
-        });
-        COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
-    }
-
-    pub fn get() -> &'static Self {
-        COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
+        }
     }
 
     fn get_contracts_map(&self) -> &HashMap<Contract, Script> {

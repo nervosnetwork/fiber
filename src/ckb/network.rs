@@ -33,6 +33,7 @@ use tentacle::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
+use super::chain::CommitmentLockContext;
 use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
     ProcessingChannelError, ProcessingChannelResult,
@@ -229,6 +230,8 @@ pub struct NetworkActor<S> {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
+    // TODO: The functionality of CommitmentLockContext should be merged to chain_actor.
+    ctx: CommitmentLockContext,
     store: S,
 }
 
@@ -239,11 +242,14 @@ where
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
+        // TODO: The functionality of CommitmentLockContext should be merged to chain_actor.
+        ctx: CommitmentLockContext,
         store: S,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
+            ctx,
             store,
         }
     }
@@ -535,6 +541,7 @@ pub struct NetworkActorState {
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
     chain_actor: ActorRef<CkbChainMessage>,
+    contracts_context: CommitmentLockContext,
 }
 
 impl NetworkActorState {
@@ -565,7 +572,10 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
+            (
+                self.contracts_context.clone(),
+                ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx),
+            ),
             network.clone().get_cell(),
         )
         .await?
@@ -602,11 +612,14 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::AcceptChannel(
-                funding_amount,
-                seed,
-                open_channel,
-                Some(tx),
+            (
+                self.contracts_context.clone(),
+                ChannelInitializationParameter::AcceptChannel(
+                    funding_amount,
+                    seed,
+                    open_channel,
+                    Some(tx),
+                ),
             ),
             network.clone().get_cell(),
         )
@@ -670,7 +683,10 @@ impl NetworkActorState {
             if let Ok((channel, _)) = Actor::spawn_linked(
                 None,
                 ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
-                ChannelInitializationParameter::ReestablishChannel(channel_id),
+                (
+                    self.contracts_context.clone(),
+                    ChannelInitializationParameter::ReestablishChannel(channel_id),
+                ),
                 self.network.get_cell(),
             )
             .await
@@ -930,6 +946,7 @@ where
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
             chain_actor: self.chain_actor.clone(),
+            contracts_context: self.ctx.clone(),
         })
     }
 
@@ -1234,11 +1251,13 @@ pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,
     root_actor: ActorCell,
+    // TODO: The functionality of CommitmentLockContext should be merged to chain_actor.
+    ctx: CommitmentLockContext,
     store: S,
 ) -> ActorRef<NetworkActorMessage> {
     let (actor, _handle) = Actor::spawn_linked(
         Some("network actor".to_string()),
-        NetworkActor::new(event_sender, chain_actor, store),
+        NetworkActor::new(event_sender, chain_actor, ctx, store),
         (config, tracker),
         root_actor,
     )

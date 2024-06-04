@@ -562,12 +562,12 @@ where
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
-    type Arguments = ChannelInitializationParameter;
+    type Arguments = (CommitmentLockContext, ChannelInitializationParameter);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: Self::Arguments,
+        (ctx, args): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
@@ -622,6 +622,7 @@ where
                     next_local_nonce.clone(),
                     *first_per_commitment_point,
                     *second_per_commitment_point,
+                    ctx,
                 );
 
                 let commitment_number = 0;
@@ -684,6 +685,7 @@ where
                     self.peer_id.clone(),
                     funding_amount,
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
+                    ctx,
                 );
 
                 let commitment_number = 0;
@@ -938,6 +940,11 @@ pub struct ChannelActorState {
     pub local_shutdown_fee: Option<u128>,
     pub remote_shutdown_signature: Option<PartialSignature>,
     pub remote_shutdown_fee: Option<u128>,
+
+    // Providing additional information about contracts (e.g. commitmemt lock outpoint)
+    // that are used in pcn channels.
+    #[serde(skip)]
+    pub contracts_context: Option<CommitmentLockContext>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1128,6 +1135,7 @@ impl ChannelActorState {
         remote_nonce: PubNonce,
         remote_commitment_point: Pubkey,
         remote_prev_commitment_point: Pubkey,
+        contracts_context: CommitmentLockContext,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
@@ -1173,6 +1181,7 @@ impl ChannelActorState {
             local_shutdown_fee: None,
             remote_shutdown_signature: None,
             remote_shutdown_fee: None,
+            contracts_context: Some(contracts_context),
         }
     }
 
@@ -1181,6 +1190,7 @@ impl ChannelActorState {
         peer_id: PeerId,
         value: u128,
         to_local_delay: LockTime,
+        contracts_context: CommitmentLockContext,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
@@ -1214,6 +1224,7 @@ impl ChannelActorState {
             remote_shutdown_fee: None,
             local_shutdown_signature: None,
             remote_shutdown_signature: None,
+            contracts_context: Some(contracts_context),
         }
     }
 
@@ -1230,6 +1241,10 @@ impl ChannelActorState {
 impl ChannelActorState {
     pub fn get_id(&self) -> Hash256 {
         self.id
+    }
+
+    pub fn get_contracts_context(&self) -> &CommitmentLockContext {
+        self.contracts_context.as_ref().unwrap()
     }
 
     pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
@@ -1349,7 +1364,7 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_lock_script(&self) -> Script {
-        let ctx: &CommitmentLockContext = CommitmentLockContext::get();
+        let ctx: &CommitmentLockContext = self.get_contracts_context();
         let args = blake2b_256(self.get_funding_lock_script_xonly());
         debug!(
             "Aggregated pubkey: {:?}, hash: {:?}",
@@ -2520,7 +2535,7 @@ impl ChannelActorState {
                 )));
             }
         };
-        let commitment_lock_context = CommitmentLockContext::get();
+        let commitment_lock_context = self.get_contracts_context();
         let tx_builder = TransactionBuilder::default()
             .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
             .input(
@@ -2557,7 +2572,7 @@ impl ChannelActorState {
     // for the remote party (we build this commitment transaction
     // normally because we want to send a partial signature to remote).
     pub fn build_commitment_tx(&self, local: bool) -> TransactionView {
-        let commitment_lock_context = CommitmentLockContext::get();
+        let commitment_lock_context = self.get_contracts_context();
         let input = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
             .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
@@ -2722,7 +2737,7 @@ impl ChannelActorState {
             self.remote_commitment_number
         );
 
-        let commitment_lock_ctx = CommitmentLockContext::get();
+        let commitment_lock_ctx = self.get_contracts_context();
         let immediate_secp256k1_lock_script = commitment_lock_ctx
             .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
         let commitment_lock_script =
