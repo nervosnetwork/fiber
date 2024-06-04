@@ -218,12 +218,29 @@ pub use test_utils::MockChainActor;
 
 #[cfg(test)]
 mod test_utils {
+    use std::collections::HashMap;
+
     use super::CkbChainMessage;
     use crate::ckb::chain::MockContext;
 
+    use ckb_types::packed::Byte32;
+    use log::{debug, error};
     use ractor::{Actor, ActorProcessingErr, ActorRef};
 
-    pub type MockChainActorState = MockContext;
+    pub struct MockChainActorState {
+        ctx: MockContext,
+        committed_tx_status: HashMap<Byte32, ckb_jsonrpc_types::Status>,
+    }
+
+    impl MockChainActorState {
+        pub fn new() -> Self {
+            Self {
+                ctx: MockContext::new(),
+                committed_tx_status: HashMap::new(),
+            }
+        }
+    }
+
     pub struct MockChainActor {}
 
     impl MockChainActor {
@@ -248,10 +265,68 @@ mod test_utils {
 
         async fn handle(
             &self,
-            _: ActorRef<Self::Msg>,
-            _: Self::Msg,
-            _: &mut Self::State,
+            myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            ctx: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
+            use CkbChainMessage::*;
+            match message {
+                Fund(tx, request, reply_port) => {
+                    // TODO: Fill in transaction from request.
+                    let fulfilled_tx = tx.clone();
+                    debug!(
+                        "fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
+                        request, &tx, &fulfilled_tx
+                    );
+                    if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
+                }
+                Sign(tx, reply_port) => {
+                    // TODO: Fill in transaction from request.
+                    let signed_tx = tx.clone();
+                    debug!(
+                        "signing transaction: original tx: {:?}, signed tx: {:?}",
+                        &tx, &signed_tx
+                    );
+                    if let Err(e) = reply_port.send(Ok(signed_tx)) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
+                }
+                SendTx(tx) => {
+                    debug!("sending transaction: {:?}", tx);
+                    // TODO: verify the transaction and set the relevant status.
+                    let status = ckb_jsonrpc_types::Status::Committed;
+                    debug!("Verified transaction: {:?}, status: {:?}", tx, status);
+                    ctx.committed_tx_status.insert(tx.hash(), status);
+                }
+                TraceTx(tx, reply_port) => {
+                    let status = ctx
+                        .committed_tx_status
+                        .get(&tx.tx_hash)
+                        .cloned()
+                        .unwrap_or(ckb_jsonrpc_types::Status::Unknown);
+                    debug!(
+                        "tracing transaction: {:?}, status: {:?}",
+                        &tx.tx_hash, &status
+                    );
+                    if let Err(e) = reply_port.send(status) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
+                }
+            }
             Ok(())
         }
     }
