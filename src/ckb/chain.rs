@@ -26,9 +26,6 @@ pub struct MockContext {
 
 #[cfg(test)]
 impl MockContext {
-    // If we are using cfg(test), then directly including contracts binaries into the
-    // resulting executable is not a problem. Otherwise, we'd better read the binaries from
-    // the filesystem.
     fn get_contract_binaries() -> Vec<(Contract, Bytes)> {
         [
             (

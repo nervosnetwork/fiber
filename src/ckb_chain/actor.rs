@@ -344,7 +344,7 @@ mod test_utils {
                 }
                 Sign(tx, reply_port) => {
                     // We don't need to sign the funding transaction in mock chain actor,
-                    // as any funding transaction is considered correct it we can successfully
+                    // as any funding transaction is considered correct if we can successfully
                     // run the scripts of transaction inputs, and we don't have inputs in the
                     // funding transaction.
                     let signed_tx = tx.clone();
