@@ -34,7 +34,7 @@ use std::{
 use crate::{
     ckb::{chain::CommitmentLockContext, types::Shutdown},
     ckb_chain::FundingRequest,
-    RpcError,
+    NetworkServiceEvent, RpcError,
 };
 
 use super::{
@@ -224,8 +224,11 @@ impl<S> ChannelActor<S> {
             }
         };
 
-        let PartiallySignedCommitmentTransaction { tx, signature } =
-            state.build_and_sign_commitment_tx()?;
+        let PartiallySignedCommitmentTransaction {
+            tx,
+            signature,
+            num: _,
+        } = state.build_and_sign_commitment_tx()?;
         debug!(
             "Build a funding tx ({:?}) with partial signature {:?}",
             &tx, &signature
@@ -1264,12 +1267,16 @@ impl ChannelActorState {
         self.remote_channel_parameters.as_ref().unwrap()
     }
 
-    pub fn get_next_commitment_number(&self, local: bool) -> u64 {
+    pub fn get_current_commitment_number(&self, local: bool) -> u64 {
         if local {
-            self.local_commitment_number + 1
+            self.local_commitment_number
         } else {
-            self.remote_commitment_number + 1
+            self.remote_commitment_number
         }
+    }
+
+    pub fn get_next_commitment_number(&self, local: bool) -> u64 {
+        self.get_current_commitment_number(local) + 1
     }
 
     pub fn get_funding_transaction(&self) -> &Transaction {
@@ -2141,6 +2148,19 @@ impl ChannelActorState {
             &commitment_signed, &tx
         );
 
+        // Notify outside observers.
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(
+                    NetworkServiceEvent::RemoteCommitmentSigned(
+                        self.peer_id.clone(),
+                        self.get_id(),
+                        tx.clone(),
+                    ),
+                ),
+            ))
+            .expect("myself alive");
+
         debug!("Updating peer next local nonce");
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
@@ -2704,13 +2724,14 @@ impl ChannelActorState {
 
         dbg!("Calling build_commitment_tx from build_and_verify_commitment_tx");
         let tx = self.build_commitment_tx(false);
+        let num = self.get_current_commitment_number(false);
         let message = get_tx_message_to_sign(&tx);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
             &signature, &tx, &message
         );
         verify_ctx.verify(signature, message.as_slice())?;
-        Ok(PartiallySignedCommitmentTransaction { tx, signature })
+        Ok(PartiallySignedCommitmentTransaction { tx, signature, num })
     }
 
     pub fn build_and_sign_commitment_tx(
@@ -2719,6 +2740,7 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(self);
 
         let tx = self.build_commitment_tx(true);
+        let num = self.get_current_commitment_number(true);
         let message = get_tx_message_to_sign(&tx);
 
         debug!(
@@ -2731,7 +2753,7 @@ impl ChannelActorState {
             &tx, &message, &signature,
         );
 
-        Ok(PartiallySignedCommitmentTransaction { tx, signature })
+        Ok(PartiallySignedCommitmentTransaction { tx, signature, num })
     }
 
     /// Verify the partial signature from the peer and create a complete transaction
@@ -2787,8 +2809,12 @@ pub trait ChannelActorStateStore {
 /// the ckb transaction.
 #[derive(Clone, Debug)]
 pub struct PartiallySignedCommitmentTransaction {
-    tx: TransactionView,
-    signature: PartialSignature,
+    // The commitment number of the commitment transaction.
+    pub num: u64,
+    // The commitment transaction.
+    pub tx: TransactionView,
+    // The partial signature of the commitment transaction.
+    pub signature: PartialSignature,
 }
 
 pub struct Musig2Context {
@@ -3626,6 +3652,36 @@ mod tests {
             .expect("node_a alive");
 
         debug!("node_b send CommitmentSigned to node_a");
+
+        let _node_b_commitment_tx = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx) => {
+                    println!(
+                        "A commitment tx {:?} from {:?} for channel {:?} received",
+                        &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        let _node_a_commitment_tx = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx) => {
+                    println!(
+                        "A commitment tx {:?} from {:?} for channel {:?} received",
+                        &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
 
         node_a
             .expect_event(|event| match event {
