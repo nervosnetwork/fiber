@@ -30,17 +30,6 @@ pub struct TraceTxRequest {
     pub confirmations: u64,
 }
 
-#[derive(Debug, Clone)]
-pub struct GetScriptRequest {
-    pub contract: super::contracts::Contract,
-    pub args: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct GetCellDepsRequest {
-    pub contracts: Vec<super::contracts::Contract>,
-}
-
 #[derive(Debug)]
 pub enum CkbChainMessage {
     Fund(
