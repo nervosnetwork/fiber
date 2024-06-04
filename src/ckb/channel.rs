@@ -2605,10 +2605,10 @@ impl ChannelActorState {
         local: bool,
         commitment_number: u64,
     ) -> Vec<u8> {
-        dbg!(
-            "Building commitment transaction witnesses for commitment number",
+        debug!(
+            "Building commitment transaction #{}'s witnesses for {} party",
             commitment_number,
-            local
+            if local { "local" } else { "remote" }
         );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
@@ -2629,7 +2629,7 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
-            dbg!(delay, base_delayed_payment_key, base_revocation_key);
+            debug!("Get base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, base_delayed_payment_key, base_revocation_key);
             (
                 delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
@@ -2670,16 +2670,11 @@ impl ChannelActorState {
             [a, b].concat()
         };
 
-        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
-        let revocation_key_hash = blake2b_256(revocation_key.serialize());
-
-        dbg!(
-            &tlcs,
-            local,
-            delayed_payment_key,
-            hex::encode(&delayed_payment_key_hash[..20]),
-            revocation_key,
-            hex::encode(&revocation_key_hash[..20])
+        debug!(
+            "Get all tlcs for commitment tx #{} for {} party: {:?}",
+            commitment_number,
+            if local { "local" } else { "remote" },
+            &tlcs
         );
         let witnesses: Vec<u8> = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
@@ -2690,7 +2685,21 @@ impl ChannelActorState {
                 .flatten()
                 .collect(),
         ]
+        .map(|x| {
+            debug!(
+                "Witness element for commitment transaction #{} of {} party: {:?}",
+                commitment_number,
+                if local { "local" } else { "remote" },
+                hex::encode(&x)
+            );
+            x
+        })
         .concat();
+        debug!(
+            "Built commitment transaction #{}'s witnesses: {:?}",
+            commitment_number,
+            hex::encode(&witnesses)
+        );
         witnesses
     }
 
