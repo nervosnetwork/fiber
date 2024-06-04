@@ -2500,41 +2500,6 @@ impl ChannelActorState {
                         format!("Funding transaction output amount mismatch ({} given, {} to local , {} to remote)", first_output_capacity, self.to_local_amount, self.to_remote_amount)
                     ));
                 }
-
-                let commtiment_lock_context = CommitmentLockContext::get();
-                // Just create a cell with the same capacity as the first output of the funding tx.
-                // This is to test the validity of the commitment tx that spends the funding tx.
-                if commtiment_lock_context.is_testing() {
-                    let always_success = commtiment_lock_context
-                        .get_always_success_script(b"funding transaction test");
-                    let mut context = commtiment_lock_context.write_mock_context();
-                    let context = &mut context;
-                    let funding_tx = Transaction::default()
-                        .as_advanced_builder()
-                        .outputs([CellOutput::new_builder()
-                            .capacity(first_output.capacity())
-                            .lock(always_success)
-                            .build()])
-                        .outputs_data(vec![Default::default()])
-                        .build();
-                    dbg!("funding_tx before completion: {:?}", &funding_tx);
-                    let funding_tx = context.complete_tx(funding_tx);
-
-                    dbg!("funding_tx after completion: {:?}", &funding_tx);
-
-                    let result = context.verify_tx(&funding_tx, 10_000_000);
-                    dbg!(&result);
-                    assert!(result.is_ok());
-
-                    // Save this transaction so that we can find it later.
-                    let outpoint = funding_tx.output_pts().get(0).unwrap().clone();
-                    let (cell, cell_data) = funding_tx.output_with_data(0).unwrap();
-                    dbg!("funding_tx saved: {:?}", &funding_tx);
-                    dbg!("outpoint: {:?}", &outpoint);
-                    dbg!("Cell: {:?}", &cell);
-                    context.create_cell_with_out_point(outpoint, cell, cell_data);
-                    self.funding_tx = Some(funding_tx.data());
-                }
             }
         }
         Ok(())
