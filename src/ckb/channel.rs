@@ -907,6 +907,7 @@ where
                     *channel_id,
                     my_funding_amount,
                     my_funding_type_script.clone(),
+                    funding_type_script.clone(),
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
@@ -922,6 +923,7 @@ where
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: my_funding_amount,
+                    funding_type_script: my_funding_type_script.clone(),
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     to_local_delay: *to_local_delay,
@@ -981,6 +983,7 @@ where
                     &seed,
                     self.peer_id.clone(),
                     funding_amount,
+                    funding_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
@@ -1189,6 +1192,8 @@ pub struct ChannelActorState {
 
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_type_script: Option<Script>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_funding_type_script: Option<Script>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -1419,6 +1424,7 @@ impl ChannelActorState {
         temp_channel_id: Hash256,
         local_value: u128,
         funding_type_script: Option<Script>,
+        remote_funding_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
         remote_value: u128,
@@ -1452,6 +1458,7 @@ impl ChannelActorState {
             funding_tx: None,
             is_acceptor: true,
             funding_type_script,
+            remote_funding_type_script,
             to_local_amount: local_value,
             id: channel_id,
             next_offering_tlc_id: 0,
@@ -1485,6 +1492,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u128,
+        my_funding_type_script: Option<Script>,
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -1495,7 +1503,8 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
-            funding_type_script: None,
+            funding_type_script: my_funding_type_script,
+            remote_funding_type_script: None,
             is_acceptor: false,
             to_local_amount: value,
             id: temp_channel_id,
@@ -1665,7 +1674,6 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
-        debug!("anan Generating funding request");
         let udt_info = if let Some(type_script) = &self.funding_type_script {
             Some(FundingUdtInfo {
                 type_script: type_script.clone(),
@@ -1676,7 +1684,6 @@ impl ChannelActorState {
         } else {
             None
         };
-        warn!("anan udt_info: {:?}", udt_info);
         FundingRequest {
             udt_info,
             script: self.get_funding_lock_script(),
@@ -1997,6 +2004,11 @@ impl ChannelActorState {
         ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
+        self.remote_funding_type_script = accept_channel.funding_type_script.clone();
+        warn!(
+            "anan Remote funding type script: {:?}",
+            &self.remote_funding_type_script
+        );
 
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
@@ -2370,6 +2382,27 @@ impl ChannelActorState {
             panic!("Invalid funding transation")
         }
 
+        if self.funding_type_script.is_some() {
+            let (_output, data) =
+                tx.output_with_data(0)
+                    .ok_or(ProcessingChannelError::InvalidParameter(
+                        "Funding transaction should have at least one output".to_string(),
+                    ))?;
+            if data.as_ref().len() >= 16 {
+                let mut amount_bytes = [0u8; 16];
+                amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+                let udt_amount = u128::from_le_bytes(amount_bytes);
+                warn!(
+                    "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
+                    udt_amount, self.to_remote_amount, self.to_local_amount
+                );
+                if udt_amount == self.to_remote_amount + self.to_local_amount {
+                    return Ok(true);
+                }
+            } else {
+                return Ok(false);
+            }
+        }
         let current_capacity: u64 = first_output.capacity().unpack();
         let is_complete = current_capacity == (self.to_local_amount + self.to_remote_amount) as u64;
         Ok(is_complete)
@@ -2815,37 +2848,47 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
-        if let Some(type_script) = &self.funding_type_script {
-            let immediate_output = packed::CellOutput::new_builder()
-                .capacity(Capacity::shannons(6100000000).pack())
-                .lock(immediate_secp256k1_lock_script.clone())
-                .type_(Some(type_script.clone()).pack())
-                .build();
-            let immediate_output_data: Bytes = immediately_spendable_value.to_le_bytes().pack();
+        match (&self.funding_type_script, &self.remote_funding_type_script) {
+            (Some(type_script), Some(remote_type_script)) => {
+                let immediate_output = packed::CellOutput::new_builder()
+                    .capacity(Capacity::shannons(6100000000).pack())
+                    .lock(immediate_secp256k1_lock_script.clone())
+                    .type_(Some(remote_type_script.clone()).pack())
+                    .build();
+                let immediate_output_data: Bytes = immediately_spendable_value.to_le_bytes().pack();
 
-            let commitment_lock_output = packed::CellOutput::new_builder()
-                .capacity(Capacity::shannons(6100000000).pack())
-                .lock(commitment_lock_script.clone())
-                .type_(Some(type_script.clone()).pack())
-                .build();
-            let commitment_lock_output_data: Bytes = time_locked_value.to_le_bytes().pack();
+                let commitment_lock_output = packed::CellOutput::new_builder()
+                    .capacity(Capacity::shannons(6100000000).pack())
+                    .lock(commitment_lock_script.clone())
+                    .type_(Some(type_script.clone()).pack())
+                    .build();
+                let commitment_lock_output_data: Bytes = time_locked_value.to_le_bytes().pack();
 
-            let outputs = vec![immediate_output, commitment_lock_output];
-            let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
-            (outputs, outputs_data)
-        } else {
-            let outputs = vec![
-                CellOutput::new_builder()
-                    .capacity((immediately_spendable_value as u64).pack())
-                    .lock(immediate_secp256k1_lock_script)
-                    .build(),
-                CellOutput::new_builder()
-                    .capacity((time_locked_value as u64).pack())
-                    .lock(commitment_lock_script)
-                    .build(),
-            ];
-            let outputs_data = vec![Bytes::default(); outputs.len()];
-            (outputs, outputs_data)
+                let outputs = vec![immediate_output, commitment_lock_output];
+                let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
+                (outputs, outputs_data)
+            }
+            (None, None) => {
+                let outputs = vec![
+                    CellOutput::new_builder()
+                        .capacity((immediately_spendable_value as u64).pack())
+                        .lock(immediate_secp256k1_lock_script)
+                        .build(),
+                    CellOutput::new_builder()
+                        .capacity((time_locked_value as u64).pack())
+                        .lock(commitment_lock_script)
+                        .build(),
+                ];
+                let outputs_data = vec![Bytes::default(); outputs.len()];
+                (outputs, outputs_data)
+            }
+            _ => {
+                warn!(
+                    "self_type_script: {:?}, remote_type_script: {:?}",
+                    &self.funding_type_script, &self.remote_funding_type_script
+                );
+                panic!("Funding type script is not present");
+            }
         }
     }
 

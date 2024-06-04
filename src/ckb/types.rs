@@ -503,10 +503,13 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptChannel {
     pub channel_id: Hash256,
     pub funding_amount: u128,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_type_script: Option<Script>,
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u128,
@@ -549,6 +552,7 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
         Ok(AcceptChannel {
             channel_id: accept_channel.channel_id().into(),
             funding_amount: accept_channel.funding_amount().unpack(),
+            funding_type_script: accept_channel.funding_type_script().to_opt(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: accept_channel.max_accept_tlcs().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),

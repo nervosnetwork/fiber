@@ -118,7 +118,6 @@ impl TxBuilder for FundingTxBuilder {
         if let Some(ref udt_info) = self.request.udt_info {
             let udt_type_script = udt_info.type_script.clone();
             let owner = self.context.funding_source_lock_script.clone();
-            warn!("anan owner now: {:?}", owner);
             let owner_query = {
                 let mut query = CellQueryOptions::new_lock(owner.clone());
                 //query.secondary_script = Some(udt_type_script.clone());
@@ -131,14 +130,12 @@ impl TxBuilder for FundingTxBuilder {
             let udt_amount = self.request.local_amount as u128;
 
             let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
-            warn!("anan owner_cells: {:?}", owner_cells.len());
             for cell in owner_cells.iter() {
                 let cell_capacity: u64 = cell.output.capacity().unpack();
                 let mut amount_bytes = [0u8; 16];
                 amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
                 let cell_udt_amount = u128::from_le_bytes(amount_bytes);
                 //FIXME(yukang): we may need to revise the check here
-                warn!("anan cell_capacity: {}, local_ckb_amount: {}, cell_udt_amount: {}, udt_amount: {}", cell_capacity, local_ckb_amount, cell_udt_amount, udt_amount);
                 if cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount {
                     inputs.push(CellInput::new(cell.out_point.clone(), 0));
                     if cell_udt_amount > udt_amount {
@@ -164,11 +161,9 @@ impl TxBuilder for FundingTxBuilder {
             let owner_cell_dep = cell_dep_resolver
                 .resolve(&owner)
                 .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(owner.clone()))?;
-            warn!("anan begin to resolve udt cell dep: {:?}", udt_type_script);
             let udt_cell_dep = cell_dep_resolver
                 .resolve(&udt_type_script)
                 .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script.clone()))?;
-            warn!("anan udt_cell_dep: {:?}", udt_cell_dep);
             #[allow(clippy::mutable_key_type)]
             cell_deps.insert(owner_cell_dep);
             cell_deps.insert(udt_cell_dep);

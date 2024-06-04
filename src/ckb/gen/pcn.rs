@@ -3670,6 +3670,12 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(
             f,
             ", {}: {}",
+            "funding_type_script",
+            self.funding_type_script()
+        )?;
+        write!(
+            f,
+            ", {}: {}",
             "max_tlc_value_in_flight",
             self.max_tlc_value_in_flight()
         )?;
@@ -3718,10 +3724,10 @@ impl ::core::default::Default for AcceptChannel {
     }
 }
 impl AcceptChannel {
-    const DEFAULT_VALUE: [u8; 453] = [
-        197, 1, 0, 0, 60, 0, 0, 0, 92, 0, 0, 0, 108, 0, 0, 0, 124, 0, 0, 0, 132, 0, 0, 0, 148, 0,
-        0, 0, 156, 0, 0, 0, 189, 0, 0, 0, 222, 0, 0, 0, 255, 0, 0, 0, 32, 1, 0, 0, 65, 1, 0, 0, 98,
-        1, 0, 0, 131, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 457] = [
+        201, 1, 0, 0, 64, 0, 0, 0, 96, 0, 0, 0, 112, 0, 0, 0, 112, 0, 0, 0, 128, 0, 0, 0, 136, 0,
+        0, 0, 152, 0, 0, 0, 160, 0, 0, 0, 193, 0, 0, 0, 226, 0, 0, 0, 3, 1, 0, 0, 36, 1, 0, 0, 69,
+        1, 0, 0, 102, 1, 0, 0, 135, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -3734,9 +3740,9 @@ impl AcceptChannel {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 14;
+    pub const FIELD_COUNT: usize = 15;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3765,77 +3771,83 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn max_tlc_value_in_flight(&self) -> Uint128 {
+    pub fn funding_type_script(&self) -> ScriptOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
+        ScriptOpt::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn max_tlc_value_in_flight(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
     pub fn max_accept_tlcs(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
+        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
     pub fn min_tlc_value(&self) -> Uint128 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
-        let end = molecule::unpack_number(&slice[24..]) as usize;
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
     pub fn to_self_delay(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
     pub fn funding_pubkey(&self) -> Pubkey {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
-        Pubkey::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn revocation_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn payment_basepoint(&self) -> Pubkey {
+    pub fn revocation_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn delayed_payment_basepoint(&self) -> Pubkey {
+    pub fn payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tlc_basepoint(&self) -> Pubkey {
+    pub fn delayed_payment_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn first_per_commitment_point(&self) -> Pubkey {
+    pub fn tlc_basepoint(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn second_per_commitment_point(&self) -> Pubkey {
+    pub fn first_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         let end = molecule::unpack_number(&slice[56..]) as usize;
         Pubkey::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_local_nonce(&self) -> PubNonce {
+    pub fn second_per_commitment_point(&self) -> Pubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
+        let end = molecule::unpack_number(&slice[60..]) as usize;
+        Pubkey::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn next_local_nonce(&self) -> PubNonce {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[60..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[60..]) as usize;
+            let end = molecule::unpack_number(&slice[64..]) as usize;
             PubNonce::new_unchecked(self.0.slice(start..end))
         } else {
             PubNonce::new_unchecked(self.0.slice(start..))
@@ -3870,6 +3882,7 @@ impl molecule::prelude::Entity for AcceptChannel {
         Self::new_builder()
             .channel_id(self.channel_id())
             .funding_amount(self.funding_amount())
+            .funding_type_script(self.funding_type_script())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_accept_tlcs(self.max_accept_tlcs())
             .min_tlc_value(self.min_tlc_value())
@@ -3905,6 +3918,12 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
+        write!(
+            f,
+            ", {}: {}",
+            "funding_type_script",
+            self.funding_type_script()
+        )?;
         write!(
             f,
             ", {}: {}",
@@ -3950,7 +3969,7 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
     }
 }
 impl<'r> AcceptChannelReader<'r> {
-    pub const FIELD_COUNT: usize = 14;
+    pub const FIELD_COUNT: usize = 15;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3979,77 +3998,83 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn max_tlc_value_in_flight(&self) -> Uint128Reader<'r> {
+    pub fn funding_type_script(&self) -> ScriptOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
+        ScriptOptReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn max_tlc_value_in_flight(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
+        let end = molecule::unpack_number(&slice[20..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn max_accept_tlcs(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
+        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn min_tlc_value(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
-        let end = molecule::unpack_number(&slice[24..]) as usize;
+        let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn to_self_delay(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[24..]) as usize;
-        let end = molecule::unpack_number(&slice[28..]) as usize;
+        let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn funding_pubkey(&self) -> PubkeyReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[28..]) as usize;
-        let end = molecule::unpack_number(&slice[32..]) as usize;
-        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn revocation_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn payment_basepoint(&self) -> PubkeyReader<'r> {
+    pub fn revocation_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn delayed_payment_basepoint(&self) -> PubkeyReader<'r> {
+    pub fn payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tlc_basepoint(&self) -> PubkeyReader<'r> {
+    pub fn delayed_payment_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[44..]) as usize;
         let end = molecule::unpack_number(&slice[48..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn first_per_commitment_point(&self) -> PubkeyReader<'r> {
+    pub fn tlc_basepoint(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn second_per_commitment_point(&self) -> PubkeyReader<'r> {
+    pub fn first_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[52..]) as usize;
         let end = molecule::unpack_number(&slice[56..]) as usize;
         PubkeyReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
+    pub fn second_per_commitment_point(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[56..]) as usize;
+        let end = molecule::unpack_number(&slice[60..]) as usize;
+        PubkeyReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[60..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[60..]) as usize;
+            let end = molecule::unpack_number(&slice[64..]) as usize;
             PubNonceReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             PubNonceReader::new_unchecked(&self.as_slice()[start..])
@@ -4104,18 +4129,19 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
-        PubkeyReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        ScriptOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         PubkeyReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         PubkeyReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
         PubkeyReader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
         PubkeyReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
         PubkeyReader::verify(&slice[offsets[11]..offsets[12]], compatible)?;
         PubkeyReader::verify(&slice[offsets[12]..offsets[13]], compatible)?;
-        PubNonceReader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
+        PubkeyReader::verify(&slice[offsets[13]..offsets[14]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[14]..offsets[15]], compatible)?;
         Ok(())
     }
 }
@@ -4123,6 +4149,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
 pub struct AcceptChannelBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_amount: Uint128,
+    pub(crate) funding_type_script: ScriptOpt,
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_accept_tlcs: Uint64,
     pub(crate) min_tlc_value: Uint128,
@@ -4137,13 +4164,17 @@ pub struct AcceptChannelBuilder {
     pub(crate) next_local_nonce: PubNonce,
 }
 impl AcceptChannelBuilder {
-    pub const FIELD_COUNT: usize = 14;
+    pub const FIELD_COUNT: usize = 15;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
     }
     pub fn funding_amount(mut self, v: Uint128) -> Self {
         self.funding_amount = v;
+        self
+    }
+    pub fn funding_type_script(mut self, v: ScriptOpt) -> Self {
+        self.funding_type_script = v;
         self
     }
     pub fn max_tlc_value_in_flight(mut self, v: Uint128) -> Self {
@@ -4202,6 +4233,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
             + self.funding_amount.as_slice().len()
+            + self.funding_type_script.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_accept_tlcs.as_slice().len()
             + self.min_tlc_value.as_slice().len()
@@ -4222,6 +4254,8 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.funding_type_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.max_tlc_value_in_flight.as_slice().len();
         offsets.push(total_size);
@@ -4252,6 +4286,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
+        writer.write_all(self.funding_type_script.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_accept_tlcs.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
