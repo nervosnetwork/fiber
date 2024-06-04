@@ -3403,6 +3403,7 @@ mod tests {
 
     use crate::{
         ckb::{
+            channel::{ChannelCommand, ChannelCommandWithId},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3669,6 +3670,112 @@ mod tests {
                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
                     println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
                     assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_create_channel() {
+
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::OpenChannel(
+                    OpenChannelCommand {
+                        peer_id: node_b.peer_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
+            ))
+            .expect("node_a alive");
+        let old_channel_id = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!(
+                        "A temp channel ({:?}) to {:?} created",
+                        &channel_id, peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    Some(channel_id.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_b
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::AcceptChannel(
+                    AcceptChannelCommand {
+                        temp_channel_id: old_channel_id.clone(),
+                        funding_amount: 1000,
+                    },
+                    None,
+                ),
+            ))
+            .expect("node_a alive");
+
+        let new_channel_id = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} created", &channel_id, &peer_id);
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    Some(channel_id.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} created", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_a
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id.clone(),
+                    command: ChannelCommand::CommitmentSigned(),
+                }),
+            ))
+            .expect("node_a alive");
+
+        println!("node_a send CommitmentSigned to node_b");
+
+        node_b
+            .network_actor
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id.clone(),
+                    command: ChannelCommand::CommitmentSigned(),
+                }),
+            ))
+            .expect("node_a alive");
+
+        println!("node_b send CommitmentSigned to node_a");
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} ready", channel_id, peer_id);
+                    assert_eq!(peer_id, &node_b.peer_id);
                     true
                 }
                 _ => false,
