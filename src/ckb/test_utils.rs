@@ -290,9 +290,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_network_node() {
-        dbg!("start network node");
+        println!("starting network node");
         let node = NetworkNode::new().await;
-        dbg!("network node started", &node);
+        println!("network node {:?} started", &node);
     }
 
     #[tokio::test]

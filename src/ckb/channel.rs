@@ -1355,10 +1355,10 @@ impl ChannelActorState {
     /// Get the counterparty commitment point for the given commitment number.
     pub fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
         let index = commitment_number as usize;
-        dbg!(
-            "getting counterparty commitment point",
+        debug!(
+            "Obtaining {}th commitment point (out of {}) for remote",
             index,
-            &self.remote_commitment_points
+            self.remote_commitment_points.len()
         );
         self.remote_commitment_points[index]
     }
@@ -2355,7 +2355,7 @@ impl ChannelActorState {
             ))?;
 
         if first_output.lock() != self.get_funding_lock_script() {
-            dbg!(&tx, first_output.lock(), self.get_funding_lock_script());
+            error!("Checking if transaction final failed as tx's first output's script is not funding lock: tx: {:?}, first output lock script: {:?}, funding lock script: {:?}", &tx, first_output.lock(), self.get_funding_lock_script());
             // TODO: return an error here. We panic because we want to move fast.
             panic!("Invalid funding transation")
         }
@@ -2604,10 +2604,8 @@ impl ChannelActorState {
         } else {
             self.remote_commitment_number - 1
         };
-        dbg!(
-            "Building previous commitment transaction witnesses for",
-            local,
-            commitment_number
+        debug!(
+            "Building previous commitment transaction witnesses for {} party, commitment number: {}", if local { "local" } else { "remote" }, commitment_number
         );
         self.build_commitment_transaction_witnesses(local, commitment_number)
     }
@@ -2786,7 +2784,6 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let verify_ctx = Musig2VerifyContext::from(self);
 
-        dbg!("Calling build_commitment_tx from build_and_verify_commitment_tx");
         let (tx, msg) = self.build_commitment_tx(false);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
@@ -2832,7 +2829,6 @@ impl ChannelActorState {
         &self,
         signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        dbg!("Calling build_commitment_tx from verify_and_complete_tx");
         let tx = self.build_and_verify_commitment_tx(signature)?;
         self.sign_tx_to_consume_funding_cell(&tx)
     }
