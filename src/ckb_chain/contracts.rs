@@ -213,13 +213,20 @@ fn get_environment_variable(
     )
 }
 
+#[cfg(test)]
+impl From<MockContext> for ContractsContext {
+    fn from(mock: MockContext) -> Self {
+        Self::Mock(mock)
+    }
+}
+
 impl ContractsContext {
     pub fn new(network: CkbNetwork) -> Self {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
                 log::warn!("Initializing mock context for testing.");
-                Self::Mock(MockContext::new())
+                MockContext::new().into()
             }
             CkbNetwork::Dev => {
                 let mut map = HashMap::new();
@@ -423,4 +430,47 @@ pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
 
 pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
     init_contracts_context(None).get_cell_deps(contracts)
+}
+
+#[cfg(test)]
+mod test {
+    use ckb_types::{core::TransactionView, packed::CellOutput, prelude::Pack};
+    use molecule::prelude::{Builder, Entity};
+
+    use crate::ckb_chain::contracts::{
+        get_script_by_contract, Contract, ContractsContext, MockContext,
+    };
+
+    // This test is to ensure that the same transaction is generated for different mock contexts.
+    // If different transactions are generated, then the mock context is not deterministic.
+    // We can't use the mock context to verify the validity of the transactions.
+    #[test]
+    fn test_same_tx_for_different_mock_context() {
+        let mock_ctx1 = MockContext::new();
+        let mock_ctx2 = MockContext::new();
+        let capacity = 100u64;
+        let output = CellOutput::new_builder()
+            .capacity(capacity.pack())
+            .lock(get_script_by_contract(
+                Contract::FundingLock,
+                &b"whatever"[..],
+            ))
+            .build();
+        assert_eq!(
+            TransactionView::new_advanced_builder()
+                .cell_deps(
+                    ContractsContext::from(mock_ctx1).get_cell_deps(vec![Contract::FundingLock])
+                )
+                .output(output.clone())
+                .output_data(Default::default())
+                .build(),
+            TransactionView::new_advanced_builder()
+                .cell_deps(
+                    ContractsContext::from(mock_ctx2).get_cell_deps(vec![Contract::FundingLock])
+                )
+                .output(output.clone())
+                .output_data(Default::default())
+                .build()
+        );
+    }
 }
