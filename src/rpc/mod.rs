@@ -1,21 +1,21 @@
 mod cch;
 mod channel;
+mod config;
 mod invoice;
 mod peer;
-mod config;
 
+use crate::{cch::CchCommand, ckb::NetworkActorMessage, invoice::InvoiceCommand};
 use cch::{CchRpcServer, CchRpcServerImpl};
 use channel::{ChannelRpcServer, ChannelRpcServerImpl};
+pub use config::RpcConfig;
 use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
-use jsonrpsee::{server::{Server, ServerHandle}, Methods};
+use jsonrpsee::{
+    server::{Server, ServerHandle},
+    Methods,
+};
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
 use tokio::sync::mpsc::Sender;
-use crate::{
-    cch::CchCommand,
-    ckb::NetworkActorMessage, invoice::InvoiceCommand,
-};
-pub use config::RpcConfig;
 
 pub type InvoiceCommandWithReply = (InvoiceCommand, Sender<crate::Result<String>>);
 

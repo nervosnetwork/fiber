@@ -163,7 +163,8 @@ pub async fn main() {
             ckb_command_sender,
             cch_command_sender,
             invoice_command_sender,
-        ).await;
+        )
+        .await;
 
         handle.stopped().await;
     };

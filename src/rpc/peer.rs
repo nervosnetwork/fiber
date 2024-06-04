@@ -1,9 +1,9 @@
+use crate::ckb::{NetworkActorCommand, NetworkActorMessage};
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use ractor::ActorRef;
 use serde::Deserialize;
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
-use crate::ckb::{NetworkActorCommand, NetworkActorMessage};
 
 #[derive(Deserialize)]
 pub struct ConnectPeerParams {
