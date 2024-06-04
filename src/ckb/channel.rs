@@ -3402,6 +3402,7 @@ mod tests {
         packed::{CellDep, CellInput, CellOutput, OutPoint, Transaction},
         prelude::{AsTransactionBuilder, Pack},
     };
+    use log::debug;
     use molecule::prelude::{Builder, Entity};
 
     use crate::{
@@ -3751,6 +3752,10 @@ mod tests {
             })
             .await;
 
+        // Wait for each party to create funding txs.
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        debug!("Sending commitment_signed to both parties");
+
         node_a
             .network_actor
             .send_message(NetworkActorMessage::new_command(
@@ -3761,7 +3766,7 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        println!("node_a send CommitmentSigned to node_b");
+        debug!("node_a send CommitmentSigned to node_b");
 
         node_b
             .network_actor
@@ -3773,7 +3778,7 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        println!("node_b send CommitmentSigned to node_a");
+        debug!("node_b send CommitmentSigned to node_a");
 
         node_a
             .expect_event(|event| match event {

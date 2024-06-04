@@ -220,6 +220,11 @@ pub use test_utils::MockChainActor;
 mod test_utils {
     use std::collections::HashMap;
 
+    use ckb_types::{
+        packed::CellOutput,
+        prelude::{Builder, Entity, Pack, PackVec, Unpack},
+    };
+
     use super::CkbChainMessage;
     use crate::ckb::chain::MockContext;
 
@@ -272,12 +277,63 @@ mod test_utils {
             use CkbChainMessage::*;
             match message {
                 Fund(tx, request, reply_port) => {
-                    // TODO: Fill in transaction from request.
-                    let fulfilled_tx = tx.clone();
+                    let mut fulfilled_tx = tx.clone();
+                    let outputs = fulfilled_tx
+                        .as_ref()
+                        .map(|x| x.outputs())
+                        .unwrap_or_default();
+                    let outputs = match outputs.get(0) {
+                        Some(output) => {
+                            if output.lock() != request.script {
+                                error!(
+                                        "funding request script ({:?}) does not match the first output lock script ({:?})", request.script, output.lock()
+                                    );
+                                return Ok(());
+                            }
+                            let current_capacity: u64 = output.capacity().unpack();
+                            let capacity = request.local_amount + current_capacity;
+                            let mut outputs_builder = outputs.as_builder();
+
+                            outputs_builder
+                                .replace(0, output.as_builder().capacity(capacity.pack()).build());
+                            outputs_builder.build()
+                        }
+                        None => [CellOutput::new_builder()
+                            .capacity(request.local_amount.pack())
+                            .lock(request.script.clone())
+                            .build()]
+                        .pack(),
+                    };
+
+                    let outputs_data = fulfilled_tx
+                        .as_ref()
+                        .map(|x| x.outputs_data())
+                        .unwrap_or_default();
+                    let outputs_data = if outputs_data.is_empty() {
+                        [Default::default()].pack()
+                    } else {
+                        outputs_data
+                    };
+
+                    let tx_builder = fulfilled_tx
+                        .take()
+                        .map(|x| x.as_advanced_builder())
+                        .unwrap_or_default();
+
+                    fulfilled_tx
+                        .update_for_self(
+                            tx_builder
+                                .set_outputs(outputs.into_iter().collect())
+                                .set_outputs_data(outputs_data.into_iter().collect())
+                                .build(),
+                        )
+                        .expect("update tx");
+
                     debug!(
-                        "fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
+                        "Fulfilling funding request: request: {:?}, original tx: {:?}, fulfilled tx: {:?}",
                         request, &tx, &fulfilled_tx
                     );
+
                     if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
                         error!(
                             "[{}] send reply failed: {:?}",
@@ -302,7 +358,7 @@ mod test_utils {
                     }
                 }
                 SendTx(tx) => {
-                    debug!("sending transaction: {:?}", tx);
+                    debug!("Sending transaction: {:?}", tx);
                     // TODO: verify the transaction and set the relevant status.
                     let status = ckb_jsonrpc_types::Status::Committed;
                     debug!("Verified transaction: {:?}, status: {:?}", tx, status);
@@ -315,7 +371,7 @@ mod test_utils {
                         .cloned()
                         .unwrap_or(ckb_jsonrpc_types::Status::Unknown);
                     debug!(
-                        "tracing transaction: {:?}, status: {:?}",
+                        "Tracing transaction: {:?}, status: {:?}",
                         &tx.tx_hash, &status
                     );
                     if let Err(e) = reply_port.send(status) {
