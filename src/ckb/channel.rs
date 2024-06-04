@@ -1845,36 +1845,52 @@ impl ChannelActorState {
         )
     }
 
-    pub fn sign_tx_to_consume_funding_cell(
+    pub fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
-        tx: &PartiallySignedCommitmentTransaction,
+        partial_signatures: [PartialSignature; 2],
+        version: Option<u64>,
+        tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let sign_ctx = Musig2SignContext::from(self);
+        let funding_out_point = self.get_funding_transaction_outpoint();
+        let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
+        debug!(
+            "Get message to sign for funding tx {:?}",
+            hex::encode(message.as_slice())
+        );
+
         let verify_ctx = Musig2VerifyContext::from(self);
 
-        debug!(
-            "Signing and verifying commitment tx with message {:?}",
-            hex::encode(tx.msg.as_slice())
-        );
-        let signature2 = sign_ctx.sign(tx.msg.as_slice())?;
-
-        debug!(
-            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
-            &tx.tx, &tx.msg, &signature2,
-        );
         let signature = aggregate_partial_signatures_for_msg(
-            tx.msg.as_slice(),
+            message.as_slice(),
             verify_ctx,
-            [tx.signature, signature2],
+            partial_signatures,
         )?;
 
-        let witness = self.create_witness_for_funding_cell(signature, Some(tx.version));
-        let tx = tx
-            .tx
+        let witness = self.create_witness_for_funding_cell(signature, None);
+        let tx = self
+            .get_funding_transaction()
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
             .build();
         Ok(tx)
+    }
+
+    pub fn sign_tx_to_consume_funding_cell(
+        &self,
+        tx: &PartiallySignedCommitmentTransaction,
+    ) -> Result<TransactionView, ProcessingChannelError> {
+        debug!(
+            "Signing and verifying commitment tx with message {:?}",
+            hex::encode(tx.msg.as_slice())
+        );
+        let sign_ctx = Musig2SignContext::from(self);
+        let signature2 = sign_ctx.sign(tx.msg.as_slice())?;
+
+        self.aggregate_partial_signatures_to_consume_funding_cell(
+            [tx.signature, signature2],
+            Some(tx.version),
+            &tx.tx,
+        )
     }
 
     pub fn maybe_transition_to_shutdown(
@@ -1904,78 +1920,40 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let shutdown_tx = self.build_shutdown_tx()?;
+        let (shutdown_tx, message) = self.build_shutdown_tx()?;
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
-        match self.local_shutdown_signature {
-            None => {
-                let message = get_funding_cell_message_to_sign(
-                    None,
-                    self.get_funding_transaction_outpoint(),
-                    &shutdown_tx,
-                );
-                debug!(
-                    "Building our shutdown signature for message {:?}",
-                    hex::encode(message.as_slice())
-                );
-                let signature = sign_ctx.clone().sign(message.as_slice())?;
-                self.local_shutdown_signature = Some(signature);
-                debug!(
-                    "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
-                    &shutdown_tx, &message, &signature,
-                );
+        let local_shutdown_signature = self.local_shutdown_signature.unwrap_or({
+            let signature = sign_ctx.clone().sign(message.as_slice())?;
+            self.local_shutdown_signature = Some(signature);
+            debug!(
+                "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
+                &shutdown_tx, &message, &signature,
+            );
 
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                            peer_id: self.peer_id.clone(),
-                            message: PCNMessage::ClosingSigned(ClosingSigned {
-                                partial_signature: signature,
-                                channel_id: self.get_id(),
-                            }),
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                        peer_id: self.peer_id.clone(),
+                        message: PCNMessage::ClosingSigned(ClosingSigned {
+                            partial_signature: signature,
+                            channel_id: self.get_id(),
                         }),
-                    ))
-                    .expect("network actor alive");
-            }
-            Some(signatures) => {
-                debug!(
-                    "We have already signed the shutdown tx signature {:?}",
-                    &signatures
-                );
-            }
-        }
+                    }),
+                ))
+                .expect("network actor alive");
+            signature
+        });
 
-        match (
-            self.local_shutdown_signature,
-            self.remote_shutdown_signature,
-        ) {
-            (Some(local_shutdown_signature), Some(remote_shutdown_signature)) => {
+        match self.remote_shutdown_signature {
+            Some(remote_shutdown_signature) => {
                 self.update_state(ChannelState::Closed);
-                let partial_signatures = self
-                    .order_things_for_musig2(local_shutdown_signature, remote_shutdown_signature);
-                let message = get_funding_cell_message_to_sign(
+                let tx = self.aggregate_partial_signatures_to_consume_funding_cell(
+                    [local_shutdown_signature, remote_shutdown_signature],
                     None,
-                    self.get_funding_transaction_outpoint(),
                     &shutdown_tx,
-                );
-                debug!(
-                    "Get message to sign for shutdown tx {:?}",
-                    hex::encode(message.as_slice())
-                );
-
-                let signature = aggregate_partial_signatures_for_msg(
-                    message.as_slice(),
-                    sign_ctx.into(),
-                    partial_signatures,
                 )?;
-
-                let witness = self.create_witness_for_funding_cell(signature, None);
-
-                let tx = shutdown_tx
-                    .as_advanced_builder()
-                    .set_witnesses(vec![witness.pack()])
-                    .build();
 
                 network
                     .send_message(NetworkActorMessage::new_event(
@@ -1984,10 +1962,7 @@ impl ChannelActorState {
                     .expect("network actor alive");
             }
 
-            (None, _) => {
-                panic!("We should have our shutdown signature previously");
-            }
-            (_, None) => {
+            None => {
                 debug!("We have sent our shutdown signature, waiting for counterparty's signature");
             }
         }
@@ -2515,7 +2490,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
+    pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
         // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
         // This function may be called in a state where these scripts are not present.
@@ -2576,7 +2551,14 @@ impl ChannelActorState {
         let outputs = self.order_things_for_musig2(local_output, remote_output);
         let tx_builder = tx_builder.set_outputs(outputs.to_vec());
         let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
-        Ok(tx_builder.build())
+        let tx = tx_builder.build();
+        let message =
+            get_funding_cell_message_to_sign(None, self.get_funding_transaction_outpoint(), &tx);
+        debug!(
+            "Building message to sign for shutdown transaction {:?}",
+            hex::encode(message.as_slice())
+        );
+        Ok((tx, message))
     }
 
     // The parameter `local` here specifies whether we are building the commitment transaction
