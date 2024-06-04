@@ -10,7 +10,7 @@ use std::{
 
 use ckb_types::core::TransactionView;
 
-use ractor::{call_t, Actor, ActorRef};
+use ractor::{Actor, ActorRef};
 
 use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
@@ -22,7 +22,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb_chain::{CkbChainMessage, MockChainActor, TraceTxRequest},
+    ckb_chain::{submit_tx, CkbChainMessage, MockChainActor},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
 };
@@ -216,23 +216,7 @@ impl NetworkNode {
     }
 
     pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
-        pub const TIMEOUT: u64 = 1000;
-        let tx_hash = tx.hash();
-
-        self.chain_actor
-            .send_message(CkbChainMessage::SendTx(tx))
-            .expect("chain actor alive");
-        let request = TraceTxRequest {
-            tx_hash,
-            confirmations: 1,
-        };
-        call_t!(
-            self.chain_actor,
-            CkbChainMessage::TraceTx,
-            TIMEOUT,
-            request.clone()
-        )
-        .expect("chain actor alive")
+        submit_tx(self.chain_actor.clone(), tx).await
     }
 }
 

@@ -228,23 +228,26 @@ impl CkbChainState {
 }
 
 #[cfg(test)]
-pub use test_utils::MockChainActor;
+pub use test_utils::{submit_tx, MockChainActor};
 
 #[cfg(test)]
 mod test_utils {
     use std::collections::HashMap;
 
     use ckb_types::{
+        core::TransactionView,
         packed::CellOutput,
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
+
+    use crate::ckb_chain::TraceTxRequest;
 
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;
 
     use ckb_types::packed::Byte32;
     use log::{debug, error};
-    use ractor::{Actor, ActorProcessingErr, ActorRef};
+    use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
 
     pub struct MockChainActorState {
         ctx: MockContext,
@@ -427,5 +430,159 @@ mod test_utils {
             }
             Ok(())
         }
+    }
+
+    pub async fn submit_tx(
+        mock_actor: ActorRef<CkbChainMessage>,
+        tx: TransactionView,
+    ) -> ckb_jsonrpc_types::Status {
+        pub const TIMEOUT: u64 = 1000;
+        let tx_hash = tx.hash();
+
+        mock_actor
+            .send_message(CkbChainMessage::SendTx(tx))
+            .expect("chain actor alive");
+        let request = TraceTxRequest {
+            tx_hash,
+            confirmations: 1,
+        };
+        call_t!(
+            mock_actor,
+            CkbChainMessage::TraceTx,
+            TIMEOUT,
+            request.clone()
+        )
+        .expect("chain actor alive")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use ckb_jsonrpc_types::Status;
+    use ckb_types::core::TransactionView;
+    use ckb_types::packed::{CellInput, CellOutput};
+    use ckb_types::prelude::{Builder, Pack};
+    use molecule::prelude::Entity;
+    use ractor::{Actor, ActorRef};
+
+    use super::super::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
+    use super::test_utils::submit_tx;
+    use super::CkbChainMessage;
+
+    async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
+        use super::test_utils::MockChainActor;
+
+        let chain_actor = Actor::spawn(None, MockChainActor::new(), ())
+            .await
+            .expect("start mock chain actor")
+            .0;
+        chain_actor
+    }
+
+    #[tokio::test]
+    async fn test_submit_empty_tx() {
+        let actor = create_mock_chain_actor().await;
+        assert_eq!(
+            submit_tx(actor, TransactionView::new_advanced_builder().build()).await,
+            Status::Committed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_one_output_tx() {
+        let actor = create_mock_chain_actor().await;
+        assert_eq!(
+            submit_tx(
+                actor,
+                TransactionView::new_advanced_builder()
+                    .output(CellOutput::default())
+                    .output_data(Default::default())
+                    .build()
+            )
+            .await,
+            Status::Committed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_always_success_tx() {
+        let actor = create_mock_chain_actor().await;
+        let capacity = 100u64;
+        let output = CellOutput::new_builder()
+            .capacity(capacity.pack())
+            .lock(get_script_by_contract(
+                Contract::AlwaysSuccess,
+                &b"whatever1"[..],
+            ))
+            .build();
+        let tx = TransactionView::new_advanced_builder()
+            .output(output)
+            .output_data(Default::default())
+            .build();
+        assert_eq!(
+            submit_tx(actor.clone(), tx.clone()).await,
+            Status::Committed
+        );
+        let out_point = tx.output_pts_iter().next().unwrap();
+        let tx = TransactionView::new_advanced_builder()
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+            .input(
+                CellInput::new_builder()
+                    .previous_output(out_point.clone())
+                    .build(),
+            )
+            .output(
+                CellOutput::new_builder()
+                    .capacity(capacity.pack())
+                    .lock(get_script_by_contract(
+                        Contract::FundingLock,
+                        &b"whatever2"[..],
+                    ))
+                    .build(),
+            )
+            .output_data(Default::default())
+            .build();
+        assert_eq!(submit_tx(actor, tx).await, Status::Committed);
+    }
+
+    #[tokio::test]
+    async fn test_submit_malformed_commitment_tx() {
+        let actor = create_mock_chain_actor().await;
+        let capacity = 100u64;
+        let output = CellOutput::new_builder()
+            .capacity(capacity.pack())
+            .lock(get_script_by_contract(
+                Contract::FundingLock,
+                &b"whatever1"[..],
+            ))
+            .build();
+        let tx = TransactionView::new_advanced_builder()
+            .output(output)
+            .output_data(Default::default())
+            .build();
+        assert_eq!(
+            submit_tx(actor.clone(), tx.clone()).await,
+            Status::Committed
+        );
+        let out_point = tx.output_pts_iter().next().unwrap();
+        let tx = TransactionView::new_advanced_builder()
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::FundingLock]))
+            .input(
+                CellInput::new_builder()
+                    .previous_output(out_point.clone())
+                    .build(),
+            )
+            .output(
+                CellOutput::new_builder()
+                    .capacity(capacity.pack())
+                    .lock(get_script_by_contract(
+                        Contract::CommitmentLock,
+                        &b"whatever2"[..],
+                    ))
+                    .build(),
+            )
+            .output_data(Default::default())
+            .build();
+        assert_eq!(submit_tx(actor, tx).await, Status::Rejected);
     }
 }
