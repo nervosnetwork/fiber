@@ -64,14 +64,13 @@ where
     async fn process_command(
         &mut self,
         command: InvoiceCommand,
-        response: Option<mpsc::Sender<crate::Result<String>>>,
+        response: mpsc::Sender<crate::Result<String>>,
     ) -> Result<(), anyhow::Error> {
         log::debug!("InvoiceCommand received: {:?}", command);
         let res = match command {
             InvoiceCommand::NewInvoice(params) => self.new_invoice(params).await,
             InvoiceCommand::ParseInvoice(params) => self.parse_invoice(params).await,
         };
-        let response = response.expect("response channel");
         match res {
             Ok(invoice) => {
                 let data = json!({

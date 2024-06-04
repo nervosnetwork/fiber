@@ -32,12 +32,8 @@ use std::{
 };
 
 use crate::{
-    ckb::types::Shutdown,
-    ckb_chain::{
-        contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
-        FundingRequest,
-    },
-    NetworkServiceEvent, RpcError,
+    ckb::{chain::CommitmentLockContext, types::Shutdown},
+    ckb_chain::FundingRequest,
 };
 
 use super::{
@@ -86,7 +82,7 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(
         AddTlcCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<AddTlcResponse, RpcError>>>,
+        #[serde(skip)] Option<RpcReplyPort<Result<AddTlcResponse, ProcessingChannelError>>>,
     ),
     RemoveTlc(RemoveTlcCommand),
     Shutdown(ShutdownCommand),
@@ -100,24 +96,24 @@ pub enum TxCollaborationCommand {
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 pub struct AddTlcCommand {
-    amount: u128,
-    preimage: Option<Hash256>,
-    payment_hash: Option<Hash256>,
-    expiry: LockTime,
+    pub amount: u128,
+    pub preimage: Option<Hash256>,
+    pub payment_hash: Option<Hash256>,
+    pub expiry: LockTime,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 pub struct RemoveTlcCommand {
-    id: u64,
-    reason: RemoveTlcReason,
+    pub id: u64,
+    pub reason: RemoveTlcReason,
 }
 
 #[serde_as]
 #[derive(Clone, Debug, Deserialize)]
 pub struct ShutdownCommand {
     #[serde_as(as = "EntityHex")]
-    close_script: Script,
-    fee: u128,
+    pub close_script: Script,
+    pub fee: u128,
 }
 
 fn get_random_preimage() -> Hash256 {

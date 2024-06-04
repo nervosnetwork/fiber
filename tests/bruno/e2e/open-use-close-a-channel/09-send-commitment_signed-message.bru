@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,19 +17,20 @@ headers {
 
 body:json {
   {
-    "request": {
-      "ControlPcnChannel": {
-        "channel_id": "{{CHANNEL_ID}}",
-        "command": {
-          "CommitmentSigned": []
-        }
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "commitment_signed",
+    "params": [
+      {
+        "channel_id": "{{CHANNEL_ID}}"
       }
-    }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {

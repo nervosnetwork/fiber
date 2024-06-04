@@ -158,20 +158,14 @@ pub async fn main() {
             return;
         }
 
-        let shutdown_signal = async {
-            let token = new_tokio_cancellation_token();
-            token.cancelled().await;
-        };
-        new_tokio_task_tracker().spawn(async move {
-            start_rpc(
-                rpc_config,
-                ckb_command_sender,
-                cch_command_sender,
-                invoice_command_sender,
-                shutdown_signal,
-            )
-            .await;
-        });
+        let handle = start_rpc(
+            rpc_config,
+            ckb_command_sender,
+            cch_command_sender,
+            invoice_command_sender,
+        ).await;
+
+        handle.stopped().await;
     };
 
     signal::ctrl_c().await.expect("Failed to listen for event");

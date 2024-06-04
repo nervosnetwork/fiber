@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,26 +17,27 @@ headers {
 
 body:json {
   {
-    "request": {
-      "ControlPcnChannel": {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_tlc",
+    "params": [
+      {
         "channel_id": "{{CHANNEL_ID}}",
-        "command": {
-          "AddTlc": [{
-            "amount": 300000000,
-            "preimage": "0x0000000000000000000000000000000000000000000000000000000000000002",
-            "expiry": 40
-          }]
-        }
+        "amount": 300000000,
+        "payment_hash": "0x29449e2cc6f56a691253fe88e3a378171c81573b09247010b4f1cb8c806e1e38",
+        "expiry": 40
       }
-    }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.tlc_id: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+  bru.setVar("TLC_ID3", res.body.result.tlc_id);
 }

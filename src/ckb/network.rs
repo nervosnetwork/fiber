@@ -49,7 +49,7 @@ use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
-use crate::{unwrap_or_return, Error, RpcError};
+use crate::{unwrap_or_return, Error};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
@@ -91,7 +91,7 @@ pub enum NetworkActorCommand {
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<AcceptChannelResponse, RpcError>>>,
+        #[serde(skip)] Option<RpcReplyPort<Result<AcceptChannelResponse, ProcessingChannelError>>>,
     ),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
@@ -347,18 +347,15 @@ where
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
-                let result = state
+                let (_, old_channel_id, new_channel_id) = state
                     .create_inbound_channel(accept_channel, self.store.clone())
-                    .await
-                    .map(|(_, old_id, new_id)| AcceptChannelResponse {
-                        old_channel_id: old_id,
-                        new_channel_id: new_id,
-                    });
-                debug!("Processed accept channel command, result: {:?}", &result);
+                    .await?;
                 if let Some(reply) = reply {
-                    let _ = reply.send(result.as_ref().map_err(Into::into).map(Clone::clone));
+                    let _ = reply.send(Ok(AcceptChannelResponse {
+                        old_channel_id,
+                        new_channel_id,
+                    }));
                 }
-                result?;
             }
 
             NetworkActorCommand::ControlPcnChannel(c) => {

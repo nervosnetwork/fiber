@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE1_RPC_URL}}/ckb
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,26 +17,24 @@ headers {
 
 body:json {
   {
-    "request": {
-      "ControlPcnChannel": {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "remove_tlc",
+    "params": [
+      {
         "channel_id": "{{CHANNEL_ID}}",
-        "command": {
-          "RemoveTlc": {
-            "id": 2,
-            "reason": {
-              "RemoveTlcFail": {
-                "error_code": 42
-              }
-            }
-          }
+        "tlc_id": {{TLC_ID4}},
+        "reason": {
+          "error_code": 42
         }
       }
-    }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {

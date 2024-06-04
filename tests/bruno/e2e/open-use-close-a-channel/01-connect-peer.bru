@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,15 +17,18 @@ headers {
 
 body:json {
   {
-    "request": {
-      "ConnectPeer": "{{NODE1_ADDR}}"
-    }
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "connect_peer",
+    "params": [
+      {"address": "{{NODE1_ADDR}}"}
+    ]
   }
-  
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {
