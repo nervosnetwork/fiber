@@ -130,11 +130,21 @@ pub struct ContractsContext {
     cell_deps: CellDepVec,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum CommitmentLockContext {
     #[cfg(test)]
     Mock(MockContext),
     Real(Arc<ContractsContext>),
+}
+
+impl std::fmt::Debug for CommitmentLockContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(test)]
+            Self::Mock(_mock) => write!(f, "Mock"),
+            Self::Real(_real) => write!(f, "Real"),
+        }
+    }
 }
 
 enum EnvironmentVariableType {
