@@ -3,7 +3,7 @@ use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
-    packed::{Byte32, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
@@ -12,8 +12,8 @@ use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
-    sign_partial, verify_partial, AggNonce, BinaryEncoding, CompactSignature, KeyAggContext,
-    PartialSignature, PubNonce, SecNonce,
+    sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
+    PubNonce, SecNonce,
 };
 use ractor::{
     async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
@@ -2977,11 +2977,6 @@ impl Musig2SignContext {
     }
 }
 
-fn get_tx_message_to_sign(tx: &TransactionView) -> Byte32 {
-    let hash = tx.hash();
-    hash
-}
-
 fn get_funding_cell_message_to_sign(
     version: Option<u64>,
     funding_out_point: OutPoint,
@@ -3011,23 +3006,6 @@ pub fn aggregate_partial_signatures_for_msg(
         message,
     )?;
     Ok(signature)
-}
-
-pub fn aggregate_partial_signatures_for_commitment_tx(
-    tx: &TransactionView,
-    verify_ctx: Musig2VerifyContext,
-    partial_signatures: [PartialSignature; 2],
-) -> Result<TransactionView, ProcessingChannelError> {
-    debug!("Aggregating partial signatures for tx {:?}", tx);
-    let message = get_tx_message_to_sign(tx);
-
-    let signature =
-        aggregate_partial_signatures_for_msg(message.as_slice(), verify_ctx, partial_signatures)?;
-
-    Ok(tx
-        .as_advanced_builder()
-        .set_witnesses(vec![signature.to_bytes().pack()])
-        .build())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
