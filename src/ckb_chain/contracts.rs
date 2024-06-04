@@ -7,7 +7,7 @@ use log::debug;
 
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 
-use super::{config::CkbNetwork, types::Hash256};
+use crate::ckb::{config::CkbNetwork, types::Hash256};
 
 #[cfg(not(test))]
 use ckb_types::bytes::Bytes;
@@ -21,7 +21,7 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[derive(Clone, Debug)]
 pub struct MockContext {
     context: Arc<RwLock<Context>>,
-    contracts_context: Arc<ContractsContext>,
+    contracts_context: Arc<ContractsInfo>,
 }
 
 #[cfg(test)]
@@ -99,7 +99,7 @@ impl MockContext {
 
         let context = MockContext {
             context: Arc::new(RwLock::new(context)),
-            contracts_context: Arc::new(ContractsContext {
+            contracts_context: Arc::new(ContractsInfo {
                 contract_default_scripts: map,
                 cell_deps: cell_dep_vec,
             }),
@@ -118,7 +118,7 @@ impl MockContext {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-enum Contract {
+pub enum Contract {
     FundingLock,
     CommitmentLock,
     Secp256k1Lock,
@@ -129,20 +129,21 @@ enum Contract {
 }
 
 #[derive(Clone, Debug)]
-pub struct ContractsContext {
+struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
     // TODO: We bundle all the cell deps together, but some of they are not always needed.
     cell_deps: CellDepVec,
 }
 
 #[derive(Clone)]
-pub enum CommitmentLockContext {
+pub enum ContractsContext {
     #[cfg(test)]
     Mock(MockContext),
-    Real(Arc<ContractsContext>),
+    #[allow(private_interfaces)]
+    Real(Arc<ContractsInfo>),
 }
 
-impl std::fmt::Debug for CommitmentLockContext {
+impl std::fmt::Debug for ContractsContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             #[cfg(test)]
@@ -212,9 +213,7 @@ fn get_environment_variable(
     )
 }
 
-impl CommitmentLockContext {
-    // TODO: better way to organize this? Currently CommitmentLockContext is a singleton
-    // because it is used in so many places.
+impl ContractsContext {
     pub fn new(network: CkbNetwork) -> Self {
         match network {
             #[cfg(test)]
@@ -304,7 +303,7 @@ impl CommitmentLockContext {
                     "Use these contracts by specifying cell deps to {:?}",
                     &cell_dep_vec
                 );
-                Self::Real(Arc::new(ContractsContext {
+                Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     cell_deps: cell_dep_vec,
                 }))
@@ -372,7 +371,7 @@ impl CommitmentLockContext {
                         .build()
                 })
                 .pack();
-                Self::Real(Arc::new(ContractsContext {
+                Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     cell_deps: cell_dep_vec.pack(),
                 }))
@@ -388,15 +387,15 @@ impl CommitmentLockContext {
             Self::Real(real) => &real.contract_default_scripts,
         }
     }
-    fn get_cell_deps(&self) -> &CellDepVec {
+    pub(crate) fn get_cell_deps(&self, _contracts: Vec<Contract>) -> CellDepVec {
         match self {
             #[cfg(test)]
-            Self::Mock(mock) => &mock.contracts_context.cell_deps,
-            Self::Real(real) => &real.cell_deps,
+            Self::Mock(mock) => mock.contracts_context.cell_deps.clone(),
+            Self::Real(real) => real.cell_deps.clone(),
         }
     }
 
-    fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
+    pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
             .expect(format!("Contract {:?} exists", contract).as_str())
@@ -405,24 +404,23 @@ impl CommitmentLockContext {
             .args(args.pack())
             .build()
     }
+}
 
-    pub fn get_secp256k1_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contract::Secp256k1Lock, args)
-    }
+pub fn init_contracts_context(network: Option<CkbNetwork>) -> &'static ContractsContext {
+    static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
+    INSTANCE.get_or_init(|| ContractsContext::new(network.unwrap_or(DEFAULT_CONTRACT_NETWORK)));
+    INSTANCE.get().unwrap()
+}
 
-    pub fn get_funding_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contract::FundingLock, args)
-    }
+#[cfg(test)]
+const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Mocknet;
+#[cfg(not(test))]
+const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Dev;
 
-    pub fn get_commitment_lock_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contract::CommitmentLock, args)
-    }
+pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
+    init_contracts_context(None).get_script(contract, args)
+}
 
-    pub fn get_commitment_transaction_cell_deps(&self) -> CellDepVec {
-        self.get_cell_deps().clone()
-    }
-
-    pub fn get_always_success_script(&self, args: &[u8]) -> Script {
-        self.get_script(Contract::AlwaysSuccess, args)
-    }
+pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
+    init_contracts_context(None).get_cell_deps(contracts)
 }

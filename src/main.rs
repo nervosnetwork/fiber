@@ -1,5 +1,4 @@
-use ckb_pcn_node::ckb::chain::CommitmentLockContext;
-use ckb_pcn_node::ckb::config::CkbNetwork;
+use ckb_pcn_node::ckb_chain::contracts::init_contracts_context;
 use ckb_pcn_node::invoice::start_invoice;
 use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use ckb_pcn_node::store::Store;
@@ -52,13 +51,12 @@ pub async fn main() {
             // for the user to fix the error and start the node.
             let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
 
-            let network = ckb_config.network.unwrap_or(CkbNetwork::Dev);
-            let ctx = CommitmentLockContext::new(network);
+            let _ = init_contracts_context(ckb_config.network);
 
             let ckb_chain_actor = Actor::spawn_linked(
                 Some("ckb-chain".to_string()),
                 CkbChainActor {},
-                (ckb_chain_config, ctx.clone()),
+                ckb_chain_config,
                 root_actor.get_cell(),
             )
             .await
@@ -77,7 +75,6 @@ pub async fn main() {
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
-                ctx,
                 store.clone(),
             )
             .await;

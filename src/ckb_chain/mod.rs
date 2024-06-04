@@ -10,3 +10,4 @@ pub use funding::{FundingRequest, FundingTx, FundingUdtInfo};
 
 #[cfg(test)]
 pub use actor::MockChainActor;
+pub mod contracts;

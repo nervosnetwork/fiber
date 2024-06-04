@@ -32,8 +32,11 @@ use std::{
 };
 
 use crate::{
-    ckb::{chain::CommitmentLockContext, types::Shutdown},
-    ckb_chain::FundingRequest,
+    ckb::types::Shutdown,
+    ckb_chain::{
+        contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
+        FundingRequest,
+    },
     NetworkServiceEvent, RpcError,
 };
 
@@ -567,12 +570,12 @@ where
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;
-    type Arguments = (CommitmentLockContext, ChannelInitializationParameter);
+    type Arguments = ChannelInitializationParameter;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (ctx, args): Self::Arguments,
+        args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
@@ -627,7 +630,6 @@ where
                     next_local_nonce.clone(),
                     *first_per_commitment_point,
                     *second_per_commitment_point,
-                    ctx,
                 );
 
                 let commitment_number = 0;
@@ -690,7 +692,6 @@ where
                     self.peer_id.clone(),
                     funding_amount,
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
-                    ctx,
                 );
 
                 let commitment_number = 0;
@@ -945,11 +946,6 @@ pub struct ChannelActorState {
     pub local_shutdown_fee: Option<u128>,
     pub remote_shutdown_signature: Option<PartialSignature>,
     pub remote_shutdown_fee: Option<u128>,
-
-    // Providing additional information about contracts (e.g. commitmemt lock outpoint)
-    // that are used in pcn channels.
-    #[serde(skip)]
-    pub contracts_context: Option<CommitmentLockContext>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1140,7 +1136,6 @@ impl ChannelActorState {
         remote_nonce: PubNonce,
         remote_commitment_point: Pubkey,
         remote_prev_commitment_point: Pubkey,
-        contracts_context: CommitmentLockContext,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
@@ -1186,7 +1181,6 @@ impl ChannelActorState {
             local_shutdown_fee: None,
             remote_shutdown_signature: None,
             remote_shutdown_fee: None,
-            contracts_context: Some(contracts_context),
         }
     }
 
@@ -1195,7 +1189,6 @@ impl ChannelActorState {
         peer_id: PeerId,
         value: u128,
         to_local_delay: LockTime,
-        contracts_context: CommitmentLockContext,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
@@ -1229,7 +1222,6 @@ impl ChannelActorState {
             remote_shutdown_fee: None,
             local_shutdown_signature: None,
             remote_shutdown_signature: None,
-            contracts_context: Some(contracts_context),
         }
     }
 
@@ -1246,10 +1238,6 @@ impl ChannelActorState {
 impl ChannelActorState {
     pub fn get_id(&self) -> Hash256 {
         self.id
-    }
-
-    pub fn get_contracts_context(&self) -> &CommitmentLockContext {
-        self.contracts_context.as_ref().unwrap()
     }
 
     pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
@@ -1369,14 +1357,13 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_lock_script(&self) -> Script {
-        let ctx: &CommitmentLockContext = self.get_contracts_context();
         let args = blake2b_256(self.get_funding_lock_script_xonly());
         debug!(
             "Aggregated pubkey: {:?}, hash: {:?}",
             hex::encode(&args),
             hex::encode(&args[..20])
         );
-        ctx.get_funding_lock_script(&args[..20])
+        get_script_by_contract(Contract::FundingLock, args.as_slice())
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
@@ -2524,9 +2511,8 @@ impl ChannelActorState {
                 )));
             }
         };
-        let commitment_lock_context = self.get_contracts_context();
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
             .input(
                 CellInput::new_builder()
                     .previous_output(self.get_funding_transaction_outpoint())
@@ -2571,10 +2557,9 @@ impl ChannelActorState {
     // and the second element is the message to be signed by the each party,
     // so as to consume the funding cell.
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32]) {
-        let commitment_lock_context = self.get_contracts_context();
         let funding_out_point = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(commitment_lock_context.get_commitment_transaction_cell_deps())
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
             .input(
                 CellInput::new_builder()
                     .previous_output(funding_out_point.clone())
@@ -2757,11 +2742,12 @@ impl ChannelActorState {
             self.remote_commitment_number
         );
 
-        let commitment_lock_ctx = self.get_contracts_context();
-        let immediate_secp256k1_lock_script = commitment_lock_ctx
-            .get_secp256k1_lock_script(&blake2b_256(immediate_payment_key.serialize())[0..20]);
+        let immediate_secp256k1_lock_script = get_script_by_contract(
+            Contract::Secp256k1Lock,
+            &blake2b_256(immediate_payment_key.serialize())[0..20],
+        );
         let commitment_lock_script =
-            commitment_lock_ctx.get_commitment_lock_script(&blake2b_256(witnesses)[0..20]);
+            get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
         let outputs = vec![
             CellOutput::new_builder()
@@ -3637,6 +3623,7 @@ mod tests {
             })
             .await;
 
+        // We can submit the commitment txs to the chain now.
         assert_eq!(
             node_a.submit_tx(node_a_commitment_tx.clone()).await,
             Status::Committed

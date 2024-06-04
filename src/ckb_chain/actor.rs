@@ -1,11 +1,15 @@
 use ckb_sdk::{CkbRpcClient, RpcError};
-use ckb_types::{core::TransactionView, packed, prelude::*};
+use ckb_types::{
+    core::TransactionView,
+    packed::{self},
+    prelude::*,
+};
 use ractor::{
     concurrency::{sleep, Duration},
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
 };
 
-use crate::ckb::chain::CommitmentLockContext;
+use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
 
 use super::{funding::FundingContext, CkbChainConfig, FundingError, FundingRequest, FundingTx};
 
@@ -17,7 +21,6 @@ pub struct CkbChainState {
     config: CkbChainConfig,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
-    ctx: CommitmentLockContext,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +28,17 @@ pub struct TraceTxRequest {
     pub tx_hash: packed::Byte32,
     // How many confirmations required to consider the transaction committed.
     pub confirmations: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetScriptRequest {
+    pub contract: super::contracts::Contract,
+    pub args: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GetCellDepsRequest {
+    pub contracts: Vec<super::contracts::Contract>,
 }
 
 #[derive(Debug)]
@@ -43,19 +57,20 @@ pub enum CkbChainMessage {
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
-    type Arguments = (CkbChainConfig, CommitmentLockContext);
+    type Arguments = CkbChainConfig;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (config, ctx): Self::Arguments,
+        config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
 
         let secp = secp256k1::Secp256k1::new();
         let pub_key = secret_key.public_key(&secp);
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
-        let funding_source_lock_script = ctx.get_secp256k1_lock_script(&pub_key_hash[0..20]);
+        let funding_source_lock_script =
+            get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
         log::info!(
             "[{}] funding lock args: {}",
             myself.get_name().unwrap_or_default(),
@@ -66,7 +81,6 @@ impl Actor for CkbChainActor {
             config,
             secret_key,
             funding_source_lock_script,
-            ctx,
         })
     }
 
@@ -225,8 +239,8 @@ mod test_utils {
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
 
+    use super::super::contracts::MockContext;
     use super::CkbChainMessage;
-    use crate::ckb::chain::MockContext;
 
     use ckb_types::packed::Byte32;
     use log::{debug, error};
