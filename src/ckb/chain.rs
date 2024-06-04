@@ -1,38 +1,34 @@
-use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
 use ckb_types::{
     core::{DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, OutPoint, Script},
-    prelude::{Builder, Entity, PackVec},
+    prelude::{Builder, Entity, Pack, PackVec},
 };
 use log::debug;
 use once_cell::sync::OnceCell;
-use std::{
-    collections::HashMap,
-    env,
-    str::FromStr,
-    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
-};
-
-use ckb_types::prelude::Pack;
+use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 
 use super::{config::CkbNetwork, types::Hash256};
 
-// TODO: MockContext should only be used in tests.
-// We previously used MockContext with CommitmentLockContext::is_testing
-// to determine if we are in a testing environment. If we are in a testing environment,
-// we try to validate transactions with ckb_testtool.
-// We should eventually remove this and write unit tests to validate transactions.
-#[derive(Debug)]
+#[cfg(not(test))]
+use ckb_types::bytes::Bytes;
+
+#[cfg(test)]
+use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
+#[cfg(test)]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
 pub struct MockContext {
-    context: RwLock<Context>,
+    context: Arc<RwLock<Context>>,
     contracts_context: Arc<ContractsContext>,
 }
 
+#[cfg(test)]
 impl MockContext {
     // If we are using cfg(test), then directly including contracts binaries into the
     // resulting executable is not a problem. Otherwise, we'd better read the binaries from
     // the filesystem.
-    #[cfg(test)]
     fn get_contract_binaries() -> Vec<(Contract, Bytes)> {
         [
             (
@@ -69,47 +65,6 @@ impl MockContext {
         .into()
     }
 
-    #[cfg(not(test))]
-    fn get_contract_binaries() -> Vec<(Contract, Bytes)> {
-        use log::warn;
-        use std::{fs, path::PathBuf};
-
-        match env::var("TESTING_CONTRACTS_DIR") {
-            Ok(base_dir) => {
-                [
-                    (Contract::FundingLock, "funding-lock"),
-                    (Contract::CommitmentLock, "commitment-lock"),
-                    (Contract::AlwaysSuccess, "always_success"),
-                    // These are contracts that we will call from other contracts, e.g. funding-lock.
-                    (Contract::CkbAuth, "auth"),
-                    (Contract::SimpleUDT, "simple_udt"),
-                ]
-                .into_iter()
-                .map(|(contract, binary_name)| {
-                    let mut path = PathBuf::from(base_dir.clone());
-                    path.push(PathBuf::from(binary_name));
-
-                    let binary = fs::read(&path).expect(
-                        format!(
-                            "Failed to read contract binary from path: {:?}",
-                            path.as_path()
-                        )
-                        .as_str(),
-                    );
-                    (contract, binary.into())
-                })
-                .collect()
-            }
-            Err(e) => {
-                warn!(
-                    "TESTING_CONTRACTS_DIR is not set, using default contracts: {:?}",
-                    e
-                );
-                vec![]
-            }
-        }
-    }
-
     pub fn new() -> Self {
         let mut context = Context::default();
 
@@ -138,7 +93,7 @@ impl MockContext {
         );
 
         let context = MockContext {
-            context: RwLock::new(context),
+            context: Arc::new(RwLock::new(context)),
             contracts_context: Arc::new(ContractsContext {
                 contract_default_scripts: map,
                 cell_deps: cell_dep_vec,
@@ -146,13 +101,6 @@ impl MockContext {
         };
         debug!("Created mock context to test transactions.");
         context
-    }
-
-    // This is used temporarily to test the functionality of the contract.
-    pub fn get() -> &'static Self {
-        static INSTANCE: OnceCell<MockContext> = OnceCell::new();
-        INSTANCE.get_or_init(|| Self::new());
-        INSTANCE.get().unwrap()
     }
 
     pub fn write(&self) -> RwLockWriteGuard<Context> {
@@ -171,6 +119,7 @@ enum Contract {
     Secp256k1Lock,
     AlwaysSuccess,
     CkbAuth,
+    #[allow(dead_code)]
     SimpleUDT,
 }
 
@@ -183,7 +132,8 @@ pub struct ContractsContext {
 
 #[derive(Clone, Debug)]
 pub enum CommitmentLockContext {
-    Mock(&'static MockContext),
+    #[cfg(test)]
+    Mock(MockContext),
     Real(Arc<ContractsContext>),
 }
 
@@ -254,7 +204,11 @@ impl CommitmentLockContext {
     // because it is used in so many places.
     pub fn initialize(network: CkbNetwork) -> &'static Self {
         COMMITMENT_LOCK_CTX_INSTANCE.get_or_init(|| match network {
-            CkbNetwork::Mocknet => Self::Mock(MockContext::get()),
+            #[cfg(test)]
+            CkbNetwork::Mocknet => {
+                log::warn!("Initializing mock context for testing.");
+                Self::Mock(MockContext::new())
+            }
             CkbNetwork::Dev => {
                 let mut map = HashMap::new();
                 let mut cell_deps = vec![];
@@ -415,29 +369,20 @@ impl CommitmentLockContext {
         COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
     }
 
-    pub fn get_mock() -> Self {
-        Self::Mock(MockContext::get())
-    }
-
     pub fn get() -> &'static Self {
         COMMITMENT_LOCK_CTX_INSTANCE.get().unwrap()
     }
 
-    pub fn is_testing(&self) -> bool {
-        match self {
-            Self::Mock(_) => true,
-            Self::Real(_) => false,
-        }
-    }
-
     fn get_contracts_map(&self) -> &HashMap<Contract, Script> {
         match self {
+            #[cfg(test)]
             Self::Mock(mock) => &mock.contracts_context.contract_default_scripts,
             Self::Real(real) => &real.contract_default_scripts,
         }
     }
     fn get_cell_deps(&self) -> &CellDepVec {
         match self {
+            #[cfg(test)]
             Self::Mock(mock) => &mock.contracts_context.cell_deps,
             Self::Real(real) => &real.cell_deps,
         }
@@ -451,20 +396,6 @@ impl CommitmentLockContext {
             .as_builder()
             .args(args.pack())
             .build()
-    }
-
-    pub fn read_mock_context(&self) -> RwLockReadGuard<Context> {
-        match &self {
-            Self::Mock(mock) => mock.context.read().unwrap(),
-            Self::Real(_real) => panic!("Real context is not readable"),
-        }
-    }
-
-    pub fn write_mock_context(&self) -> RwLockWriteGuard<Context> {
-        match &self {
-            Self::Mock(mock) => mock.context.write().unwrap(),
-            Self::Real(_real) => panic!("Real context is not writable"),
-        }
     }
 
     pub fn get_secp256k1_lock_script(&self, args: &[u8]) -> Script {
