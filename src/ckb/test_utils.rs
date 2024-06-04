@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use ractor::{Actor, ActorRef};
+use ckb_types::core::TransactionView;
+
+use ractor::{call_t, Actor, ActorRef};
 
 use tempfile::TempDir as OldTempDir;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
@@ -21,7 +23,7 @@ use tokio::{
 use crate::{
     actors::{RootActor, RootActorMessage},
     ckb::{chain::CommitmentLockContext, config::CkbNetwork},
-    ckb_chain::MockChainActor,
+    ckb_chain::{CkbChainMessage, MockChainActor, TraceTxRequest},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
 };
@@ -90,6 +92,7 @@ pub struct NetworkNode {
     pub base_dir: TempDir,
     pub listening_addr: MultiAddr,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
 }
@@ -109,19 +112,14 @@ impl NetworkNode {
         let mut chain_base_dir = PathBuf::from(base_dir.as_ref());
         chain_base_dir.push("ckb-chain");
 
-        let mock_chain_actor =
-            Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
-                .await
-                .expect("start mock chain actor")
-                .0;
+        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
+            .await
+            .expect("start mock chain actor")
+            .0;
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(
-                event_sender,
-                mock_chain_actor.clone(),
-                MemoryStore::default(),
-            ),
+            NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )
@@ -150,6 +148,7 @@ impl NetworkNode {
             base_dir,
             listening_addr,
             network_actor,
+            chain_actor,
             peer_id,
             event_emitter: event_receiver,
         }
@@ -216,6 +215,26 @@ impl NetworkNode {
     {
         self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
             .await;
+    }
+
+    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+        pub const TIMEOUT: u64 = 1000;
+        let tx_hash = tx.hash();
+
+        self.chain_actor
+            .send_message(CkbChainMessage::SendTx(tx))
+            .expect("chain actor alive");
+        let request = TraceTxRequest {
+            tx_hash,
+            confirmations: 1,
+        };
+        call_t!(
+            self.chain_actor,
+            CkbChainMessage::TraceTx,
+            TIMEOUT,
+            request.clone()
+        )
+        .expect("chain actor alive")
     }
 }
 

@@ -272,7 +272,7 @@ mod test_utils {
             &self,
             myself: ActorRef<Self::Msg>,
             message: Self::Msg,
-            ctx: &mut Self::State,
+            state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             use CkbChainMessage::*;
             match message {
@@ -362,7 +362,7 @@ mod test_utils {
                 }
                 SendTx(tx) => {
                     const MAX_CYCLES: u64 = 100_000_000;
-                    let mut context = ctx.ctx.write();
+                    let mut context = state.ctx.write();
                     let status = match context.verify_tx(&tx, MAX_CYCLES) {
                         Ok(c) => {
                             debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
@@ -373,7 +373,15 @@ mod test_utils {
                                 let index = index as usize;
                                 let cell = tx.outputs().get(index).unwrap();
                                 let data = tx.outputs_data().get(index).unwrap();
-                                context.create_cell_with_out_point(outpoint, cell, data.as_bytes());
+                                debug!(
+                                    "Creating cell with outpoint: {:?}, cell: {:?}, data: {:?}",
+                                    outpoint, cell, data
+                                );
+                                context.create_cell_with_out_point(
+                                    outpoint.clone(),
+                                    cell,
+                                    data.as_bytes(),
+                                );
                             }
                             ckb_jsonrpc_types::Status::Committed
                         }
@@ -382,10 +390,10 @@ mod test_utils {
                             ckb_jsonrpc_types::Status::Rejected
                         }
                     };
-                    ctx.committed_tx_status.insert(tx.hash(), status);
+                    state.committed_tx_status.insert(tx.hash(), status);
                 }
                 TraceTx(tx, reply_port) => {
-                    let status = ctx
+                    let status = state
                         .committed_tx_status
                         .get(&tx.tx_hash)
                         .cloned()

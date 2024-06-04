@@ -144,6 +144,7 @@ impl MockContext {
                 cell_deps: cell_dep_vec,
             }),
         };
+        debug!("Created mock context to test transactions.");
         context
     }
 

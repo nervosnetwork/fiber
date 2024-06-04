@@ -35,7 +35,7 @@ use tokio_util::task::TaskTracker;
 
 use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
-    PartiallySignedCommitmentTransaction, ProcessingChannelError, ProcessingChannelResult,
+    ProcessingChannelError, ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -146,8 +146,10 @@ pub enum NetworkServiceEvent {
     ChannelClosed(PeerId, Hash256, TransactionView),
     // A CommitmentSigned message is pending to sent to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
-    // The other party has signed a valid commitment transaction.
-    RemoteCommitmentSigned(PeerId, Hash256, PartiallySignedCommitmentTransaction),
+    // The other party has signed a valid commitment transaction,
+    // and we successfully assemble the partial signature from other party
+    // to create a complete commitment transaction.
+    RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,

@@ -2166,7 +2166,8 @@ impl ChannelActorState {
             }
         };
 
-        let tx = self.build_and_verify_commitment_tx(commitment_signed.partial_signature)?;
+        let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+        let num = self.get_current_commitment_number(false);
 
         debug!(
             "Successfully handled commitment signed message: {:?}, tx: {:?}",
@@ -2180,6 +2181,7 @@ impl ChannelActorState {
                     NetworkServiceEvent::RemoteCommitmentSigned(
                         self.peer_id.clone(),
                         self.get_id(),
+                        num,
                         tx.clone(),
                     ),
                 ),
@@ -3294,6 +3296,7 @@ impl InMemorySigner {
 #[cfg(test)]
 mod tests {
 
+    use ckb_jsonrpc_types::Status;
     use ckb_sdk::core::TransactionBuilder;
     use ckb_types::{
         core::{DepType, ScriptHashType},
@@ -3709,12 +3712,12 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let _node_b_commitment_tx = node_a
+        let node_a_commitment_tx = node_a
             .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx) => {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
                     println!(
-                        "A commitment tx {:?} from {:?} for channel {:?} received",
-                        &tx, peer_id, channel_id
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
                     );
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
@@ -3724,12 +3727,12 @@ mod tests {
             })
             .await;
 
-        let _node_a_commitment_tx = node_b
+        let node_b_commitment_tx = node_b
             .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx) => {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
                     println!(
-                        "A commitment tx {:?} from {:?} for channel {:?} received",
-                        &tx, peer_id, channel_id
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
                     );
                     assert_eq!(peer_id, &node_a.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
@@ -3768,6 +3771,15 @@ mod tests {
                 _ => false,
             })
             .await;
+
+        assert_eq!(
+            node_a.submit_tx(node_a_commitment_tx.clone()).await,
+            Status::Committed
+        );
+        assert_eq!(
+            node_b.submit_tx(node_b_commitment_tx.clone()).await,
+            Status::Committed
+        );
     }
 
     #[tokio::test]
