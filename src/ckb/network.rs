@@ -129,6 +129,11 @@ pub enum NetworkServiceEvent {
     ChannelClosed(PeerId, Hash256, TransactionView),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
+    // We have signed a commitment transaction and sent it to the other party.
+    // The last element is the witnesses for this commitment transaction.
+    // The TransactionView here is not a valid commitment transaction per se,
+    // as we need the other party's signature.
+    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
     // The other party has signed a valid commitment transaction,
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
@@ -169,8 +174,15 @@ pub enum NetworkActorEvent {
     /// A funding transaction has been confirmed.
     FundingTransactionFailed(OutPoint),
 
+    /// A commitment transaction is signed by us and has sent to the other party.
+    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
+
     /// Network service events to be sent to outside observers.
-    /// We will not do any processing on these events.
+    /// These events may be both present at `NetworkActorEvent` and
+    /// this branch of `NetworkActorEvent`. This is because some events
+    /// (e.g. `ChannelClosed`)require some processing internally,
+    /// and they are also interesting to outside observers.
+    /// Once we processed these events, we will send them to outside observers.
     NetworkServiceEvent(NetworkServiceEvent),
 }
 
@@ -1054,6 +1066,25 @@ where
                 }
                 NetworkActorEvent::FundingTransactionFailed(_outpoint) => {
                     unimplemented!("handling funding transaction failed");
+                }
+                NetworkActorEvent::LocalCommitmentSigned(
+                    peer_id,
+                    channel_id,
+                    version,
+                    tx,
+                    witnesses,
+                ) => {
+                    // TODO: We should save the witnesses to the channel state.
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::LocalCommitmentSigned(
+                                    peer_id, channel_id, version, tx, witnesses,
+                                ),
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
             },
             NetworkActorMessage::Command(command) => {

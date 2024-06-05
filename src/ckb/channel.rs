@@ -232,8 +232,9 @@ impl<S> ChannelActor<S> {
         let PartiallySignedCommitmentTransaction {
             tx,
             signature,
+            witnesses,
             msg: _,
-            version: _,
+            version,
         } = state.build_and_sign_commitment_tx()?;
         debug!(
             "Build a commitment tx ({:?}) with partial signature {:?}",
@@ -257,6 +258,17 @@ impl<S> ChannelActor<S> {
                 }),
             ))
             .expect("network actor alive");
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::LocalCommitmentSigned(
+                    state.peer_id.clone(),
+                    state.get_id(),
+                    version,
+                    tx.clone(),
+                    witnesses,
+                )),
+            ))
+            .expect("myself alive");
 
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
@@ -2621,8 +2633,9 @@ impl ChannelActorState {
     // normally because we want to send a partial signature to remote).
     // The function returns a tuple, the first element is the commitment transaction itself,
     // and the second element is the message to be signed by the each party,
-    // so as to consume the funding cell.
-    pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32]) {
+    // so as to consume the funding cell. The last element is the witnesses for the
+    // commitment transaction.
+    pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32], Vec<u8>) {
         let funding_out_point = self.get_funding_transaction_outpoint();
         let tx_builder = TransactionBuilder::default()
             .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
@@ -2632,7 +2645,8 @@ impl ChannelActorState {
                     .build(),
             );
 
-        let (outputs, outputs_data) = self.build_commitment_transaction_outputs(local);
+        let (outputs, outputs_data, witnesses) =
+            self.build_commitment_transaction_parameters(local);
         debug!("Built outputs for commitment transaction: {:?}", &outputs);
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
@@ -2640,12 +2654,10 @@ impl ChannelActorState {
         let version = self.get_current_commitment_number(local);
         let message = get_funding_cell_message_to_sign(Some(version), funding_out_point, &tx);
         debug!(
-            "Building {} commitment transaction message to sign {:?} (version {})",
-            if local { "local" } else { "remote" },
-            hex::encode(message.as_slice()),
-            version
+            "Built commitment transaction {:?}, message pending to sign: {:?}, witnesses for commitment tx (version {}): {:?}",
+            &tx, hex::encode(message.as_slice()), version, hex::encode(&witnesses)
         );
-        (tx, message)
+        (tx, message, witnesses)
     }
 
     fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
@@ -2666,11 +2678,6 @@ impl ChannelActorState {
         local: bool,
         commitment_number: u64,
     ) -> Vec<u8> {
-        debug!(
-            "Building commitment transaction #{}'s witnesses for {} party",
-            commitment_number,
-            if local { "local" } else { "remote" }
-        );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
@@ -2757,14 +2764,21 @@ impl ChannelActorState {
         })
         .concat();
         debug!(
-            "Built commitment transaction #{}'s witnesses: {:?}",
+            "Built commitment transaction #{}'s witnesses of {} party: {:?}",
             commitment_number,
+            if local { "local" } else { "remote" },
             hex::encode(&witnesses)
         );
         witnesses
     }
 
-    fn build_commitment_transaction_outputs(&self, local: bool) -> (Vec<CellOutput>, Vec<Bytes>) {
+    // Build the parameters for the commitment transaction. The first two elements for the
+    // returning tuple are commitment outputs and commitment outputs data.
+    // The last element is the witnesses for the commitment transaction.
+    fn build_commitment_transaction_parameters(
+        &self,
+        local: bool,
+    ) -> (Vec<CellOutput>, Vec<Bytes>, Vec<u8>) {
         let (time_locked_value, immediately_spendable_value) = if local {
             (self.to_local_amount, self.to_remote_amount)
         } else {
@@ -2798,11 +2812,12 @@ impl ChannelActorState {
         let witnesses: Vec<u8> = self.build_previous_commitment_transaction_witnesses(local);
 
         let hash = blake2b_256(&witnesses);
+        let script_arg: &[u8] = &hash[..20];
         debug!(
             "Building {} commitment transaction with witnesses {:?} and hash {:?} with local commitment number {} and remote commitment number {}",
             if local { "local" } else {"remote"},
             hex::encode(&witnesses),
-            hex::encode(&hash[..20]),
+            hex::encode(&script_arg),
             self.local_commitment_number,
             self.remote_commitment_number
         );
@@ -2811,8 +2826,7 @@ impl ChannelActorState {
             Contract::Secp256k1Lock,
             &blake2b_256(immediate_payment_key.serialize())[0..20],
         );
-        let commitment_lock_script =
-            get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
+        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, script_arg);
 
         let outputs = vec![
             CellOutput::new_builder()
@@ -2826,7 +2840,7 @@ impl ChannelActorState {
         ];
         let outputs_data = vec![Bytes::default(); outputs.len()];
 
-        (outputs, outputs_data)
+        (outputs, outputs_data, witnesses)
     }
 
     pub fn build_and_verify_commitment_tx(
@@ -2835,7 +2849,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let verify_ctx = Musig2VerifyContext::from(self);
 
-        let (tx, msg) = self.build_commitment_tx(false);
+        let (tx, msg, witnesses) = self.build_commitment_tx(false);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
             &signature,
@@ -2848,6 +2862,7 @@ impl ChannelActorState {
             version: self.get_current_commitment_number(false),
             tx,
             signature,
+            witnesses,
         })
     }
 
@@ -2856,7 +2871,7 @@ impl ChannelActorState {
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let sign_ctx = Musig2SignContext::from(self);
 
-        let (tx, msg) = self.build_commitment_tx(true);
+        let (tx, msg, witnesses) = self.build_commitment_tx(true);
 
         debug!(
             "Signing commitment tx with message {:?}",
@@ -2874,6 +2889,7 @@ impl ChannelActorState {
             msg,
             tx,
             signature,
+            witnesses,
             version: self.get_current_commitment_number(true),
         })
     }
@@ -2912,6 +2928,8 @@ pub struct PartiallySignedCommitmentTransaction {
     pub version: u64,
     // The commitment transaction.
     pub tx: TransactionView,
+    // The witnesses in the commitment transaction.
+    pub witnesses: Vec<u8>,
     // The partial signature of the commitment transaction.
     pub signature: PartialSignature,
 }
