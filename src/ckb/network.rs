@@ -8,8 +8,6 @@ use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RpcReplyPort, SupervisionEvent,
 };
-use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr, FromInto};
 use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 use tentacle::secio::SecioKeyPair;
@@ -46,7 +44,6 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error};
@@ -55,12 +52,12 @@ pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
 }
 
-#[derive(Copy, Clone, Debug, Serialize)]
+#[derive(Debug)]
 pub struct AcceptChannelResponse {
     pub old_channel_id: Hash256,
     pub new_channel_id: Hash256,
@@ -71,52 +68,38 @@ pub struct AcceptChannelResponse {
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
 /// need to hide it from the API. So in case a reply is needed, we need to put
 /// an optional RpcReplyPort in the of the definition of this message.
-#[serde_as]
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
-    DisconnectPeer(#[serde_as(as = "DisplayFromStr")] PeerId),
+    DisconnectPeer(PeerId),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
     SendPcnMessage(PCNMessageWithPeerId),
-    // Directly send a message to session
-    SendPcnMessageToSession(PCNMessageWithSessionId),
     // Open a channel to a peer.
     OpenChannel(
         OpenChannelCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<OpenChannelResponse, ProcessingChannelError>>>,
+        Option<RpcReplyPort<Result<OpenChannelResponse, ProcessingChannelError>>>,
     ),
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<AcceptChannelResponse, ProcessingChannelError>>>,
+        Option<RpcReplyPort<Result<AcceptChannelResponse, ProcessingChannelError>>>,
     ),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
-    UpdateChannelFunding(
-        Hash256,
-        #[serde_as(as = "EntityHex")] Transaction,
-        FundingRequest,
-    ),
-    SignTx(
-        #[serde_as(as = "DisplayFromStr")] PeerId,
-        Hash256,
-        #[serde_as(as = "EntityHex")] Transaction,
-        Option<Vec<Vec<u8>>>,
-    ),
+    UpdateChannelFunding(Hash256, Transaction, FundingRequest),
+    SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct OpenChannelCommand {
-    #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub funding_amount: u128,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
@@ -197,10 +180,8 @@ pub enum NetworkActorMessage {
     Event(NetworkActorEvent),
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct PCNMessageWithPeerId {
-    #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub message: PCNMessage,
 }
@@ -211,15 +192,13 @@ impl PCNMessageWithPeerId {
     }
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct PCNMessageWithSessionId {
-    #[serde_as(as = "FromInto<usize>")]
     pub session_id: SessionId,
     pub message: PCNMessage,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct PCNMessageWithChannelId {
     pub channel_id: Hash256,
     pub message: PCNMessage,
@@ -295,17 +274,6 @@ where
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
         match command {
-            NetworkActorCommand::SendPcnMessageToSession(PCNMessageWithSessionId {
-                session_id,
-                message,
-            }) => {
-                debug!(
-                    "SendPcnMessageToSession command received: Sending message to session {:?}",
-                    session_id
-                );
-                state.send_message_to_session(session_id, message).await?;
-            }
-
             NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId { peer_id, message }) => {
                 debug!(
                     "SendPcnMessage command received: sending message to peer {:?}",
