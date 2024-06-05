@@ -941,6 +941,10 @@ where
                         .get_commitment_point(commitment_number + 1),
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
+                warn!(
+                    "anan set accept_channel funding script: {:?}",
+                    my_funding_type_script
+                );
 
                 let command = PCNMessageWithPeerId {
                     peer_id,

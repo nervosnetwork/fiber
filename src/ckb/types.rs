@@ -529,6 +529,7 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
         molecule_pcn::AcceptChannel::new_builder()
             .channel_id(accept_channel.channel_id.into())
             .funding_amount(accept_channel.funding_amount.pack())
+            .funding_type_script(accept_channel.funding_type_script.pack())
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(accept_channel.max_accept_tlcs.pack())
             .min_tlc_value(accept_channel.min_tlc_value.pack())
