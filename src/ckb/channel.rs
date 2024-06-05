@@ -1688,6 +1688,7 @@ impl ChannelActorState {
         } else {
             None
         };
+        warn!("anan get_funding_request: {:?}", udt_info);
         FundingRequest {
             udt_info,
             script: self.get_funding_lock_script(),

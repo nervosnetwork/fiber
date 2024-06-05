@@ -45,7 +45,9 @@ use super::{
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::types::TxSignatures;
-use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
+use crate::ckb_chain::{
+    CkbChainMessage, FundingRequest, FundingTx, FundingUdtInfo, TraceTxRequest,
+};
 use crate::{unwrap_or_return, Error};
 
 pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -156,7 +158,7 @@ pub enum NetworkActorEvent {
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
     /// and the script is the lock script of the agreed funding cell.
-    ChannelAccepted(PeerId, Hash256, Hash256, u128, u128, Script),
+    ChannelAccepted(PeerId, Hash256, Hash256, u128, u128, Script, Option<Script>),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
     /// A channel is being shutting down.
@@ -1027,7 +1029,15 @@ where
                         ))
                         .expect("myself alive");
                 }
-                NetworkActorEvent::ChannelAccepted(peer_id, new, old, local, remote, script) => {
+                NetworkActorEvent::ChannelAccepted(
+                    peer_id,
+                    new,
+                    old,
+                    local,
+                    remote,
+                    script,
+                    funding_script,
+                ) => {
                     assert_ne!(new, old, "new and old channel id must be different");
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         if let Some(channel) = state.channels.remove(&old) {
@@ -1039,15 +1049,26 @@ where
                             });
 
                             debug!("Starting funding channel");
-                            // TODO: Here we imply that the one who receives AcceptChannel message
-                            // (i.e. the channel initiator) will send TxUpdate message first.
+                            // TODO: Here we implies the one who receives AcceptChannel message
+                            //  (i.e. the channel initiator) will send TxUpdate message first.
+                            dbg!(&script);
+                            let udt_info = if let Some(funding_script) = funding_script {
+                                Some(FundingUdtInfo {
+                                    type_script: funding_script,
+                                    // FIXME(yukang): this is hardcoded to 61 * 10^8 * 4 shannons
+                                    local_ckb_amount: 24400000000,
+                                    remote_ckb_amount: 24400000000,
+                                })
+                            } else {
+                                None
+                            };
                             myself
                                 .send_message(NetworkActorMessage::new_command(
                                     NetworkActorCommand::UpdateChannelFunding(
                                         new,
                                         Default::default(),
                                         FundingRequest {
-                                            udt_info: None,
+                                            udt_info,
                                             script,
                                             local_amount: local as u64,
                                             local_fee_rate: 0,

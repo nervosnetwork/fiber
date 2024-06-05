@@ -9,7 +9,8 @@ use ckb_sdk::{
     traits::{
         CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
         DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
-        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
+        HeaderDepResolver, QueryOrder, SecpCkbRawKeySigner, TransactionDependencyProvider,
+        ValueRangeOption,
     },
     tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -115,73 +116,90 @@ impl TxBuilder for FundingTxBuilder {
         // Try to find a proper UDT input cell.
         let mut inputs = vec![];
         let mut cell_deps = HashSet::new();
-        if let Some(ref udt_info) = self.request.udt_info {
-            let udt_type_script = udt_info.type_script.clone();
-            let owner = self.context.funding_source_lock_script.clone();
-            let owner_query = {
-                let mut query = CellQueryOptions::new_lock(owner.clone());
-                //query.secondary_script = Some(udt_type_script.clone());
-                query.data_len_range = Some(ValueRangeOption::new_min(16));
-                query.min_total_capacity = u64::MAX;
-                query
-            };
 
+        if let Some(ref tx) = self.funding_tx.tx {
+            for input in tx.inputs().into_iter() {
+                inputs.push(input.clone());
+            }
+            for cell_dep in tx.cell_deps().into_iter() {
+                cell_deps.insert(cell_dep);
+            }
+        }
+
+        warn!("anan build_base now : {:?}", self.request.udt_info);
+        if let Some(ref udt_info) = self.request.udt_info {
             let local_ckb_amount = udt_info.local_ckb_amount;
             let udt_amount = self.request.local_amount as u128;
 
-            let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
-            for cell in owner_cells.iter() {
-                let cell_capacity: u64 = cell.output.capacity().unpack();
-                let mut amount_bytes = [0u8; 16];
-                amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
-                let cell_udt_amount = u128::from_le_bytes(amount_bytes);
-                //FIXME(yukang): we may need to revise the check here
-                if cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount {
-                    inputs.push(CellInput::new(cell.out_point.clone(), 0));
-                    if cell_udt_amount > udt_amount {
-                        let change_output = packed::CellOutput::new_builder()
-                            .capacity(Capacity::shannons(cell_capacity - local_ckb_amount).pack())
-                            .lock(owner.clone())
-                            .build();
-                        let change_output_data: Bytes =
-                            (cell_udt_amount - udt_amount).to_le_bytes().pack();
+            if udt_amount > 0 {
+                let udt_type_script = udt_info.type_script.clone();
+                let owner = self.context.funding_source_lock_script.clone();
+                let owner_query = {
+                    let mut query = CellQueryOptions::new_lock(owner.clone());
+                    query.secondary_script = Some(udt_type_script.clone());
+                    query.data_len_range = Some(ValueRangeOption::new_min(16));
+                    query.min_total_capacity = u64::MAX;
+                    query.order = QueryOrder::Desc;
+                    query
+                };
 
-                        outputs.push(change_output);
-                        outputs_data.push(change_output_data);
+                let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
+                let mut found_udt_cell = false;
+                for cell in owner_cells.iter() {
+                    let cell_capacity: u64 = cell.output.capacity().unpack();
+                    let mut amount_bytes = [0u8; 16];
+                    amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
+                    let cell_udt_amount = u128::from_le_bytes(amount_bytes);
+                    //FIXME(yukang): we may need to revise the check here
+                    warn!(
+                        "anan compare : {:?} >= {:?} && {:?} >= {:?} result: {:?}",
+                        cell_capacity,
+                        local_ckb_amount,
+                        cell_udt_amount,
+                        udt_amount,
+                        cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount
+                    );
+                    if cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount {
+                        inputs.push(CellInput::new(cell.out_point.clone(), 0));
+                        if cell_udt_amount > udt_amount {
+                            let change_output = packed::CellOutput::new_builder()
+                                .capacity(
+                                    Capacity::shannons(cell_capacity - local_ckb_amount).pack(),
+                                )
+                                .lock(owner.clone())
+                                .build();
+                            let change_output_data: Bytes =
+                                (cell_udt_amount - udt_amount).to_le_bytes().pack();
+
+                            outputs.push(change_output);
+                            outputs_data.push(change_output_data);
+                        }
+                        warn!("anan find proper UDT owner cell: {:?}", cell);
+                        found_udt_cell = true;
+                        break;
                     }
-                    warn!("anan find proper UDT owner cell: {:?}", cell);
-                    break;
                 }
+                if !found_udt_cell {
+                    return Err(TxBuilderError::Other(anyhow!(
+                        "proper UDT owner cell not found"
+                    )));
+                }
+                let owner_cell_dep = cell_dep_resolver
+                    .resolve(&owner)
+                    .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(owner.clone()))?;
+                let udt_cell_dep = cell_dep_resolver
+                    .resolve(&udt_type_script)
+                    .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script.clone()))?;
+                #[allow(clippy::mutable_key_type)]
+                cell_deps.insert(owner_cell_dep);
+                cell_deps.insert(udt_cell_dep);
             }
-            if inputs.is_empty() {
-                return Err(TxBuilderError::Other(anyhow!(
-                    "proper UDT owner cell not found"
-                )));
-            }
-            let owner_cell_dep = cell_dep_resolver
-                .resolve(&owner)
-                .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(owner.clone()))?;
-            let udt_cell_dep = cell_dep_resolver
-                .resolve(&udt_type_script)
-                .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script.clone()))?;
-            #[allow(clippy::mutable_key_type)]
-            cell_deps.insert(owner_cell_dep);
-            cell_deps.insert(udt_cell_dep);
         }
-
-        let mut tx_inputs: Vec<packed::CellInput> =
-            inputs.into_iter().map(|input| input.into()).collect();
 
         if let Some(ref tx) = self.funding_tx.tx {
             for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
                 outputs.push(output.clone());
                 outputs_data.push(tx.outputs_data().get(i).unwrap_or_default().clone());
-            }
-            for input in tx.inputs().into_iter() {
-                tx_inputs.push(input.clone());
-            }
-            for cell_dep in tx.cell_deps().into_iter() {
-                cell_deps.insert(cell_dep);
             }
         }
 
@@ -190,15 +208,13 @@ impl TxBuilder for FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
 
-        warn!("anan now here : {:?}", cell_deps);
         let tx_builder = builder
-            .set_inputs(tx_inputs)
+            .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
             .set_cell_deps(cell_deps.into_iter().collect());
         warn!("anan tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
-        warn!("anan tx_builder finished: {:?}", tx);
         Ok(tx)
     }
 }
@@ -316,6 +332,8 @@ impl FundingTxBuilder {
         )?;
 
         let mut funding_tx = self.funding_tx;
+        let tx_builder = tx.as_advanced_builder();
+        warn!("anan final tx_builder: {:?}", tx_builder);
         funding_tx.update_for_self(tx)?;
         Ok(funding_tx)
     }
