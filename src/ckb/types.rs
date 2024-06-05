@@ -982,7 +982,7 @@ impl TryFrom<molecule_pcn::RevokeAndAck> for RevokeAndAck {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFulfill {
     pub payment_preimage: Hash256,
 }
@@ -1005,7 +1005,7 @@ impl TryFrom<molecule_pcn::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
     pub error_code: u32,
 }
@@ -1028,7 +1028,7 @@ impl TryFrom<molecule_pcn::RemoveTlcFail> for RemoveTlcFail {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(RemoveTlcFail),

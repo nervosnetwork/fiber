@@ -333,17 +333,17 @@ impl<S> ChannelActor<S> {
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
         state.check_state_for_tlc_update()?;
+        let msg = PCNMessageWithPeerId {
+            peer_id: self.peer_id.clone(),
+            message: PCNMessage::RemoveTlc(RemoveTlc {
+                channel_id: state.get_id(),
+                tlc_id: command.id,
+                reason: command.reason,
+            }),
+        };
         // Notes: state updating and message sending are not atomic.
         match state.pending_received_tlcs.remove(&command.id) {
             Some(tlc) => {
-                let msg = PCNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: PCNMessage::RemoveTlc(RemoveTlc {
-                        channel_id: state.get_id(),
-                        tlc_id: tlc.id,
-                        reason: command.reason,
-                    }),
-                };
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
                     let filled_payment_hash: Hash256 = blake2b_256(fulfill.payment_preimage).into();
                     if tlc.payment_hash != filled_payment_hash {
@@ -367,16 +367,42 @@ impl<S> ChannelActor<S> {
                         state.to_local_amount += tlc.amount;
                     }
                 }
+                state.to_be_committed_tlcs.push((tlc, command.reason));
             }
             None => {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Trying to remove tlc with id {:?} that is not in pending received tlcs",
-                    command.id
-                )));
+                match state
+                    .to_be_committed_tlcs
+                    .iter()
+                    .find(|(tlc, _reason)| tlc.id == command.id && !tlc.is_offered)
+                {
+                    Some((tlc, reason)) => {
+                        if *reason != command.reason {
+                            return Err(ProcessingChannelError::InvalidParameter(format!(
+                                "Processing RemoveTlcCommand to remove a previously removed tlc {:?} with different reasons (previous reason: {:?}, new reason: {:?})",
+                                tlc, reason, command.reason
+                            )));
+                        }
+                        debug!(
+                            "Resending RemoveTLC message as the TLC is already removed {:?} (removed reason {:?})",
+                            tlc, reason
+                        );
+                        self.network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendPcnMessage(msg),
+                            ))
+                            .expect("network actor alive");
+                    }
+                    None => {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Trying to remove tlc with id {:?} that is not in pending received tlcs",
+                            command.id
+                        )));
+                    }
+                }
             }
         }
         debug!(
-            "Balance after removetlccommand: to_local_amount: {} to_remote_amount: {}",
+            "Channel balance distribution after processing RemoveTlcCommand: to_local_amount: {} to_remote_amount: {}",
             state.to_local_amount, state.to_remote_amount
         );
         state.maybe_transition_to_shutdown(self.network.clone())?;
@@ -940,6 +966,14 @@ pub struct ChannelActorState {
     // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
     // will be removed from this map.
     pub pending_received_tlcs: HashMap<u64, TLC>,
+    // List of tlcs that are removed but not yet committed in a commitment transaction.
+    // We have to keep them tentatively because
+    // 1. Even if the counterparty goes offline, we can still take the assets back
+    // when the tlc has expired.
+    // 2. The counterparty may have lost some state update, we can resend the
+    // AddTlc meessages to the counterparty with `pending_offered_tlcs` and
+    // RemoveTlc messages to the counterparty with this list.
+    pub to_be_committed_tlcs: Vec<(TLC, RemoveTlcReason)>,
 
     // The counterparty has already sent a shutdown message with this script.
     #[serde_as(as = "Option<EntityHex>")]
@@ -1162,6 +1196,7 @@ impl ChannelActorState {
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
+            to_be_committed_tlcs: Default::default(),
             to_remote_amount: remote_value,
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
@@ -1206,6 +1241,7 @@ impl ChannelActorState {
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
+            to_be_committed_tlcs: Default::default(),
             to_remote_amount: 0,
             signer,
             local_channel_parameters: ChannelParametersOneParty {
@@ -1743,17 +1779,38 @@ impl ChannelActorState {
                                 debug!("Balance after tlc removed: to_local_amount: {}, to_remote_amount: {}", self.to_local_amount, self.to_remote_amount);
                             }
                         }
-                        entry.remove();
+                        let tlc = entry.remove();
+                        self.to_be_committed_tlcs.push((tlc, remove_tlc.reason));
                         if self.pending_offered_tlcs.is_empty() {
                             self.maybe_transition_to_shutdown(network)?;
                         }
                         Ok(())
                     }
                     hash_map::Entry::Vacant(_) => {
-                        Err(ProcessingChannelError::InvalidParameter(format!(
-                            "TLC with id {:?} not found in pending_received_tlcs",
-                            remove_tlc.tlc_id
-                        )))
+                        match self
+                            .to_be_committed_tlcs
+                            .iter()
+                            .find(|(tlc, _reason)| tlc.id == remove_tlc.tlc_id && tlc.is_offered)
+                        {
+                            Some((tlc, reason)) => {
+                                if *reason != remove_tlc.reason {
+                                    Err(ProcessingChannelError::InvalidParameter(format!(
+                                        "Recevied a RemoveTlc message for a previously removed tlc {:?} with different reasons (previous reason: {:?}, new reason: {:?})",
+                                        tlc, reason, remove_tlc.reason
+                                    )))
+                                } else {
+                                    debug!(
+                                        "Ignoring repeated removing of the same tlc {:?} (reason {:?})",
+                                        tlc, reason
+                                    );
+                                    Ok(())
+                                }
+                            }
+                            None => Err(ProcessingChannelError::InvalidParameter(format!(
+                                "TLC with id {:?} not found in pending_received_tlcs",
+                                remove_tlc.tlc_id
+                            ))),
+                        }
                     }
                 }
             }
@@ -2218,6 +2275,8 @@ impl ChannelActorState {
                     ))
                     .expect("network actor alive");
                 self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+                // We are now sure all the inflight tlcs are resolved, so clear them.
+                self.to_be_committed_tlcs.clear();
             }
         }
         Ok(())
