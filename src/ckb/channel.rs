@@ -1680,8 +1680,8 @@ impl ChannelActorState {
             Some(FundingUdtInfo {
                 type_script: type_script.clone(),
                 // FIXME(yukang): this is hardcoded to 61 * 10^8 * 2 shannons
-                local_ckb_amount: 12200000000,
-                remote_ckb_amount: 12200000000,
+                local_ckb_amount: 122000000000,
+                remote_ckb_amount: 122000000000,
             })
         } else {
             None
@@ -2584,27 +2584,52 @@ impl ChannelActorState {
             );
 
         if let Some(type_script) = &self.funding_type_script {
+            warn!(
+                "anan UDT local_amount: {}, remote_amount: {}",
+                self.to_local_amount, self.to_remote_amount
+            );
             // FIXME(yukang): how to handle the CKB amount here,
             // after substracting tx fee, we should return the lefted CKB to the holder
-            let minimal_capacity = 61_0000_0000 as u64;
-            let holder_output = CellOutput::new_builder()
-                .capacity(minimal_capacity.pack())
-                .type_(Some(type_script.clone()).pack())
-                .lock(local_shutdown_script)
-                .build();
+            // let minimal_capacity = 61_0000_0000 as u64;
+            // let holder_output = CellOutput::new_builder()
+            //     .capacity(minimal_capacity.pack())
+            //     .type_(Some(type_script.clone()).pack())
+            //     .lock(local_shutdown_script)
+            //     .build();
             let holder_output_data = self.to_local_amount.to_le_bytes().pack();
-
-            let counterparty_output = CellOutput::new_builder()
-                .capacity(minimal_capacity.pack())
+            let dummy_output = CellOutput::new_builder()
+                .lock(local_shutdown_script.clone())
                 .type_(Some(type_script.clone()).pack())
-                .lock(remote_shutdown_script)
                 .build();
+            let required_capacity = dummy_output
+                .occupied_capacity(Capacity::bytes(holder_output_data.len()).unwrap())
+                .unwrap()
+                .pack();
+            let holder_output = dummy_output
+                .as_builder()
+                .capacity(required_capacity)
+                .build();
+
             let counterparty_output_data = self.to_remote_amount.to_le_bytes().pack();
+            let dummy_output = CellOutput::new_builder()
+                .lock(remote_shutdown_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .build();
+            let required_capacity = dummy_output
+                .occupied_capacity(Capacity::bytes(counterparty_output_data.len()).unwrap())
+                .unwrap()
+                .pack();
+            let counterparty_output = dummy_output
+                .as_builder()
+                .capacity(required_capacity)
+                .build();
 
             let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
-            let tx_builder = tx_builder.set_outputs(outputs.to_vec());
-            let tx_builder =
-                tx_builder.set_outputs_data(vec![holder_output_data, counterparty_output_data]);
+            let outputs_data =
+                self.order_things_for_musig2(holder_output_data, counterparty_output_data);
+            let tx_builder = tx_builder
+                .set_outputs(outputs.to_vec())
+                .set_outputs_data(outputs_data);
             let tx = tx_builder.build();
             let message = get_funding_cell_message_to_sign(
                 u64::MAX,
@@ -2617,7 +2642,6 @@ impl ChannelActorState {
             );
             Ok((tx, message))
         } else {
-            // TODO: Check UDT type, if it is ckb then convert it into u64.
             let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
             let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
             debug!(

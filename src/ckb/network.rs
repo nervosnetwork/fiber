@@ -1066,8 +1066,8 @@ where
                                 Some(FundingUdtInfo {
                                     type_script: funding_script,
                                     // FIXME(yukang): this is hardcoded to 61 * 10^8 * 2 shannons
-                                    local_ckb_amount: 12200000000,
-                                    remote_ckb_amount: 12200000000,
+                                    local_ckb_amount: 122000000000,
+                                    remote_ckb_amount: 122000000000,
                                 })
                             } else {
                                 None
