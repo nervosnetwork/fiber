@@ -1,7 +1,7 @@
 meta {
   name: accept a channel from a peer, a normal accept channel request
   type: http
-  seq: 8
+  seq: 3
 }
 
 post {
@@ -21,8 +21,7 @@ body:json {
       "AcceptChannel": [
         {
           "temp_channel_id": "{{N1N2_TEMP_CHANNEL_ID}}",
-          "funding_amount": 91000000000000,
-          "funding_type_script": "0x55000000100000003000000031000000e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df4190220000000e9218fa964cc80be12eb6eb750b43a94a649cfc6a71ba5c6ba37e88621fc3de3"
+          "funding_amount": 1234
         }
       ]
     }

@@ -608,7 +608,7 @@ impl NetworkActorState {
         }
 
         warn!(
-            "anan create_inbound_channel: our_funding_type: {:?}, remote_funding_type: {:?}",
+            "anan create_inbound_channel: accept_funding_type_script: {:?}, open_funding_type: {:?}",
             funding_type_script, open_channel.funding_type_script
         );
 
@@ -616,13 +616,23 @@ impl NetworkActorState {
             open_channel.funding_type_script.as_ref(),
             funding_type_script.as_ref(),
         ) {
-            (Some(_open_script), Some(_script)) => {
-                // TODO: may need to check the same UDT type script
+            (Some(open_channel_udt_script), Some(funding_type_script)) => {
+                if open_channel_udt_script != funding_type_script {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "Funding type script mismatch".to_string(),
+                    ));
+                }
+            }
+            (Some(_), None) => {
+                // If the funding type script is provided in the open channel message,
+                // then both parties will use the same funding type script, it's OK the other
+                // does not provide it, he accept it means he agrees with the funding type script
+                // but he does not want to provice funding amount.
             }
             (None, None) => {}
-            _ => {
+            (None, Some(_)) => {
                 return Err(ProcessingChannelError::InvalidParameter(
-                    "Funding type script must both provided, or both not provided".to_string(),
+                    "The OpenChannel didn't provide UDT type script, so we don't expect script in AcceptChannel".to_string(),
                 ));
             }
         }
@@ -1055,9 +1065,9 @@ where
                             let udt_info = if let Some(funding_script) = funding_script {
                                 Some(FundingUdtInfo {
                                     type_script: funding_script,
-                                    // FIXME(yukang): this is hardcoded to 61 * 10^8 * 4 shannons
-                                    local_ckb_amount: 24400000000,
-                                    remote_ckb_amount: 24400000000,
+                                    // FIXME(yukang): this is hardcoded to 61 * 10^8 * 2 shannons
+                                    local_ckb_amount: 12200000000,
+                                    remote_ckb_amount: 12200000000,
                                 })
                             } else {
                                 None

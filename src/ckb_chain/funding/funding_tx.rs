@@ -19,7 +19,7 @@ use ckb_sdk::{
 use ckb_types::{
     core::{BlockView, Capacity, DepType, TransactionView},
     h256,
-    packed::{self, Bytes, CellDep, CellInput, OutPoint, Script, Transaction},
+    packed::{self, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::*,
 };
 use log::warn;
@@ -162,14 +162,23 @@ impl TxBuilder for FundingTxBuilder {
                     if cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount {
                         inputs.push(CellInput::new(cell.out_point.clone(), 0));
                         if cell_udt_amount > udt_amount {
-                            let change_output = packed::CellOutput::new_builder()
-                                .capacity(
-                                    Capacity::shannons(cell_capacity - local_ckb_amount).pack(),
-                                )
-                                .lock(owner.clone())
-                                .build();
                             let change_output_data: Bytes =
                                 (cell_udt_amount - udt_amount).to_le_bytes().pack();
+
+                            let dummy_output = CellOutput::new_builder()
+                                .lock(owner.clone())
+                                .type_(Some(udt_type_script.clone()).pack())
+                                .build();
+                            let required_capacity = dummy_output
+                                .occupied_capacity(
+                                    Capacity::bytes(change_output_data.len()).unwrap(),
+                                )
+                                .unwrap()
+                                .pack();
+                            let change_output = dummy_output
+                                .as_builder()
+                                .capacity(required_capacity)
+                                .build();
 
                             outputs.push(change_output);
                             outputs_data.push(change_output_data);
@@ -300,17 +309,12 @@ impl FundingTxBuilder {
             // FIXME(yukang): how to add cell deps for udt?
             let udt_type_script = udt_info.type_script.clone();
             let tx_hash =
-                h256!("0x371c4d9727fa47c0d77d04bdbb9951a7c63860f50c26108372cd28a336a31058");
+                h256!("0xc24e3b64b9fb890ec319115713742029cefbd8cd2c9a47e9b4547192b23f3985");
             let out_point = OutPoint::new(tx_hash.pack(), 0);
             let cell_dep = CellDep::new_builder()
                 .out_point(out_point)
                 .dep_type(DepType::Code.into())
                 .build();
-            warn!(
-                "anan adding cell_dep: code_hash {:?} => {:?}",
-                ScriptId::from(&udt_type_script),
-                cell_dep
-            );
             cell_dep_resolver.insert(
                 ScriptId::from(&udt_type_script),
                 cell_dep,
