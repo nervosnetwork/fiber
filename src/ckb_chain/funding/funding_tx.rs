@@ -65,6 +65,18 @@ pub struct FundingUdtInfo {
     pub remote_ckb_amount: u64,
 }
 
+impl FundingUdtInfo {
+    pub fn new_with_script(type_script: packed::Script) -> Self {
+        // FIXME(yukang): make sure the udt_amount is enough for split into at least 2 cells
+        let two_cells_amount: u64 = (142 + 10) * (10 as u64).pow(8);
+        Self {
+            type_script,
+            local_ckb_amount: two_cells_amount,
+            remote_ckb_amount: two_cells_amount,
+        }
+    }
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FundingRequest {
@@ -126,9 +138,7 @@ impl TxBuilder for FundingTxBuilder {
             }
         }
 
-        warn!("anan build_base now : {:?}", self.request.udt_info);
         if let Some(ref udt_info) = self.request.udt_info {
-            let local_ckb_amount = udt_info.local_ckb_amount;
             let udt_amount = self.request.local_amount as u128;
 
             if udt_amount > 0 {
@@ -146,20 +156,11 @@ impl TxBuilder for FundingTxBuilder {
                 let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
                 let mut found_udt_cell = false;
                 for cell in owner_cells.iter() {
-                    let cell_capacity: u64 = cell.output.capacity().unpack();
                     let mut amount_bytes = [0u8; 16];
                     amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
                     let cell_udt_amount = u128::from_le_bytes(amount_bytes);
                     //FIXME(yukang): we may need to revise the check here
-                    warn!(
-                        "anan compare : {:?} >= {:?} && {:?} >= {:?} result: {:?}",
-                        cell_capacity,
-                        local_ckb_amount,
-                        cell_udt_amount,
-                        udt_amount,
-                        cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount
-                    );
-                    if cell_capacity >= local_ckb_amount && cell_udt_amount >= udt_amount {
+                    if cell_udt_amount >= udt_amount {
                         inputs.push(CellInput::new(cell.out_point.clone(), 0));
                         if cell_udt_amount > udt_amount {
                             let change_output_data: Bytes =
@@ -183,7 +184,7 @@ impl TxBuilder for FundingTxBuilder {
                             outputs.push(change_output);
                             outputs_data.push(change_output_data);
                         }
-                        warn!("anan find proper UDT owner cell: {:?}", cell);
+                        warn!("find proper UDT owner cell: {:?}", cell);
                         found_udt_cell = true;
                         break;
                     }
@@ -222,7 +223,7 @@ impl TxBuilder for FundingTxBuilder {
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
             .set_cell_deps(cell_deps.into_iter().collect());
-        warn!("anan tx_builder: {:?}", tx_builder);
+        warn!("tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
         Ok(tx)
     }
@@ -337,7 +338,7 @@ impl FundingTxBuilder {
 
         let mut funding_tx = self.funding_tx;
         let tx_builder = tx.as_advanced_builder();
-        warn!("anan final tx_builder: {:?}", tx_builder);
+        warn!("final tx_builder: {:?}", tx_builder);
         funding_tx.update_for_self(tx)?;
         Ok(funding_tx)
     }

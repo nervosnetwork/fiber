@@ -944,10 +944,6 @@ where
                         .get_commitment_point(commitment_number + 1),
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
-                warn!(
-                    "anan set accept_channel funding script: {:?}",
-                    funding_type_script
-                );
 
                 let command = PCNMessageWithPeerId {
                     peer_id,
@@ -1451,11 +1447,6 @@ impl ChannelActorState {
             &channel_id, &temp_channel_id,
         );
 
-        warn!(
-            "anan new_inbound_channel funding_type_script: {:?}",
-            funding_type_script
-        );
-
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             peer_id,
@@ -1676,19 +1667,11 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
-        let udt_info = if let Some(type_script) = &self.funding_type_script {
-            Some(FundingUdtInfo {
-                type_script: type_script.clone(),
-                // FIXME(yukang): this is hardcoded to 61 * 10^8 * 2 shannons
-                local_ckb_amount: 122000000000,
-                remote_ckb_amount: 122000000000,
-            })
-        } else {
-            None
-        };
-        warn!("anan get_funding_request: {:?}", udt_info);
         FundingRequest {
-            udt_info,
+            udt_info: self
+                .funding_type_script
+                .clone()
+                .map(FundingUdtInfo::new_with_script),
             script: self.get_funding_lock_script(),
             local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
@@ -2008,10 +1991,6 @@ impl ChannelActorState {
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
         self.funding_type_script = accept_channel.funding_type_script.clone();
-        warn!(
-            "anan handle_accept_channel funding type script: {:?}",
-            &self.funding_type_script
-        );
 
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
@@ -2584,18 +2563,10 @@ impl ChannelActorState {
             );
 
         if let Some(type_script) = &self.funding_type_script {
-            warn!(
-                "anan UDT local_amount: {}, remote_amount: {}",
+            debug!(
+                "UDT local_amount: {}, remote_amount: {}",
                 self.to_local_amount, self.to_remote_amount
             );
-            // FIXME(yukang): how to handle the CKB amount here,
-            // after substracting tx fee, we should return the lefted CKB to the holder
-            // let minimal_capacity = 61_0000_0000 as u64;
-            // let holder_output = CellOutput::new_builder()
-            //     .capacity(minimal_capacity.pack())
-            //     .type_(Some(type_script.clone()).pack())
-            //     .lock(local_shutdown_script)
-            //     .build();
             let holder_output_data = self.to_local_amount.to_le_bytes().pack();
             let dummy_output = CellOutput::new_builder()
                 .lock(local_shutdown_script.clone())

@@ -38,8 +38,7 @@ tokio = { version = "1", features = [
     "signal",
 ] }
 home = "0.5.9"
-#ckb-sdk = "3.1.0"
-ckb-sdk = { git = "https://github.com/chenyukang/ckb-sdk-rust.git", branch = "v3.1.0-with-pcn-udt" }
+ckb-sdk = "3.1.0"
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 env_logger = "0.11.3"

@@ -371,7 +371,6 @@ where
                     "Updating channel funding for channel {:?}, current tx: {:?}",
                     &channel_id, old_tx
                 );
-                warn!("anan fundingrequest: {:?}", request);
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
                 let tx = match call_t!(
@@ -606,11 +605,6 @@ impl NetworkActorState {
             warn!("A channel of id {:?} is already created, returning it", &id);
             return Ok((channel.clone(), temp_channel_id, id));
         }
-
-        warn!(
-            "anan create_inbound_channel: accept_funding_type_script: {:?}, open_funding_type: {:?}",
-            funding_type_script, open_channel.funding_type_script
-        );
 
         match (
             open_channel.funding_type_script.as_ref(),
@@ -1062,23 +1056,14 @@ where
                             // TODO: Here we implies the one who receives AcceptChannel message
                             //  (i.e. the channel initiator) will send TxUpdate message first.
                             dbg!(&script);
-                            let udt_info = if let Some(funding_script) = funding_script {
-                                Some(FundingUdtInfo {
-                                    type_script: funding_script,
-                                    // FIXME(yukang): this is hardcoded to 61 * 10^8 * 2 shannons
-                                    local_ckb_amount: 122000000000,
-                                    remote_ckb_amount: 122000000000,
-                                })
-                            } else {
-                                None
-                            };
                             myself
                                 .send_message(NetworkActorMessage::new_command(
                                     NetworkActorCommand::UpdateChannelFunding(
                                         new,
                                         Default::default(),
                                         FundingRequest {
-                                            udt_info,
+                                            udt_info: funding_script
+                                                .map(FundingUdtInfo::new_with_script),
                                             script,
                                             local_amount: local as u64,
                                             local_fee_rate: 0,
