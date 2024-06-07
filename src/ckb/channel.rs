@@ -2455,22 +2455,11 @@ impl ChannelActorState {
                     "Received TxComplete message, funding tx is present {:?}",
                     tx
                 );
-                let first_output =
-                    tx.raw()
-                        .outputs()
-                        .get(0)
-                        .ok_or(ProcessingChannelError::InvalidParameter(
-                            "Funding transaction should have at least one output".to_string(),
-                        ))?;
-
-                let first_output_capacity =
-                    u64::from_le_bytes(first_output.capacity().as_slice().try_into().unwrap())
-                        as u128;
-
-                if self.to_local_amount + self.to_remote_amount != first_output_capacity {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        format!("Funding transaction output amount mismatch ({} given, {} to local , {} to remote)", first_output_capacity, self.to_local_amount, self.to_remote_amount)
-                    ));
+                let check = self.is_tx_final(tx);
+                if !check.is_ok_and(|ok| ok) {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Received TxComplete message, but funding tx is not final"
+                    )));
                 }
             }
         }
