@@ -3,7 +3,7 @@ use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
     core::{Capacity, TransactionBuilder, TransactionView},
-    packed::{self, Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
+    packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
@@ -2844,19 +2844,33 @@ impl ChannelActorState {
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let immediate_output = packed::CellOutput::new_builder()
-                .capacity(Capacity::shannons(6100000000).pack())
+            let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
+            let dummy_output = CellOutput::new_builder()
                 .lock(immediate_secp256k1_lock_script.clone())
                 .type_(Some(udt_type_script.clone()).pack())
                 .build();
-            let immediate_output_data: Bytes = immediately_spendable_value.to_le_bytes().pack();
+            let required_capacity = dummy_output
+                .occupied_capacity(Capacity::bytes(immediate_output_data.len()).unwrap())
+                .unwrap()
+                .pack();
+            let immediate_output = dummy_output
+                .as_builder()
+                .capacity(required_capacity)
+                .build();
 
-            let commitment_lock_output = packed::CellOutput::new_builder()
-                .capacity(Capacity::shannons(6100000000).pack())
+            let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
+            let dummy_output = CellOutput::new_builder()
                 .lock(commitment_lock_script.clone())
                 .type_(Some(udt_type_script.clone()).pack())
                 .build();
-            let commitment_lock_output_data: Bytes = time_locked_value.to_le_bytes().pack();
+            let required_capacity = dummy_output
+                .occupied_capacity(Capacity::bytes(commitment_lock_output_data.len()).unwrap())
+                .unwrap()
+                .pack();
+            let commitment_lock_output = dummy_output
+                .as_builder()
+                .capacity(required_capacity)
+                .build();
 
             let outputs = vec![immediate_output, commitment_lock_output];
             let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
