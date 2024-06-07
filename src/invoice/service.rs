@@ -116,7 +116,7 @@ where
 
         let invoice = invoice_builder.build();
         if let Ok(invoice) = &invoice {
-            self.store.insert_invoice(invoice.clone());
+            self.store.insert_invoice(invoice.clone())?;
         }
         invoice
     }
