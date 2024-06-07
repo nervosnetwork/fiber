@@ -9,4 +9,5 @@ pub use error::{CkbChainError, FundingError};
 pub use funding::{FundingRequest, FundingTx, FundingUdtInfo};
 
 #[cfg(test)]
-pub use actor::MockChainActor;
+pub use actor::{submit_tx, MockChainActor};
+pub mod contracts;

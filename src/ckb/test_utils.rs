@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use ckb_types::core::TransactionView;
+
 use ractor::{Actor, ActorRef};
 
 use tempfile::TempDir as OldTempDir;
@@ -20,8 +22,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::{chain::CommitmentLockContext, config::CkbNetwork},
-    ckb_chain::MockChainActor,
+    ckb_chain::{submit_tx, CkbChainMessage, MockChainActor},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
 };
@@ -90,6 +91,7 @@ pub struct NetworkNode {
     pub base_dir: TempDir,
     pub listening_addr: MultiAddr,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
 }
@@ -102,25 +104,20 @@ impl NetworkNode {
             ..Default::default()
         };
 
-        CommitmentLockContext::initialize(CkbNetwork::Mocknet);
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let mut chain_base_dir = PathBuf::from(base_dir.as_ref());
         chain_base_dir.push("ckb-chain");
 
-        let noop_chain_actor = Actor::spawn_linked(None, MockChainActor {}, (), root.get_cell())
+        let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
             .await
             .expect("start mock chain actor")
             .0;
 
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(
-                event_sender,
-                noop_chain_actor.clone(),
-                MemoryStore::default(),
-            ),
+            NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
             (ckb_config, new_tokio_task_tracker()),
             root.get_cell(),
         )
@@ -149,6 +146,7 @@ impl NetworkNode {
             base_dir,
             listening_addr,
             network_actor,
+            chain_actor,
             peer_id,
             event_emitter: event_receiver,
         }
@@ -216,6 +214,10 @@ impl NetworkNode {
         self.expect_to_process_event(|event| if event_filter(event) { Some(()) } else { None })
             .await;
     }
+
+    pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+        submit_tx(self.chain_actor.clone(), tx).await
+    }
 }
 
 #[derive(Clone, Default)]
@@ -265,9 +267,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_network_node() {
-        dbg!("start network node");
+        println!("starting network node");
         let node = NetworkNode::new().await;
-        dbg!("network node started", &node);
+        println!("network node {:?} started", &node);
     }
 
     #[tokio::test]

@@ -144,6 +144,12 @@ pub enum NetworkServiceEvent {
     ChannelReady(PeerId, Hash256),
     ChannelShutDown(PeerId, Hash256),
     ChannelClosed(PeerId, Hash256, TransactionView),
+    // We should sign a commitment transaction and send it to the other party.
+    CommitmentSignaturePending(PeerId, Hash256, u64),
+    // The other party has signed a valid commitment transaction,
+    // and we successfully assemble the partial signature from other party
+    // to create a complete commitment transaction.
+    RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -987,9 +993,8 @@ where
                             });
 
                             debug!("Starting funding channel");
-                            // TODO: Here we implies the one who receives AcceptChannel message
-                            // will send TxUpdate message first.
-                            dbg!(&script);
+                            // TODO: Here we imply that the one who receives AcceptChannel message
+                            // (i.e. the channel initiator) will send TxUpdate message first.
                             myself
                                 .send_message(NetworkActorMessage::new_command(
                                     NetworkActorCommand::UpdateChannelFunding(
