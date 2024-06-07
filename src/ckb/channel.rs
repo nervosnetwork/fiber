@@ -2565,40 +2565,39 @@ impl ChannelActorState {
                 "UDT local_amount: {}, remote_amount: {}",
                 self.to_local_amount, self.to_remote_amount
             );
-            let holder_output_data = self.to_local_amount.to_le_bytes().pack();
+            let local_output_data = self.to_local_amount.to_le_bytes().pack();
             let dummy_output = CellOutput::new_builder()
                 .lock(local_shutdown_script.clone())
                 .type_(Some(type_script.clone()).pack())
                 .build();
             let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(holder_output_data.len()).unwrap())
+                .occupied_capacity(Capacity::bytes(local_output_data.len()).unwrap())
                 .unwrap()
                 .pack();
-            let holder_output = dummy_output
+            let local_output = dummy_output
                 .as_builder()
                 .capacity(required_capacity)
                 .build();
 
-            let counterparty_output_data = self.to_remote_amount.to_le_bytes().pack();
+            let remote_output_data = self.to_remote_amount.to_le_bytes().pack();
             let dummy_output = CellOutput::new_builder()
                 .lock(remote_shutdown_script.clone())
                 .type_(Some(type_script.clone()).pack())
                 .build();
             let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(counterparty_output_data.len()).unwrap())
+                .occupied_capacity(Capacity::bytes(remote_output_data.len()).unwrap())
                 .unwrap()
                 .pack();
-            let counterparty_output = dummy_output
+            let remote_output = dummy_output
                 .as_builder()
                 .capacity(required_capacity)
                 .build();
 
-            let outputs = self.order_things_for_musig2(holder_output, counterparty_output);
-            let outputs_data =
-                self.order_things_for_musig2(holder_output_data, counterparty_output_data);
+            let outputs = self.order_things_for_musig2(local_output, remote_output);
+            let outputs_data = self.order_things_for_musig2(local_output_data, remote_output_data);
             let tx_builder = tx_builder
                 .set_outputs(outputs.to_vec())
-                .set_outputs_data(outputs_data);
+                .set_outputs_data(outputs_data.to_vec());
             let tx = tx_builder.build();
             let message = get_funding_cell_message_to_sign(
                 u64::MAX,
