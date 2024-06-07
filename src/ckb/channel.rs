@@ -869,7 +869,7 @@ where
                 my_funding_amount,
                 seed,
                 open_channel,
-                accept_funding_type_script,
+                accept_funding_udt_type_script,
                 oneshot_channel,
             ) => {
                 let peer_id = self.peer_id.clone();
@@ -882,7 +882,7 @@ where
                 let OpenChannel {
                     channel_id,
                     chain_hash,
-                    funding_type_script,
+                    funding_udt_type_script,
                     funding_amount,
                     to_local_delay,
                     first_per_commitment_point,
@@ -891,8 +891,8 @@ where
                     ..
                 } = &open_channel;
 
-                if accept_funding_type_script != *funding_type_script
-                    && accept_funding_type_script.is_some()
+                if accept_funding_udt_type_script != *funding_udt_type_script
+                    && accept_funding_udt_type_script.is_some()
                 {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(
                             "Accept funding type script does not match open channel funding type script"
@@ -907,10 +907,18 @@ where
                     ))));
                 }
 
+                if funding_udt_type_script.is_some() {
+                    // We have not implemented funding type script yet.
+                    // But don't panic, otherwise adversary can easily take us down.
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Funding type script is not none, but we are currently unable to process this".to_string(),
+                    )));
+                }
+
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     my_funding_amount,
-                    funding_type_script.clone(),
+                    funding_udt_type_script.clone(),
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
@@ -926,7 +934,7 @@ where
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: my_funding_amount,
-                    funding_type_script: funding_type_script.clone(),
+                    funding_udt_type_script: funding_udt_type_script.clone(),
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     to_local_delay: *to_local_delay,
@@ -976,7 +984,7 @@ where
             ChannelInitializationParameter::OpenChannel(
                 funding_amount,
                 seed,
-                funding_type_script,
+                funding_udt_type_script,
                 tx,
             ) => {
                 let peer_id = self.peer_id.clone();
@@ -986,7 +994,7 @@ where
                     &seed,
                     self.peer_id.clone(),
                     funding_amount,
-                    funding_type_script.clone(),
+                    funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
@@ -994,7 +1002,7 @@ where
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
-                    funding_type_script,
+                    funding_udt_type_script: None,
                     funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
@@ -1194,7 +1202,7 @@ pub struct ChannelActorState {
     pub funding_tx: Option<Transaction>,
 
     #[serde_as(as = "Option<EntityHex>")]
-    pub funding_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
 
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
@@ -1424,7 +1432,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
         local_value: u128,
-        funding_type_script: Option<Script>,
+        funding_udt_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
         remote_value: u128,
@@ -1452,7 +1460,7 @@ impl ChannelActorState {
             peer_id,
             funding_tx: None,
             is_acceptor: true,
-            funding_type_script,
+            funding_udt_type_script,
             to_local_amount: local_value,
             id: channel_id,
             next_offering_tlc_id: 0,
@@ -1486,7 +1494,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u128,
-        funding_type_script: Option<Script>,
+        funding_udt_type_script: Option<Script>,
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -1497,7 +1505,7 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
-            funding_type_script,
+            funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
             id: temp_channel_id,
@@ -1669,7 +1677,7 @@ impl ChannelActorState {
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
         FundingRequest {
             udt_info: self
-                .funding_type_script
+                .funding_udt_type_script
                 .clone()
                 .map(FundingUdtInfo::new_with_script),
             script: self.get_funding_lock_script(),
@@ -1990,7 +1998,7 @@ impl ChannelActorState {
         ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
-        self.funding_type_script = accept_channel.funding_type_script.clone();
+        self.funding_udt_type_script = accept_channel.funding_udt_type_script.clone();
 
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
@@ -2364,7 +2372,7 @@ impl ChannelActorState {
             panic!("Invalid funding transation")
         }
 
-        if self.funding_type_script.is_some() {
+        if self.funding_udt_type_script.is_some() {
             let (_output, data) =
                 tx.output_with_data(0)
                     .ok_or(ProcessingChannelError::InvalidParameter(
@@ -2562,7 +2570,7 @@ impl ChannelActorState {
                     .build(),
             );
 
-        if let Some(type_script) = &self.funding_type_script {
+        if let Some(type_script) = &self.funding_udt_type_script {
             debug!(
                 "UDT local_amount: {}, remote_amount: {}",
                 self.to_local_amount, self.to_remote_amount
@@ -2846,7 +2854,7 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
-        if let Some(udt_type_script) = &self.funding_type_script {
+        if let Some(udt_type_script) = &self.funding_udt_type_script {
             let immediate_output = packed::CellOutput::new_builder()
                 .capacity(Capacity::shannons(6100000000).pack())
                 .lock(immediate_secp256k1_lock_script.clone())
@@ -3473,7 +3481,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3506,7 +3514,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3531,7 +3539,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3556,7 +3564,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3580,7 +3588,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 1000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3673,7 +3681,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3698,7 +3706,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
-                    funding_type_script: None,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))

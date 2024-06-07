@@ -2896,8 +2896,8 @@ impl ::core::fmt::Display for OpenChannel {
         write!(
             f,
             ", {}: {}",
-            "funding_type_script",
-            self.funding_type_script()
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
         )?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
         write!(f, ", {}: {}", "funding_fee_rate", self.funding_fee_rate())?;
@@ -3008,7 +3008,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_type_script(&self) -> ScriptOpt {
+    pub fn funding_udt_type_script(&self) -> ScriptOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -3143,7 +3143,7 @@ impl molecule::prelude::Entity for OpenChannel {
         Self::new_builder()
             .chain_hash(self.chain_hash())
             .channel_id(self.channel_id())
-            .funding_type_script(self.funding_type_script())
+            .funding_udt_type_script(self.funding_udt_type_script())
             .funding_amount(self.funding_amount())
             .funding_fee_rate(self.funding_fee_rate())
             .commitment_fee_rate(self.commitment_fee_rate())
@@ -3186,8 +3186,8 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "funding_type_script",
-            self.funding_type_script()
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
         )?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
         write!(f, ", {}: {}", "funding_fee_rate", self.funding_fee_rate())?;
@@ -3272,7 +3272,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_type_script(&self) -> ScriptOptReader<'r> {
+    pub fn funding_udt_type_script(&self) -> ScriptOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -3451,7 +3451,7 @@ impl<'r> molecule::prelude::Reader<'r> for OpenChannelReader<'r> {
 pub struct OpenChannelBuilder {
     pub(crate) chain_hash: Byte32,
     pub(crate) channel_id: Byte32,
-    pub(crate) funding_type_script: ScriptOpt,
+    pub(crate) funding_udt_type_script: ScriptOpt,
     pub(crate) funding_amount: Uint128,
     pub(crate) funding_fee_rate: Uint64,
     pub(crate) commitment_fee_rate: Uint64,
@@ -3479,8 +3479,8 @@ impl OpenChannelBuilder {
         self.channel_id = v;
         self
     }
-    pub fn funding_type_script(mut self, v: ScriptOpt) -> Self {
-        self.funding_type_script = v;
+    pub fn funding_udt_type_script(mut self, v: ScriptOpt) -> Self {
+        self.funding_udt_type_script = v;
         self
     }
     pub fn funding_amount(mut self, v: Uint128) -> Self {
@@ -3555,7 +3555,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.chain_hash.as_slice().len()
             + self.channel_id.as_slice().len()
-            + self.funding_type_script.as_slice().len()
+            + self.funding_udt_type_script.as_slice().len()
             + self.funding_amount.as_slice().len()
             + self.funding_fee_rate.as_slice().len()
             + self.commitment_fee_rate.as_slice().len()
@@ -3581,7 +3581,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.funding_type_script.as_slice().len();
+        total_size += self.funding_udt_type_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
         offsets.push(total_size);
@@ -3620,7 +3620,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         }
         writer.write_all(self.chain_hash.as_slice())?;
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.funding_type_script.as_slice())?;
+        writer.write_all(self.funding_udt_type_script.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
         writer.write_all(self.funding_fee_rate.as_slice())?;
         writer.write_all(self.commitment_fee_rate.as_slice())?;
@@ -3670,8 +3670,8 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(
             f,
             ", {}: {}",
-            "funding_type_script",
-            self.funding_type_script()
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
         )?;
         write!(
             f,
@@ -3771,7 +3771,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_type_script(&self) -> ScriptOpt {
+    pub fn funding_udt_type_script(&self) -> ScriptOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -3882,7 +3882,7 @@ impl molecule::prelude::Entity for AcceptChannel {
         Self::new_builder()
             .channel_id(self.channel_id())
             .funding_amount(self.funding_amount())
-            .funding_type_script(self.funding_type_script())
+            .funding_udt_type_script(self.funding_udt_type_script())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_accept_tlcs(self.max_accept_tlcs())
             .min_tlc_value(self.min_tlc_value())
@@ -3921,8 +3921,8 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "funding_type_script",
-            self.funding_type_script()
+            "funding_udt_type_script",
+            self.funding_udt_type_script()
         )?;
         write!(
             f,
@@ -3998,7 +3998,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_type_script(&self) -> ScriptOptReader<'r> {
+    pub fn funding_udt_type_script(&self) -> ScriptOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -4149,7 +4149,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
 pub struct AcceptChannelBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_amount: Uint128,
-    pub(crate) funding_type_script: ScriptOpt,
+    pub(crate) funding_udt_type_script: ScriptOpt,
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_accept_tlcs: Uint64,
     pub(crate) min_tlc_value: Uint128,
@@ -4173,8 +4173,8 @@ impl AcceptChannelBuilder {
         self.funding_amount = v;
         self
     }
-    pub fn funding_type_script(mut self, v: ScriptOpt) -> Self {
-        self.funding_type_script = v;
+    pub fn funding_udt_type_script(mut self, v: ScriptOpt) -> Self {
+        self.funding_udt_type_script = v;
         self
     }
     pub fn max_tlc_value_in_flight(mut self, v: Uint128) -> Self {
@@ -4233,7 +4233,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
             + self.funding_amount.as_slice().len()
-            + self.funding_type_script.as_slice().len()
+            + self.funding_udt_type_script.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_accept_tlcs.as_slice().len()
             + self.min_tlc_value.as_slice().len()
@@ -4255,7 +4255,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
         offsets.push(total_size);
-        total_size += self.funding_type_script.as_slice().len();
+        total_size += self.funding_udt_type_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.max_tlc_value_in_flight.as_slice().len();
         offsets.push(total_size);
@@ -4286,7 +4286,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
-        writer.write_all(self.funding_type_script.as_slice())?;
+        writer.write_all(self.funding_udt_type_script.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_accept_tlcs.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;

@@ -8,7 +8,7 @@ vector SignatureVec <Signature>;
 table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
-    funding_type_script:         ScriptOpt,
+    funding_udt_type_script:         ScriptOpt,
     funding_amount:              Uint128,
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
@@ -30,7 +30,7 @@ table OpenChannel {
 table AcceptChannel {
     channel_id:                  Byte32,
     funding_amount:              Uint128,
-    funding_type_script:         ScriptOpt,
+    funding_udt_type_script:         ScriptOpt,
     max_tlc_value_in_flight:     Uint128,
     max_accept_tlcs:             Uint64,
     min_tlc_value:               Uint128,

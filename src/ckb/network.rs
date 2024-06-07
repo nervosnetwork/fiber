@@ -100,7 +100,7 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     #[serde_as(as = "Option<EntityHex>")]
-    pub funding_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
 }
 
 #[derive(Debug)]
@@ -108,7 +108,7 @@ pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
     #[serde_as(as = "Option<EntityHex>")]
-    pub funding_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
 }
 
 impl NetworkActorMessage {
@@ -561,7 +561,7 @@ impl NetworkActorState {
         let OpenChannelCommand {
             peer_id,
             funding_amount,
-            funding_type_script,
+            funding_udt_type_script,
         } = open_channel;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -571,7 +571,7 @@ impl NetworkActorState {
             ChannelInitializationParameter::OpenChannel(
                 funding_amount,
                 seed,
-                funding_type_script,
+                funding_udt_type_script,
                 tx,
             ),
             network.clone().get_cell(),
@@ -590,7 +590,7 @@ impl NetworkActorState {
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
-            funding_type_script,
+            funding_udt_type_script,
         } = accept_channel;
         let (peer_id, open_channel) = self
             .to_be_accepted_channels
@@ -607,11 +607,11 @@ impl NetworkActorState {
         }
 
         match (
-            open_channel.funding_type_script.as_ref(),
-            funding_type_script.as_ref(),
+            open_channel.funding_udt_type_script.as_ref(),
+            funding_udt_type_script.as_ref(),
         ) {
-            (Some(open_channel_udt_script), Some(funding_type_script)) => {
-                if open_channel_udt_script != funding_type_script {
+            (Some(open_channel_udt_script), Some(funding_udt_type_script)) => {
+                if open_channel_udt_script != funding_udt_type_script {
                     return Err(ProcessingChannelError::InvalidParameter(
                         "Funding type script mismatch".to_string(),
                     ));
@@ -640,7 +640,7 @@ impl NetworkActorState {
                 funding_amount,
                 seed,
                 open_channel,
-                funding_type_script,
+                funding_udt_type_script,
                 Some(tx),
             ),
             network.clone().get_cell(),
