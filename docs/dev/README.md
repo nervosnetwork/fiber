@@ -9,6 +9,15 @@ When we have not intialized the dev chain for ckb, this command will automatical
 ./tests/nodes/start.sh
 ```
 
+Running above commmand with environment variable `REMOVE_OLD_STATE` to `y` will remove all old states.
+i.e.
+
+```
+REMOVE_OLD_STATE=y ./tests/nodes/start.sh
+```
+
+will start nodes in a clean state. This is useful in case like database schema are changed in development environment.
+
 ## (Re)Initialize a dev chain (optional)
 
 We can (re)initialize the dev chain to transfer some balances from the default dev chain account (corresponding to NODE3) and deploy contracts to it. This is normally not needed as above command automatically do that. `-f` parameter may be used to forcefully clean all old state and reintialize the dev chain.
