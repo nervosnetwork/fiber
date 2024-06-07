@@ -23,7 +23,7 @@ body:json {
                 "currency": "Ckb",
                 "description": "test invoice",
                 "expiry": 3600,
-                "payment_hash": [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "payment_hash": "0x0000000000000000000000000000000000000000000000000000000000000002x",
                 "final_cltv": 40
             }
         }
@@ -31,5 +31,5 @@ body:json {
 }
 
 assert {
-  res.status: eq 400
+  res.status: eq 422
 }

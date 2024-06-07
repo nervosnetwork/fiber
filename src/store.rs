@@ -9,7 +9,7 @@ use crate::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         types::Hash256,
     },
-    invoice::{CkbInvoice, InvoiceStore},
+    invoice::{CkbInvoice, InvoiceError, InvoiceStore},
 };
 
 #[derive(Clone)]
@@ -154,12 +154,17 @@ impl InvoiceStore for Store {
         })
     }
 
-    fn insert_invoice(&self, invoice: CkbInvoice) {
+    fn insert_invoice(&self, invoice: CkbInvoice) -> Result<(), InvoiceError> {
         let mut batch = self.batch();
+        let hash = invoice.payment_hash().clone();
+        if self.get_invoice(&hash).is_some() {
+            return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
+        }
         batch.put_kv(KeyValue::CkbInvoice(
             invoice.payment_hash().clone(),
             invoice,
         ));
         batch.commit();
+        return Ok(());
     }
 }
