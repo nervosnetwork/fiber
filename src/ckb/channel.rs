@@ -2382,16 +2382,17 @@ impl ChannelActorState {
                 let mut amount_bytes = [0u8; 16];
                 amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
                 let udt_amount = u128::from_le_bytes(amount_bytes);
-                warn!(
+                debug!(
                     "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
                     udt_amount, self.to_remote_amount, self.to_local_amount
                 );
-                if udt_amount == self.to_remote_amount + self.to_local_amount {
-                    return Ok(true);
-                }
-            } else {
-                return Ok(false);
+                return Ok(udt_amount == self.to_remote_amount + self.to_local_amount);
             }
+            debug!(
+                "is_tx_final: output data length {} is less than 16",
+                data.as_ref().len()
+            );
+            return Ok(false);
         }
         let current_capacity: u64 = first_output.capacity().unpack();
         let is_complete = current_capacity == (self.to_local_amount + self.to_remote_amount) as u64;
