@@ -3,6 +3,7 @@ use crate::ckb::{
         AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand},
+    serde_utils::{U128Hex, U32Hex, U64Hex},
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -22,6 +23,7 @@ use tentacle::secio::PeerId;
 pub struct OpenChannelParams {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
+    #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
 }
 
@@ -30,9 +32,11 @@ pub struct OpenChannelResult {
     pub temporary_channel_id: Hash256,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
+    #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
 }
 
@@ -47,37 +51,51 @@ pub struct CommitmentSignedParams {
     pub channel_id: Hash256,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct AddTlcParams {
     pub channel_id: Hash256,
+    #[serde_as(as = "U128Hex")]
     pub amount: u128,
     pub payment_hash: Hash256,
     pub expiry: LockTime,
 }
 
+#[serde_as]
 #[derive(Clone, Serialize)]
 pub struct AddTlcResult {
+    #[serde_as(as = "U64Hex")]
     pub tlc_id: u64,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct RemoveTlcParams {
     pub channel_id: Hash256,
+    #[serde_as(as = "U64Hex")]
     pub tlc_id: u64,
     pub reason: RemoveTlcReason,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RemoveTlcReason {
-    RemoveTlcFulfill { payment_preimage: Hash256 },
-    RemoveTlcFail { error_code: u32 },
+    RemoveTlcFulfill {
+        payment_preimage: Hash256,
+    },
+    RemoveTlcFail {
+        #[serde_as(as = "U32Hex")]
+        error_code: u32,
+    },
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
+    #[serde_as(as = "U128Hex")]
     pub fee: u128,
 }
 

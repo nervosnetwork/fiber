@@ -149,27 +149,34 @@ pub async fn main() {
     };
 
     // Start rpc service
-    if let Some(rpc_config) = config.rpc {
-        if ckb_command_sender.is_none()
-            && cch_command_sender.is_none()
-            && invoice_command_sender.is_none()
-        {
-            error!("Rpc service requires ckb, chh and invoice service to be started. Exiting.");
-            return;
+    let rpc_server_handle = match config.rpc {
+        Some(rpc_config) => {
+            if ckb_command_sender.is_none()
+                && cch_command_sender.is_none()
+                && invoice_command_sender.is_none()
+            {
+                error!("Rpc service requires ckb, chh and invoice service to be started. Exiting.");
+                return;
+            }
+
+            info!("Starting rpc");
+            let handle = start_rpc(
+                rpc_config,
+                ckb_command_sender,
+                cch_command_sender,
+                invoice_command_sender,
+            )
+            .await;
+            Some(handle)
         }
-
-        let handle = start_rpc(
-            rpc_config,
-            ckb_command_sender,
-            cch_command_sender,
-            invoice_command_sender,
-        )
-        .await;
-
-        handle.stopped().await;
+        None => None,
     };
 
     signal::ctrl_c().await.expect("Failed to listen for event");
     info!("Received Ctrl-C, shutting down");
+    if let Some(handle) = rpc_server_handle {
+        handle.stop().unwrap();
+        handle.stopped().await;
+    }
     cancel_tasks_and_wait_for_completion().await;
 }

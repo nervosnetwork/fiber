@@ -32,8 +32,12 @@ use std::{
 };
 
 use crate::{
-    ckb::{chain::CommitmentLockContext, types::Shutdown},
-    ckb_chain::FundingRequest,
+    ckb::types::Shutdown,
+    ckb_chain::{
+        contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
+        FundingRequest,
+    },
+    NetworkServiceEvent,
 };
 
 use super::{
