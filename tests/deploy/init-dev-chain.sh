@@ -50,6 +50,7 @@ if ! [[ -d "$data_dir" ]]; then
     # The address of node 1 can be seen with the following command:
     # echo | HOME=/tmp ckb-cli account import --local-only --privkey-path "$script_dir/../nodes/1/ckb-chain/key"
     ckb-cli wallet transfer --to-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f --capacity 5000000000 --fee-rate 2000 --privkey-path "$script_dir/../nodes/deployer/ckb-chain/key"
+
     sleep 1
     "$script_dir/generate-blocks.sh" 6
     sleep 1

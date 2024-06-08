@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::FundingError;
-use crate::ckb::serde_utils::EntityHex;
+use crate::{
+    ckb::serde_utils::EntityHex,
+    ckb_chain::contracts::{get_cell_deps_by_contracts, Contract},
+};
 
 use anyhow::anyhow;
 use ckb_sdk::{
@@ -17,9 +20,8 @@ use ckb_sdk::{
     CkbRpcClient, ScriptId,
 };
 use ckb_types::{
-    core::{BlockView, Capacity, DepType, TransactionView},
-    h256,
-    packed::{self, Bytes, CellDep, CellInput, CellOutput, OutPoint, Script, Transaction},
+    core::{BlockView, Capacity, TransactionView},
+    packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
 use log::warn;
@@ -113,7 +115,7 @@ impl TxBuilder for FundingTxBuilder {
     fn build_base(
         &self,
         cell_collector: &mut dyn CellCollector,
-        cell_dep_resolver: &dyn CellDepResolver,
+        _cell_dep_resolver: &dyn CellDepResolver,
         _header_dep_resolver: &dyn HeaderDepResolver,
         _tx_dep_provider: &dyn TransactionDependencyProvider,
     ) -> Result<TransactionView, TxBuilderError> {
@@ -194,15 +196,12 @@ impl TxBuilder for FundingTxBuilder {
                         "proper UDT owner cell not found"
                     )));
                 }
-                let owner_cell_dep = cell_dep_resolver
-                    .resolve(&owner)
-                    .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(owner.clone()))?;
-                let udt_cell_dep = cell_dep_resolver
-                    .resolve(&udt_type_script)
-                    .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script.clone()))?;
-                #[allow(clippy::mutable_key_type)]
-                cell_deps.insert(owner_cell_dep);
-                cell_deps.insert(udt_cell_dep);
+                // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+                // we need to filter the cell deps by the contracts_context
+                let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+                for cell_dep in udt_cell_deps {
+                    cell_deps.insert(cell_dep);
+                }
             }
         }
 
@@ -301,27 +300,10 @@ impl FundingTxBuilder {
             CapacityBalancer::new_simple(sender, placeholder_witness, self.request.local_fee_rate);
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
-        let mut cell_dep_resolver = {
+        let cell_dep_resolver = {
             let genesis_block = ckb_client.get_block_by_number(0.into()).unwrap().unwrap();
             DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).unwrap()
         };
-
-        if let Some(ref udt_info) = self.request.udt_info {
-            // FIXME(yukang): how to add cell deps for udt?
-            let udt_type_script = udt_info.type_script.clone();
-            let tx_hash =
-                h256!("0xc24e3b64b9fb890ec319115713742029cefbd8cd2c9a47e9b4547192b23f3985");
-            let out_point = OutPoint::new(tx_hash.pack(), 0);
-            let cell_dep = CellDep::new_builder()
-                .out_point(out_point)
-                .dep_type(DepType::Code.into())
-                .build();
-            cell_dep_resolver.insert(
-                ScriptId::from(&udt_type_script),
-                cell_dep,
-                "Simple UDT".to_string(),
-            );
-        }
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
