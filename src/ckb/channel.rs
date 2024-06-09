@@ -906,14 +906,6 @@ where
                     ))));
                 }
 
-                if funding_udt_type_script.is_some() {
-                    // We have not implemented funding type script yet.
-                    // But don't panic, otherwise adversary can easily take us down.
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Funding type script is not none, but we are currently unable to process this".to_string(),
-                    )));
-                }
-
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     my_funding_amount,
@@ -1001,7 +993,7 @@ where
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
-                    funding_udt_type_script: None,
+                    funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,

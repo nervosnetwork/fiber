@@ -20,7 +20,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenChannelParams {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,

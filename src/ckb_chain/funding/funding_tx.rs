@@ -233,7 +233,6 @@ impl FundingTxBuilder {
         let udt_type_script = udt_info.type_script.clone();
         let owner = self.context.funding_source_lock_script.clone();
         let mut found_udt_amount = 0;
-        let mut found_enough_udt_cells = false;
 
         let mut query = CellQueryOptions::new_lock(owner.clone());
         query.script_search_mode = Some(SearchMode::Exact);
@@ -250,12 +249,17 @@ impl FundingTxBuilder {
                 let mut amount_bytes = [0u8; 16];
                 amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
                 let cell_udt_amount = u128::from_le_bytes(amount_bytes);
+                let ckb_amount: u64 = cell.output.capacity().unpack();
+                warn!(
+                    "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
+                    ckb_amount, cell_udt_amount, cell
+                );
                 found_udt_amount += cell_udt_amount;
                 inputs.push(CellInput::new(cell.out_point.clone(), 0));
 
                 if found_udt_amount >= udt_amount {
                     let change_output_data: Bytes =
-                        (udt_amount - found_udt_amount).to_le_bytes().pack();
+                        (found_udt_amount - udt_amount).to_le_bytes().pack();
 
                     let dummy_output = CellOutput::new_builder()
                         .lock(owner.clone())
@@ -274,24 +278,20 @@ impl FundingTxBuilder {
                     outputs_data.push(change_output_data);
 
                     warn!("find proper UDT owner cells: {:?}", inputs);
-                    found_enough_udt_cells = true;
-                    break;
+
+                    // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+                    // we need to filter the cell deps by the contracts_context
+                    let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+                    for cell_dep in udt_cell_deps {
+                        cell_deps.insert(cell_dep);
+                    }
+                    return Ok(());
                 }
             }
         }
-        if !found_enough_udt_cells {
-            return Err(TxBuilderError::Other(anyhow!(
-                "can not find enough UDT owner cells for funding transaction"
-            )));
-        } else {
-            // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
-            // we need to filter the cell deps by the contracts_context
-            let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
-            for cell_dep in udt_cell_deps {
-                cell_deps.insert(cell_dep);
-            }
-        }
-        return Ok(());
+        return Err(TxBuilderError::Other(anyhow!(
+            "can not find enough UDT owner cells for funding transaction"
+        )));
     }
 
     fn build(self) -> Result<FundingTx, FundingError> {
