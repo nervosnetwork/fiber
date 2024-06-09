@@ -1833,6 +1833,7 @@ impl ChannelActorState {
         partial_signatures: [PartialSignature; 2],
         version: Option<u64>,
         tx: &TransactionView,
+        shutdown: bool,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let funding_out_point = self.get_funding_transaction_outpoint();
         let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
@@ -1850,11 +1851,12 @@ impl ChannelActorState {
         )?;
 
         let witness = self.create_witness_for_funding_cell(signature, None);
-        let tx = self
-            .get_funding_transaction()
-            .as_advanced_builder()
-            .set_witnesses(vec![witness.pack()])
-            .build();
+        let builder = if shutdown {
+            tx.as_advanced_builder()
+        } else {
+            self.get_funding_transaction().as_advanced_builder()
+        };
+        let tx = builder.set_witnesses(vec![witness.pack()]).build();
         Ok(tx)
     }
 
@@ -1873,6 +1875,7 @@ impl ChannelActorState {
             [tx.signature, signature2],
             Some(tx.version),
             &tx.tx,
+            false,
         )
     }
 
@@ -1936,6 +1939,7 @@ impl ChannelActorState {
                     [local_shutdown_signature, remote_shutdown_signature],
                     None,
                     &shutdown_tx,
+                    true,
                 )?;
 
                 network
