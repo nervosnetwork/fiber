@@ -26,6 +26,7 @@ pub struct OpenChannelParams {
     pub peer_id: PeerId,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub funding_udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -39,6 +40,7 @@ pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub funding_udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -183,6 +185,10 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount.clone(),
+                    funding_udt_type_script: params
+                        .funding_udt_type_script
+                        .clone()
+                        .map(|s| s.into()),
                 },
                 rpc_reply,
             ))
@@ -208,6 +214,10 @@ where
                 AcceptChannelCommand {
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
+                    funding_udt_type_script: params
+                        .funding_udt_type_script
+                        .clone()
+                        .map(|s| s.into()),
                 },
                 rpc_reply,
             ))

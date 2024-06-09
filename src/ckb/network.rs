@@ -99,7 +99,6 @@ pub enum NetworkActorCommand {
 pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
-    #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 }
 
@@ -107,7 +106,6 @@ pub struct OpenChannelCommand {
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
-    #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 }
 

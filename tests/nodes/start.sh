@@ -57,5 +57,4 @@ fi
 
 # -n means we will exit when any of the background processes exits.
 # https://www.gnu.org/software/bash/manual/bash.html#index-wait
-# wait -n
 wait -n

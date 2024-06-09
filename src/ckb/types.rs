@@ -427,7 +427,6 @@ impl TryFrom<Byte66> for PubNonce {
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
-    #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
     pub funding_amount: u128,
     pub funding_fee_rate: u64,
@@ -504,12 +503,10 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AcceptChannel {
     pub channel_id: Hash256,
     pub funding_amount: u128,
-    #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
