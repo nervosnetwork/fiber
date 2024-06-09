@@ -788,6 +788,7 @@ impl<S> ChannelActor<S> {
                 )?;
             }
             TxCollaborationCommand::TxComplete(_) => {
+                state.check_tx_complete_preconditions()?;
                 let pcn_msg = PCNMessage::TxComplete(TxComplete {
                     channel_id: state.get_id(),
                 });
@@ -799,8 +800,6 @@ impl<S> ChannelActor<S> {
                         )),
                     ))
                     .expect("network actor alive");
-
-                state.check_tx_complete_preconditions()?;
                 state.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
                 ));
