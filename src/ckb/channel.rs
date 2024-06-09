@@ -37,7 +37,7 @@ use crate::{
         contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
         FundingRequest,
     },
-    NetworkServiceEvent, RpcError,
+    NetworkServiceEvent,
 };
 
 use super::{
@@ -78,7 +78,7 @@ pub struct AddTlcResponse {
     pub tlc_id: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     // TODO: maybe we should automatically send commitment_signed message after receiving
@@ -86,38 +86,36 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(
         AddTlcCommand,
-        #[serde(skip)] Option<RpcReplyPort<Result<AddTlcResponse, RpcError>>>,
+        Option<RpcReplyPort<Result<AddTlcResponse, ProcessingChannelError>>>,
     ),
     RemoveTlc(RemoveTlcCommand),
     Shutdown(ShutdownCommand),
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub enum TxCollaborationCommand {
     TxUpdate(TxUpdateCommand),
     TxComplete(TxCompleteCommand),
 }
 
-#[derive(Copy, Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct AddTlcCommand {
-    amount: u128,
-    preimage: Option<Hash256>,
-    payment_hash: Option<Hash256>,
-    expiry: LockTime,
+    pub amount: u128,
+    pub preimage: Option<Hash256>,
+    pub payment_hash: Option<Hash256>,
+    pub expiry: LockTime,
 }
 
-#[derive(Copy, Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct RemoveTlcCommand {
-    id: u64,
-    reason: RemoveTlcReason,
+    pub id: u64,
+    pub reason: RemoveTlcReason,
 }
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ShutdownCommand {
-    #[serde_as(as = "EntityHex")]
-    close_script: Script,
-    fee: u128,
+    pub close_script: Script,
+    pub fee: u128,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -126,7 +124,7 @@ fn get_random_preimage() -> Hash256 {
     preimage.into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct ChannelCommandWithId {
     pub channel_id: Hash256,
     pub command: ChannelCommand,
@@ -139,14 +137,12 @@ pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 
-#[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct TxUpdateCommand {
-    #[serde_as(as = "EntityHex")]
     pub transaction: Transaction,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug)]
 pub struct TxCompleteCommand {}
 
 pub enum ChannelInitializationParameter {
@@ -497,7 +493,7 @@ impl<S> ChannelActor<S> {
             TxCollaborationCommand::TxUpdate(tx_update) => {
                 let pcn_msg = PCNMessage::TxUpdate(TxUpdate {
                     channel_id: state.get_id(),
-                    tx: tx_update.clone().transaction,
+                    tx: tx_update.transaction.clone(),
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(

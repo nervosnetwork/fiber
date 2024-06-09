@@ -58,6 +58,7 @@ serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 hex = "0.4.3"
 tower = "0.4.13"
 axum = { version = "0.7.5", features = ["json"] }
+jsonrpsee = { version = "0.22", features = ["server", "macros"] }
 bitflags = { version = "2.5.0", features = ["serde"] }
 ckb-hash = "0.115.0"
 secp256k1 = { version = "0.28.0", features = ["serde", "recovery"] }

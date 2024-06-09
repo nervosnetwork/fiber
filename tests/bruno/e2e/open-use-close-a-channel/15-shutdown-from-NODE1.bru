@@ -1,7 +1,7 @@
 meta {
-  name: Node1 add tlc
+  name: send shutdown from NODE1
   type: http
-  seq: 17
+  seq: 15
 }
 
 post {
@@ -19,13 +19,16 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "add_tlc",
+    "method": "shutdown_channel",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "amount": "{{payment_amount}}",
-        "payment_hash": "{{payment_hash}}",
-        "expiry": 40
+        "channel_id": "{{CHANNEL_ID}}",
+        "close_script": {
+          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "hash_type": "data",
+          "args": "0x0101010101010101010101010101010101010101"
+        },
+        "fee": "0xbebc200"
       }
     ]
   }
@@ -33,11 +36,10 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
+  res.body.result: isNull
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("N1N2_TLC_ID2", res.body.result.tlc_id);
 }

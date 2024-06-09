@@ -1,7 +1,7 @@
 meta {
-  name: Node1 add tlc
+  name: add tlc from NODE1
   type: http
-  seq: 17
+  seq: 8
 }
 
 post {
@@ -22,9 +22,9 @@ body:json {
     "method": "add_tlc",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "amount": "{{payment_amount}}",
-        "payment_hash": "{{payment_hash}}",
+        "channel_id": "{{CHANNEL_ID}}",
+        "amount": "0xbebc200",
+        "payment_hash": "0xcb7bce98a778f130d34da522623d7e56705bddfe0dc4781bd2331211134a19a5",
         "expiry": 40
       }
     ]
@@ -39,5 +39,5 @@ assert {
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("N1N2_TLC_ID2", res.body.result.tlc_id);
+  bru.setVar("TLC_ID2", res.body.result.tlc_id);
 }

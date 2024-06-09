@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use super::gen::pcn::{self as molecule_pcn, PubNonce as Byte66, SignatureVec};
-use super::serde_utils::{EntityHex, SliceHex};
+use super::serde_utils::SliceHex;
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
 use ckb_types::packed::Uint64;
@@ -16,7 +16,6 @@ use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
 use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
-use serde_with::base64::Base64;
 use serde_with::serde_as;
 use thiserror::Error;
 
@@ -424,12 +423,10 @@ impl TryFrom<Byte66> for PubNonce {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
-    #[serde_as(as = "Option<EntityHex>")]
     pub funding_type_script: Option<Script>,
     pub funding_amount: u128,
     pub funding_fee_rate: u64,
@@ -694,11 +691,9 @@ pub enum TxCollaborationMsg {
     TxComplete(TxComplete),
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TxUpdate {
     pub channel_id: Hash256,
-    #[serde_as(as = "EntityHex")]
     pub tx: Transaction,
 }
 
@@ -771,8 +766,7 @@ impl TryFrom<molecule_pcn::TxAbort> for TxAbort {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TxInitRBF {
     pub channel_id: Hash256,
     pub fee_rate: u64,
@@ -821,11 +815,9 @@ impl TryFrom<molecule_pcn::TxAckRBF> for TxAckRBF {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Shutdown {
     pub channel_id: Hash256,
-    #[serde_as(as = "EntityHex")]
     pub close_script: Script,
     pub fee: u128,
 }
@@ -852,8 +844,7 @@ impl TryFrom<molecule_pcn::Shutdown> for Shutdown {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ClosingSigned {
     pub channel_id: Hash256,
     pub partial_signature: PartialSignature,
@@ -884,8 +875,7 @@ impl TryFrom<molecule_pcn::ClosingSigned> for ClosingSigned {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1113,10 +1103,8 @@ impl TryFrom<molecule_pcn::RemoveTlc> for RemoveTlc {
     }
 }
 
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TestMessage {
-    #[serde_as(as = "Base64")]
     pub bytes: Vec<u8>,
 }
 
@@ -1138,7 +1126,7 @@ impl TryFrom<molecule_pcn::TestMessage> for TestMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum PCNMessage {
     TestMessage(TestMessage),
     OpenChannel(OpenChannel),
@@ -1310,9 +1298,8 @@ impl TryFrom<molecule_pcn::PCNMessage> for PCNMessage {
 macro_rules! impl_traits {
     ($t:ident) => {
         impl $t {
-            pub fn to_molecule_bytes(&self) -> molecule::bytes::Bytes {
-                // TODO: we cloned twice here, both in self.clone and as_bytes.
-                molecule_pcn::$t::from(self.clone()).as_bytes()
+            pub fn to_molecule_bytes(self) -> molecule::bytes::Bytes {
+                molecule_pcn::$t::from(self).as_bytes()
             }
         }
 

@@ -1,7 +1,7 @@
 meta {
-  name: connect peer
+  name: open a channel to a peer
   type: http
-  seq: 1
+  seq: 2
 }
 
 post {
@@ -19,20 +19,22 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "connect_peer",
+    "method": "open_channel",
     "params": [
-      {"address": "{{NODE1_ADDR}}"}
+      {
+        "peer_id": "{{NODE1_PEERID}}",
+        "funding_amount": "0xba43b7400"
+      }
     ]
   }
 }
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.result.temporary_channel_id: isDefined
 }
 
 script:post-response {
-  // Dialing a peer is async in tentacle. Sleep for some time to make sure
-  // we're connected to the peer.
   await new Promise(r => setTimeout(r, 1000));
+  bru.setVar("TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }
