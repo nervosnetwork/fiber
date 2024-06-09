@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE2_RPC_URL}}/ckb
+  url: {{NODE2_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,24 +17,25 @@ headers {
 
 body:json {
   {
-    "request": {
-      "AcceptChannel": [
-        {
-          "temp_channel_id": "{{N2N3_TEMP_CHANNEL_ID}}",
-          "funding_amount": 61000000000000
-        }
-      ]
-    }
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "accept_channel",
+    "params": [
+      {
+        "temporary_channel_id": "{{N2N3_TEMP_CHANNEL_ID}}",
+        "funding_amount": "0x377aab54d000"
+      }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.channel_id: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
-  console.log("accept channel result: ", res.body);
-  bru.setVar("N2N3_CHANNEL_ID", res.body.new_channel_id);
+  bru.setVar("N2N3_CHANNEL_ID", res.body.result.channel_id);
 }

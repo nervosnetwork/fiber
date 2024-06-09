@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,26 +17,24 @@ headers {
 
 body:json {
   {
-    "request": {
-      "ControlPcnChannel": {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "remove_tlc",
+    "params": [
+      {
         "channel_id": "{{N2N3_CHANNEL_ID}}",
-        "command": {
-          "RemoveTlc": {
-            "id": {{N2N3_TLC_ID2}},
-            "reason": {
-              "RemoveTlcFulfill": {
-                "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000003"
-              }
-            }
-          }
+        "tlc_id": "{{N2N3_TLC_ID2}}",
+        "reason": {
+          "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000003"
         }
       }
-    }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {

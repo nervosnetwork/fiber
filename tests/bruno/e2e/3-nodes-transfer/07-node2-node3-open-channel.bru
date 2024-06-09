@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}/ckb
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -17,24 +17,24 @@ headers {
 
 body:json {
   {
-    "request": {
-      "OpenChannel":
-      [
-        {
-          "peer_id": "{{NODE2_PEERID}}",
-          "funding_amount": 61000000000000
-        }
-      ]
-    }
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "peer_id": "{{NODE2_PEERID}}",
+        "funding_amount": "0x377aab54d000"
+      }
+    ]
   }
 }
 
 assert {
-  res.status: eq 200
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
 }
 
 script:post-response {
   await new Promise(r => setTimeout(r, 1000));
-  console.log("N2N3 response: ", res.body.channel_id);
-  bru.setVar("N2N3_TEMP_CHANNEL_ID", res.body.channel_id);
+  bru.setVar("N2N3_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }
