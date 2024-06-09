@@ -15,6 +15,19 @@ headers {
   Accept: application/json
 }
 
+script:pre-request {
+  // generate random hash
+  function generateRandomHash() {
+    let hash = '0x';
+    for (let i = 0; i < 64; i++) {
+        hash += Math.floor(Math.random() * 16).toString(16);
+    }
+    return hash;
+  }
+  const payment_hash = generateRandomHash();
+  bru.setVar("payment_hash", payment_hash);
+}
+
 body:json {
     {
         "request": {
@@ -23,7 +36,7 @@ body:json {
                 "currency": "Ckb",
                 "description": "test invoice",
                 "expiry": 3600,
-                "payment_hash":  [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "payment_hash": "{{payment_hash}}",
                 "final_cltv": 40
             }
         }
