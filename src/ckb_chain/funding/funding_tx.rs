@@ -9,11 +9,11 @@ use crate::{
 use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
+    rpc::ckb_indexer::SearchMode,
     traits::{
         CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
         DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
-        HeaderDepResolver, QueryOrder, SecpCkbRawKeySigner, TransactionDependencyProvider,
-        ValueRangeOption,
+        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -123,88 +123,24 @@ impl TxBuilder for FundingTxBuilder {
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
 
+        let mut inputs = vec![];
+        let mut cell_deps = HashSet::new();
+
         // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
         let mut outputs: Vec<packed::CellOutput> = vec![funding_cell_output];
         let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell_output_data];
 
-        // Try to find a proper UDT input cell.
-        let mut inputs = vec![];
-        let mut cell_deps = HashSet::new();
-
         if let Some(ref tx) = self.funding_tx.tx {
-            for input in tx.inputs().into_iter() {
-                inputs.push(input.clone());
-            }
-            for cell_dep in tx.cell_deps().into_iter() {
-                cell_deps.insert(cell_dep);
-            }
+            inputs = tx.inputs().into_iter().collect();
+            cell_deps = tx.cell_deps().into_iter().collect();
         }
-
-        if let Some(ref udt_info) = self.request.udt_info {
-            let udt_amount = self.request.local_amount as u128;
-
-            if udt_amount > 0 {
-                let udt_type_script = udt_info.type_script.clone();
-                let owner = self.context.funding_source_lock_script.clone();
-                let owner_query = {
-                    let mut query = CellQueryOptions::new_lock(owner.clone());
-                    query.secondary_script = Some(udt_type_script.clone());
-                    query.data_len_range = Some(ValueRangeOption::new_min(16));
-                    query.min_total_capacity = u64::MAX;
-                    query.order = QueryOrder::Desc;
-                    query
-                };
-
-                let (owner_cells, _) = cell_collector.collect_live_cells(&owner_query, true)?;
-                let mut found_udt_cell = false;
-                for cell in owner_cells.iter() {
-                    let mut amount_bytes = [0u8; 16];
-                    amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
-                    let cell_udt_amount = u128::from_le_bytes(amount_bytes);
-                    //FIXME(yukang): we may need to revise the check here
-                    if cell_udt_amount >= udt_amount {
-                        inputs.push(CellInput::new(cell.out_point.clone(), 0));
-                        if cell_udt_amount > udt_amount {
-                            let change_output_data: Bytes =
-                                (cell_udt_amount - udt_amount).to_le_bytes().pack();
-
-                            let dummy_output = CellOutput::new_builder()
-                                .lock(owner.clone())
-                                .type_(Some(udt_type_script.clone()).pack())
-                                .build();
-                            let required_capacity = dummy_output
-                                .occupied_capacity(
-                                    Capacity::bytes(change_output_data.len()).unwrap(),
-                                )
-                                .unwrap()
-                                .pack();
-                            let change_output = dummy_output
-                                .as_builder()
-                                .capacity(required_capacity)
-                                .build();
-
-                            outputs.push(change_output);
-                            outputs_data.push(change_output_data);
-                        }
-                        warn!("find proper UDT owner cell: {:?}", cell);
-                        found_udt_cell = true;
-                        break;
-                    }
-                }
-                if !found_udt_cell {
-                    return Err(TxBuilderError::Other(anyhow!(
-                        "proper UDT owner cell not found"
-                    )));
-                }
-                // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
-                // we need to filter the cell deps by the contracts_context
-                let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
-                for cell_dep in udt_cell_deps {
-                    cell_deps.insert(cell_dep);
-                }
-            }
-        }
-
+        self.build_udt_inputs_outputs(
+            cell_collector,
+            &mut inputs,
+            &mut outputs,
+            &mut outputs_data,
+            &mut cell_deps,
+        )?;
         if let Some(ref tx) = self.funding_tx.tx {
             for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
                 outputs.push(output.clone());
@@ -278,6 +214,84 @@ impl FundingTxBuilder {
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
+    }
+
+    fn build_udt_inputs_outputs(
+        &self,
+        cell_collector: &mut dyn CellCollector,
+        inputs: &mut Vec<CellInput>,
+        outputs: &mut Vec<packed::CellOutput>,
+        outputs_data: &mut Vec<packed::Bytes>,
+        cell_deps: &mut HashSet<packed::CellDep>,
+    ) -> Result<(), TxBuilderError> {
+        let udt_amount = self.request.local_amount as u128;
+        let udt_info = match &self.request.udt_info {
+            Some(ref udt_info) if self.request.local_amount > 0 => udt_info,
+            _ => return Ok(()),
+        };
+
+        let udt_type_script = udt_info.type_script.clone();
+        let owner = self.context.funding_source_lock_script.clone();
+        let mut found_udt_amount = 0;
+        let mut found_enough_udt_cells = false;
+
+        let mut query = CellQueryOptions::new_lock(owner.clone());
+        query.script_search_mode = Some(SearchMode::Exact);
+        query.secondary_script = Some(udt_type_script.clone());
+        query.data_len_range = Some(ValueRangeOption::new_min(16));
+
+        loop {
+            // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
+            let (udt_cells, _) = cell_collector.collect_live_cells(&query, true)?;
+            if udt_cells.is_empty() {
+                break;
+            }
+            for cell in udt_cells.iter() {
+                let mut amount_bytes = [0u8; 16];
+                amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
+                let cell_udt_amount = u128::from_le_bytes(amount_bytes);
+                found_udt_amount += cell_udt_amount;
+                inputs.push(CellInput::new(cell.out_point.clone(), 0));
+
+                if found_udt_amount >= udt_amount {
+                    let change_output_data: Bytes =
+                        (udt_amount - found_udt_amount).to_le_bytes().pack();
+
+                    let dummy_output = CellOutput::new_builder()
+                        .lock(owner.clone())
+                        .type_(Some(udt_type_script.clone()).pack())
+                        .build();
+                    let required_capacity = dummy_output
+                        .occupied_capacity(Capacity::bytes(change_output_data.len()).unwrap())
+                        .unwrap()
+                        .pack();
+                    let change_output = dummy_output
+                        .as_builder()
+                        .capacity(required_capacity)
+                        .build();
+
+                    outputs.push(change_output);
+                    outputs_data.push(change_output_data);
+
+                    warn!("find proper UDT owner cells: {:?}", inputs);
+                    found_enough_udt_cells = true;
+                    break;
+                }
+            }
+        }
+        if !found_enough_udt_cells {
+            return Err(TxBuilderError::Other(anyhow!(
+                "can not find enough UDT owner cells for funding transaction"
+            )));
+        } else {
+            // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+            // we need to filter the cell deps by the contracts_context
+            let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+            for cell_dep in udt_cell_deps {
+                cell_deps.insert(cell_dep);
+            }
+        }
+        return Ok(());
     }
 
     fn build(self) -> Result<FundingTx, FundingError> {
