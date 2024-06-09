@@ -2,6 +2,7 @@ use super::errors::VerificationError;
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
 use crate::ckb::serde_utils::EntityHex;
+use crate::ckb::serde_utils::U128Hex;
 use crate::ckb::types::Hash256;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
@@ -143,8 +144,10 @@ pub enum Attribute {
     Feature(u64),
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InvoiceData {
+    #[serde_as(as = "U128Hex")]
     pub timestamp: u128,
     pub payment_hash: Hash256,
     pub attrs: Vec<Attribute>,
@@ -171,9 +174,11 @@ macro_rules! attr_getter {
 ///  1. using [`CkbInvoiceBuilder`]
 ///  2. using `str::parse::<CkbInvoice>(&str)` (see [`CkbInvoice::from_str`])
 ///
+#[serde_as]
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CkbInvoice {
     pub currency: Currency,
+    #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
     pub prefix: Option<SiPrefix>,
     pub signature: Option<InvoiceSignature>,
