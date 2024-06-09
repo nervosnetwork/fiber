@@ -1,21 +1,34 @@
-use super::InvoiceCommandWithReply;
+use std::time::Duration;
+
+use crate::ckb::serde_utils::{U128Hex, U64Hex};
 use crate::ckb::types::Hash256;
-use crate::invoice::{Currency, InvoiceCommand};
+use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{channel, Sender};
+use serde_with::serde_as;
 
+#[serde_as]
 #[derive(Serialize, Deserialize)]
 pub struct NewInvoiceParams {
+    #[serde_as(as = "U128Hex")]
     pub amount: u128,
     pub description: Option<String>,
     pub currency: Currency,
     pub payment_preimage: Hash256,
+    #[serde_as(as = "Option<U64Hex>")]
     pub expiry: Option<u64>,
     pub fallback_address: Option<String>,
+    #[serde_as(as = "Option<U64Hex>")]
     pub final_cltv: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
     pub final_htlc_timeout: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NewInvoiceResult {
+    pub invoice_string: String,
+    pub invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,47 +36,76 @@ pub struct ParseInvoiceParams {
     pub invoice: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ParseInvoiceResult {
+    pub invoice: CkbInvoice,
+}
+
 #[rpc(server)]
 pub trait InvoiceRpc {
     #[method(name = "new_invoice")]
-    async fn new_invoice(&self, params: NewInvoiceParams) -> Result<String, ErrorObjectOwned>;
+    async fn new_invoice(
+        &self,
+        params: NewInvoiceParams,
+    ) -> Result<NewInvoiceResult, ErrorObjectOwned>;
 
     #[method(name = "parse_invoice")]
-    async fn parse_invoice(&self, params: ParseInvoiceParams) -> Result<String, ErrorObjectOwned>;
+    async fn parse_invoice(
+        &self,
+        params: ParseInvoiceParams,
+    ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 }
 
-pub struct InvoiceRpcServerImpl {
-    pub invoice_command_sender: Sender<InvoiceCommandWithReply>,
+pub struct InvoiceRpcServerImpl<S> {
+    pub store: S,
 }
 
-impl InvoiceRpcServerImpl {
-    pub fn new(invoice_command_sender: Sender<InvoiceCommandWithReply>) -> Self {
-        InvoiceRpcServerImpl {
-            invoice_command_sender,
-        }
+impl<S> InvoiceRpcServerImpl<S> {
+    pub fn new(store: S) -> Self {
+        Self { store }
     }
 }
 
 #[async_trait]
-impl InvoiceRpcServer for InvoiceRpcServerImpl {
-    async fn new_invoice(&self, params: NewInvoiceParams) -> Result<String, ErrorObjectOwned> {
-        let command = InvoiceCommand::NewInvoice(crate::invoice::NewInvoiceParams {
-            amount: params.amount,
-            description: params.description.clone(),
-            currency: params.currency,
-            payment_hash: None,
-            payment_preimage: Some(params.payment_preimage),
-            expiry: params.expiry,
-            fallback_address: params.fallback_address.clone(),
-            final_cltv: params.final_cltv,
-            final_htlc_timeout: params.final_htlc_timeout,
-        });
+impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
+where
+    S: InvoiceStore + Send + Sync + 'static,
+{
+    async fn new_invoice(
+        &self,
+        params: NewInvoiceParams,
+    ) -> Result<NewInvoiceResult, ErrorObjectOwned> {
+        let mut invoice_builder = InvoiceBuilder::new(params.currency)
+            .amount(Some(params.amount))
+            .payment_preimage(params.payment_preimage);
+        if let Some(description) = params.description.clone() {
+            invoice_builder = invoice_builder.description(description);
+        };
+        if let Some(expiry) = params.expiry {
+            let duration: Duration = Duration::from_secs(expiry);
+            invoice_builder = invoice_builder.expiry_time(duration);
+        };
+        if let Some(fallback_address) = params.fallback_address.clone() {
+            invoice_builder = invoice_builder.fallback_address(fallback_address);
+        };
+        if let Some(final_cltv) = params.final_cltv {
+            invoice_builder = invoice_builder.final_cltv(final_cltv);
+        };
 
-        let (sender, mut receiver) = channel(1);
-        let _ = self.invoice_command_sender.send((command, sender)).await;
-        let result = receiver.recv().await.expect("channel should not be closed");
-        match result {
-            Ok(data) => Ok(data),
+        match invoice_builder.build() {
+            Ok(invoice) => match self.store.insert_invoice(invoice.clone()) {
+                Ok(_) => Ok(NewInvoiceResult {
+                    invoice_string: invoice.to_string(),
+                    invoice,
+                }),
+                Err(e) => {
+                    return Err(ErrorObjectOwned::owned(
+                        CALL_EXECUTION_FAILED_CODE,
+                        e.to_string(),
+                        Some(params),
+                    ))
+                }
+            },
             Err(e) => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 e.to_string(),
@@ -72,13 +114,13 @@ impl InvoiceRpcServer for InvoiceRpcServerImpl {
         }
     }
 
-    async fn parse_invoice(&self, params: ParseInvoiceParams) -> Result<String, ErrorObjectOwned> {
-        let command = InvoiceCommand::ParseInvoice(params.invoice.clone());
-        let (sender, mut receiver) = channel(1);
-        let _ = self.invoice_command_sender.send((command, sender)).await;
-        let result = receiver.recv().await.expect("channel should not be closed");
+    async fn parse_invoice(
+        &self,
+        params: ParseInvoiceParams,
+    ) -> Result<ParseInvoiceResult, ErrorObjectOwned> {
+        let result: Result<CkbInvoice, _> = params.invoice.parse();
         match result {
-            Ok(data) => Ok(data),
+            Ok(invoice) => Ok(ParseInvoiceResult { invoice }),
             Err(e) => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
                 e.to_string(),

@@ -1,6 +1,4 @@
 use ckb_pcn_node::ckb_chain::contracts::init_contracts_context;
-use ckb_pcn_node::invoice::start_invoice;
-use ckb_pcn_node::rpc::InvoiceCommandWithReply;
 use ckb_pcn_node::store::Store;
 use log::{debug, error, info};
 use ractor::Actor;
@@ -133,40 +131,16 @@ pub async fn main() {
         None => None,
     };
 
-    let invoice_command_sender = {
-        const CHANNEL_SIZE: usize = 4000;
-        let (command_sender, command_receiver) =
-            mpsc::channel::<InvoiceCommandWithReply>(CHANNEL_SIZE);
-        info!("Starting cch");
-        start_invoice(
-            command_receiver,
-            new_tokio_cancellation_token(),
-            new_tokio_task_tracker(),
-            store,
-        )
-        .await;
-        Some(command_sender)
-    };
-
     // Start rpc service
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
-            if ckb_command_sender.is_none()
-                && cch_command_sender.is_none()
-                && invoice_command_sender.is_none()
-            {
-                error!("Rpc service requires ckb, chh and invoice service to be started. Exiting.");
+            if ckb_command_sender.is_none() && cch_command_sender.is_none() {
+                error!("Rpc service requires ckb and cch service to be started. Exiting.");
                 return;
             }
 
             info!("Starting rpc");
-            let handle = start_rpc(
-                rpc_config,
-                ckb_command_sender,
-                cch_command_sender,
-                invoice_command_sender,
-            )
-            .await;
+            let handle = start_rpc(rpc_config, ckb_command_sender, cch_command_sender, store).await;
             Some(handle)
         }
         None => None,
