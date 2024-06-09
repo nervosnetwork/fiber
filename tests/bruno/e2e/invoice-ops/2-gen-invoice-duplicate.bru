@@ -1,0 +1,49 @@
+meta {
+  name: generate duplicate invoice
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+docs {
+  description: "use the same payment_preimage to generate a new invoice"
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "new_invoice",
+    "params": [
+      {
+        "amount": "0x64",
+        "currency": "Ckb",
+        "description": "test invoice",
+        "expiry": "0xe10",
+        "final_cltv": "0x28",
+        "payment_preimage": "{{payment_preimage}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+  res.body.result: isUndefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("generated result: ", res.body.result);
+}
