@@ -11,6 +11,7 @@ jobs:
           - 3-nodes-transfer
           - invoice-ops
           - open-use-close-a-channel
+          - udt
         release:
           - "0.116.1"
     name: e2e test for ${{ matrix.workflow }}

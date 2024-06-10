@@ -4,6 +4,7 @@ set -xeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 data_dir="$script_dir/node-data"
+udt_init_dir="$script_dir/udt-init"
 cd "$script_dir" || exit 1
 
 miner_key_file="$data_dir/specs/miner.key"
@@ -55,9 +56,16 @@ deploy_and_generate_blocks() {
     generate_blocks
 }
 
+run_udt_init() {
+    export $(xargs <".env")
+    cd "$udt_init_dir" || exit 1
+    cargo run -- "$@"
+}
+
 deploy_and_generate_blocks always_success
 deploy_and_generate_blocks funding-lock
 deploy_and_generate_blocks commitment-lock
 deploy_and_generate_blocks simple-udt
 
 ./create-dotenv-file.sh >.env
+run_udt_init
