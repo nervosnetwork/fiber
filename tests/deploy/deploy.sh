@@ -58,8 +58,10 @@ deploy_and_generate_blocks() {
 
 run_udt_init() {
     export $(xargs <".env")
-    cd "$udt_init_dir" || exit 1
-    cargo run -- "$@"
+    (
+        cd "$udt_init_dir" || exit 1
+        cargo run -- "$@"
+    )
 }
 
 deploy_and_generate_blocks always_success

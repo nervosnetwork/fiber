@@ -5,3 +5,4 @@
 /result*
 
 /tests/nodes/*/ckb/store
+/tests/deploy/udt-init/target
