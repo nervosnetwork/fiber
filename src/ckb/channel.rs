@@ -934,6 +934,41 @@ impl From<Transaction> for FundingTxInput {
     }
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct CommitmentNumbers {
+    pub local: u64,
+    pub remote: u64,
+}
+
+impl CommitmentNumbers {
+    pub fn new(local: u64, remote: u64) -> Self {
+        Self { local, remote }
+    }
+
+    pub fn initial() -> Self {
+        Self {
+            local: INITIAL_COMMITMENT_NUMBER,
+            remote: INITIAL_COMMITMENT_NUMBER,
+        }
+    }
+
+    pub fn get_local(&self) -> u64 {
+        self.local
+    }
+
+    pub fn get_remote(&self) -> u64 {
+        self.remote
+    }
+
+    pub fn increment_local(&mut self) {
+        self.local += 1;
+    }
+
+    pub fn increment_remote(&mut self) {
+        self.remote += 1;
+    }
+}
+
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelActorState {
@@ -961,9 +996,8 @@ pub struct ChannelActorState {
     pub local_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
-    // This value is guaranteed to be 1 when channel is just created.
-    pub local_commitment_number: u64,
-    pub remote_commitment_number: u64,
+    // This value is guaranteed to be 0 when channel is just created.
+    pub commitment_numbers: CommitmentNumbers,
 
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
@@ -1220,8 +1254,7 @@ impl ChannelActorState {
                 pubkeys: remote_pubkeys,
                 selected_contest_delay: remote_delay,
             }),
-            local_commitment_number: INITIAL_COMMITMENT_NUMBER,
-            remote_commitment_number: INITIAL_COMMITMENT_NUMBER,
+            commitment_numbers: CommitmentNumbers::initial(),
             remote_shutdown_script: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![remote_prev_commitment_point, remote_commitment_point],
@@ -1261,9 +1294,8 @@ impl ChannelActorState {
                 selected_contest_delay: to_local_delay,
             },
             remote_channel_parameters: None,
-            local_commitment_number: INITIAL_COMMITMENT_NUMBER,
             remote_nonce: None,
-            remote_commitment_number: INITIAL_COMMITMENT_NUMBER,
+            commitment_numbers: CommitmentNumbers::initial(),
             remote_commitment_points: vec![],
             local_shutdown_script: None,
             local_shutdown_fee: None,
@@ -1308,6 +1340,34 @@ impl ChannelActorState {
         self.remote_nonce.as_ref().unwrap()
     }
 
+    pub fn get_local_commitment_number(&self) -> u64 {
+        self.commitment_numbers.get_local()
+    }
+
+    pub fn get_remote_commitment_number(&self) -> u64 {
+        self.commitment_numbers.get_remote()
+    }
+
+    pub fn increment_local_commitment_number(&mut self) {
+        self.commitment_numbers.increment_local();
+    }
+
+    pub fn increment_remote_commitment_number(&mut self) {
+        self.commitment_numbers.increment_remote();
+    }
+
+    pub fn get_current_commitment_number(&self, local: bool) -> u64 {
+        if local {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        }
+    }
+
+    pub fn get_next_commitment_number(&self, local: bool) -> u64 {
+        self.get_current_commitment_number(local) + 1
+    }
+
     pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
         if local {
             self.get_local_channel_parameters()
@@ -1322,18 +1382,6 @@ impl ChannelActorState {
 
     pub fn get_remote_channel_parameters(&self) -> &ChannelParametersOneParty {
         self.remote_channel_parameters.as_ref().unwrap()
-    }
-
-    pub fn get_current_commitment_number(&self, local: bool) -> u64 {
-        if local {
-            self.local_commitment_number
-        } else {
-            self.remote_commitment_number
-        }
-    }
-
-    pub fn get_next_commitment_number(&self, local: bool) -> u64 {
-        self.get_current_commitment_number(local) + 1
     }
 
     pub fn get_funding_transaction(&self) -> &Transaction {
@@ -1382,7 +1430,7 @@ impl ChannelActorState {
     }
 
     pub fn get_current_local_commitment_point(&self) -> Pubkey {
-        self.get_local_commitment_point(self.local_commitment_number)
+        self.get_local_commitment_point(self.get_local_commitment_number())
     }
 
     // Get the commitment secret for the previous commitment number.
@@ -1390,11 +1438,12 @@ impl ChannelActorState {
     // the channel is just created), then the previous commitment secret is the
     // initial commitment secret.
     pub fn get_previous_local_commitment_secret(&self) -> [u8; 32] {
-        let prev_commitment_number = if self.local_commitment_number == INITIAL_COMMITMENT_NUMBER {
-            INITIAL_COMMITMENT_NUMBER
-        } else {
-            self.local_commitment_number - 1
-        };
+        let prev_commitment_number =
+            if self.get_local_commitment_number() == INITIAL_COMMITMENT_NUMBER {
+                INITIAL_COMMITMENT_NUMBER
+            } else {
+                self.get_local_commitment_number() - 1
+            };
         self.signer.get_commitment_secret(prev_commitment_number)
     }
 
@@ -1403,11 +1452,12 @@ impl ChannelActorState {
     // the channel is just created), then the previous commitment point is the
     // initial commitment point sent from the counterparty.
     pub fn get_previous_remote_commitment_point(&self) -> Pubkey {
-        let prev_commitment_number = if self.remote_commitment_number == INITIAL_COMMITMENT_NUMBER {
-            INITIAL_COMMITMENT_NUMBER
-        } else {
-            self.remote_commitment_number - 1
-        };
+        let prev_commitment_number =
+            if self.get_remote_commitment_number() == INITIAL_COMMITMENT_NUMBER {
+                INITIAL_COMMITMENT_NUMBER
+            } else {
+                self.get_remote_commitment_number() - 1
+            };
         self.get_remote_commitment_point(prev_commitment_number)
     }
 
@@ -1461,7 +1511,7 @@ impl ChannelActorState {
 
     pub fn get_local_musig2_secnonce(&self) -> SecNonce {
         self.signer
-            .derive_musig2_nonce(self.local_commitment_number)
+            .derive_musig2_nonce(self.get_local_commitment_number())
     }
 
     pub fn get_local_musig2_pubnonce(&self) -> PubNonce {
@@ -1537,16 +1587,16 @@ impl ChannelActorState {
             lock_time: command.expiry,
             is_offered: true,
             payment_preimage: Some(preimage),
-            local_commitment_number: self.local_commitment_number,
-            remote_commitment_number: self.remote_commitment_number,
+            local_commitment_number: self.get_local_commitment_number(),
+            remote_commitment_number: self.get_remote_commitment_number(),
             local_payment_key_hash: None,
             remote_payment_key_hash: None,
         }
     }
 
     pub fn create_inbounding_tlc(&self, message: AddTlc) -> TLC {
-        let local_commitment_number = self.local_commitment_number;
-        let remote_commitment_number = self.remote_commitment_number;
+        let local_commitment_number = self.get_local_commitment_number();
+        let remote_commitment_number = self.get_remote_commitment_number();
         TLC {
             id: message.tlc_id,
             amount: message.amount,
@@ -2292,7 +2342,7 @@ impl ChannelActorState {
                     "Revealing preimage for revocation: {:?}",
                     &revocation_preimage
                 );
-                self.local_commitment_number = self.get_next_commitment_number(true);
+                self.increment_local_commitment_number();
                 let next_commitment_point = self.get_current_local_commitment_point();
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -2424,7 +2474,7 @@ impl ChannelActorState {
         }
         self.remote_commitment_points
             .push(next_per_commitment_point);
-        self.remote_commitment_number = self.get_next_commitment_number(false);
+        self.increment_remote_commitment_number();
         Ok(())
     }
 
@@ -2834,8 +2884,8 @@ impl ChannelActorState {
             if local { "local" } else {"remote"},
             hex::encode(&witnesses),
             hex::encode(&script_arg),
-            self.local_commitment_number,
-            self.remote_commitment_number
+            self.get_local_commitment_number(),
+            self.get_remote_commitment_number()
         );
 
         let immediate_secp256k1_lock_script = get_script_by_contract(
