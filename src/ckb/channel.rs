@@ -319,7 +319,7 @@ impl<S> ChannelActor<S> {
         // Update the state for this tlc.
         state.pending_offered_tlcs.insert(tlc.id, tlc);
         state.to_local_amount -= tlc.amount;
-        state.next_offering_tlc_id += 1;
+        state.increment_next_offering_tlc_id();
         debug!(
             "Added tlc with id {:?} to pending offered tlcs: {:?}",
             tlc.id, &tlc
@@ -940,6 +940,12 @@ pub struct CommitmentNumbers {
     pub remote: u64,
 }
 
+impl Default for CommitmentNumbers {
+    fn default() -> Self {
+        Self::initial()
+    }
+}
+
 impl CommitmentNumbers {
     pub fn new(local: u64, remote: u64) -> Self {
         Self { local, remote }
@@ -966,6 +972,47 @@ impl CommitmentNumbers {
 
     pub fn increment_remote(&mut self) {
         self.remote += 1;
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct TLCIds {
+    pub offering: u64,
+    pub received: u64,
+}
+
+impl Default for TLCIds {
+    fn default() -> Self {
+        Self::initial()
+    }
+}
+
+impl TLCIds {
+    pub fn new(offering: u64, received: u64) -> Self {
+        Self { offering, received }
+    }
+
+    pub fn initial() -> Self {
+        Self {
+            offering: 0,
+            received: 0,
+        }
+    }
+
+    pub fn get_next_offering(&self) -> u64 {
+        self.offering
+    }
+
+    pub fn get_next_received(&self) -> u64 {
+        self.received
+    }
+
+    pub fn increment_offering(&mut self) {
+        self.offering += 1;
+    }
+
+    pub fn increment_received(&mut self) {
+        self.received += 1;
     }
 }
 
@@ -1002,10 +1049,9 @@ pub struct ChannelActorState {
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
 
-    // The id of our next offering tlc, must increment by 1 for each new offered tlc.
-    pub next_offering_tlc_id: u64,
-    // The id of our next receiving tlc, must increment by 1 for each new offered tlc.
-    pub next_receiving_tlc_id: u64,
+    // The id of next offering/received tlc, must increment by 1 for each new tlc.
+    pub tlc_ids: TLCIds,
+
     // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
     // will be removed from this map.
     pub pending_offered_tlcs: HashMap<u64, TLC>,
@@ -1238,8 +1284,7 @@ impl ChannelActorState {
             is_acceptor: true,
             to_local_amount: local_value,
             id: channel_id,
-            next_offering_tlc_id: 0,
-            next_receiving_tlc_id: 0,
+            tlc_ids: Default::default(),
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
             to_be_committed_tlcs: Default::default(),
@@ -1254,7 +1299,7 @@ impl ChannelActorState {
                 pubkeys: remote_pubkeys,
                 selected_contest_delay: remote_delay,
             }),
-            commitment_numbers: CommitmentNumbers::initial(),
+            commitment_numbers: Default::default(),
             remote_shutdown_script: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![remote_prev_commitment_point, remote_commitment_point],
@@ -1282,8 +1327,7 @@ impl ChannelActorState {
             is_acceptor: false,
             to_local_amount: value,
             id: temp_channel_id,
-            next_offering_tlc_id: 0,
-            next_receiving_tlc_id: 0,
+            tlc_ids: Default::default(),
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
             to_be_committed_tlcs: Default::default(),
@@ -1295,7 +1339,7 @@ impl ChannelActorState {
             },
             remote_channel_parameters: None,
             remote_nonce: None,
-            commitment_numbers: CommitmentNumbers::initial(),
+            commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
             local_shutdown_script: None,
             local_shutdown_fee: None,
@@ -1366,6 +1410,22 @@ impl ChannelActorState {
 
     pub fn get_next_commitment_number(&self, local: bool) -> u64 {
         self.get_current_commitment_number(local) + 1
+    }
+
+    pub fn get_next_offering_tlc_id(&self) -> u64 {
+        self.tlc_ids.get_next_offering()
+    }
+
+    pub fn get_next_received_tlc_id(&self) -> u64 {
+        self.tlc_ids.get_next_received()
+    }
+
+    pub fn increment_next_offering_tlc_id(&mut self) {
+        self.tlc_ids.increment_offering();
+    }
+
+    pub fn increment_next_received_tlc_id(&mut self) {
+        self.tlc_ids.increment_received();
     }
 
     pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
@@ -1569,7 +1629,7 @@ impl ChannelActorState {
         // inadvertently click the same button twice, and we will process the same
         // twice, the frontend needs to prevent this kind of behaviour.
         // Is this what we want?
-        let id = self.next_offering_tlc_id;
+        let id = self.get_next_offering_tlc_id();
         assert!(
             self.pending_offered_tlcs.get(&id).is_none(),
             "Must not have the same id in pending offered tlcs"
