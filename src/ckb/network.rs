@@ -80,12 +80,12 @@ pub enum NetworkActorCommand {
     // Open a channel to a peer.
     OpenChannel(
         OpenChannelCommand,
-        Option<RpcReplyPort<Result<OpenChannelResponse, ProcessingChannelError>>>,
+        RpcReplyPort<Result<OpenChannelResponse, String>>,
     ),
     // Accept a channel to a peer.
     AcceptChannel(
         AcceptChannelCommand,
-        Option<RpcReplyPort<Result<AcceptChannelResponse, ProcessingChannelError>>>,
+        RpcReplyPort<Result<AcceptChannelResponse, String>>,
     ),
     // Send a command to a channel.
     ControlPcnChannel(ChannelCommandWithId),
@@ -307,22 +307,34 @@ where
             }
 
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                let (_, channel_id) = state
+                match state
                     .create_outbound_channel(open_channel, self.store.clone())
-                    .await?;
-                if let Some(reply) = reply {
-                    let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
+                    .await
+                {
+                    Ok((_, channel_id)) => {
+                        let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
+                    }
+                    Err(err) => {
+                        error!("Failed to create channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
-                let (_, old_channel_id, new_channel_id) = state
+                match state
                     .create_inbound_channel(accept_channel, self.store.clone())
-                    .await?;
-                if let Some(reply) = reply {
-                    let _ = reply.send(Ok(AcceptChannelResponse {
-                        old_channel_id,
-                        new_channel_id,
-                    }));
+                    .await
+                {
+                    Ok((_, old_channel_id, new_channel_id)) => {
+                        let _ = reply.send(Ok(AcceptChannelResponse {
+                            old_channel_id,
+                            new_channel_id,
+                        }));
+                    }
+                    Err(err) => {
+                        error!("Failed to accept channel: {}", err);
+                        let _ = reply.send(Err(err.to_string()));
+                    }
                 }
             }
 

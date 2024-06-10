@@ -1,11 +1,11 @@
 meta {
-  name: remove tlc from NODE2
+  name: remove tlc from NODE1
   type: http
-  seq: 15
+  seq: 19
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,10 +22,10 @@ body:json {
     "method": "remove_tlc",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "tlc_id": "{{N1N2_TLC_ID1}}",
+        "channel_id": "{{CHANNEL_ID}}",
+        "tlc_id": "{{TLC_ID5}}",
         "reason": {
-          "payment_preimage": "{{payment_preimage}}"
+          "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000042"
         }
       }
     ]
@@ -33,11 +33,12 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+  console.log(res.body);
 }

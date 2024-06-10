@@ -146,13 +146,13 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned> {
-        let message = |r| -> NetworkActorMessage {
+        let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount.clone(),
                 },
-                Some(r),
+                rpc_reply,
             ))
         };
         match call!(self.actor, message).unwrap() {
@@ -171,13 +171,13 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned> {
-        let message = |r| -> NetworkActorMessage {
+        let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
                 },
-                Some(r),
+                rpc_reply,
             ))
         };
         match call!(self.actor, message).unwrap() {
@@ -207,7 +207,7 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
     }
 
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
-        let message = |r| -> NetworkActorMessage {
+        let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
                 ChannelCommandWithId {
                     channel_id: params.channel_id,
@@ -218,7 +218,7 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
                             payment_hash: Some(params.payment_hash),
                             expiry: params.expiry,
                         },
-                        Some(r),
+                        rpc_reply,
                     ),
                 },
             ))
@@ -229,35 +229,47 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
             }),
             Err(e) => Err(ErrorObjectOwned::owned(
                 CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
+                e,
                 Some(params),
             )),
         }
     }
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::RemoveTlc(RemoveTlcCommand {
-                    id: params.tlc_id,
-                    reason: match params.reason {
-                        RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                            crate::ckb::types::RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                payment_preimage,
-                            })
-                        }
-                        RemoveTlcReason::RemoveTlcFail { error_code } => {
-                            crate::ckb::types::RemoveTlcReason::RemoveTlcFail(RemoveTlcFail {
-                                error_code,
-                            })
-                        }
-                    },
-                }),
-            },
-        ));
-        self.actor.cast(message).unwrap();
-        Ok(())
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
+                ChannelCommandWithId {
+                    channel_id: params.channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: params.tlc_id,
+                            reason: match params.reason {
+                                RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
+                                    crate::ckb::types::RemoveTlcReason::RemoveTlcFulfill(
+                                        RemoveTlcFulfill { payment_preimage },
+                                    )
+                                }
+                                RemoveTlcReason::RemoveTlcFail { error_code } => {
+                                    crate::ckb::types::RemoveTlcReason::RemoveTlcFail(
+                                        RemoveTlcFail { error_code },
+                                    )
+                                }
+                            },
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+
+        match call!(self.actor, message).unwrap() {
+            Ok(_response) => Ok(()),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                e,
+                Some(params),
+            )),
+        }
     }
 
     async fn shutdown_channel(
