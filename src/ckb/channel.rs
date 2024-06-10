@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tokio::sync::{mpsc::error::TrySendError, oneshot};
+use tokio::sync::oneshot;
 
 use std::{
     borrow::Borrow,
@@ -970,20 +970,12 @@ pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
 
 #[derive(Error, Debug)]
 pub enum ProcessingChannelError {
-    #[error("Invalid chain hash: {0}")]
-    InvalidChainHash(Hash256),
-    #[error("Unsupported operation: {0}")]
-    Unsupported(String),
     #[error("Invalid state: ")]
     InvalidState(String),
     #[error("Repeated processing message: {0}")]
     RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
-    #[error("Unimplemented operation: {0}")]
-    Unimplemented(String),
-    #[error("Failed to send command: {0}")]
-    CommanderSendingError(#[from] TrySendError<NetworkActorCommand>),
     #[error("Failed to spawn actor: {0}")]
     SpawnErr(#[from] SpawnErr),
     #[error("Musig2 VerifyError: {0}")]
