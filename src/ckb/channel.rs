@@ -305,7 +305,7 @@ impl<S> ChannelActor<S> {
             peer_id: self.peer_id.clone(),
             message: PCNMessage::AddTlc(AddTlc {
                 channel_id: state.get_id(),
-                tlc_id: tlc.id,
+                tlc_id: tlc.id.into(),
                 amount: tlc.amount,
                 payment_hash: tlc.payment_hash,
                 expiry: tlc.lock_time,
@@ -318,7 +318,8 @@ impl<S> ChannelActor<S> {
             .expect("network actor alive");
 
         // Update the state for this tlc.
-        state.pending_offered_tlcs.insert(tlc.id, tlc);
+        debug_assert!(tlc.is_offered());
+        state.insert_tlc(tlc);
         state.to_local_amount -= tlc.amount;
         state.increment_next_offering_tlc_id();
         debug!(
@@ -326,18 +327,10 @@ impl<S> ChannelActor<S> {
             tlc.id, &tlc
         );
         debug!(
-            "Current pending offered tlcs: {:?}",
-            &state.pending_offered_tlcs
-        );
-        debug!(
-            "Current pending received tlcs: {:?}",
-            &state.pending_received_tlcs
-        );
-        debug!(
             "Balance after addtlccommand: to_local_amount: {} to_remote_amount: {}",
             state.to_local_amount, state.to_remote_amount
         );
-        Ok(tlc.id)
+        Ok(tlc.id.into())
     }
 
     pub fn handle_remove_tlc_command(
@@ -355,12 +348,13 @@ impl<S> ChannelActor<S> {
             }),
         };
         // Notes: state updating and message sending are not atomic.
-        match state.pending_received_tlcs.remove(&command.id) {
+        match state.remove_received_tlc(command.id) {
             Some(tlc) => {
+                debug_assert!(!tlc.is_offered());
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = command.reason {
                     let filled_payment_hash: Hash256 = blake2b_256(fulfill.payment_preimage).into();
                     if tlc.payment_hash != filled_payment_hash {
-                        state.pending_received_tlcs.insert(tlc.id, tlc);
+                        state.insert_tlc(tlc);
                         return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
                             fulfill.payment_preimage, filled_payment_hash, tlc.payment_hash,
@@ -386,7 +380,7 @@ impl<S> ChannelActor<S> {
                 match state
                     .to_be_committed_tlcs
                     .iter()
-                    .find(|(tlc, _reason)| tlc.id == command.id && !tlc.is_offered())
+                    .find(|(tlc, _reason)| tlc.id == TLCId::Offered(command.id))
                 {
                     Some((tlc, reason)) => {
                         if *reason != command.reason {
@@ -1019,14 +1013,14 @@ impl TLCIds {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TLCId {
-    Offering(u64),
+    Offered(u64),
     Received(u64),
 }
 
 impl Hash for TLCId {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            TLCId::Offering(id) => {
+            TLCId::Offered(id) => {
                 state.write_u64(0);
                 state.write_u64(*id);
             }
@@ -1038,10 +1032,19 @@ impl Hash for TLCId {
     }
 }
 
+impl From<TLCId> for u64 {
+    fn from(id: TLCId) -> u64 {
+        match id {
+            TLCId::Offered(id) => id,
+            TLCId::Received(id) => id,
+        }
+    }
+}
+
 impl TLCId {
     pub fn is_offering(&self) -> bool {
         match self {
-            TLCId::Offering(_) => true,
+            TLCId::Offered(_) => true,
             _ => false,
         }
     }
@@ -1051,6 +1054,17 @@ impl TLCId {
             TLCId::Received(_) => true,
             _ => false,
         }
+    }
+
+    pub fn flip(&self) -> Self {
+        match self {
+            TLCId::Offered(id) => TLCId::Received(*id),
+            TLCId::Received(id) => TLCId::Offered(*id),
+        }
+    }
+
+    pub fn flip_mut(&mut self) {
+        *self = self.flip();
     }
 }
 
@@ -1090,12 +1104,9 @@ pub struct ChannelActorState {
     // The id of next offering/received tlc, must increment by 1 for each new tlc.
     pub tlc_ids: TLCIds,
 
-    // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
+    // HashMap of tlc ids to pending tlcs. Resovled tlcs (both failed and succeeded)
     // will be removed from this map.
-    pub pending_offered_tlcs: HashMap<u64, TLC>,
-    // HashMap of tlc ids to pending offered tlcs. Resovled tlcs (both failed and succeeded)
-    // will be removed from this map.
-    pub pending_received_tlcs: HashMap<u64, TLC>,
+    pub pending_tlcs: HashMap<TLCId, TLC>,
     // List of tlcs that are removed but not yet committed in a commitment transaction.
     // We have to keep them tentatively because
     // 1. Even if the counterparty goes offline, we can still take the assets back
@@ -1323,8 +1334,7 @@ impl ChannelActorState {
             to_local_amount: local_value,
             id: channel_id,
             tlc_ids: Default::default(),
-            pending_offered_tlcs: Default::default(),
-            pending_received_tlcs: Default::default(),
+            pending_tlcs: Default::default(),
             to_be_committed_tlcs: Default::default(),
             to_remote_amount: remote_value,
             local_shutdown_script: None,
@@ -1366,8 +1376,7 @@ impl ChannelActorState {
             to_local_amount: value,
             id: temp_channel_id,
             tlc_ids: Default::default(),
-            pending_offered_tlcs: Default::default(),
-            pending_received_tlcs: Default::default(),
+            pending_tlcs: Default::default(),
             to_be_committed_tlcs: Default::default(),
             to_remote_amount: 0,
             signer,
@@ -1464,6 +1473,26 @@ impl ChannelActorState {
 
     pub fn increment_next_received_tlc_id(&mut self) {
         self.tlc_ids.increment_received();
+    }
+
+    pub fn get_offered_tlc(&self, tlc_id: u64) -> Option<&TLC> {
+        self.pending_tlcs.get(&TLCId::Offered(tlc_id))
+    }
+
+    pub fn get_received_tlc(&self, tlc_id: u64) -> Option<&TLC> {
+        self.pending_tlcs.get(&TLCId::Received(tlc_id))
+    }
+
+    pub fn insert_tlc(&mut self, tlc: TLC) {
+        self.pending_tlcs.insert(tlc.id, tlc);
+    }
+
+    pub fn remove_offered_tlc(&mut self, tlc_id: u64) -> Option<TLC> {
+        self.pending_tlcs.remove(&TLCId::Offered(tlc_id))
+    }
+
+    pub fn remove_received_tlc(&mut self, tlc_id: u64) -> Option<TLC> {
+        self.pending_tlcs.remove(&TLCId::Received(tlc_id))
     }
 
     pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
@@ -1625,24 +1654,15 @@ impl ChannelActorState {
     }
 
     pub fn get_all_tlcs(&self) -> Vec<TLC> {
-        debug!("Getting tlcs for commitment tx");
-        debug!(
-            "Current pending offered tlcs: {:?}",
-            self.pending_offered_tlcs
-        );
-        debug!(
-            "Current pending received tlcs: {:?}",
-            self.pending_received_tlcs
-        );
-        self.pending_offered_tlcs
+        self.pending_tlcs
             .values()
-            .chain(self.pending_received_tlcs.values())
+            .chain(self.pending_tlcs.values())
             .cloned()
             .collect()
     }
 
     fn any_tlc_pending(&self) -> bool {
-        !self.pending_offered_tlcs.is_empty() || !self.pending_received_tlcs.is_empty()
+        !self.pending_tlcs.is_empty()
     }
 
     pub fn get_remote_funding_pubkey(&self) -> &Pubkey {
@@ -1669,7 +1689,7 @@ impl ChannelActorState {
         // Is this what we want?
         let id = self.get_next_offering_tlc_id();
         assert!(
-            self.pending_offered_tlcs.get(&id).is_none(),
+            self.get_offered_tlc(id).is_none(),
             "Must not have the same id in pending offered tlcs"
         );
 
@@ -1679,11 +1699,10 @@ impl ChannelActorState {
             .unwrap_or(blake2b_256(&preimage).into());
 
         TLC {
-            id,
+            id: TLCId::Offered(id),
             amount: command.amount,
             payment_hash,
             lock_time: command.expiry,
-            is_offered: true,
             payment_preimage: Some(preimage),
             local_commitment_number: self.get_local_commitment_number(),
             remote_commitment_number: self.get_remote_commitment_number(),
@@ -1696,11 +1715,10 @@ impl ChannelActorState {
         let local_commitment_number = self.get_local_commitment_number();
         let remote_commitment_number = self.get_remote_commitment_number();
         TLC {
-            id: message.tlc_id,
+            id: TLCId::Received(message.tlc_id),
             amount: message.amount,
             payment_hash: message.payment_hash,
             lock_time: message.expiry,
-            is_offered: false,
             payment_preimage: None,
             local_commitment_number,
             remote_commitment_number,
@@ -1890,7 +1908,7 @@ impl ChannelActorState {
                 let tlc = self.create_inbounding_tlc(add_tlc);
                 let id = tlc.id;
 
-                match self.pending_received_tlcs.get(&id) {
+                match self.get_received_tlc(id.into()) {
                     Some(current) if current == &tlc => {
                         debug!(
                             "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
@@ -1910,18 +1928,11 @@ impl ChannelActorState {
                     }
                 }
 
-                self.pending_received_tlcs.insert(tlc.id, tlc);
+                debug_assert!(!tlc.is_offered());
+                self.insert_tlc(tlc);
                 self.to_remote_amount -= tlc.amount;
 
                 debug!("Saved tlc {:?} to pending_received_tlcs", &tlc);
-                debug!(
-                    "Current pending_received_tlcs: {:?}",
-                    &self.pending_received_tlcs
-                );
-                debug!(
-                    "Current pending_offered_tlcs: {:?}",
-                    &self.pending_offered_tlcs
-                );
                 debug!(
                     "Balance after tlc added: to_local_amount: {}, to_remote_amount: {}",
                     self.to_local_amount, self.to_remote_amount
@@ -1936,7 +1947,7 @@ impl ChannelActorState {
                 self.check_state_for_tlc_update()?;
 
                 let channel_id = self.get_id();
-                match self.pending_offered_tlcs.entry(remove_tlc.tlc_id) {
+                match self.pending_tlcs.entry(TLCId::Offered(remove_tlc.tlc_id)) {
                     hash_map::Entry::Occupied(entry) => {
                         let current = entry.get();
                         debug!("Removing tlc {:?} from channel {:?}", &current, &channel_id);
@@ -1963,7 +1974,7 @@ impl ChannelActorState {
                         }
                         let tlc = entry.remove();
                         self.to_be_committed_tlcs.push((tlc, remove_tlc.reason));
-                        if self.pending_offered_tlcs.is_empty() {
+                        if self.pending_tlcs.is_empty() {
                             self.maybe_transition_to_shutdown(network)?;
                         }
                         Ok(())
@@ -1972,7 +1983,7 @@ impl ChannelActorState {
                         match self
                             .to_be_committed_tlcs
                             .iter()
-                            .find(|(tlc, _reason)| tlc.id == remove_tlc.tlc_id && tlc.is_offered())
+                            .find(|(tlc, _reason)| tlc.id == TLCId::Offered(remove_tlc.tlc_id))
                         {
                             Some((tlc, reason)) => {
                                 if *reason != remove_tlc.reason {
@@ -2874,12 +2885,20 @@ impl ChannelActorState {
         // This currently only works for the current commitment number.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.pending_received_tlcs
+                self.pending_tlcs
                     .values()
+                    .filter(|tlc| match tlc.id {
+                        TLCId::Received(_) => true,
+                        _ => false,
+                    })
                     .cloned()
                     .collect::<Vec<_>>(),
-                self.pending_offered_tlcs
+                self.pending_tlcs
                     .values()
+                    .filter(|tlc| match tlc.id {
+                        TLCId::Received(_) => true,
+                        _ => false,
+                    })
                     .cloned()
                     .collect::<Vec<_>>(),
             );
@@ -2895,8 +2914,8 @@ impl ChannelActorState {
                 }
                 (offered_tlcs, received_tlcs)
             };
-            a.sort_by(|x, y| x.id.cmp(&y.id));
-            b.sort_by(|x, y| x.id.cmp(&y.id));
+            a.sort_by(|x, y| u64::from(x.id).cmp(&u64::from(y.id)));
+            b.sort_by(|x, y| u64::from(x.id).cmp(&u64::from(y.id)));
             [a, b].concat()
         };
 
@@ -3329,9 +3348,7 @@ type ShortHash = [u8; 20];
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TLC {
     /// The id of a TLC.
-    pub id: u64,
-    /// Whether this is an offered or received HTLC.
-    pub is_offered: bool,
+    pub id: TLCId,
     /// The value as it appears in the commitment transaction
     pub amount: u128,
     /// The CLTV lock-time at which this HTLC expires.
@@ -3354,12 +3371,18 @@ pub struct TLC {
 
 impl TLC {
     pub fn is_offered(&self) -> bool {
-        self.is_offered
+        match self.id {
+            TLCId::Offered(_) => true,
+            TLCId::Received(_) => false,
+        }
     }
 
     // Flip the tlc to the other party.
     pub fn flip(&mut self) {
-        self.is_offered = !self.is_offered;
+        self.id = match self.id {
+            TLCId::Offered(id) => TLCId::Received(id),
+            TLCId::Received(id) => TLCId::Offered(id),
+        };
         (self.local_payment_key_hash, self.remote_payment_key_hash) =
             (self.remote_payment_key_hash, self.local_payment_key_hash);
     }
