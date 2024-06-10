@@ -3,7 +3,7 @@ on: [push, pull_request]
 name: E2E tests
 
 jobs:
-  open-update-close-channel:
+  e2e-testing:
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +33,25 @@ jobs:
           ./tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time
-          (cd ./tests/bruno; sleep 60; npm exec -- @usebruno/cli run e2e/${{ matrix.workflow }} -r --env test) &
+          # check port 127.0.0.1:(41714 ~ 41716) are open
+          for i in {1..20}; do
+            all_open=true
+            for port in 41714 41715 41716 8114; do
+              if ! nc -z 127.0.0.1 $port; then
+                all_open=false
+                break
+              fi
+            done
+            if $all_open; then
+              echo "All ports are open"
+              break
+            else
+              echo "Not all ports are open, waiting 3 seconds before retrying"
+              sleep 3
+            fi
+          done
+
+          (cd ./tests/bruno; npm exec -- @usebruno/cli run e2e/${{ matrix.workflow }} -r --env test) &
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
           wait -n
