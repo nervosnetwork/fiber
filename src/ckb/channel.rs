@@ -29,6 +29,7 @@ use std::{
     borrow::Borrow,
     collections::{hash_map, HashMap},
     fmt::Debug,
+    hash::{Hash, Hasher},
 };
 
 use crate::{
@@ -385,7 +386,7 @@ impl<S> ChannelActor<S> {
                 match state
                     .to_be_committed_tlcs
                     .iter()
-                    .find(|(tlc, _reason)| tlc.id == command.id && !tlc.is_offered)
+                    .find(|(tlc, _reason)| tlc.id == command.id && !tlc.is_offered())
                 {
                     Some((tlc, reason)) => {
                         if *reason != command.reason {
@@ -1013,6 +1014,43 @@ impl TLCIds {
 
     pub fn increment_received(&mut self) {
         self.received += 1;
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TLCId {
+    Offering(u64),
+    Received(u64),
+}
+
+impl Hash for TLCId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            TLCId::Offering(id) => {
+                state.write_u64(0);
+                state.write_u64(*id);
+            }
+            TLCId::Received(id) => {
+                state.write_u64(1);
+                state.write_u64(*id);
+            }
+        }
+    }
+}
+
+impl TLCId {
+    pub fn is_offering(&self) -> bool {
+        match self {
+            TLCId::Offering(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_received(&self) -> bool {
+        match self {
+            TLCId::Received(_) => true,
+            _ => false,
+        }
     }
 }
 
@@ -1934,7 +1972,7 @@ impl ChannelActorState {
                         match self
                             .to_be_committed_tlcs
                             .iter()
-                            .find(|(tlc, _reason)| tlc.id == remove_tlc.tlc_id && tlc.is_offered)
+                            .find(|(tlc, _reason)| tlc.id == remove_tlc.tlc_id && tlc.is_offered())
                         {
                             Some((tlc, reason)) => {
                                 if *reason != remove_tlc.reason {
@@ -2853,9 +2891,7 @@ impl ChannelActorState {
             } else {
                 for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
                     // Need to flip these fields for the counterparty.
-                    tlc.is_offered = !tlc.is_offered;
-                    (tlc.local_payment_key_hash, tlc.remote_payment_key_hash) =
-                        (tlc.remote_payment_key_hash, tlc.local_payment_key_hash);
+                    tlc.flip();
                 }
                 (offered_tlcs, received_tlcs)
             };
@@ -3292,11 +3328,9 @@ type ShortHash = [u8; 20];
 /// A tlc output.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TLC {
-    /// The id of a received TLC. Must be empty if this is an offered HTLC.
-    /// We will fill in the id when we send this tlc to the counterparty.
-    /// Otherwise must be the next sequence number of the counterparty.
+    /// The id of a TLC.
     pub id: u64,
-    /// Is this HTLC being received by us or offered by us?
+    /// Whether this is an offered or received HTLC.
     pub is_offered: bool,
     /// The value as it appears in the commitment transaction
     pub amount: u128,
@@ -3319,6 +3353,17 @@ pub struct TLC {
 }
 
 impl TLC {
+    pub fn is_offered(&self) -> bool {
+        self.is_offered
+    }
+
+    // Flip the tlc to the other party.
+    pub fn flip(&mut self) {
+        self.is_offered = !self.is_offered;
+        (self.local_payment_key_hash, self.remote_payment_key_hash) =
+            (self.remote_payment_key_hash, self.local_payment_key_hash);
+    }
+
     fn get_hash(&self) -> ShortHash {
         self.payment_hash.as_ref()[..20].try_into().unwrap()
     }
@@ -3367,7 +3412,7 @@ impl TLC {
     // Must be called after fill_in_pubkeys.
     pub fn serialize_to_lock_args(&self) -> Vec<u8> {
         [
-            (if self.is_offered { [0] } else { [1] }).to_vec(),
+            (if self.is_offered() { [0] } else { [1] }).to_vec(),
             self.amount.to_le_bytes().to_vec(),
             self.get_hash().to_vec(),
             self.remote_payment_key_hash.unwrap().to_vec(),
