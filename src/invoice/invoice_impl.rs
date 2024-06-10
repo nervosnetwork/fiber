@@ -168,7 +168,7 @@ macro_rules! attr_getter {
     };
 }
 
-/// Represents a syntactically and semantically correct lightning BOLT11 invoice.
+/// Represents a syntactically and semantically correct lightning BOLT11 invoice
 ///
 /// There are three ways to construct a `CkbInvoice`:
 ///  1. using [`CkbInvoiceBuilder`]
