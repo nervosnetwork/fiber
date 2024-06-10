@@ -78,16 +78,14 @@ fn generate_configuration(
     let mut configuration =
         TransactionBuilderConfiguration::new_devnet().expect("new devnet configuration");
 
-    let sighash_handler = gen_dev_sighash_handler();
-    configuration.register_script_handler(Box::new(sighash_handler));
-    let sudt_handler = gen_dev_udt_handler();
-    configuration.register_script_handler(Box::new(sudt_handler));
+    configuration.register_script_handler(Box::new(gen_dev_sighash_handler()));
+    configuration.register_script_handler(Box::new(gen_dev_udt_handler()));
     return Ok((network_info, configuration));
 }
 
 fn init_or_send_udt(
     issuer_address: &str,
-    sender_info: &(&str, H256),
+    sender_info: &(String, H256),
     receiver_address: Option<&str>,
     sudt_amount: u128,
     apply: bool,
@@ -95,7 +93,7 @@ fn init_or_send_udt(
     let (network_info, configuration) = generate_configuration()?;
 
     let issuer = Address::from_str(issuer_address)?;
-    let sender = Address::from_str(sender_info.0)?;
+    let sender = Address::from_str(&sender_info.0)?;
     let receiver = if let Some(addr) = receiver_address {
         Address::from_str(addr)?
     } else {
@@ -174,53 +172,60 @@ fn generate_udt_type_script(address: &str) -> ckb_types::packed::Script {
     res
 }
 
-fn main() -> Result<(), Box<dyn StdErr>> {
-    // The address is from
-    // ckb-cli account import --local-only --privkey-path tests/nodes/deployer/ckb-chain/key
-    let udt_owner = ("ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqwgx292hnvmn68xf779vmzrshpmm6epn4c0cgwga", h256!("0xd00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"));
+fn get_nodes_info(node: &str) -> (String, H256) {
+    let nodes_dir = std::env::var("NODES_DIR").expect("env var");
+    let node_dir = format!("{}/{}", nodes_dir, node);
+    let wallet =
+        std::fs::read_to_string(format!("{}/ckb-chain/wallet", node_dir)).expect("read failed");
+    let key = std::fs::read_to_string(format!("{}/ckb-chain/key", node_dir)).expect("read failed");
+    eprintln!("node {}: wallet: {}", node, wallet);
+    (wallet, H256::from_str(&key.trim()).expect("parse hex"))
+}
 
+fn main() -> Result<(), Box<dyn StdErr>> {
+    let udt_owner = get_nodes_info("deployer");
     let wallets = [
-        ("ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqgx5lf4pczpamsfam48evs0c8nvwqqa59qapt46f", h256!("0xcccd5f7e693b60447623fb71a5983f15a426938c33699b1a81d1239cfa656cd1")),
-        ("ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqt4vqqyehpxn47deg5l6eeqtkfrt5kfkfchkwv62", h256!("0x85af6ff21ea891dbb384b771e02317427e7b66e84b4516c03d74ca4fd5ad0500")),
-        ("ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqtrnd9f2lh5vlwlj23dedf7jje65cdj8qs7q4awr", h256!("0xd00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb975ffffff")),
+        get_nodes_info("1"),
+        get_nodes_info("2"),
+        get_nodes_info("3"),
     ];
 
-    init_or_send_udt(udt_owner.0, &udt_owner, None, 1000000000000, true).expect("init udt");
+    init_or_send_udt(&udt_owner.0, &udt_owner, None, 1000000000000, true).expect("init udt");
     generate_blocks(4).expect("ok");
 
     init_or_send_udt(
-        udt_owner.0,
+        &udt_owner.0,
         &udt_owner,
-        Some(wallets[0].0),
+        Some(&wallets[0].0),
         200000000000,
         true,
     )?;
     generate_blocks(4).expect("ok");
 
     init_or_send_udt(
-        udt_owner.0,
+        &udt_owner.0,
         &udt_owner,
-        Some(wallets[1].0),
+        Some(&wallets[1].0),
         200000000000,
         true,
     )?;
     generate_blocks(4).expect("ok");
 
     init_or_send_udt(
-        udt_owner.0,
+        &udt_owner.0,
         &udt_owner,
-        Some(wallets[2].0),
+        Some(&wallets[2].0),
         200000000000,
         true,
     )?;
     generate_blocks(4).expect("ok");
 
-    check_account(udt_owner.0, udt_owner.0)?;
-    check_account(wallets[0].0, udt_owner.0)?;
-    check_account(wallets[1].0, udt_owner.0)?;
-    check_account(wallets[2].0, udt_owner.0)?;
+    check_account(&udt_owner.0, &udt_owner.0)?;
+    check_account(&wallets[0].0, &udt_owner.0)?;
+    check_account(&wallets[1].0, &udt_owner.0)?;
+    check_account(&wallets[2].0, &udt_owner.0)?;
 
-    let script = generate_udt_type_script(udt_owner.0);
+    let script = generate_udt_type_script(&udt_owner.0);
     println!("initialized udt_type_script: {} ...", script);
 
     Ok(())
