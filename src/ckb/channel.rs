@@ -61,7 +61,7 @@ const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
 // is funded or not.
-pub const INITIAL_COMMITMENT_NUMBER: u64 = 1;
+pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -1385,8 +1385,30 @@ impl ChannelActorState {
         self.get_local_commitment_point(self.local_commitment_number)
     }
 
+    // Get the commitment secret for the previous commitment number.
+    // If the current commitment number is the initial commitment number (i.e.
+    // the channel is just created), then the previous commitment secret is the
+    // initial commitment secret.
+    pub fn get_previous_local_commitment_secret(&self) -> [u8; 32] {
+        let prev_commitment_number = if self.local_commitment_number == INITIAL_COMMITMENT_NUMBER {
+            INITIAL_COMMITMENT_NUMBER
+        } else {
+            self.local_commitment_number - 1
+        };
+        self.signer.get_commitment_secret(prev_commitment_number)
+    }
+
+    // Get the commitment point for the previous commitment number.
+    // If the current commitment number is the initial commitment number (i.e.
+    // the channel is just created), then the previous commitment point is the
+    // initial commitment point sent from the counterparty.
     pub fn get_previous_remote_commitment_point(&self) -> Pubkey {
-        self.get_remote_commitment_point(self.remote_commitment_number - 1)
+        let prev_commitment_number = if self.remote_commitment_number == INITIAL_COMMITMENT_NUMBER {
+            INITIAL_COMMITMENT_NUMBER
+        } else {
+            self.remote_commitment_number - 1
+        };
+        self.get_remote_commitment_point(prev_commitment_number)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
@@ -2265,9 +2287,7 @@ impl ChannelActorState {
             }
             CommitmentSignedFlags::ChannelReady(_) => {
                 // Now we should revoke previous transation by revealing preimage.
-                let revocation_preimage = self
-                    .signer
-                    .get_commitment_secret(self.local_commitment_number - 1);
+                let revocation_preimage = self.get_previous_local_commitment_secret();
                 debug!(
                     "Revealing preimage for revocation: {:?}",
                     &revocation_preimage
@@ -2660,12 +2680,8 @@ impl ChannelActorState {
         (tx, message, witnesses)
     }
 
-    fn build_previous_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
-        let commitment_number = if local {
-            self.local_commitment_number - 1
-        } else {
-            self.remote_commitment_number - 1
-        };
+    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+        let commitment_number = self.get_current_commitment_number(local);
         debug!(
             "Building previous commitment transaction witnesses for {} party, commitment number: {}", if local { "local" } else { "remote" }, commitment_number
         );
@@ -2809,7 +2825,7 @@ impl ChannelActorState {
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
 
-        let witnesses: Vec<u8> = self.build_previous_commitment_transaction_witnesses(local);
+        let witnesses: Vec<u8> = self.build_current_commitment_transaction_witnesses(local);
 
         let hash = blake2b_256(&witnesses);
         let script_arg: &[u8] = &hash[..20];
