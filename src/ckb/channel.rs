@@ -236,7 +236,7 @@ impl<S> ChannelActor<S> {
             version: _,
         } = state.build_and_sign_commitment_tx()?;
         debug!(
-            "Build a funding tx ({:?}) with partial signature {:?}",
+            "Build a commitment tx ({:?}) with partial signature {:?}",
             &tx, &signature
         );
 
@@ -1840,10 +1840,17 @@ impl ChannelActorState {
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let funding_out_point = self.get_funding_transaction_outpoint();
+        debug_assert_eq!(
+            tx.input_pts_iter().next().as_ref(),
+            Some(&funding_out_point),
+            "The first input of the tx must be the funding cell outpoint"
+        );
+
         let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
         debug!(
-            "Get message to sign for funding tx {:?}",
-            hex::encode(message.as_slice())
+            "Message to sign to consume funding cell {:?} with version {:?}",
+            hex::encode(message.as_slice()),
+            version
         );
 
         let verify_ctx = Musig2VerifyContext::from(self);
@@ -1854,13 +1861,11 @@ impl ChannelActorState {
             partial_signatures,
         )?;
 
-        let witness = self.create_witness_for_funding_cell(signature, None);
-        let tx = self
-            .get_funding_transaction()
+        let witness = self.create_witness_for_funding_cell(signature, version);
+        Ok(tx
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
-            .build();
-        Ok(tx)
+            .build())
     }
 
     pub fn sign_tx_to_consume_funding_cell(
@@ -1868,8 +1873,9 @@ impl ChannelActorState {
         tx: &PartiallySignedCommitmentTransaction,
     ) -> Result<TransactionView, ProcessingChannelError> {
         debug!(
-            "Signing and verifying commitment tx with message {:?}",
-            hex::encode(tx.msg.as_slice())
+            "Signing and verifying commitment tx with message {:?} (version {})",
+            hex::encode(tx.msg.as_slice()),
+            tx.version
         );
         let sign_ctx = Musig2SignContext::from(self);
         let signature2 = sign_ctx.sign(tx.msg.as_slice())?;
@@ -2572,14 +2578,13 @@ impl ChannelActorState {
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
         let tx = tx_builder.build();
-        let message = get_funding_cell_message_to_sign(
-            Some(self.get_current_commitment_number(local)),
-            funding_out_point,
-            &tx,
-        );
+        let version = self.get_current_commitment_number(local);
+        let message = get_funding_cell_message_to_sign(Some(version), funding_out_point, &tx);
         debug!(
-            "Building commitment transaction message to sign {:?}",
-            hex::encode(message.as_slice())
+            "Building {} commitment transaction message to sign {:?} (version {})",
+            if local { "local" } else { "remote" },
+            hex::encode(message.as_slice()),
+            version
         );
         (tx, message)
     }
@@ -2774,7 +2779,9 @@ impl ChannelActorState {
         let (tx, msg) = self.build_commitment_tx(false);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
-            &signature, &tx, &msg
+            &signature,
+            &tx,
+            hex::encode(&msg)
         );
         verify_ctx.verify(signature, msg.as_slice())?;
         Ok(PartiallySignedCommitmentTransaction {
@@ -2799,7 +2806,9 @@ impl ChannelActorState {
         let signature = sign_ctx.sign(msg.as_slice())?;
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
-            &tx, &msg, &signature,
+            &tx,
+            hex::encode(&msg),
+            &signature,
         );
 
         Ok(PartiallySignedCommitmentTransaction {
@@ -2817,6 +2826,10 @@ impl ChannelActorState {
         signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let tx = self.build_and_verify_commitment_tx(signature)?;
+        debug!(
+            "Trying to complete tx with partial remote signature {:?}",
+            &tx
+        );
         self.sign_tx_to_consume_funding_cell(&tx)
     }
 }
@@ -2867,7 +2880,7 @@ pub fn create_witness_for_funding_cell(
     }
 
     debug!(
-        "Building shutdown tx with witness: {:?}",
+        "Building witnesses for transaction to consume funding cell: {:?}",
         hex::encode(&witness)
     );
 
