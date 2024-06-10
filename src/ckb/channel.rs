@@ -84,11 +84,8 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(
-        AddTlcCommand,
-        Option<RpcReplyPort<Result<AddTlcResponse, ProcessingChannelError>>>,
-    ),
-    RemoveTlc(RemoveTlcCommand),
+    AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
+    RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand),
 }
 
@@ -547,13 +544,29 @@ impl<S> ChannelActor<S> {
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
-                let tlc_id = self.handle_add_tlc_command(state, command)?;
-                if let Some(reply) = reply {
-                    let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
+                match self.handle_add_tlc_command(state, command) {
+                    Ok(tlc_id) => {
+                        let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = reply.send(Err(err.to_string()));
+                        Err(err)
+                    }
                 }
-                Ok(())
             }
-            ChannelCommand::RemoveTlc(command) => self.handle_remove_tlc_command(state, command),
+            ChannelCommand::RemoveTlc(command, reply) => {
+                match self.handle_remove_tlc_command(state, command) {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = reply.send(Err(err.to_string()));
+                        Err(err)
+                    }
+                }
+            }
             ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
         }
     }
@@ -3302,6 +3315,7 @@ impl InMemorySigner {
 mod tests {
 
     use ckb_jsonrpc_types::Status;
+    use ractor::call;
 
     use crate::{
         ckb::{
@@ -3340,16 +3354,19 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let open_channel_command = OpenChannelCommand {
-            peer_id: node_b.peer_id.clone(),
-            funding_amount: 1000,
-        };
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(open_channel_command, None),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
+        };
+        let _open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
         node_b
             .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
@@ -3364,68 +3381,48 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_and_accept_channel() {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
             .unwrap();
 
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(
-                    OpenChannelCommand {
-                        peer_id: node_b.peer_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
-        let channel_id = node_b
-            .expect_to_process_event(|event| match event {
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
+        node_b
+            .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
                     println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                     assert_eq!(peer_id, &node_a.peer_id);
-                    Some(channel_id.clone())
+                    true
                 }
-                _ => None,
+                _ => false,
             })
             .await;
 
-        node_b
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::AcceptChannel(
-                    AcceptChannelCommand {
-                        temp_channel_id: channel_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
+        };
 
-        node_a
-            .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        node_b
-            .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    true
-                }
-                _ => false,
-            })
-            .await;
+        let _accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
     }
 
     #[tokio::test]
@@ -3437,67 +3434,42 @@ mod tests {
             .try_into()
             .unwrap();
 
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(
-                    OpenChannelCommand {
-                        peer_id: node_b.peer_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
-        let old_channel_id = node_b
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                    println!(
-                        "A temp channel ({:?}) to {:?} created",
-                        &channel_id, peer_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    Some(channel_id.clone())
-                }
-                _ => None,
-            })
-            .await;
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
 
         node_b
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::AcceptChannel(
-                    AcceptChannelCommand {
-                        temp_channel_id: old_channel_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
-            ))
-            .expect("node_a alive");
-
-        node_a
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} created", &channel_id, &peer_id);
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &old_channel_id);
-                    Some(channel_id.clone())
-                }
-                _ => None,
-            })
-            .await;
-
-        let new_channel_id = node_b
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::ChannelCreated(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} created", &channel_id, &peer_id);
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                     assert_eq!(peer_id, &node_a.peer_id);
-                    Some(channel_id.clone())
+                    true
                 }
-                _ => None,
+                _ => false,
             })
             .await;
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 1000,
+                },
+                rpc_reply,
+            ))
+        };
+        let accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
+        let new_channel_id = accept_channel_result.new_channel_id;
 
         node_a
             .expect_event(|event| match event {
@@ -3637,41 +3609,42 @@ mod tests {
             .try_into()
             .unwrap();
 
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::OpenChannel(
-                    OpenChannelCommand {
-                        peer_id: node_b.peer_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
-        let channel_id = node_b
-            .expect_to_process_event(|event| match event {
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
+        node_b
+            .expect_event(|event| match event {
                 NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
                     println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
                     assert_eq!(peer_id, &node_a.peer_id);
-                    Some(channel_id.clone())
+                    true
                 }
-                _ => None,
+                _ => false,
             })
             .await;
 
-        node_b
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::AcceptChannel(
-                    AcceptChannelCommand {
-                        temp_channel_id: channel_id.clone(),
-                        funding_amount: 1000,
-                    },
-                    None,
-                ),
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 1000,
+                },
+                rpc_reply,
             ))
-            .expect("node_a alive");
+        };
+        let _accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
 
         node_a
             .expect_event(|event| match event {
