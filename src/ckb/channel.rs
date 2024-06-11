@@ -293,6 +293,7 @@ impl<S> ChannelActor<S> {
         state.check_state_for_tlc_update()?;
 
         let tlc = state.create_outbounding_tlc(command);
+        state.try_insert_tlc(tlc)?;
 
         // TODO: Note that since message sending is async,
         // we can't guarantee anything about the order of message sending
@@ -317,19 +318,6 @@ impl<S> ChannelActor<S> {
             ))
             .expect("network actor alive");
 
-        // Update the state for this tlc.
-        debug_assert!(tlc.is_offered());
-        state.insert_tlc(tlc);
-        state.to_local_amount -= tlc.amount;
-        state.increment_next_offering_tlc_id();
-        debug!(
-            "Added tlc with id {:?} to pending offered tlcs: {:?}",
-            tlc.id, &tlc
-        );
-        debug!(
-            "Balance after addtlccommand: to_local_amount: {} to_remote_amount: {}",
-            state.to_local_amount, state.to_remote_amount
-        );
         Ok(tlc.id.into())
     }
 
@@ -1487,12 +1475,59 @@ impl ChannelActorState {
         self.pending_tlcs.insert(tlc.id, tlc);
     }
 
+    pub fn try_insert_tlc(&mut self, tlc: TLC) -> Result<(), ProcessingChannelError> {
+        if let Some(current) = self.pending_tlcs.get(&tlc.id) {
+            if current == &tlc {
+                debug!(
+                    "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
+                    tlc.id, current,
+                );
+                return Ok(());
+            } else {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Trying to insert different tlcs with identical id {:?}: current tlc {:?}, new tlc {:?}",
+                        tlc.id, current, tlc
+                    )));
+            }
+        };
+        debug!(
+            "Adding new tlc {:?} to channel {:?} with local balance {} and remote balance {}",
+            &tlc,
+            &self.get_id(),
+            self.to_local_amount,
+            self.to_remote_amount
+        );
+        match tlc.id {
+            TLCId::Offered(_) => {
+                self.pending_tlcs.insert(tlc.id, tlc);
+                self.to_local_amount -= tlc.amount;
+                self.increment_next_offering_tlc_id();
+            }
+            TLCId::Received(_) => {
+                self.pending_tlcs.insert(tlc.id, tlc);
+                self.to_remote_amount -= tlc.amount;
+            }
+        }
+        debug!(
+            "Channel ({:?}) balance after add tlc {:?}: local balance: {}, remote balance: {}",
+            self.get_id(),
+            tlc,
+            self.to_local_amount,
+            self.to_remote_amount
+        );
+        Ok(())
+    }
+
+    pub fn remove_tlc(&mut self, tlc_id: TLCId) -> Option<TLC> {
+        self.pending_tlcs.remove(&tlc_id)
+    }
+
     pub fn remove_offered_tlc(&mut self, tlc_id: u64) -> Option<TLC> {
-        self.pending_tlcs.remove(&TLCId::Offered(tlc_id))
+        self.remove_tlc(TLCId::Offered(tlc_id))
     }
 
     pub fn remove_received_tlc(&mut self, tlc_id: u64) -> Option<TLC> {
-        self.pending_tlcs.remove(&TLCId::Received(tlc_id))
+        self.remove_tlc(TLCId::Received(tlc_id))
     }
 
     pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
@@ -1906,37 +1941,8 @@ impl ChannelActorState {
                 self.check_state_for_tlc_update()?;
 
                 let tlc = self.create_inbounding_tlc(add_tlc);
-                let id = tlc.id;
+                self.try_insert_tlc(tlc)?;
 
-                match self.get_received_tlc(id.into()) {
-                    Some(current) if current == &tlc => {
-                        debug!(
-                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
-                            id, current,
-                        )
-                    }
-                    Some(current) => {
-                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                                    "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
-                                    id,
-                                    current,
-                                    &tlc
-                                )));
-                    }
-                    None => {
-                        debug!("Adding tlc {:?} to channel {:?}", &tlc, &self.get_id());
-                    }
-                }
-
-                debug_assert!(!tlc.is_offered());
-                self.insert_tlc(tlc);
-                self.to_remote_amount -= tlc.amount;
-
-                debug!("Saved tlc {:?}", &tlc);
-                debug!(
-                    "Balance after tlc added: to_local_amount: {}, to_remote_amount: {}",
-                    self.to_local_amount, self.to_remote_amount
-                );
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
