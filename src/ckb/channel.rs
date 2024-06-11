@@ -208,7 +208,16 @@ impl<S> ChannelActor<S> {
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
             }
             PCNMessage::TxComplete(tx) => {
-                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), &self.network)
+                state.handle_tx_collaboration_msg(
+                    TxCollaborationMsg::TxComplete(tx),
+                    &self.network,
+                )?;
+                if let ChannelState::CollaboratingFundingTx(flags) = state.state {
+                    if flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) {
+                        self.handle_commitment_signed_command(state)?;
+                    }
+                }
+                Ok(())
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
                 state.handle_commitment_signed_message(commitment_signed, &self.network)?;
@@ -2352,16 +2361,21 @@ impl ChannelActorState {
         );
 
         if is_complete {
+            // We need to send a SendPcnMessage command here (instead of a ControlPcnChannel),
+            // to guarantee that the TxComplete message immediately is sent to the network actor.
+            // Otherwise, it is possible that when the network actor is processing ControlPcnChannel,
+            // it receives another SendPcnMessage command, and that message (e.g. CommitmentSigned)
+            // is processed first, thus breaking the order of messages.
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                        channel_id: self.get_id(),
-                        command: ChannelCommand::TxCollaborationCommand(
-                            TxCollaborationCommand::TxComplete(TxCompleteCommand {}),
-                        ),
-                    }),
+                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                        self.peer_id.clone(),
+                        PCNMessage::TxComplete(TxComplete {
+                            channel_id: self.get_id(),
+                        }),
+                    )),
                 ))
-                .expect("network alive");
+                .expect("network actor alive");
             let old_flags = match self.state {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {
@@ -3307,7 +3321,6 @@ mod tests {
 
     use crate::{
         ckb::{
-            channel::{ChannelCommand, ChannelCommandWithId, INITIAL_COMMITMENT_NUMBER},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3458,66 +3471,6 @@ mod tests {
             .expect("node_b alive")
             .expect("accept channel success");
         let new_channel_id = accept_channel_result.new_channel_id;
-
-        node_a
-            .expect_event(|event| match event {
-                NetworkServiceEvent::CommitmentSignaturePending(
-                    peer_id,
-                    channel_id,
-                    commitment_num,
-                ) => {
-                    println!(
-                        "A commitment signature for channel {:?} to {:?} is pending",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::CommitmentSigned(),
-                }),
-            ))
-            .expect("node_a alive");
-
-        node_b
-            .expect_event(|event| match event {
-                NetworkServiceEvent::CommitmentSignaturePending(
-                    peer_id,
-                    channel_id,
-                    commitment_num,
-                ) => {
-                    println!(
-                        "A commitment signature for channel {:?} to {:?} is pending",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        node_b
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::CommitmentSigned(),
-                }),
-            ))
-            .expect("node_a alive");
 
         let node_a_commitment_tx = node_a
             .expect_to_process_event(|event| match event {
