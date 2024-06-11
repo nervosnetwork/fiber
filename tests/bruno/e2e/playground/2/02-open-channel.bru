@@ -1,0 +1,40 @@
+meta {
+  name: open a channel to a peer
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}",
+        "funding_amount": "0xba43b7400"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  bru.setVar("TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
+}
