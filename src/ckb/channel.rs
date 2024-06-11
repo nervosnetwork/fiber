@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use std::{
     borrow::Borrow,
-    collections::{hash_map, HashMap},
+    collections::{btree_map, BTreeMap},
     fmt::Debug,
     hash::{Hash, Hasher},
 };
@@ -1011,7 +1011,7 @@ impl TLCIds {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum TLCId {
     Offered(u64),
     Received(u64),
@@ -1106,7 +1106,7 @@ pub struct ChannelActorState {
 
     // HashMap of tlc ids to pending tlcs. Resovled tlcs (both failed and succeeded)
     // will be removed from this map.
-    pub pending_tlcs: HashMap<TLCId, TLC>,
+    pub pending_tlcs: BTreeMap<TLCId, TLC>,
     // List of tlcs that are removed but not yet committed in a commitment transaction.
     // We have to keep them tentatively because
     // 1. Even if the counterparty goes offline, we can still take the assets back
@@ -1932,7 +1932,7 @@ impl ChannelActorState {
                 self.insert_tlc(tlc);
                 self.to_remote_amount -= tlc.amount;
 
-                debug!("Saved tlc {:?} to pending_received_tlcs", &tlc);
+                debug!("Saved tlc {:?}", &tlc);
                 debug!(
                     "Balance after tlc added: to_local_amount: {}, to_remote_amount: {}",
                     self.to_local_amount, self.to_remote_amount
@@ -1948,7 +1948,7 @@ impl ChannelActorState {
 
                 let channel_id = self.get_id();
                 match self.pending_tlcs.entry(TLCId::Offered(remove_tlc.tlc_id)) {
-                    hash_map::Entry::Occupied(entry) => {
+                    btree_map::Entry::Occupied(entry) => {
                         let current = entry.get();
                         debug!("Removing tlc {:?} from channel {:?}", &current, &channel_id);
                         match remove_tlc.reason {
@@ -1979,7 +1979,7 @@ impl ChannelActorState {
                         }
                         Ok(())
                     }
-                    hash_map::Entry::Vacant(_) => {
+                    btree_map::Entry::Vacant(_) => {
                         match self
                             .to_be_committed_tlcs
                             .iter()
