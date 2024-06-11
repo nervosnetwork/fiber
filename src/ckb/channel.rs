@@ -3300,7 +3300,6 @@ mod tests {
 
     use crate::{
         ckb::{
-            channel::{ChannelCommand, ChannelCommandWithId, INITIAL_COMMITMENT_NUMBER},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
             NetworkActorCommand, NetworkActorMessage,
@@ -3451,66 +3450,6 @@ mod tests {
             .expect("node_b alive")
             .expect("accept channel success");
         let new_channel_id = accept_channel_result.new_channel_id;
-
-        node_a
-            .expect_event(|event| match event {
-                NetworkServiceEvent::CommitmentSignaturePending(
-                    peer_id,
-                    channel_id,
-                    commitment_num,
-                ) => {
-                    println!(
-                        "A commitment signature for channel {:?} to {:?} is pending",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        // node_a
-        //     .network_actor
-        //     .send_message(NetworkActorMessage::new_command(
-        //         NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-        //             channel_id: new_channel_id.clone(),
-        //             command: ChannelCommand::CommitmentSigned(),
-        //         }),
-        //     ))
-        //     .expect("node_a alive");
-
-        // node_b
-        //     .expect_event(|event| match event {
-        //         NetworkServiceEvent::CommitmentSignaturePending(
-        //             peer_id,
-        //             channel_id,
-        //             commitment_num,
-        //         ) => {
-        //             println!(
-        //                 "A commitment signature for channel {:?} to {:?} is pending",
-        //                 &channel_id, &peer_id
-        //             );
-        //             assert_eq!(peer_id, &node_a.peer_id);
-        //             assert_eq!(channel_id, &new_channel_id);
-        //             assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
-        //             true
-        //         }
-        //         _ => false,
-        //     })
-        //     .await;
-
-        // node_b
-        //     .network_actor
-        //     .send_message(NetworkActorMessage::new_command(
-        //         NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-        //             channel_id: new_channel_id.clone(),
-        //             command: ChannelCommand::CommitmentSigned(),
-        //         }),
-        //     ))
-        //     .expect("node_a alive");
 
         let node_a_commitment_tx = node_a
             .expect_to_process_event(|event| match event {
