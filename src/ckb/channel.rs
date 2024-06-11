@@ -236,7 +236,7 @@ impl<S> ChannelActor<S> {
             version: _,
         } = state.build_and_sign_commitment_tx()?;
         debug!(
-            "Build a funding tx ({:?}) with partial signature {:?}",
+            "Build a commitment tx ({:?}) with partial signature {:?}",
             &tx, &signature
         );
 
@@ -1823,7 +1823,7 @@ impl ChannelActorState {
     pub fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
-        version: Option<u64>,
+        version: u64,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
         create_witness_for_funding_cell(
             self.get_funding_lock_script_xonly(),
@@ -1836,14 +1836,21 @@ impl ChannelActorState {
     pub fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
         partial_signatures: [PartialSignature; 2],
-        version: Option<u64>,
+        version: u64,
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let funding_out_point = self.get_funding_transaction_outpoint();
+        debug_assert_eq!(
+            tx.input_pts_iter().next().as_ref(),
+            Some(&funding_out_point),
+            "The first input of the tx must be the funding cell outpoint"
+        );
+
         let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
         debug!(
-            "Get message to sign for funding tx {:?}",
-            hex::encode(message.as_slice())
+            "Message to sign to consume funding cell {:?} with version {:?}",
+            hex::encode(message.as_slice()),
+            version
         );
 
         let verify_ctx = Musig2VerifyContext::from(self);
@@ -1854,13 +1861,11 @@ impl ChannelActorState {
             partial_signatures,
         )?;
 
-        let witness = self.create_witness_for_funding_cell(signature, None);
-        let tx = self
-            .get_funding_transaction()
+        let witness = self.create_witness_for_funding_cell(signature, version);
+        Ok(tx
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
-            .build();
-        Ok(tx)
+            .build())
     }
 
     pub fn sign_tx_to_consume_funding_cell(
@@ -1868,15 +1873,16 @@ impl ChannelActorState {
         tx: &PartiallySignedCommitmentTransaction,
     ) -> Result<TransactionView, ProcessingChannelError> {
         debug!(
-            "Signing and verifying commitment tx with message {:?}",
-            hex::encode(tx.msg.as_slice())
+            "Signing and verifying commitment tx with message {:?} (version {})",
+            hex::encode(tx.msg.as_slice()),
+            tx.version
         );
         let sign_ctx = Musig2SignContext::from(self);
         let signature2 = sign_ctx.sign(tx.msg.as_slice())?;
 
         self.aggregate_partial_signatures_to_consume_funding_cell(
             [tx.signature, signature2],
-            Some(tx.version),
+            tx.version,
             &tx.tx,
         )
     }
@@ -1939,7 +1945,7 @@ impl ChannelActorState {
                 self.update_state(ChannelState::Closed);
                 let tx = self.aggregate_partial_signatures_to_consume_funding_cell(
                     [local_shutdown_signature, remote_shutdown_signature],
-                    None,
+                    u64::MAX,
                     &shutdown_tx,
                 )?;
 
@@ -2539,8 +2545,11 @@ impl ChannelActorState {
         let tx_builder = tx_builder.set_outputs(outputs.to_vec());
         let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
         let tx = tx_builder.build();
-        let message =
-            get_funding_cell_message_to_sign(None, self.get_funding_transaction_outpoint(), &tx);
+        let message = get_funding_cell_message_to_sign(
+            u64::MAX,
+            self.get_funding_transaction_outpoint(),
+            &tx,
+        );
         debug!(
             "Building message to sign for shutdown transaction {:?}",
             hex::encode(message.as_slice())
@@ -2572,14 +2581,13 @@ impl ChannelActorState {
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
         let tx = tx_builder.build();
-        let message = get_funding_cell_message_to_sign(
-            Some(self.get_current_commitment_number(local)),
-            funding_out_point,
-            &tx,
-        );
+        let version = self.get_current_commitment_number(local);
+        let message = get_funding_cell_message_to_sign(version, funding_out_point, &tx);
         debug!(
-            "Building commitment transaction message to sign {:?}",
-            hex::encode(message.as_slice())
+            "Building {} commitment transaction message to sign {:?} (version {})",
+            if local { "local" } else { "remote" },
+            hex::encode(message.as_slice()),
+            version
         );
         (tx, message)
     }
@@ -2774,7 +2782,9 @@ impl ChannelActorState {
         let (tx, msg) = self.build_commitment_tx(false);
         debug!(
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
-            &signature, &tx, &msg
+            &signature,
+            &tx,
+            hex::encode(&msg)
         );
         verify_ctx.verify(signature, msg.as_slice())?;
         Ok(PartiallySignedCommitmentTransaction {
@@ -2799,7 +2809,9 @@ impl ChannelActorState {
         let signature = sign_ctx.sign(msg.as_slice())?;
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
-            &tx, &msg, &signature,
+            &tx,
+            hex::encode(&msg),
+            &signature,
         );
 
         Ok(PartiallySignedCommitmentTransaction {
@@ -2817,6 +2829,10 @@ impl ChannelActorState {
         signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let tx = self.build_and_verify_commitment_tx(signature)?;
+        debug!(
+            "Trying to complete tx with partial remote signature {:?}",
+            &tx
+        );
         self.sign_tx_to_consume_funding_cell(&tx)
     }
 }
@@ -2848,10 +2864,9 @@ pub fn create_witness_for_funding_cell(
     lock_key_xonly: [u8; 32],
     out_point: OutPoint,
     signature: CompactSignature,
-    version: Option<u64>,
+    version: u64,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
-    let version = version.unwrap_or(u64::MAX);
     for bytes in [
         version.to_le_bytes().as_ref(),
         out_point.as_slice(),
@@ -2867,7 +2882,7 @@ pub fn create_witness_for_funding_cell(
     }
 
     debug!(
-        "Building shutdown tx with witness: {:?}",
+        "Building witnesses for transaction to consume funding cell: {:?}",
         hex::encode(&witness)
     );
 
@@ -2965,12 +2980,12 @@ impl Musig2SignContext {
 }
 
 fn get_funding_cell_message_to_sign(
-    version: Option<u64>,
+    version: u64,
     funding_out_point: OutPoint,
     tx: &TransactionView,
 ) -> [u8; 32] {
-    let version = version.unwrap_or(u64::MAX).to_le_bytes();
-    let version = version.as_slice();
+    let version = version.to_le_bytes();
+    let version = version.as_ref();
     let funding_out_point = funding_out_point.as_slice();
     let tx_hash = tx.hash();
     let tx_hash = tx_hash.as_slice();
