@@ -38,7 +38,7 @@ pub enum CkbChainMessage {
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
-    SendTx(TransactionView),
+    SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     TraceTx(TraceTxRequest, RpcReplyPort<ckb_jsonrpc_types::Status>),
 }
 
@@ -104,29 +104,37 @@ impl Actor for CkbChainActor {
                     });
                 }
             }
-            SendTx(tx) => {
+            SendTx(tx, reply_port) => {
                 let rpc_url = state.config.rpc_url.clone();
                 tokio::task::block_in_place(move || {
                     let ckb_client = CkbRpcClient::new(&rpc_url);
-                    if let Err(err) = ckb_client.send_transaction(tx.data().into(), None) {
-                        //FIXME(yukang): RBF or duplicated transaction handling
-                        match err {
-                            RpcError::Rpc(e)
-                                if (e.code.code() == -1107 || e.code.code() == -1111) =>
-                            {
-                                log::warn!(
-                                    "[{}] transaction already in pool",
-                                    myself.get_name().unwrap_or_default()
-                                );
-                            }
-                            _ => {
-                                log::error!(
-                                    "[{}] send transaction failed: {:?}",
-                                    myself.get_name().unwrap_or_default(),
-                                    err
-                                );
+                    let result = match ckb_client.send_transaction(tx.data().into(), None) {
+                        Ok(_) => Ok(()),
+                        Err(err) => {
+                            //FIXME(yukang): RBF or duplicated transaction handling
+                            match err {
+                                RpcError::Rpc(e)
+                                    if (e.code.code() == -1107 || e.code.code() == -1111) =>
+                                {
+                                    log::warn!(
+                                        "[{}] transaction already in pool",
+                                        myself.get_name().unwrap_or_default()
+                                    );
+                                    Ok(())
+                                }
+                                _ => {
+                                    log::error!(
+                                        "[{}] send transaction failed: {:?}",
+                                        myself.get_name().unwrap_or_default(),
+                                        err
+                                    );
+                                    Err(err)
+                                }
                             }
                         }
+                    };
+                    if !reply_port.is_closed() {
+                        reply_port.send(result).expect("reply ok");
                     }
                 });
             }
@@ -223,9 +231,10 @@ pub use test_utils::{submit_tx, MockChainActor};
 mod test_utils {
     use std::collections::HashMap;
 
+    use anyhow::anyhow;
     use ckb_types::{
         core::TransactionView,
-        packed::CellOutput,
+        packed::{CellOutput, OutPoint},
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
 
@@ -238,16 +247,25 @@ mod test_utils {
     use log::{debug, error};
     use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CellStatus {
+        // This cell has been consumed. If any transaction
+        // tries to consume the same cell, it should be rejected.
+        Consumed,
+    }
+
     pub struct MockChainActorState {
         ctx: MockContext,
-        committed_tx_status: HashMap<Byte32, ckb_jsonrpc_types::Status>,
+        tx_status: HashMap<Byte32, ckb_jsonrpc_types::Status>,
+        cell_status: HashMap<OutPoint, CellStatus>,
     }
 
     impl MockChainActorState {
         pub fn new() -> Self {
             Self {
                 ctx: MockContext::new(),
-                committed_tx_status: HashMap::new(),
+                tx_status: HashMap::new(),
+                cell_status: HashMap::new(),
             }
         }
     }
@@ -366,41 +384,75 @@ mod test_utils {
                         );
                     }
                 }
-                SendTx(tx) => {
+                SendTx(tx, reply_port) => {
                     const MAX_CYCLES: u64 = 100_000_000;
                     let mut context = state.ctx.write();
-                    let status = match context.verify_tx(&tx, MAX_CYCLES) {
-                        Ok(c) => {
-                            debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
-                            // Also save the outputs to the context, so that we can refer to
-                            // these out points later.
-                            for outpoint in tx.output_pts().into_iter() {
-                                let index: u32 = outpoint.index().unpack();
-                                let index = index as usize;
-                                let cell = tx.outputs().get(index).unwrap();
-                                let data = tx.outputs_data().get(index).unwrap();
-                                debug!(
-                                    "Creating cell with outpoint: {:?}, cell: {:?}, data: {:?}",
-                                    outpoint, cell, data
-                                );
-                                context.create_cell_with_out_point(
-                                    outpoint.clone(),
-                                    cell,
-                                    data.as_bytes(),
-                                );
+                    let mut f = || {
+                        // Mark the inputs as consumed
+                        for input in tx.input_pts_iter().into_iter() {
+                            match state.cell_status.entry(input.clone()) {
+                                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                    if *entry.get() == CellStatus::Consumed {
+                                        return (
+                                            ckb_jsonrpc_types::Status::Rejected,
+                                            Err(ckb_sdk::RpcError::Other(anyhow!(
+                                                "Cell {:?} already consumed",
+                                                &input
+                                            ))),
+                                        );
+                                    }
+                                    *entry.get_mut() = CellStatus::Consumed;
+                                }
+                                std::collections::hash_map::Entry::Vacant(entry) => {
+                                    entry.insert(CellStatus::Consumed);
+                                }
                             }
-                            ckb_jsonrpc_types::Status::Committed
                         }
-                        Err(e) => {
-                            error!("Failed to verify transaction: {:?}, error: {:?}", tx, e);
-                            ckb_jsonrpc_types::Status::Rejected
+                        match context.verify_tx(&tx, MAX_CYCLES) {
+                            Ok(c) => {
+                                debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
+                                // Also save the outputs to the context, so that we can refer to
+                                // these out points later.
+                                for outpoint in tx.output_pts().into_iter() {
+                                    let index: u32 = outpoint.index().unpack();
+                                    let index = index as usize;
+                                    let cell = tx.outputs().get(index).unwrap();
+                                    let data = tx.outputs_data().get(index).unwrap();
+                                    debug!(
+                                        "Creating cell with outpoint: {:?}, cell: {:?}, data: {:?}",
+                                        outpoint, cell, data
+                                    );
+                                    context.create_cell_with_out_point(
+                                        outpoint.clone(),
+                                        cell,
+                                        data.as_bytes(),
+                                    );
+                                }
+                                (ckb_jsonrpc_types::Status::Committed, Ok(()))
+                            }
+                            Err(e) => (
+                                ckb_jsonrpc_types::Status::Rejected,
+                                Err(ckb_sdk::RpcError::Other(anyhow!(
+                                    "Failed to verify transaction: {:?}, error: {:?}",
+                                    tx,
+                                    e
+                                ))),
+                            ),
                         }
                     };
-                    state.committed_tx_status.insert(tx.hash(), status);
+                    let (status, result) = f();
+                    state.tx_status.insert(tx.hash(), status);
+                    if let Err(e) = reply_port.send(result.into()) {
+                        error!(
+                            "[{}] send reply failed: {:?}",
+                            myself.get_name().unwrap_or_default(),
+                            e
+                        );
+                    }
                 }
                 TraceTx(tx, reply_port) => {
                     let status = state
-                        .committed_tx_status
+                        .tx_status
                         .get(&tx.tx_hash)
                         .cloned()
                         .unwrap_or(ckb_jsonrpc_types::Status::Unknown);
@@ -408,7 +460,7 @@ mod test_utils {
                         "Tracing transaction: {:?}, status: {:?}",
                         &tx.tx_hash, &status
                     );
-                    if let Err(e) = reply_port.send(status) {
+                    if let Err(e) = reply_port.send(status.into()) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
@@ -427,10 +479,12 @@ mod test_utils {
     ) -> ckb_jsonrpc_types::Status {
         pub const TIMEOUT: u64 = 1000;
         let tx_hash = tx.hash();
-
-        mock_actor
-            .send_message(CkbChainMessage::SendTx(tx))
-            .expect("chain actor alive");
+        if let Err(error) =
+            call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx).expect("chain actor alive")
+        {
+            error!("submit tx failed: {:?}", error);
+            return ckb_jsonrpc_types::Status::Rejected;
+        }
         let request = TraceTxRequest {
             tx_hash,
             confirmations: 1,
@@ -532,6 +586,66 @@ mod test {
             .output_data(Default::default())
             .build();
         assert_eq!(submit_tx(actor, tx).await, Status::Committed);
+    }
+
+    #[tokio::test]
+    async fn test_repeatedly_consume_the_same_cell() {
+        let actor = create_mock_chain_actor().await;
+        let capacity = 100u64;
+        let output = CellOutput::new_builder()
+            .capacity(capacity.pack())
+            .lock(get_script_by_contract(
+                Contract::AlwaysSuccess,
+                &b"whatever1"[..],
+            ))
+            .build();
+        let tx = TransactionView::new_advanced_builder()
+            .output(output)
+            .output_data(Default::default())
+            .build();
+        assert_eq!(
+            submit_tx(actor.clone(), tx.clone()).await,
+            Status::Committed
+        );
+        let out_point = tx.output_pts_iter().next().unwrap();
+        let tx = TransactionView::new_advanced_builder()
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+            .input(
+                CellInput::new_builder()
+                    .previous_output(out_point.clone())
+                    .build(),
+            )
+            .output(
+                CellOutput::new_builder()
+                    .capacity(capacity.pack())
+                    .lock(get_script_by_contract(
+                        Contract::FundingLock,
+                        &b"whatever2"[..],
+                    ))
+                    .build(),
+            )
+            .output_data(Default::default())
+            .build();
+        assert_eq!(submit_tx(actor.clone(), tx).await, Status::Committed);
+        let tx = TransactionView::new_advanced_builder()
+            .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+            .input(
+                CellInput::new_builder()
+                    .previous_output(out_point.clone())
+                    .build(),
+            )
+            .output(
+                CellOutput::new_builder()
+                    .capacity(capacity.pack())
+                    .lock(get_script_by_contract(
+                        Contract::FundingLock,
+                        &b"whatever3"[..],
+                    ))
+                    .build(),
+            )
+            .output_data(Default::default())
+            .build();
+        assert_eq!(submit_tx(actor, tx).await, Status::Rejected);
     }
 
     #[tokio::test]

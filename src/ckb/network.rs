@@ -750,9 +750,15 @@ impl NetworkActorState {
         );
         let transaction = transaction.into_view();
         debug!("Trying to broadcast funding transaction {:?}", &transaction);
-        self.chain_actor
-            .send_message(CkbChainMessage::SendTx(transaction.clone()))
-            .expect("chain actor alive");
+
+        call_t!(
+            self.chain_actor,
+            CkbChainMessage::SendTx,
+            DEFAULT_CHAIN_ACTOR_TIMEOUT,
+            transaction.clone()
+        )
+        .expect("chain alive")
+        .expect("valid funding tx");
 
         let hash = transaction.hash().into();
 
@@ -1024,9 +1030,15 @@ where
                         "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
                         channel_id, peer_id, tx
                     );
-                    self.chain_actor
-                        .send_message(CkbChainMessage::SendTx(tx.clone()))
-                        .expect("chain actor alive");
+                    call_t!(
+                        self.chain_actor,
+                        CkbChainMessage::SendTx,
+                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                        tx.clone()
+                    )
+                    .expect("chain alive")
+                    .expect("valid closing tx");
+
                     // Notify outside observers.
                     myself
                         .send_message(NetworkActorMessage::new_event(
