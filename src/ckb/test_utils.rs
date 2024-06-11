@@ -28,7 +28,7 @@ use crate::{
 };
 
 use super::{
-    channel::{ChannelActorState, ChannelActorStateStore},
+    channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
@@ -246,7 +246,7 @@ impl ChannelActorStateStore for MemoryStore {
         self.channel_actor_state_map.write().unwrap().remove(id);
     }
 
-    fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256> {
+    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
         self.channel_actor_state_map
             .read()
             .unwrap()
@@ -259,6 +259,25 @@ impl ChannelActorStateStore for MemoryStore {
                 }
             })
             .collect()
+    }
+
+    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+        let map = self.channel_actor_state_map.read().unwrap();
+        let values = map.values();
+        match peer_id {
+            Some(peer_id) => values
+                .filter_map(|state| {
+                    if peer_id == state.peer_id {
+                        Some((state.peer_id.clone(), state.id.clone(), state.state.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            None => values
+                .map(|state| (state.peer_id.clone(), state.id.clone(), state.state.clone()))
+                .collect(),
+        }
     }
 }
 

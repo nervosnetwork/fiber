@@ -1,11 +1,11 @@
 meta {
-  name: accept a channel from a peer
+  name: get auto accepted channel id from Node3
   type: http
-  seq: 3
+  seq: 8
 }
 
 post {
-  url: {{NODE1_RPC_URL}}
+  url: {{NODE3_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,11 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "accept_channel",
+    "method": "list_channels",
     "params": [
       {
-        "temporary_channel_id": "{{TEMP_CHANNEL_ID}}",
-        "funding_amount": "0x174876e800"
+        "peer_id": "{{NODE2_PEERID}}"
       }
     ]
   }
@@ -31,11 +30,12 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.channel_id: isDefined
+  res.body.result.channels: isDefined
 }
 
 script:post-response {
+  console.log(res.body.result);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
-  bru.setVar("CHANNEL_ID", res.body.result.channel_id);
+  bru.setVar("N2N3_CHANNEL_ID", res.body.result.channels[0].channel_id);
 }

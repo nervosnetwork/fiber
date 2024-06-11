@@ -1,6 +1,7 @@
 use crate::ckb::{
     channel::{
-        AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, ShutdownCommand,
+        AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
+        RemoveTlcCommand, ShutdownCommand,
     },
     network::{AcceptChannelCommand, OpenChannelCommand},
     serde_utils::{U128Hex, U32Hex, U64Hex},
@@ -49,6 +50,27 @@ pub struct AcceptChannelResult {
 #[derive(Serialize, Deserialize)]
 pub struct CommitmentSignedParams {
     pub channel_id: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize)]
+pub struct ListChannelsParams {
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    pub peer_id: Option<PeerId>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ListChannelsResult {
+    pub channels: Vec<Channel>,
+}
+
+#[serde_as]
+#[derive(Clone, Serialize)]
+pub struct Channel {
+    pub channel_id: Hash256,
+    #[serde_as(as = "DisplayFromStr")]
+    pub peer_id: PeerId,
+    pub state: ChannelState,
 }
 
 #[serde_as]
@@ -113,6 +135,12 @@ pub trait ChannelRpc {
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
 
+    #[method(name = "list_channels")]
+    async fn list_channels(
+        &self,
+        params: ListChannelsParams,
+    ) -> Result<ListChannelsResult, ErrorObjectOwned>;
+
     #[method(name = "commitment_signed")]
     async fn commitment_signed(
         &self,
@@ -130,18 +158,22 @@ pub trait ChannelRpc {
         -> Result<(), ErrorObjectOwned>;
 }
 
-pub struct ChannelRpcServerImpl {
+pub struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
+    store: S,
 }
 
-impl ChannelRpcServerImpl {
-    pub fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
-        ChannelRpcServerImpl { actor }
+impl<S> ChannelRpcServerImpl<S> {
+    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+        ChannelRpcServerImpl { actor, store }
     }
 }
 
 #[async_trait]
-impl ChannelRpcServer for ChannelRpcServerImpl {
+impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
+where
+    S: ChannelActorStateStore + Send + Sync + 'static,
+{
     async fn open_channel(
         &self,
         params: OpenChannelParams,
@@ -190,6 +222,23 @@ impl ChannelRpcServer for ChannelRpcServerImpl {
                 Some(params),
             )),
         }
+    }
+
+    async fn list_channels(
+        &self,
+        params: ListChannelsParams,
+    ) -> Result<ListChannelsResult, ErrorObjectOwned> {
+        let channels = self.store.get_channel_states(params.peer_id);
+        Ok(ListChannelsResult {
+            channels: channels
+                .into_iter()
+                .map(|(peer_id, channel_id, state)| Channel {
+                    channel_id,
+                    peer_id,
+                    state,
+                })
+                .collect(),
+        })
     }
 
     async fn commitment_signed(

@@ -660,7 +660,7 @@ impl NetworkActorState {
         debug!("Peer connected: {:?}, session id: {}", &peer_id, session.id);
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
-        for channel_id in store.get_channels(&peer_id) {
+        for channel_id in store.get_channel_ids_by_peer(&peer_id) {
             debug!("Reestablishing channel {:?}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
                 None,
