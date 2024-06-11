@@ -208,7 +208,16 @@ impl<S> ChannelActor<S> {
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
             }
             PCNMessage::TxComplete(tx) => {
-                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), &self.network)
+                state.handle_tx_collaboration_msg(
+                    TxCollaborationMsg::TxComplete(tx),
+                    &self.network,
+                )?;
+                if let ChannelState::CollaboratingFundingTx(flags) = state.state {
+                    if flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) {
+                        self.handle_commitment_signed_command(state)?;
+                    }
+                }
+                Ok(())
             }
             PCNMessage::CommitmentSigned(commitment_signed) => {
                 state.handle_commitment_signed_message(commitment_signed, &self.network)?;
@@ -3458,45 +3467,45 @@ mod tests {
             })
             .await;
 
-        node_a
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::CommitmentSigned(),
-                }),
-            ))
-            .expect("node_a alive");
+        // node_a
+        //     .network_actor
+        //     .send_message(NetworkActorMessage::new_command(
+        //         NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+        //             channel_id: new_channel_id.clone(),
+        //             command: ChannelCommand::CommitmentSigned(),
+        //         }),
+        //     ))
+        //     .expect("node_a alive");
 
-        node_b
-            .expect_event(|event| match event {
-                NetworkServiceEvent::CommitmentSignaturePending(
-                    peer_id,
-                    channel_id,
-                    commitment_num,
-                ) => {
-                    println!(
-                        "A commitment signature for channel {:?} to {:?} is pending",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
-                    true
-                }
-                _ => false,
-            })
-            .await;
+        // node_b
+        //     .expect_event(|event| match event {
+        //         NetworkServiceEvent::CommitmentSignaturePending(
+        //             peer_id,
+        //             channel_id,
+        //             commitment_num,
+        //         ) => {
+        //             println!(
+        //                 "A commitment signature for channel {:?} to {:?} is pending",
+        //                 &channel_id, &peer_id
+        //             );
+        //             assert_eq!(peer_id, &node_a.peer_id);
+        //             assert_eq!(channel_id, &new_channel_id);
+        //             assert_eq!(commitment_num, &INITIAL_COMMITMENT_NUMBER);
+        //             true
+        //         }
+        //         _ => false,
+        //     })
+        //     .await;
 
-        node_b
-            .network_actor
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::CommitmentSigned(),
-                }),
-            ))
-            .expect("node_a alive");
+        // node_b
+        //     .network_actor
+        //     .send_message(NetworkActorMessage::new_command(
+        //         NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
+        //             channel_id: new_channel_id.clone(),
+        //             command: ChannelCommand::CommitmentSigned(),
+        //         }),
+        //     ))
+        //     .expect("node_a alive");
 
         let node_a_commitment_tx = node_a
             .expect_to_process_event(|event| match event {
