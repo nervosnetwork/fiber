@@ -101,6 +101,7 @@ impl NetworkNode {
         let base_dir = TempDir::new("ckb-pcn-node-test");
         let ckb_config = CkbConfig {
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
+            auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
             ..Default::default()
         };
 

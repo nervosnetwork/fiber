@@ -3350,7 +3350,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3382,7 +3382,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3406,7 +3406,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 1000,
+                    funding_amount: 6100000000,
                 },
                 rpc_reply,
             ))
@@ -3430,7 +3430,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3605,7 +3605,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3629,7 +3629,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 1000,
+                    funding_amount: 6100000000,
                 },
                 rpc_reply,
             ))

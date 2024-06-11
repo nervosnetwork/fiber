@@ -46,6 +46,35 @@ pub struct CkbConfig {
     /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
     #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]
     pub network: Option<CkbNetwork>,
+
+    /// minimum ckb funding amount for open channel requests, unit: shannons [default: 16100000000 shannons]
+    #[arg(
+        name = "CKB_OPEN_CHANNEL_MIN_CKB_FUNDING_AMOUNT",
+        long = "ckb-open-channel-min-ckb-funding-amount",
+        env,
+        help = "minimum ckb funding amount for open channel requests, unit: shannons [default: 16100000000 shannons]"
+    )]
+    pub open_channel_min_ckb_funding_amount: Option<u128>,
+    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept
+    #[arg(
+        name = "CKB_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
+        long = "ckb-auto-accept-channel-ckb-funding-amount",
+        env,
+        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept"
+    )]
+    pub auto_accept_channel_ckb_funding_amount: Option<u128>,
+}
+
+impl CkbConfig {
+    pub fn open_channel_min_ckb_funding_amount(&self) -> u128 {
+        self.open_channel_min_ckb_funding_amount
+            .unwrap_or(16100000000)
+    }
+
+    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u128 {
+        self.auto_accept_channel_ckb_funding_amount
+            .unwrap_or(6100000000)
+    }
 }
 
 // Basically ckb_sdk::types::NetworkType. But we added a `Mocknet` variant.
