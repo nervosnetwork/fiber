@@ -326,7 +326,8 @@ impl<S> ChannelActor<S> {
                         debug!(
                             "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
                             id, current,
-                        )
+                        );
+                        return Ok(());
                     }
                     Some(current) => {
                         return Err(ProcessingChannelError::RepeatedProcessing(format!(
@@ -2081,13 +2082,13 @@ impl ChannelActorState {
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) =>
             {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to process commitment_signed command in state {:?}, as collaboration is not completed yet.",
+                    "Unable to process commitment_signed message in state {:?}, as collaboration is not completed yet.",
                     &self.state
                 )));
             }
             ChannelState::CollaboratingFundingTx(_) => {
                 debug!(
-                    "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
+                    "Processing commitment_signed message in state {:?}",
                     &self.state
                 );
                 CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
@@ -2102,7 +2103,7 @@ impl ChannelActorState {
             }
             ChannelState::SigningCommitment(flags) => {
                 debug!(
-                    "Processing commitment_signed command in from SigningCommitment state {:?}",
+                    "Processing commitment_signed message in state {:?}",
                     &self.state
                 );
                 CommitmentSignedFlags::SigningCommitment(flags)
@@ -2120,7 +2121,7 @@ impl ChannelActorState {
             }
             ChannelState::ChannelReady(flags) => {
                 debug!(
-                    "Processing commitment_signed command in from ChannelReady state {:?}",
+                    "Processing commitment_signed message in state {:?}",
                     &self.state
                 );
                 CommitmentSignedFlags::ChannelReady(flags)
