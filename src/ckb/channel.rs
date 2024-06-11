@@ -177,6 +177,272 @@ impl<S> ChannelActor<S> {
         }
     }
 
+    pub fn handle_peer_message(
+        &self,
+        state: &mut ChannelActorState,
+        message: PCNMessage,
+    ) -> Result<(), ProcessingChannelError> {
+        match message {
+            PCNMessage::OpenChannel(_) => {
+                panic!("OpenChannel message should be processed while prestarting")
+            }
+            PCNMessage::AcceptChannel(accept_channel) => {
+                state.handle_accept_channel_message(accept_channel)?;
+                let old_id = state.get_id();
+                state.fill_in_channel_id();
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::ChannelAccepted(
+                            state.peer_id.clone(),
+                            state.get_id(),
+                            old_id,
+                            state.to_local_amount,
+                            state.to_remote_amount,
+                            state.get_funding_lock_script(),
+                        ),
+                    ))
+                    .expect("network actor alive");
+                Ok(())
+            }
+            PCNMessage::TxUpdate(tx) => {
+                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
+            }
+            PCNMessage::TxComplete(tx) => {
+                state.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), &self.network)
+            }
+            PCNMessage::CommitmentSigned(commitment_signed) => {
+                state.handle_commitment_signed_message(commitment_signed, &self.network)?;
+                if let ChannelState::SigningCommitment(flags) = state.state {
+                    if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
+                        // TODO: maybe we should send our commitment_signed message here.
+                        debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
+                        // Notify outside observers.
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::NetworkServiceEvent(
+                                    NetworkServiceEvent::CommitmentSignaturePending(
+                                        state.peer_id.clone(),
+                                        state.get_id(),
+                                        state.get_current_commitment_number(false),
+                                    ),
+                                ),
+                            ))
+                            .expect("myself alive");
+                    }
+                }
+                Ok(())
+            }
+            PCNMessage::TxSignatures(tx_signatures) => {
+                // We're the one who sent tx_signature first, and we received a tx_signature message.
+                // This means that the tx_signature procedure is now completed. Just change state,
+                // and exit.
+                if state.should_local_send_tx_signatures_first() {
+                    let new_witnesses: Vec<_> = tx_signatures
+                        .witnesses
+                        .into_iter()
+                        .map(|x| x.pack())
+                        .collect();
+                    debug!(
+                        "Updating funding tx witnesses of {:?} to {:?}",
+                        state.get_funding_transaction().calc_tx_hash(),
+                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
+                    );
+                    state.funding_tx = Some(
+                        state
+                            .get_funding_transaction()
+                            .as_advanced_builder()
+                            .set_witnesses(new_witnesses)
+                            .build()
+                            .data(),
+                    );
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::FundingTransactionPending(
+                                state.get_funding_transaction().clone(),
+                                state.get_funding_transaction_outpoint(),
+                                state.get_id(),
+                            ),
+                        ))
+                        .expect("network actor alive");
+
+                    state.state =
+                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    return Ok(());
+                };
+
+                state.handle_tx_signatures(&self.network, Some(tx_signatures.witnesses))?;
+                Ok(())
+            }
+            PCNMessage::RevokeAndAck(revoke_and_ack) => {
+                state.handle_revoke_and_ack_message(revoke_and_ack)?;
+                state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+                Ok(())
+            }
+            PCNMessage::ChannelReady(channel_ready) => {
+                let flags = match state.state {
+                    ChannelState::AwaitingTxSignatures(flags) => {
+                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
+                            AwaitingChannelReadyFlags::empty()
+                        } else {
+                            return Err(ProcessingChannelError::InvalidState(format!(
+                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
+                                state.state
+                            )));
+                        }
+                    }
+                    ChannelState::AwaitingChannelReady(flags) => flags,
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}", state.state
+                        )));
+                    }
+                };
+                let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
+                state.update_state(ChannelState::AwaitingChannelReady(flags));
+                debug!(
+                    "ChannelReady: {:?}, current state: {:?}",
+                    &channel_ready, &state.state
+                );
+
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelReady(state.get_id(), state.peer_id.clone()),
+                        ))
+                        .expect("network actor alive");
+                }
+
+                Ok(())
+            }
+            PCNMessage::AddTlc(add_tlc) => {
+                state.check_state_for_tlc_update()?;
+
+                let tlc = state.create_inbounding_tlc(add_tlc);
+                let id = tlc.id;
+
+                match state.pending_received_tlcs.get(&id) {
+                    Some(current) if current == &tlc => {
+                        debug!(
+                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
+                            id, current,
+                        )
+                    }
+                    Some(current) => {
+                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
+                                    "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
+                                    id,
+                                    current,
+                                    &tlc
+                                )));
+                    }
+                    None => {
+                        debug!("Adding tlc {:?} to channel {:?}", &tlc, state.get_id());
+                    }
+                }
+
+                state.pending_received_tlcs.insert(tlc.id, tlc);
+                state.to_remote_amount -= tlc.amount;
+
+                // TODO: here we didn't send any ack message to the peer.
+                // The peer may falsely believe that we have already processed this message,
+                // while we have crashed. We need a way to make sure that the peer will resend
+                // this message, and our processing of this message is idempotent.
+                Ok(())
+            }
+            PCNMessage::RemoveTlc(remove_tlc) => {
+                state.check_state_for_tlc_update()?;
+
+                match state.pending_offered_tlcs.entry(remove_tlc.tlc_id) {
+                    hash_map::Entry::Occupied(entry) => {
+                        let current = entry.get();
+                        match remove_tlc.reason {
+                            RemoveTlcReason::RemoveTlcFail(_fail) => {
+                                state.to_local_amount += current.amount;
+                            }
+                            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
+                                let preimage = fulfill.payment_preimage;
+                                if current.payment_hash != blake2b_256(preimage).into() {
+                                    return Err(ProcessingChannelError::InvalidParameter(
+                                        "Payment preimage does not match the hash".to_string(),
+                                    ));
+                                }
+                                state.to_remote_amount += current.amount;
+                            }
+                        }
+                        entry.remove();
+                        if state.pending_offered_tlcs.is_empty() {
+                            state.maybe_transition_to_shutdown(&self.network)?;
+                        }
+                        Ok(())
+                    }
+                    hash_map::Entry::Vacant(_) => {
+                        Err(ProcessingChannelError::InvalidParameter(format!(
+                            "TLC with id {:?} not found in pending_received_tlcs",
+                            remove_tlc.tlc_id
+                        )))
+                    }
+                }
+            }
+            PCNMessage::Shutdown(shutdown) => {
+                let flags = match state.state {
+                    ChannelState::ChannelReady(_) => ShuttingDownFlags::empty(),
+                    ChannelState::ShuttingDown(flags)
+                        if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
+                    {
+                        return Err(ProcessingChannelError::InvalidParameter(
+                            "Received Shutdown message, but we're already in ShuttingDown state"
+                                .to_string(),
+                        ));
+                    }
+                    ChannelState::ShuttingDown(flags) => flags,
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
+                            state.state
+                        )));
+                    }
+                };
+                state.remote_shutdown_script = Some(shutdown.close_script);
+                state.remote_shutdown_fee = Some(shutdown.fee);
+
+                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+                state.update_state(ChannelState::ShuttingDown(flags));
+                state.maybe_transition_to_shutdown(&self.network)?;
+
+                Ok(())
+            }
+            PCNMessage::ClosingSigned(closing) => {
+                let ClosingSigned {
+                    partial_signature,
+                    channel_id,
+                } = closing;
+
+                if channel_id != state.get_id() {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "Channel id mismatch".to_string(),
+                    ));
+                }
+
+                // Note that we don't check the validity of the signature here.
+                // we will check the validity when we're about to build the shutdown tx.
+                // This may be or may not be a problem.
+                // We do this to simplify the handling of the message.
+                // We may change this in the future.
+                // We also didn't check the state here.
+                state.remote_shutdown_signature = Some(partial_signature);
+
+                state.maybe_transition_to_shutdown(&self.network)?;
+                Ok(())
+            }
+
+            _ => {
+                warn!("Received unsupported message: {:?}", &message);
+                Ok(())
+            }
+        }
+    }
+
     pub fn handle_commitment_signed_command(
         &self,
         state: &mut ChannelActorState,
@@ -262,7 +528,7 @@ impl<S> ChannelActor<S> {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
                 state.update_state(ChannelState::SigningCommitment(flags));
-                state.maybe_transition_to_tx_signatures(flags, self.network.clone())?;
+                state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
             CommitmentSignedFlags::ChannelReady(flags) => {
                 let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
@@ -379,7 +645,7 @@ impl<S> ChannelActor<S> {
             "Balance after removetlccommand: to_local_amount: {} to_remote_amount: {}",
             state.to_local_amount, state.to_remote_amount
         );
-        state.maybe_transition_to_shutdown(self.network.clone())?;
+        state.maybe_transition_to_shutdown(&self.network)?;
 
         Ok(())
     }
@@ -424,7 +690,7 @@ impl<S> ChannelActor<S> {
             &state.state
         );
 
-        state.maybe_transition_to_shutdown(self.network.clone())?;
+        state.maybe_transition_to_shutdown(&self.network)?;
         Ok(())
     }
 
@@ -507,7 +773,7 @@ impl<S> ChannelActor<S> {
                 state.funding_tx = Some(tx_update.transaction.clone());
                 state.maybe_complete_tx_collaboration(
                     tx_update.transaction.clone(),
-                    self.network.clone(),
+                    &self.network,
                 )?;
             }
             TxCollaborationCommand::TxComplete(_) => {
@@ -533,7 +799,7 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
-    pub async fn handle_command(
+    pub fn handle_command(
         &self,
         state: &mut ChannelActorState,
         command: ChannelCommand,
@@ -815,12 +1081,12 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = state.handle_peer_message(message, self.network.clone()) {
+                if let Err(error) = self.handle_peer_message(state, message) {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command).await {
+                if let Err(err) = self.handle_command(state, command) {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
@@ -1529,297 +1795,6 @@ impl From<&ChannelActorState> for Musig2VerifyContext {
 
 // State transition handlers for the channel actor state.
 impl ChannelActorState {
-    pub fn handle_peer_message(
-        &mut self,
-        message: PCNMessage,
-        network: ActorRef<NetworkActorMessage>,
-    ) -> Result<(), ProcessingChannelError> {
-        match message {
-            PCNMessage::OpenChannel(_) => {
-                panic!("OpenChannel message should be processed while prestarting")
-            }
-            PCNMessage::AcceptChannel(accept_channel) => {
-                self.handle_accept_channel_message(accept_channel)?;
-                let old_id = self.get_id();
-                self.fill_in_channel_id();
-                network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelAccepted(
-                            self.peer_id.clone(),
-                            self.get_id(),
-                            old_id,
-                            self.to_local_amount,
-                            self.to_remote_amount,
-                            self.get_funding_lock_script(),
-                        ),
-                    ))
-                    .expect("network actor alive");
-                Ok(())
-            }
-            PCNMessage::TxUpdate(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), network)
-            }
-            PCNMessage::TxComplete(tx) => {
-                self.handle_tx_collaboration_msg(TxCollaborationMsg::TxComplete(tx), network)
-            }
-            PCNMessage::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_message(commitment_signed, network.clone())?;
-                if let ChannelState::SigningCommitment(flags) = self.state {
-                    if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
-                        // TODO: maybe we should send our commitment_signed message here.
-                        debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
-                        // Notify outside observers.
-                        network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::NetworkServiceEvent(
-                                    NetworkServiceEvent::CommitmentSignaturePending(
-                                        self.peer_id.clone(),
-                                        self.get_id(),
-                                        self.get_current_commitment_number(false),
-                                    ),
-                                ),
-                            ))
-                            .expect("myself alive");
-                    }
-                }
-                Ok(())
-            }
-            PCNMessage::TxSignatures(tx_signatures) => {
-                // We're the one who sent tx_signature first, and we received a tx_signature message.
-                // This means that the tx_signature procedure is now completed. Just change state,
-                // and exit.
-                if self.should_local_send_tx_signatures_first() {
-                    let new_witnesses: Vec<_> = tx_signatures
-                        .witnesses
-                        .into_iter()
-                        .map(|x| x.pack())
-                        .collect();
-                    debug!(
-                        "Updating funding tx witnesses of {:?} to {:?}",
-                        self.get_funding_transaction().calc_tx_hash(),
-                        new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
-                    );
-                    self.funding_tx = Some(
-                        self.get_funding_transaction()
-                            .as_advanced_builder()
-                            .set_witnesses(new_witnesses)
-                            .build()
-                            .data(),
-                    );
-                    network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::FundingTransactionPending(
-                                self.get_funding_transaction().clone(),
-                                self.get_funding_transaction_outpoint(),
-                                self.get_id(),
-                            ),
-                        ))
-                        .expect("network actor alive");
-
-                    self.state =
-                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
-                    return Ok(());
-                };
-
-                self.handle_tx_signatures(network, Some(tx_signatures.witnesses))?;
-                Ok(())
-            }
-            PCNMessage::RevokeAndAck(revoke_and_ack) => {
-                self.handle_revoke_and_ack_message(revoke_and_ack, network.clone())?;
-                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-                Ok(())
-            }
-            PCNMessage::ChannelReady(channel_ready) => {
-                let flags = match self.state {
-                    ChannelState::AwaitingTxSignatures(flags) => {
-                        if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
-                            AwaitingChannelReadyFlags::empty()
-                        } else {
-                            return Err(ProcessingChannelError::InvalidState(format!(
-                                "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}",
-                                self.state
-                            )));
-                        }
-                    }
-                    ChannelState::AwaitingChannelReady(flags) => flags,
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "received ChannelReady message, but we're not ready for ChannelReady, state is currently {:?}", self.state
-                        )));
-                    }
-                };
-                let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
-                self.update_state(ChannelState::AwaitingChannelReady(flags));
-                debug!(
-                    "ChannelReady: {:?}, current state: {:?}",
-                    &channel_ready, &self.state
-                );
-
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-                    network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
-                        ))
-                        .expect("network actor alive");
-                }
-
-                Ok(())
-            }
-            PCNMessage::AddTlc(add_tlc) => {
-                self.check_state_for_tlc_update()?;
-
-                let tlc = self.create_inbounding_tlc(add_tlc);
-                let id = tlc.id;
-
-                match self.pending_received_tlcs.get(&id) {
-                    Some(current) if current == &tlc => {
-                        debug!(
-                            "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
-                            id, current,
-                        )
-                    }
-                    Some(current) => {
-                        return Err(ProcessingChannelError::RepeatedProcessing(format!(
-                                    "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}, tlc to be inserted {:?}",
-                                    id,
-                                    current,
-                                    &tlc
-                                )));
-                    }
-                    None => {
-                        debug!("Adding tlc {:?} to channel {:?}", &tlc, &self.get_id());
-                    }
-                }
-
-                self.pending_received_tlcs.insert(tlc.id, tlc);
-                self.to_remote_amount -= tlc.amount;
-
-                debug!("Saved tlc {:?} to pending_received_tlcs", &tlc);
-                debug!(
-                    "Current pending_received_tlcs: {:?}",
-                    &self.pending_received_tlcs
-                );
-                debug!(
-                    "Current pending_offered_tlcs: {:?}",
-                    &self.pending_offered_tlcs
-                );
-                debug!(
-                    "Balance after tlc added: to_local_amount: {}, to_remote_amount: {}",
-                    self.to_local_amount, self.to_remote_amount
-                );
-                // TODO: here we didn't send any ack message to the peer.
-                // The peer may falsely believe that we have already processed this message,
-                // while we have crashed. We need a way to make sure that the peer will resend
-                // this message, and our processing of this message is idempotent.
-                Ok(())
-            }
-            PCNMessage::RemoveTlc(remove_tlc) => {
-                self.check_state_for_tlc_update()?;
-
-                let channel_id = self.get_id();
-                match self.pending_offered_tlcs.entry(remove_tlc.tlc_id) {
-                    hash_map::Entry::Occupied(entry) => {
-                        let current = entry.get();
-                        debug!("Removing tlc {:?} from channel {:?}", &current, &channel_id);
-                        match remove_tlc.reason {
-                            RemoveTlcReason::RemoveTlcFail(fail) => {
-                                debug!("TLC {:?} failed with code {}", &current, &fail.error_code);
-                                self.to_local_amount += current.amount;
-                                debug!("Balance after tlc removed: to_local_amount: {}, to_remote_amount: {}", self.to_local_amount, self.to_remote_amount);
-                            }
-                            RemoveTlcReason::RemoveTlcFulfill(fulfill) => {
-                                let preimage = fulfill.payment_preimage;
-                                debug!(
-                                    "TLC {:?} succeeded with preimage {:?}",
-                                    &current, &preimage
-                                );
-                                if current.payment_hash != blake2b_256(preimage).into() {
-                                    return Err(ProcessingChannelError::InvalidParameter(
-                                        "Payment preimage does not match the hash".to_string(),
-                                    ));
-                                }
-                                self.to_remote_amount += current.amount;
-                                debug!("Balance after tlc removed: to_local_amount: {}, to_remote_amount: {}", self.to_local_amount, self.to_remote_amount);
-                            }
-                        }
-                        entry.remove();
-                        if self.pending_offered_tlcs.is_empty() {
-                            self.maybe_transition_to_shutdown(network)?;
-                        }
-                        Ok(())
-                    }
-                    hash_map::Entry::Vacant(_) => {
-                        Err(ProcessingChannelError::InvalidParameter(format!(
-                            "TLC with id {:?} not found in pending_received_tlcs",
-                            remove_tlc.tlc_id
-                        )))
-                    }
-                }
-            }
-            PCNMessage::Shutdown(shutdown) => {
-                let flags = match self.state {
-                    ChannelState::ChannelReady(_) => ShuttingDownFlags::empty(),
-                    ChannelState::ShuttingDown(flags)
-                        if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
-                    {
-                        return Err(ProcessingChannelError::InvalidParameter(
-                            "Received Shutdown message, but we're already in ShuttingDown state"
-                                .to_string(),
-                        ));
-                    }
-                    ChannelState::ShuttingDown(flags) => flags,
-                    _ => {
-                        return Err(ProcessingChannelError::InvalidState(format!(
-                            "received Shutdown message, but we're not ready for Shutdown, state is currently {:?}",
-                            self.state
-                        )));
-                    }
-                };
-                self.remote_shutdown_script = Some(shutdown.close_script);
-                self.remote_shutdown_fee = Some(shutdown.fee);
-
-                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
-                self.update_state(ChannelState::ShuttingDown(flags));
-                debug!(
-                    "Channel state updated to {:?} after processing shutdown command",
-                    &self.state
-                );
-                self.maybe_transition_to_shutdown(network)?;
-
-                Ok(())
-            }
-            PCNMessage::ClosingSigned(closing) => {
-                let ClosingSigned {
-                    partial_signature,
-                    channel_id,
-                } = closing;
-
-                if channel_id != self.get_id() {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "Channel id mismatch".to_string(),
-                    ));
-                }
-
-                // Note that we don't check the validity of the signature here.
-                // we will check the validity when we're about to build the shutdown tx.
-                // This may be or may not be a problem.
-                // We do this to simplify the handling of the message.
-                // We may change this in the future.
-                // We also didn't check the state here.
-                self.remote_shutdown_signature = Some(partial_signature);
-
-                self.maybe_transition_to_shutdown(network)?;
-                Ok(())
-            }
-
-            _ => {
-                warn!("Received unsupported message: {:?}", &message);
-                Ok(())
-            }
-        }
-    }
-
     pub fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
@@ -1883,7 +1858,7 @@ impl ChannelActorState {
 
     pub fn maybe_transition_to_shutdown(
         &mut self,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         // This function will also be called when we resolve all pending tlcs.
         // If we are not in the ShuttingDown state, we should not do anything.
@@ -1997,7 +1972,7 @@ impl ChannelActorState {
     pub fn handle_tx_collaboration_msg(
         &mut self,
         msg: TxCollaborationMsg,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
         let is_complete_message = match msg {
@@ -2099,7 +2074,7 @@ impl ChannelActorState {
     pub fn handle_commitment_signed_message(
         &mut self,
         commitment_signed: CommitmentSigned,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         let flags = match self.state {
             ChannelState::CollaboratingFundingTx(flags)
@@ -2220,7 +2195,7 @@ impl ChannelActorState {
     pub fn maybe_transition_to_tx_signatures(
         &mut self,
         flags: SigningCommitmentFlags,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         if flags.contains(SigningCommitmentFlags::COMMITMENT_SIGNED_SENT) {
             debug!("Commitment signed message sent by both sides, tranitioning to AwaitingTxSignatures state");
@@ -2240,7 +2215,7 @@ impl ChannelActorState {
     // set of witnesses.
     pub fn handle_tx_signatures(
         &mut self,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
         // If partial_witnesses is given, then it is the counterparty that send a message
         // to us, and we must combine them to make a full list of witnesses.
         // Otherwise, we are the one who is to start send the tx_signatures.
@@ -2312,7 +2287,6 @@ impl ChannelActorState {
     pub fn handle_revoke_and_ack_message(
         &mut self,
         revoke_and_ack: RevokeAndAck,
-        _network: ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         let RevokeAndAck {
             channel_id: _,
@@ -2356,7 +2330,7 @@ impl ChannelActorState {
     pub fn maybe_complete_tx_collaboration(
         &mut self,
         tx: Transaction,
-        network: ActorRef<NetworkActorMessage>,
+        network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         let is_complete = self.is_tx_final(&tx)?;
 
