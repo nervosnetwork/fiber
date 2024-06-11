@@ -2350,16 +2350,21 @@ impl ChannelActorState {
         );
 
         if is_complete {
+            // We need to send a SendPcnMessage command here (instead of a ControlPcnChannel),
+            // to guarantee that the TxComplete message immediately is sent to the network actor.
+            // Otherwise, it is possible that when the network actor is processing ControlPcnChannel,
+            // it receives another SendPcnMessage command, and that message (e.g. CommitmentSigned)
+            // is processed first, thus breaking the order of messages.
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ControlPcnChannel(ChannelCommandWithId {
-                        channel_id: self.get_id(),
-                        command: ChannelCommand::TxCollaborationCommand(
-                            TxCollaborationCommand::TxComplete(TxCompleteCommand {}),
-                        ),
-                    }),
+                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                        self.peer_id.clone(),
+                        PCNMessage::TxComplete(TxComplete {
+                            channel_id: self.get_id(),
+                        }),
+                    )),
                 ))
-                .expect("network alive");
+                .expect("network actor alive");
             let old_flags = match self.state {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {
