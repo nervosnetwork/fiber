@@ -2543,13 +2543,18 @@ impl ChannelActorState {
                 )));
             }
         };
-        let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
-            .input(
-                CellInput::new_builder()
-                    .previous_output(self.get_funding_transaction_outpoint())
-                    .build(),
-            );
+
+        let mut contracts = vec![Contract::CommitmentLock];
+        if self.funding_udt_type_script.is_some() {
+            // TODO(yukang): we need to find corresponding dep cells for UDT
+            contracts.push(Contract::SimpleUDT);
+        }
+        let cell_deps = get_cell_deps_by_contracts(contracts);
+        let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
+            CellInput::new_builder()
+                .previous_output(self.get_funding_transaction_outpoint())
+                .build(),
+        );
 
         if let Some(type_script) = &self.funding_udt_type_script {
             debug!(
@@ -2644,8 +2649,13 @@ impl ChannelActorState {
     // so as to consume the funding cell.
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32]) {
         let funding_out_point = self.get_funding_transaction_outpoint();
+        let mut contracts = vec![Contract::CommitmentLock];
+        if self.funding_udt_type_script.is_some() {
+            // TODO(yukang): we need to find corresponding dep cells for UDT
+            contracts.push(Contract::SimpleUDT);
+        }
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
+            .cell_deps(get_cell_deps_by_contracts(contracts))
             .input(
                 CellInput::new_builder()
                     .previous_output(funding_out_point.clone())
