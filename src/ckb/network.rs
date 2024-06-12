@@ -106,7 +106,6 @@ pub struct OpenChannelCommand {
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
-    pub funding_udt_type_script: Option<Script>,
 }
 
 impl NetworkActorMessage {
@@ -588,7 +587,6 @@ impl NetworkActorState {
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
-            funding_udt_type_script,
         } = accept_channel;
         let (peer_id, open_channel) = self
             .to_be_accepted_channels
@@ -604,31 +602,6 @@ impl NetworkActorState {
             return Ok((channel.clone(), temp_channel_id, id));
         }
 
-        match (
-            open_channel.funding_udt_type_script.as_ref(),
-            funding_udt_type_script.as_ref(),
-        ) {
-            (Some(open_channel_udt_script), Some(funding_udt_type_script)) => {
-                if open_channel_udt_script != funding_udt_type_script {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        "Funding type script mismatch".to_string(),
-                    ));
-                }
-            }
-            (Some(_), None) => {
-                // If the funding type script is provided in the open channel message,
-                // then both parties will use the same funding type script, it's OK the other
-                // does not provide it, he accept it means he agrees with the funding type script
-                // but he does not want to provice funding amount.
-            }
-            (None, None) => {}
-            (None, Some(_)) => {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "The OpenChannel didn't provide UDT type script, so we don't expect script in AcceptChannel".to_string(),
-                ));
-            }
-        }
-
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -638,7 +611,6 @@ impl NetworkActorState {
                 funding_amount,
                 seed,
                 open_channel,
-                funding_udt_type_script,
                 Some(tx),
             ),
             network.clone().get_cell(),

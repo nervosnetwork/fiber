@@ -155,7 +155,6 @@ pub enum ChannelInitializationParameter {
         u128,
         [u8; 32],
         OpenChannel,
-        Option<Script>,
         Option<oneshot::Sender<Hash256>>,
     ),
     /// Reestablish a channel with given channel id.
@@ -868,7 +867,6 @@ where
                 my_funding_amount,
                 seed,
                 open_channel,
-                accept_funding_udt_type_script,
                 oneshot_channel,
             ) => {
                 let peer_id = self.peer_id.clone();
@@ -889,15 +887,6 @@ where
                     next_local_nonce,
                     ..
                 } = &open_channel;
-
-                if accept_funding_udt_type_script != *funding_udt_type_script
-                    && accept_funding_udt_type_script.is_some()
-                {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                            "Accept funding type script does not match open channel funding type script"
-                                .to_string(),
-                        )));
-                }
 
                 if *chain_hash != [0u8; 32].into() {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
@@ -925,7 +914,6 @@ where
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: my_funding_amount,
-                    funding_udt_type_script: funding_udt_type_script.clone(),
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     to_local_delay: *to_local_delay,
@@ -1989,8 +1977,6 @@ impl ChannelActorState {
         ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
-        self.funding_udt_type_script = accept_channel.funding_udt_type_script.clone();
-
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
             pubkeys: remote_pubkeys,
@@ -3543,7 +3529,6 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
-                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3592,7 +3577,6 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 1000,
-                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3710,7 +3694,6 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6100000000,
-                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))

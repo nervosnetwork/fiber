@@ -117,15 +117,17 @@ impl Actor for CkbChainActor {
                                     if (e.code.code() == -1107 || e.code.code() == -1111) =>
                                 {
                                     log::warn!(
-                                        "[{}] transaction already in pool",
-                                        myself.get_name().unwrap_or_default()
+                                        "[{}] transaction { } already in pool",
+                                        myself.get_name().unwrap_or_default(),
+                                        tx.hash(),
                                     );
                                     Ok(())
                                 }
                                 _ => {
                                     log::error!(
-                                        "[{}] send transaction failed: {:?}",
+                                        "[{}] send transaction {} failed: {:?}",
                                         myself.get_name().unwrap_or_default(),
+                                        tx.hash(),
                                         err
                                     );
                                     Err(err)

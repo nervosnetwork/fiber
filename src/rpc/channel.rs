@@ -40,7 +40,6 @@ pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
-    pub funding_udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -214,10 +213,6 @@ where
                 AcceptChannelCommand {
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
-                    funding_udt_type_script: params
-                        .funding_udt_type_script
-                        .clone()
-                        .map(|s| s.into()),
                 },
                 rpc_reply,
             ))

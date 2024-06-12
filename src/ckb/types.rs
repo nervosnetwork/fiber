@@ -507,7 +507,6 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
 pub struct AcceptChannel {
     pub channel_id: Hash256,
     pub funding_amount: u128,
-    pub funding_udt_type_script: Option<Script>,
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u128,
@@ -527,7 +526,6 @@ impl From<AcceptChannel> for molecule_pcn::AcceptChannel {
         molecule_pcn::AcceptChannel::new_builder()
             .channel_id(accept_channel.channel_id.into())
             .funding_amount(accept_channel.funding_amount.pack())
-            .funding_udt_type_script(accept_channel.funding_udt_type_script.pack())
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(accept_channel.max_accept_tlcs.pack())
             .min_tlc_value(accept_channel.min_tlc_value.pack())
@@ -551,7 +549,6 @@ impl TryFrom<molecule_pcn::AcceptChannel> for AcceptChannel {
         Ok(AcceptChannel {
             channel_id: accept_channel.channel_id().into(),
             funding_amount: accept_channel.funding_amount().unpack(),
-            funding_udt_type_script: accept_channel.funding_udt_type_script().to_opt(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: accept_channel.max_accept_tlcs().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
