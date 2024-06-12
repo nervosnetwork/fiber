@@ -200,6 +200,9 @@ impl<S> ChannelActor<S> {
                             state.to_local_amount,
                             state.to_remote_amount,
                             state.get_funding_lock_script(),
+                            state.funding_udt_type_script.clone(),
+                            state.local_ckb_amount,
+                            state.remote_ckb_amount,
                         ),
                     ))
                     .expect("network actor alive");

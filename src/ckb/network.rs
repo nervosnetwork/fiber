@@ -740,7 +740,7 @@ impl NetworkActorState {
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        if open_channel.funding_type_script.is_none()
+        if open_channel.funding_udt_type_script.is_none()
             && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount
         {
             return Err(ProcessingChannelError::InvalidParameter(format!(
