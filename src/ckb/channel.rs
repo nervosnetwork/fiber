@@ -954,6 +954,8 @@ pub enum TLCId {
     Received(u64),
 }
 
+// Required for using TLCId as key in BTreeMap.
+// See https://stackoverflow.com/questions/69186841/how-do-i-implement-hash-for-an-enum-with-a-special-case
 impl Hash for TLCId {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
@@ -1038,8 +1040,10 @@ pub struct ChannelActorState {
     // The id of next offering/received tlc, must increment by 1 for each new tlc.
     pub tlc_ids: TLCIds,
 
-    // HashMap of tlc ids to pending tlcs. Resovled tlcs (both failed and succeeded)
-    // will be removed from this map.
+    // BtreeMap of tlc ids to pending tlcs.
+    // serde_as is required for serde to json, as json requires keys to be strings.
+    // See https://stackoverflow.com/questions/51276896/how-do-i-use-serde-to-serialize-a-hashmap-with-structs-as-keys-to-json
+    #[serde_as(as = "Vec<(_, _)>")]
     pub tlcs: BTreeMap<TLCId, DetailedTLCInfo>,
 
     // The counterparty has already sent a shutdown message with this script.
@@ -3346,7 +3350,9 @@ impl TLC {
 }
 
 /// A tlc output in a commitment transaction, including both the tlc output
-/// and the commitment_number that it first appeared in the commitment transaction.
+/// and the commitment_number that it first appeared (will appear) in the
+/// commitment transaction. If this tlc is pending to be (already) removed
+/// from the commitment transaction, the removal_info will be Some.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedTLCInfo {
     pub tlc: TLC,
