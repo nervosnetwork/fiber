@@ -396,7 +396,7 @@ impl ContractsContext {
         let (script_cell_deps, contracts) = match self {
             #[cfg(test)]
             Self::Mock(mock) => {
-                //FIXME(yukang): why we need this
+                // ckb-testtool need to include CkbAuth
                 let mut contracts = contracts;
                 contracts.push(Contract::CkbAuth);
                 (&mock.contracts_context.script_cell_deps, contracts)
@@ -415,7 +415,6 @@ impl ContractsContext {
                     .clone()
             })
             .collect::<Vec<CellDepVec>>();
-
         let mut res: CellDepVecBuilder = CellDepVec::new_builder();
         for cell_dep in cell_deps_vec.into_iter().flatten() {
             res = res.push(cell_dep);
