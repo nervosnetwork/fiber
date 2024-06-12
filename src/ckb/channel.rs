@@ -1416,8 +1416,8 @@ impl ChannelActorState {
         remote_delay: LockTime,
         remote_pubkeys: ChannelBasePublicKeys,
         remote_nonce: PubNonce,
-        remote_commitment_point: Pubkey,
-        remote_prev_commitment_point: Pubkey,
+        first_commitment_point: Pubkey,
+        second_commitment_point: Pubkey,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
@@ -1458,7 +1458,7 @@ impl ChannelActorState {
             remote_commitment_number: INITIAL_COMMITMENT_NUMBER,
             remote_shutdown_script: None,
             remote_nonce: Some(remote_nonce),
-            remote_commitment_points: vec![remote_prev_commitment_point, remote_commitment_point],
+            remote_commitment_points: vec![first_commitment_point, second_commitment_point],
             local_shutdown_signature: None,
             local_shutdown_fee: None,
             remote_shutdown_signature: None,
