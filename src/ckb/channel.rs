@@ -1676,7 +1676,6 @@ impl ChannelActorState {
     pub fn get_active_tlcs(&self) -> Vec<DetailedTLCInfo> {
         self.tlcs
             .values()
-            .chain(self.tlcs.values())
             .cloned()
             .filter_map(|detailed_tlc| {
                 if detailed_tlc.removal_info.is_none() {
@@ -1777,7 +1776,7 @@ impl ChannelActorState {
     }
 
     fn any_tlc_pending(&self) -> bool {
-        !self.tlcs.is_empty()
+        !self.get_active_tlcs().is_empty()
     }
 
     pub fn get_remote_funding_pubkey(&self) -> &Pubkey {
