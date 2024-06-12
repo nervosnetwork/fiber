@@ -109,6 +109,7 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub funding_udt_type_script: Option<Script>,
+    pub min_fee_rate: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -742,6 +743,7 @@ impl NetworkActorState {
             peer_id,
             funding_amount,
             funding_udt_type_script,
+            min_fee_rate,
         } = open_channel;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -753,6 +755,7 @@ impl NetworkActorState {
                 seed,
                 funding_udt_type_script,
                 tx,
+                min_fee_rate,
             ),
             network.clone().get_cell(),
         )

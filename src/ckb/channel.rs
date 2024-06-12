@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
+use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
@@ -130,7 +131,7 @@ pub struct ChannelCommandWithId {
 }
 
 pub const DEFAULT_FEE_RATE: u64 = 0;
-pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 0;
+pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
@@ -149,7 +150,13 @@ pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
-    OpenChannel(u128, [u8; 32], Option<Script>, oneshot::Sender<Hash256>),
+    OpenChannel(
+        u128,
+        [u8; 32],
+        Option<Script>,
+        oneshot::Sender<Hash256>,
+        Option<u64>,
+    ),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// original OpenChannel message and an oneshot
@@ -947,6 +954,7 @@ where
                 let OpenChannel {
                     channel_id,
                     chain_hash,
+                    commitment_fee_rate,
                     funding_udt_type_script,
                     funding_amount,
                     to_local_delay,
@@ -966,6 +974,7 @@ where
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     my_funding_amount,
+                    *commitment_fee_rate,
                     funding_udt_type_script.clone(),
                     &seed,
                     peer_id.clone(),
@@ -1033,14 +1042,17 @@ where
                 seed,
                 funding_udt_type_script,
                 tx,
+                min_fee_rate,
             ) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
+                let commitment_fee_rate = min_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
                 let mut channel = ChannelActorState::new_outbound_channel(
                     &seed,
                     self.peer_id.clone(),
                     funding_amount,
+                    commitment_fee_rate,
                     funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
@@ -1052,7 +1064,7 @@ where
                     funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
-                    commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
+                    commitment_fee_rate,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
@@ -1227,6 +1239,11 @@ pub struct ChannelActorState {
     // we need to keep track of the CKB amount from partners in the channel.
     pub local_ckb_amount: u64,
     pub remote_ckb_amount: u64,
+
+    // The commitment fee rate is used to calculate the fee for the commitment transactions.
+    // this fee rate is only paid by the initiator of the channel, so we can use `is_acceptor`
+    // field to determine who should pay the fee.
+    pub commitment_fee_rate: u64,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
@@ -1451,6 +1468,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
         local_value: u128,
+        commitment_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
@@ -1481,12 +1499,13 @@ impl ChannelActorState {
             is_acceptor: true,
             funding_udt_type_script,
             to_local_amount: local_value,
+            to_remote_amount: remote_value,
+            commitment_fee_rate,
             id: channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_remote_amount: remote_value,
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_pubkeys,
@@ -1515,6 +1534,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u128,
+        commitment_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         to_local_delay: LockTime,
     ) -> Self {
@@ -1529,12 +1549,13 @@ impl ChannelActorState {
             funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
+            to_remote_amount: 0,
+            commitment_fee_rate,
             id: temp_channel_id,
             next_offering_tlc_id: 0,
             next_receiving_tlc_id: 0,
             pending_offered_tlcs: Default::default(),
             pending_received_tlcs: Default::default(),
-            to_remote_amount: 0,
             signer,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_pubkeys,
@@ -2771,6 +2792,7 @@ impl ChannelActorState {
         debug!("Built outputs for commitment transaction: {:?}", &outputs);
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
+        let tx_builder = self.fix_commitment_transaction_fee(tx_builder, local);
         let tx = tx_builder.build();
         let version = self.get_current_commitment_number(local);
         let message = get_funding_cell_message_to_sign(version, funding_out_point, &tx);
@@ -2986,6 +3008,58 @@ impl ChannelActorState {
             let outputs_data = vec![Bytes::default(); outputs.len()];
             (outputs, outputs_data)
         }
+    }
+
+    fn fix_commitment_transaction_fee(
+        &self,
+        tx_builder: TransactionBuilder,
+        local: bool,
+    ) -> TransactionBuilder {
+        let fee_rate: FeeRate = FeeRate::from_u64(self.commitment_fee_rate);
+        let ret_tx_builder = tx_builder.clone();
+
+        if fee_rate.as_u64() == 0 {
+            return ret_tx_builder;
+        }
+
+        let tx = tx_builder.build();
+        let tx_size = tx.data().serialized_size_in_block();
+        let fee = fee_rate.fee(tx_size as u64);
+        let outputs = tx.outputs();
+
+        // The change output is the first output if we are the acceptor, otherwise it is the second output.
+        let change_index = match (self.is_acceptor, local) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 1,
+            (false, false) => 0,
+        };
+        let change_output = outputs.get(change_index).expect("Change output exists");
+        let old_capacity: u64 = change_output.capacity().unpack();
+        let change_capacity: u64 = old_capacity - fee.as_u64();
+        let change_output = change_output
+            .as_builder()
+            .capacity(change_capacity.pack())
+            .build();
+        debug!(
+            "old_capacity: {}, fee: {}, change_capacity: {}",
+            old_capacity,
+            fee.as_u64(),
+            change_capacity
+        );
+        ret_tx_builder.set_outputs(
+            outputs
+                .into_iter()
+                .enumerate()
+                .map(|(i, output)| {
+                    if i == change_index {
+                        change_output.clone()
+                    } else {
+                        output
+                    }
+                })
+                .collect(),
+        )
     }
 
     pub fn build_and_verify_commitment_tx(
@@ -3591,6 +3665,7 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
+                    min_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -3624,6 +3699,7 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
+                    min_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -3673,6 +3749,7 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
+                    min_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -3789,6 +3866,7 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
+                    min_fee_rate: None,
                 },
                 rpc_reply,
             ))

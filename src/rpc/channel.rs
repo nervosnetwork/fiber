@@ -27,6 +27,8 @@ pub struct OpenChannelParams {
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
     pub funding_udt_type_script: Option<Script>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub commitment_fee_rate: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -188,6 +190,7 @@ where
                         .funding_udt_type_script
                         .clone()
                         .map(|s| s.into()),
+                    min_fee_rate: params.commitment_fee_rate,
                 },
                 rpc_reply,
             ))
