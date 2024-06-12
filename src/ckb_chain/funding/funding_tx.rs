@@ -68,13 +68,15 @@ pub struct FundingUdtInfo {
 }
 
 impl FundingUdtInfo {
-    pub fn new_with_script(type_script: packed::Script) -> Self {
-        // FIXME(yukang): make sure the udt_amount is enough for split into at least 2 cells
-        let two_cells_amount: u64 = (142 + 10) * (10 as u64).pow(8);
+    pub fn new(
+        type_script: &packed::Script,
+        local_ckb_amount: u64,
+        remote_ckb_amount: u64,
+    ) -> Self {
         Self {
-            type_script,
-            local_ckb_amount: two_cells_amount,
-            remote_ckb_amount: two_cells_amount,
+            type_script: type_script.clone(),
+            local_ckb_amount,
+            remote_ckb_amount,
         }
     }
 }

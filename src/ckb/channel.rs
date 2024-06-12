@@ -2,7 +2,7 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
-    core::{Capacity, TransactionBuilder, TransactionView},
+    core::{TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
@@ -133,6 +133,7 @@ pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
+pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 = 200 * 100_000_000; // 200 CKB
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -1190,6 +1191,12 @@ pub struct ChannelActorState {
     pub to_local_amount: u128,
     pub to_remote_amount: u128,
 
+    // only used for UDT scenario:
+    // `to_local_amount` and `to_remote_amount` are the amount of UDT
+    // we need to keep track of the CKB amount from partners in the channel.
+    pub local_ckb_amount: u64,
+    pub remote_ckb_amount: u64,
+
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
 
@@ -1466,6 +1473,8 @@ impl ChannelActorState {
             local_shutdown_fee: None,
             remote_shutdown_signature: None,
             remote_shutdown_fee: None,
+            local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+            remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
         }
     }
 
@@ -1509,6 +1518,8 @@ impl ChannelActorState {
             remote_shutdown_fee: None,
             local_shutdown_signature: None,
             remote_shutdown_signature: None,
+            local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+            remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
         }
     }
 
@@ -1655,10 +1666,9 @@ impl ChannelActorState {
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
         FundingRequest {
-            udt_info: self
-                .funding_udt_type_script
-                .clone()
-                .map(FundingUdtInfo::new_with_script),
+            udt_info: self.funding_udt_type_script.as_ref().map(|script| {
+                FundingUdtInfo::new(script, self.local_ckb_amount, self.remote_ckb_amount)
+            }),
             script: self.get_funding_lock_script(),
             local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
@@ -2544,36 +2554,33 @@ impl ChannelActorState {
 
         if let Some(type_script) = &self.funding_udt_type_script {
             debug!(
-                "UDT local_amount: {}, remote_amount: {}",
+                "shutdown UDT local_amount: {}, remote_amount: {}",
                 self.to_local_amount, self.to_remote_amount
             );
-            let local_output_data = self.to_local_amount.to_le_bytes().pack();
-            let dummy_output = CellOutput::new_builder()
+
+            let local_capacity: u64 = self.local_ckb_amount - local_shutdown_fee as u64;
+            debug!(
+                "shutdown_tx local_capacity: {} - {} = {}",
+                self.local_ckb_amount, local_shutdown_fee, local_capacity
+            );
+            let local_output = CellOutput::new_builder()
                 .lock(local_shutdown_script.clone())
                 .type_(Some(type_script.clone()).pack())
+                .capacity(local_capacity.pack())
                 .build();
-            let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(local_output_data.len()).unwrap())
-                .unwrap()
-                .pack();
-            let local_output = dummy_output
-                .as_builder()
-                .capacity(required_capacity)
-                .build();
+            let local_output_data = self.to_local_amount.to_le_bytes().pack();
 
-            let remote_output_data = self.to_remote_amount.to_le_bytes().pack();
-            let dummy_output = CellOutput::new_builder()
+            let remote_capacity: u64 = self.remote_ckb_amount - remote_shutdown_fee as u64;
+            debug!(
+                "shutdown_tx remote_capacity: {} - {} = {}",
+                self.remote_ckb_amount, remote_shutdown_fee, remote_capacity
+            );
+            let remote_output = CellOutput::new_builder()
                 .lock(remote_shutdown_script.clone())
                 .type_(Some(type_script.clone()).pack())
+                .capacity(remote_capacity.pack())
                 .build();
-            let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(remote_output_data.len()).unwrap())
-                .unwrap()
-                .pack();
-            let remote_output = dummy_output
-                .as_builder()
-                .capacity(required_capacity)
-                .build();
+            let remote_output_data = self.to_remote_amount.to_le_bytes().pack();
 
             let outputs = self.order_things_for_musig2(local_output, remote_output);
             let outputs_data = self.order_things_for_musig2(local_output_data, remote_output_data);
@@ -2831,32 +2838,25 @@ impl ChannelActorState {
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
+            //FIXME(yukang): we need to add logic for transaction fee here
+            let (time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
+                (self.local_ckb_amount, self.remote_ckb_amount)
+            } else {
+                (self.remote_ckb_amount, self.local_ckb_amount)
+            };
+
             let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
-            let dummy_output = CellOutput::new_builder()
+            let immediate_output = CellOutput::new_builder()
                 .lock(immediate_secp256k1_lock_script.clone())
                 .type_(Some(udt_type_script.clone()).pack())
-                .build();
-            let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(immediate_output_data.len()).unwrap())
-                .unwrap()
-                .pack();
-            let immediate_output = dummy_output
-                .as_builder()
-                .capacity(required_capacity)
+                .capacity(immediately_spendable_ckb_amount.pack())
                 .build();
 
             let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
-            let dummy_output = CellOutput::new_builder()
+            let commitment_lock_output = CellOutput::new_builder()
                 .lock(commitment_lock_script.clone())
                 .type_(Some(udt_type_script.clone()).pack())
-                .build();
-            let required_capacity = dummy_output
-                .occupied_capacity(Capacity::bytes(commitment_lock_output_data.len()).unwrap())
-                .unwrap()
-                .pack();
-            let commitment_lock_output = dummy_output
-                .as_builder()
-                .capacity(required_capacity)
+                .capacity(time_locked_ckb_amount.pack())
                 .build();
 
             let outputs = vec![immediate_output, commitment_lock_output];

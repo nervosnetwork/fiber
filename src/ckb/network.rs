@@ -155,7 +155,17 @@ pub enum NetworkActorEvent {
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
     /// and the script is the lock script of the agreed funding cell.
-    ChannelAccepted(PeerId, Hash256, Hash256, u128, u128, Script, Option<Script>),
+    ChannelAccepted(
+        PeerId,
+        Hash256,
+        Hash256,
+        u128,
+        u128,
+        Script,
+        Option<Script>,
+        u64,
+        u64,
+    ),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
     /// A channel is being shutting down.
@@ -1011,6 +1021,8 @@ where
                     remote,
                     script,
                     funding_script,
+                    local_ckb_amount,
+                    remote_ckb_amount,
                 ) => {
                     assert_ne!(new, old, "new and old channel id must be different");
                     if let Some(session) = state.get_peer_session(&peer_id) {
@@ -1032,8 +1044,13 @@ where
                                         new,
                                         Default::default(),
                                         FundingRequest {
-                                            udt_info: funding_script
-                                                .map(FundingUdtInfo::new_with_script),
+                                            udt_info: funding_script.as_ref().map(|type_script| {
+                                                FundingUdtInfo::new(
+                                                    type_script,
+                                                    local_ckb_amount,
+                                                    remote_ckb_amount,
+                                                )
+                                            }),
                                             script,
                                             local_amount: local as u64,
                                             local_fee_rate: 0,
