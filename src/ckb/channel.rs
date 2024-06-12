@@ -1061,6 +1061,11 @@ enum CommitmentSignedFlags {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "SCREAMING_SNAKE_CASE",
+    tag = "state_name",
+    content = "state_flags"
+)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
@@ -2841,7 +2846,8 @@ pub trait ChannelActorStateStore {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState>;
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
-    fn get_channels(&self, peer_id: &PeerId) -> Vec<Hash256>;
+    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256>;
+    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
@@ -3365,7 +3371,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3397,7 +3403,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3421,7 +3427,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 1000,
+                    funding_amount: 6100000000,
                 },
                 rpc_reply,
             ))
@@ -3445,7 +3451,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3620,7 +3626,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
-                    funding_amount: 1000,
+                    funding_amount: 100000000000,
                 },
                 rpc_reply,
             ))
@@ -3644,7 +3650,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 1000,
+                    funding_amount: 6100000000,
                 },
                 rpc_reply,
             ))

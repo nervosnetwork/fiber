@@ -251,7 +251,23 @@ where
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
             PCNMessage::OpenChannel(open_channel) => {
-                state.on_open_channel_msg(peer_id, open_channel).await?;
+                let temp_channel_id = open_channel.channel_id.clone();
+                match state.on_open_channel_msg(peer_id, open_channel).await {
+                    Ok(()) => {
+                        if state.auto_accept_channel_ckb_funding_amount > 0 {
+                            let open_channel = AcceptChannelCommand {
+                                temp_channel_id,
+                                funding_amount: state.auto_accept_channel_ckb_funding_amount,
+                            };
+                            state
+                                .create_inbound_channel(open_channel, self.store.clone())
+                                .await?;
+                        }
+                    }
+                    Err(err) => {
+                        error!("Failed to process OpenChannel message: {}", err);
+                    }
+                }
             }
 
             _ => match state.channels.get(&message.get_channel_id()) {
@@ -512,6 +528,8 @@ pub struct NetworkActorState {
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
     chain_actor: ActorRef<CkbChainMessage>,
+    open_channel_min_ckb_funding_amount: u128,
+    auto_accept_channel_ckb_funding_amount: u128,
 }
 
 impl NetworkActorState {
@@ -642,7 +660,7 @@ impl NetworkActorState {
         debug!("Peer connected: {:?}, session id: {}", &peer_id, session.id);
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
-        for channel_id in store.get_channels(&peer_id) {
+        for channel_id in store.get_channel_ids_by_peer(&peer_id) {
             debug!("Reestablishing channel {:?}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
                 None,
@@ -702,6 +720,15 @@ impl NetworkActorState {
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
+        if open_channel.funding_type_script.is_none()
+            && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount
+        {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Funding amount too low: {}",
+                open_channel.funding_amount
+            )));
+        }
+
         let id = open_channel.channel_id;
         if let Some(channel) = self.to_be_accepted_channels.get(&id) {
             warn!(
@@ -913,6 +940,8 @@ where
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
             chain_actor: self.chain_actor.clone(),
+            open_channel_min_ckb_funding_amount: config.open_channel_min_ckb_funding_amount(),
+            auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
         })
     }
 

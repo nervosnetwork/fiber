@@ -5,7 +5,7 @@ meta {
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE2_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,7 +22,7 @@ body:json {
     "method": "open_channel",
     "params": [
       {
-        "peer_id": "{{NODE2_PEERID}}",
+        "peer_id": "{{NODE3_PEERID}}",
         "funding_amount": "0x377aab54d000"
       }
     ]
@@ -35,6 +35,5 @@ assert {
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 1000));
-  bru.setVar("N2N3_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
+  await new Promise(r => setTimeout(r, 2000));
 }

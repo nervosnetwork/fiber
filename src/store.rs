@@ -130,7 +130,7 @@ impl ChannelActorStateStore for Store {
         }
     }
 
-    fn get_channels(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
+    fn get_channel_ids_by_peer(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
         let prefix = [&[64], peer_id.as_bytes()].concat();
         let iter = self.db.prefix_iterator(prefix.as_ref());
         iter.map(|(key, _)| {
@@ -138,6 +138,26 @@ impl ChannelActorStateStore for Store {
                 .try_into()
                 .expect("channel id should be 32 bytes");
             channel_id.into()
+        })
+        .collect()
+    }
+
+    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
+        let prefix = match peer_id {
+            Some(peer_id) => [&[64], peer_id.as_bytes()].concat(),
+            None => vec![64],
+        };
+        let iter = self.db.prefix_iterator(prefix.as_ref());
+        iter.map(|(key, value)| {
+            let key_len = key.len();
+            let peer_id = PeerId::from_bytes(key[1..key_len - 32].into())
+                .expect("deserialize peer id should be OK");
+            let channel_id: [u8; 32] = key[key_len - 32..]
+                .try_into()
+                .expect("channel id should be 32 bytes");
+            let state = serde_json::from_slice(value.as_ref())
+                .expect("deserialize ChannelState should be OK");
+            (peer_id, channel_id.into(), state)
         })
         .collect()
     }
