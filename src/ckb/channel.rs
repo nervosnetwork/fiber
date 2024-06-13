@@ -3286,20 +3286,28 @@ impl TLC {
         local_commitment: bool,
         channel: &ChannelActorState,
     ) -> Pubkey {
-        let commitment_number = if local_commitment {
-            self.local_commitment_number
-        } else {
-            self.remote_commitment_number
-        };
         let (base_key, commitment_point) = if local_pubkey {
             (
                 channel.get_local_channel_parameters().pubkeys.tlc_base_key,
-                channel.get_local_commitment_point(commitment_number),
+                channel.get_local_commitment_point(if local_commitment {
+                    self.local_commitment_number
+                } else {
+                    self.remote_commitment_number
+                }),
             )
         } else {
             (
                 channel.get_remote_channel_parameters().pubkeys.tlc_base_key,
-                channel.get_remote_commitment_point(commitment_number),
+                channel.get_remote_commitment_point(
+                    // Note that we are getting the commitment point of the remote party,
+                    // and the remote_commitment_number in tlc is actually the local_commitment_number of the remote party,
+                    // So we need to flip local/remote commitment numbers here.
+                    if local_commitment {
+                        self.remote_commitment_number
+                    } else {
+                        self.local_commitment_number
+                    },
+                ),
             )
         };
         derive_tlc_pubkey(&base_key, &commitment_point)
