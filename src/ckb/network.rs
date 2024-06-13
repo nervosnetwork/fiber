@@ -244,6 +244,185 @@ where
         let _ = self.event_sender.send(event).await;
     }
 
+    pub async fn handle_actor_message(
+        &self,
+        myself: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState,
+        message: NetworkActorMessage,
+    ) -> crate::Result<()> {
+        debug!("Network actor processing message {:?}", message);
+
+        match message {
+            NetworkActorMessage::Event(event) => match event {
+                NetworkActorEvent::NetworkServiceEvent(e) => {
+                    self.on_service_event(e).await;
+                }
+                NetworkActorEvent::PeerConnected(id, session) => {
+                    state
+                        .on_peer_connected(&id, &session, self.store.clone())
+                        .await;
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::PeerConnected(id, session.address),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::PeerDisconnected(id, session) => {
+                    state.on_peer_disconnected(&id, &session);
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::PeerDisConnected(id, session.address),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
+                    state.on_channel_created(channel_id, &peer_id, actor);
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelAccepted(
+                    peer_id,
+                    new,
+                    old,
+                    local,
+                    remote,
+                    script,
+                    funding_script,
+                    local_ckb_amount,
+                    remote_ckb_amount,
+                ) => {
+                    assert_ne!(new, old, "new and old channel id must be different");
+                    if let Some(session) = state.get_peer_session(&peer_id) {
+                        if let Some(channel) = state.channels.remove(&old) {
+                            debug!("Channel accepted: {:?} -> {:?}", old, new);
+                            state.channels.insert(new, channel);
+                            state.session_channels_map.get_mut(&session).map(|set| {
+                                set.remove(&old);
+                                set.insert(new);
+                            });
+
+                            debug!("Starting funding channel");
+                            // TODO: Here we implies the one who receives AcceptChannel message
+                            //  (i.e. the channel initiator) will send TxUpdate message first.
+                            dbg!(&script);
+                            myself
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::UpdateChannelFunding(
+                                        new,
+                                        Default::default(),
+                                        FundingRequest {
+                                            udt_info: funding_script.as_ref().map(|type_script| {
+                                                FundingUdtInfo::new(
+                                                    type_script,
+                                                    local_ckb_amount,
+                                                    remote_ckb_amount,
+                                                )
+                                            }),
+                                            script,
+                                            local_amount: local as u64,
+                                            local_fee_rate: 0,
+                                            remote_amount: remote as u64,
+                                        },
+                                    ),
+                                ))
+                                .expect("myself alive");
+                        }
+                    }
+                }
+                NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
+                    info!(
+                        "Channel ({:?}) to peer {:?} is now ready",
+                        channel_id, peer_id
+                    );
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelReady(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
+                    info!(
+                        "Channel ({:?}) to peer {:?} is being shutdown.",
+                        channel_id, peer_id
+                    );
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
+                    state.on_channel_closed(&channel_id, &peer_id);
+                    info!(
+                        "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
+                        channel_id, peer_id, tx
+                    );
+                    call_t!(
+                        self.chain_actor,
+                        CkbChainMessage::SendTx,
+                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                        tx.clone()
+                    )
+                    .expect("chain alive")
+                    .expect("valid closing tx");
+
+                    // Notify outside observers.
+                    myself
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::NetworkServiceEvent(
+                                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx),
+                            ),
+                        ))
+                        .expect("myself alive");
+                }
+                NetworkActorEvent::PeerMessage(peer_id, session, message) => {
+                    self.handle_peer_message(state, peer_id, session, message)
+                        .await?
+                }
+                NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
+                    debug!(
+                        "Funding transaction pending for channel {:?}: {:?}",
+                        channel_id, outpoint
+                    );
+                    state
+                        .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
+                        .await;
+                }
+                NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
+                    state.on_funding_transaction_confirmed(outpoint).await;
+                }
+                NetworkActorEvent::FundingTransactionFailed(_outpoint) => {
+                    unimplemented!("handling funding transaction failed");
+                }
+            },
+            NetworkActorMessage::Command(command) => {
+                let result = self.handle_command(myself, state, command).await;
+                if let Err(err) = result {
+                    error!("Failed to handle ckb network command: {}", err);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn handle_peer_message(
         &self,
         state: &mut NetworkActorState,
@@ -783,7 +962,8 @@ impl NetworkActorState {
         transaction: Transaction,
         outpoint: OutPoint,
         channel_id: Hash256,
-    ) -> Result<(), ActorProcessingErr> {
+    ) {
+        // Just a sanity check to ensure that no two channels are associated with the same outpoint.
         if let Some(old) = self.pending_channels.remove(&outpoint) {
             if old != channel_id {
                 panic!("Trying to associate a new channel id {:?} with the same outpoint {:?} when old channel id is {:?}. Rejecting.", channel_id, outpoint, old);
@@ -855,14 +1035,9 @@ impl NetworkActorState {
                 .send_message(NetworkActorMessage::new_event(message))
                 .expect("myself alive");
         });
-
-        Ok(())
     }
 
-    async fn on_funding_transaction_confirmed(
-        &mut self,
-        outpoint: OutPoint,
-    ) -> Result<(), ActorProcessingErr> {
+    async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
         let channel_id = match self.pending_channels.remove(&outpoint) {
             Some(channel_id) => channel_id,
             None => {
@@ -870,7 +1045,7 @@ impl NetworkActorState {
                     "Funding transaction confirmed for outpoint {:?} but no channel found",
                     &outpoint
                 );
-                return Ok(());
+                return;
             }
         };
         if let Some(channel) = self.channels.get(&channel_id) {
@@ -880,7 +1055,6 @@ impl NetworkActorState {
                 ))
                 .expect("channel actor alive");
         }
-        Ok(())
     }
 }
 
@@ -971,175 +1145,8 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Network actor processing message {:?}", message);
-
-        match message {
-            NetworkActorMessage::Event(event) => match event {
-                NetworkActorEvent::NetworkServiceEvent(e) => {
-                    self.on_service_event(e).await;
-                }
-                NetworkActorEvent::PeerConnected(id, session) => {
-                    state
-                        .on_peer_connected(&id, &session, self.store.clone())
-                        .await;
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::PeerConnected(id, session.address),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::PeerDisconnected(id, session) => {
-                    state.on_peer_disconnected(&id, &session);
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::PeerDisConnected(id, session.address),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
-                    state.on_channel_created(channel_id, &peer_id, actor);
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::ChannelAccepted(
-                    peer_id,
-                    new,
-                    old,
-                    local,
-                    remote,
-                    script,
-                    funding_script,
-                    local_ckb_amount,
-                    remote_ckb_amount,
-                ) => {
-                    assert_ne!(new, old, "new and old channel id must be different");
-                    if let Some(session) = state.get_peer_session(&peer_id) {
-                        if let Some(channel) = state.channels.remove(&old) {
-                            debug!("Channel accepted: {:?} -> {:?}", old, new);
-                            state.channels.insert(new, channel);
-                            state.session_channels_map.get_mut(&session).map(|set| {
-                                set.remove(&old);
-                                set.insert(new);
-                            });
-
-                            debug!("Starting funding channel");
-                            // TODO: Here we implies the one who receives AcceptChannel message
-                            //  (i.e. the channel initiator) will send TxUpdate message first.
-                            dbg!(&script);
-                            myself
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::UpdateChannelFunding(
-                                        new,
-                                        Default::default(),
-                                        FundingRequest {
-                                            udt_info: funding_script.as_ref().map(|type_script| {
-                                                FundingUdtInfo::new(
-                                                    type_script,
-                                                    local_ckb_amount,
-                                                    remote_ckb_amount,
-                                                )
-                                            }),
-                                            script,
-                                            local_amount: local as u64,
-                                            local_fee_rate: 0,
-                                            remote_amount: remote as u64,
-                                        },
-                                    ),
-                                ))
-                                .expect("myself alive");
-                        }
-                    }
-                }
-                NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
-                    info!(
-                        "Channel ({:?}) to peer {:?} is now ready",
-                        channel_id, peer_id
-                    );
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::ChannelReady(peer_id, channel_id),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
-                    info!(
-                        "Channel ({:?}) to peer {:?} is being shutdown.",
-                        channel_id, peer_id
-                    );
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
-                    state.on_channel_closed(&channel_id, &peer_id);
-                    info!(
-                        "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
-                        channel_id, peer_id, tx
-                    );
-                    call_t!(
-                        self.chain_actor,
-                        CkbChainMessage::SendTx,
-                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                        tx.clone()
-                    )
-                    .expect("chain alive")
-                    .expect("valid closing tx");
-
-                    // Notify outside observers.
-                    myself
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx),
-                            ),
-                        ))
-                        .expect("myself alive");
-                }
-                NetworkActorEvent::PeerMessage(peer_id, session, message) => {
-                    self.handle_peer_message(state, peer_id, session, message)
-                        .await?
-                }
-                NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
-                    debug!(
-                        "Funding transaction pending for channel {:?}: {:?}",
-                        channel_id, outpoint
-                    );
-                    state
-                        .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
-                        .await?;
-                }
-                NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
-                    state.on_funding_transaction_confirmed(outpoint).await?
-                }
-                NetworkActorEvent::FundingTransactionFailed(_outpoint) => {
-                    unimplemented!("handling funding transaction failed");
-                }
-            },
-            NetworkActorMessage::Command(command) => {
-                let result = self.handle_command(myself, state, command).await;
-                if let Err(err) = result {
-                    error!("Failed to handle ckb network command: {}", err);
-                }
-            }
+        if let Err(err) = self.handle_actor_message(myself, state, message).await {
+            error!("Failed to handle network actor message: {}", err);
         }
         Ok(())
     }

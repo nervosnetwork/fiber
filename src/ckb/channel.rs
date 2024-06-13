@@ -868,6 +868,48 @@ impl<S> ChannelActor<S> {
             ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
         }
     }
+
+    pub fn handle_event(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        event: ChannelEvent,
+    ) -> Result<(), ProcessingChannelError> {
+        match event {
+            ChannelEvent::FundingTransactionConfirmed => {
+                let flags = match state.state {
+                    ChannelState::AwaitingChannelReady(flags) => flags,
+                    ChannelState::AwaitingTxSignatures(f)
+                        if f.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
+                    {
+                        AwaitingChannelReadyFlags::empty()
+                    }
+                    _ => {
+                        panic!("Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state);
+                    }
+                };
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                            peer_id: state.peer_id.clone(),
+                            message: PCNMessage::ChannelReady(ChannelReady {
+                                channel_id: state.get_id(),
+                            }),
+                        }),
+                    ))
+                    .expect("network actor alive");
+                let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
+                state.update_state(ChannelState::AwaitingChannelReady(flags));
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    state.on_channel_ready(&self.network);
+                }
+            }
+            ChannelEvent::PeerDisconnected => {
+                myself.stop(Some("PeerDisconnected".to_string()));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[rasync_trait]
@@ -1121,39 +1163,11 @@ where
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
-            ChannelActorMessage::Event(e) => match e {
-                ChannelEvent::FundingTransactionConfirmed => {
-                    let flags = match state.state {
-                        ChannelState::AwaitingChannelReady(flags) => flags,
-                        ChannelState::AwaitingTxSignatures(f)
-                            if f.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) =>
-                        {
-                            AwaitingChannelReadyFlags::empty()
-                        }
-                        _ => {
-                            panic!("Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state);
-                        }
-                    };
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
-                                peer_id: state.peer_id.clone(),
-                                message: PCNMessage::ChannelReady(ChannelReady {
-                                    channel_id: state.get_id(),
-                                }),
-                            }),
-                        ))
-                        .expect("network actor alive");
-                    let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
-                    state.update_state(ChannelState::AwaitingChannelReady(flags));
-                    if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                        state.on_channel_ready(&self.network);
-                    }
+            ChannelActorMessage::Event(e) => {
+                if let Err(err) = self.handle_event(&myself, state, e) {
+                    error!("Error while processing channel event: {:?}", err);
                 }
-                ChannelEvent::PeerDisconnected => {
-                    myself.stop(Some("PeerDisconnected".to_string()));
-                }
-            },
+            }
         }
         match state.state {
             ChannelState::Closed => {
