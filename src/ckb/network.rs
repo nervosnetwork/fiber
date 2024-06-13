@@ -285,7 +285,7 @@ where
 
             _ => match state.channels.get(&message.get_channel_id()) {
                 None => {
-                    return Err(Error::ChannelNotFound(message.get_channel_id()));
+                    error!("Channel not found for message: {:?}", &message);
                 }
                 Some(c) => {
                     c.send_message(ChannelActorMessage::PeerMessage(message))
