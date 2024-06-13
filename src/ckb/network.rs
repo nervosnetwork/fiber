@@ -54,6 +54,13 @@ pub const PCN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 
+// This is a temporary way to document that we assume the chain actor is always alive.
+// We may later relax this assumption. At the moment, if the chain actor fails, we
+// should panic with this message, and later we may find all references to this message
+// to make sure that we handle the case where the chain actor is not alive.
+const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &'static str =
+    "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
+
 #[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
@@ -381,7 +388,7 @@ where
                         DEFAULT_CHAIN_ACTOR_TIMEOUT,
                         tx.clone()
                     )
-                    .expect("chain alive")
+                    .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
                     .expect("valid closing tx");
 
                     // Notify outside observers.
@@ -625,7 +632,7 @@ where
                             DEFAULT_CHAIN_ACTOR_TIMEOUT,
                             funding_tx.into()
                         )
-                        .expect("chain alive")
+                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
                         .expect("Signing succeeded");
                         debug!("Funding transaction signed: {:?}", &funding_tx);
 
@@ -670,7 +677,7 @@ where
                             DEFAULT_CHAIN_ACTOR_TIMEOUT,
                             funding_tx.into()
                         )
-                        .expect("chain alive")?;
+                        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)?;
                         debug!("Funding transaction signed: {:?}", &funding_tx);
                         let funding_tx = funding_tx.take().expect("take tx");
                         let witnesses = funding_tx.witnesses();
@@ -984,7 +991,7 @@ impl NetworkActorState {
             DEFAULT_CHAIN_ACTOR_TIMEOUT,
             transaction.clone()
         )
-        .expect("chain alive")
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
         .expect("valid funding tx");
 
         let hash = transaction.hash().into();
