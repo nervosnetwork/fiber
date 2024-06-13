@@ -63,6 +63,8 @@ const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
+const ASSUME_NETWORK_ACTOR_ALIVE: &'static str = "network actor must be alive";
+
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
     /// It is normally generated from a user request.
@@ -205,7 +207,7 @@ impl<S> ChannelActor<S> {
                             state.remote_ckb_amount,
                         ),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(())
             }
             PCNMessage::TxUpdate(tx) => {
@@ -240,7 +242,7 @@ impl<S> ChannelActor<S> {
                                     ),
                                 ),
                             ))
-                            .expect("myself alive");
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
                 Ok(())
@@ -276,7 +278,7 @@ impl<S> ChannelActor<S> {
                                 state.get_id(),
                             ),
                         ))
-                        .expect("network actor alive");
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                     state.state =
                         ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
@@ -550,7 +552,7 @@ impl<S> ChannelActor<S> {
                     message: PCNMessage::CommitmentSigned(commitment_signed),
                 }),
             ))
-            .expect("network actor alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
@@ -599,7 +601,7 @@ impl<S> ChannelActor<S> {
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendPcnMessage(msg),
             ))
-            .expect("network actor alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         // Update the state for this tlc.
         state.pending_offered_tlcs.insert(tlc.id, tlc);
@@ -655,7 +657,7 @@ impl<S> ChannelActor<S> {
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(msg),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 match command.reason {
                     RemoveTlcReason::RemoveTlcFail(_) => {
                         state.to_remote_amount += tlc.amount;
@@ -711,7 +713,7 @@ impl<S> ChannelActor<S> {
                     }),
                 }),
             ))
-            .expect("network actor alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.local_shutdown_script = Some(command.close_script.clone());
         state.local_shutdown_fee = Some(command.fee);
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
@@ -796,7 +798,7 @@ impl<S> ChannelActor<S> {
                             pcn_msg,
                         )),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 state.update_state(ChannelState::CollaboratingFundingTx(
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
@@ -819,7 +821,8 @@ impl<S> ChannelActor<S> {
                             pcn_msg,
                         )),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                 state.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
                 ));
@@ -897,7 +900,7 @@ impl<S> ChannelActor<S> {
                             }),
                         }),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
@@ -1006,7 +1009,7 @@ where
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendPcnMessage(command),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 self.network
                     .send_message(NetworkActorMessage::new_event(
@@ -1016,7 +1019,7 @@ where
                             myself,
                         ),
                     ))
-                    .expect("peer actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 state.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::INIT_SENT,
                 ));
@@ -1092,7 +1095,7 @@ where
                             message,
                         }),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
                 // It is even possible that the peer_id is bogus, and we can't send a message to it.
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
@@ -1121,7 +1124,7 @@ where
                             myself,
                         ),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 tx.send(channel.get_id()).expect("Receive not dropped");
                 Ok(channel)
@@ -1140,7 +1143,7 @@ where
                             myself,
                         ),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(channel)
             }
         }
@@ -1987,7 +1990,7 @@ impl ChannelActorState {
                         }),
                     }),
                 ))
-                .expect("network actor alive");
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             signature
         });
 
@@ -2004,7 +2007,7 @@ impl ChannelActorState {
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelClosed(self.get_id(), self.peer_id.clone(), tx),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
 
             None => {
@@ -2123,7 +2126,7 @@ impl ChannelActorState {
                                 self.get_funding_request(20000),
                             ),
                         ))
-                        .expect("network alive");
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     self.update_state(ChannelState::CollaboratingFundingTx(
                         CollaboratingFundingTxFlags::PREPARING_LOCAL_TX_COLLABORATION_MSG,
                     ));
@@ -2145,7 +2148,7 @@ impl ChannelActorState {
                                 ),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
             }
         }
@@ -2248,7 +2251,7 @@ impl ChannelActorState {
                     ),
                 ),
             ))
-            .expect("myself alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         debug!("Updating peer next local nonce");
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
@@ -2278,7 +2281,7 @@ impl ChannelActorState {
                             }),
                         }),
                     ))
-                    .expect("network actor alive");
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 match flags {
                     CommitmentSignedFlags::ChannelReady(_) => {
                         self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
@@ -2383,7 +2386,7 @@ impl ChannelActorState {
                     partial_witnesses,
                 ),
             ))
-            .expect("network alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         let flags = flags | AwaitingTxSignaturesFlags::OUR_TX_SIGNATURES_SENT;
         self.update_state(ChannelState::AwaitingTxSignatures(flags));
 
@@ -2402,7 +2405,7 @@ impl ChannelActorState {
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
             ))
-            .expect("network actor alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
@@ -2511,7 +2514,7 @@ impl ChannelActorState {
                         }),
                     )),
                 ))
-                .expect("network actor alive");
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             let old_flags = match self.state {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {

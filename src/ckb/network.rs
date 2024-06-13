@@ -61,6 +61,8 @@ pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &'static str =
     "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
 
+const ASSUME_NETWORK_MYSELF_ALIVE: &'static str = "network actor myself alive";
+
 #[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
@@ -275,7 +277,7 @@ where
                                 NetworkServiceEvent::PeerConnected(id, session.address),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::PeerDisconnected(id, session) => {
                     state.on_peer_disconnected(&id, &session);
@@ -286,7 +288,7 @@ where
                                 NetworkServiceEvent::PeerDisConnected(id, session.address),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
                     state.on_channel_created(channel_id, &peer_id, actor);
@@ -297,7 +299,7 @@ where
                                 NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::ChannelAccepted(
                     peer_id,
@@ -344,7 +346,7 @@ where
                                         },
                                     ),
                                 ))
-                                .expect("myself alive");
+                                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                         }
                     }
                 }
@@ -360,7 +362,7 @@ where
                                 NetworkServiceEvent::ChannelReady(peer_id, channel_id),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
                     info!(
@@ -374,7 +376,7 @@ where
                                 NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
                     state.on_channel_closed(&channel_id, &peer_id);
@@ -398,7 +400,7 @@ where
                                 NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx),
                             ),
                         ))
-                        .expect("myself alive");
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
                 NetworkActorEvent::PeerMessage(peer_id, session, message) => {
                     self.handle_peer_message(state, peer_id, session, message)
@@ -960,7 +962,7 @@ impl NetworkActorState {
                     NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, id),
                 ),
             ))
-            .expect("myself alive");
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         Ok(())
     }
 
@@ -1040,7 +1042,7 @@ impl NetworkActorState {
             // Notify outside observers.
             network
                 .send_message(NetworkActorMessage::new_event(message))
-                .expect("myself alive");
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         });
     }
 
@@ -1123,7 +1125,7 @@ where
                     listen_addr,
                 )),
             ))
-            .expect("network actor myself alive");
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
         tracker.spawn(async move {
             service.run().await;
