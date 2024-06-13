@@ -471,15 +471,10 @@ where
                 }
             }
 
-            _ => match state.channels.get(&message.get_channel_id()) {
-                None => {
-                    error!("Channel not found for message: {:?}", &message);
-                }
-                Some(c) => {
-                    c.send_message(ChannelActorMessage::PeerMessage(message))
-                        .expect("channel actor alive");
-                }
-            },
+            _ => state.send_message_to_channel_actor(
+                message.get_channel_id(),
+                ChannelActorMessage::PeerMessage(message),
+            ),
         };
         Ok(())
     }
@@ -1057,12 +1052,23 @@ impl NetworkActorState {
                 return;
             }
         };
-        if let Some(channel) = self.channels.get(&channel_id) {
-            channel
-                .send_message(ChannelActorMessage::Event(
-                    ChannelEvent::FundingTransactionConfirmed,
-                ))
-                .expect("channel actor alive");
+        self.send_message_to_channel_actor(
+            channel_id,
+            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed),
+        );
+    }
+
+    fn send_message_to_channel_actor(&self, channel_id: Hash256, message: ChannelActorMessage) {
+        match self.channels.get(&channel_id) {
+            None => {
+                error!(
+                    "Failed to send message to channel actor: channel {:?} not found",
+                    &channel_id
+                );
+            }
+            Some(actor) => {
+                actor.send_message(message).expect("channel actor alive");
+            }
         }
     }
 }
