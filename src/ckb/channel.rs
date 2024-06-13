@@ -1778,7 +1778,18 @@ impl ChannelActorState {
 
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady(flags) if flags.is_empty() => Ok(()),
+            ChannelState::ChannelReady(flags) => {
+                // TODO: Even if we are awaiting remote revoke, we should still stash these tlc updates,
+                // and perform corresponding actions after we receive the revoke_and_ack message.
+                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) {
+                    Err(ProcessingChannelError::InvalidState(
+                        "Trying to update tlc while channel is awaiting remote revocation"
+                            .to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
             ChannelState::ShuttingDown(_) => Ok(()),
             _ => Err(ProcessingChannelError::InvalidState(format!(
                 "Invalid state {:?} for adding tlc",
