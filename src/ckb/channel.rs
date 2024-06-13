@@ -323,12 +323,7 @@ impl<S> ChannelActor<S> {
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-                    self.network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::ChannelReady(state.get_id(), state.peer_id.clone()),
-                        ))
-                        .expect("network actor alive");
+                    state.on_channel_ready(&self.network);
                 }
 
                 Ok(())
@@ -1135,15 +1130,7 @@ where
                     let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                     state.update_state(ChannelState::AwaitingChannelReady(flags));
                     if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                        state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-                        self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::ChannelReady(
-                                    state.get_id(),
-                                    self.peer_id.clone(),
-                                ),
-                            ))
-                            .expect("network actor alive");
+                        state.on_channel_ready(&self.network);
                     }
                 }
                 ChannelEvent::PeerDisconnected => {
@@ -1665,8 +1652,8 @@ impl ChannelActorState {
         let index = commitment_number as usize;
         let commitment_point = self.remote_commitment_points[index];
         debug!(
-            "Obtained remote commitment point #{} of {}: {:?}",
-            index,
+            "Obtained remote commitment point #{} (counting from 1) of {}: {:?}",
+            index + 1,
             self.remote_commitment_points.len(),
             commitment_point
         );
@@ -2016,10 +2003,10 @@ impl ChannelActorState {
             pubkeys: remote_pubkeys,
             selected_contest_delay: accept_channel.to_local_delay,
         });
-        self.remote_commitment_points
-            .push(accept_channel.first_per_commitment_point);
-        self.remote_commitment_points
-            .push(accept_channel.second_per_commitment_point);
+        self.remote_commitment_points = vec![
+            accept_channel.first_per_commitment_point,
+            accept_channel.second_per_commitment_point,
+        ];
 
         debug!(
             "Successfully processed AcceptChannel message {:?}",
@@ -2343,6 +2330,35 @@ impl ChannelActorState {
         Ok(())
     }
 
+    pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+        self.local_commitment_number = self.get_next_commitment_number(true);
+        self.remote_commitment_number = self.get_next_commitment_number(false);
+        debug!(
+            "Channel ready commitment numbers {} {}",
+            self.local_commitment_number, self.remote_commitment_number
+        );
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
+            ))
+            .expect("network actor alive");
+    }
+
+    pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
+        debug!(
+            "Appending remote commitment point #{}: {:?}",
+            self.remote_commitment_points.len() + 1,
+            commitment_point
+        );
+        debug_assert_eq!(
+            self.remote_commitment_points.len() as u64,
+            self.get_current_commitment_number(false) + 1
+        );
+        self.remote_commitment_points.push(commitment_point);
+        self.remote_commitment_number = self.get_next_commitment_number(false);
+    }
+
     pub fn handle_revoke_and_ack_message(
         &mut self,
         revoke_and_ack: RevokeAndAck,
@@ -2352,6 +2368,7 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
+        debug!("Checking commitment secret and point for revocation");
         let per_commitment_point = self.get_previous_remote_commitment_point();
         if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -2359,9 +2376,7 @@ impl ChannelActorState {
                 per_commitment_secret, per_commitment_point,
             )));
         }
-        self.remote_commitment_points
-            .push(next_per_commitment_point);
-        self.remote_commitment_number = self.get_next_commitment_number(false);
+        self.append_remote_commitment_point(next_per_commitment_point);
         Ok(())
     }
 
@@ -2697,7 +2712,9 @@ impl ChannelActorState {
     fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
         let commitment_number = self.get_current_commitment_number(local);
         debug!(
-            "Building previous commitment transaction witnesses for {} party, commitment number: {}", if local { "local" } else { "remote" }, commitment_number
+            "Building current commitment transaction witnesses for {} party, commitment number: {}",
+            if local { "local" } else { "remote" },
+            commitment_number
         );
         self.build_commitment_transaction_witnesses(local, commitment_number)
     }
@@ -3248,6 +3265,7 @@ impl TLC {
     }
 
     fn fill_in_pubkeys(&mut self, local: bool, channel: &ChannelActorState) {
+        debug!("Filling in pubkeys for tlc {:?}", self);
         self.local_payment_key_hash = Some(self.get_local_pubkey_hash(local, channel));
         self.remote_payment_key_hash = Some(self.get_remote_pubkey_hash(local, channel));
     }
