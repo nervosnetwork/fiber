@@ -501,6 +501,20 @@ impl<S> ChannelActor<S> {
                 )));
             }
             ChannelState::ChannelReady(flags) => CommitmentSignedFlags::ChannelReady(flags),
+            ChannelState::ShuttingDown(flags) => {
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
+                    debug!(
+                        "Signing commitment transactions while shutdown is pending, current state {:?}",
+                        &state.state
+                    );
+                    CommitmentSignedFlags::PendingShutdown(flags)
+                } else {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Unable to process commitment_signed message in shutdowning state with flags {:?}",
+                        &flags
+                    )));
+                }
+            }
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to send commitment signed message in state {:?}",
@@ -547,6 +561,9 @@ impl<S> ChannelActor<S> {
             CommitmentSignedFlags::ChannelReady(flags) => {
                 let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
                 state.update_state(ChannelState::ChannelReady(flags));
+            }
+            CommitmentSignedFlags::PendingShutdown(_) => {
+                state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
         Ok(())
@@ -1336,8 +1353,10 @@ bitflags! {
 // Depending on the state of the channel, we may process the commitment_signed command differently.
 // Below are all the channel state flags variants that we may encounter
 // in normal commitment_signed processing flow.
+#[derive(Debug)]
 enum CommitmentSignedFlags {
     SigningCommitment(SigningCommitmentFlags),
+    PendingShutdown(ShuttingDownFlags),
     ChannelReady(ChannelReadyFlags),
 }
 
@@ -2173,6 +2192,20 @@ impl ChannelActorState {
                 );
                 CommitmentSignedFlags::ChannelReady(flags)
             }
+            ChannelState::ShuttingDown(flags) => {
+                if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
+                    debug!(
+                        "Signing commitment transactions while shutdown is pending, current state {:?}",
+                        &self.state
+                    );
+                    CommitmentSignedFlags::PendingShutdown(flags)
+                } else {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Unable to process commitment_signed message in shutdowning state with flags {:?}",
+                        &flags
+                    )));
+                }
+            }
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Unable to send commitment signed message in state {:?}",
@@ -2211,7 +2244,7 @@ impl ChannelActorState {
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
-            CommitmentSignedFlags::ChannelReady(_) => {
+            CommitmentSignedFlags::ChannelReady(_) | CommitmentSignedFlags::PendingShutdown(_) => {
                 // Now we should revoke previous transation by revealing preimage.
                 let revocation_preimage = self.get_previous_local_commitment_secret();
                 debug!(
@@ -2232,7 +2265,20 @@ impl ChannelActorState {
                         }),
                     ))
                     .expect("network actor alive");
-                self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+                match flags {
+                    CommitmentSignedFlags::ChannelReady(_) => {
+                        self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+                    }
+                    CommitmentSignedFlags::PendingShutdown(_) => {
+                        self.maybe_transition_to_shutdown(&network)?;
+                    }
+                    _ => {
+                        unreachable!(
+                            "Invalid flags for commitment signed message, should have handled {:?}",
+                            flags
+                        );
+                    }
+                }
             }
         }
         Ok(())
