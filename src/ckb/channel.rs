@@ -1,7 +1,6 @@
 use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
-use ckb_types::core::FeeRate;
 use ckb_types::{
     core::{TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
@@ -131,7 +130,7 @@ pub struct ChannelCommandWithId {
 }
 
 pub const DEFAULT_FEE_RATE: u64 = 0;
-pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
+pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 2_000;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
@@ -1732,14 +1731,19 @@ impl ChannelActorState {
         get_script_by_contract(Contract::FundingLock, args.as_slice())
     }
 
-    pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
+    pub fn get_funding_request(&self) -> FundingRequest {
+        let commitment_fee_rate = if self.is_acceptor {
+            self.commitment_fee_rate
+        } else {
+            self.commitment_fee_rate
+        };
         FundingRequest {
             udt_info: self.funding_udt_type_script.as_ref().map(|script| {
                 FundingUdtInfo::new(script, self.local_ckb_amount, self.remote_ckb_amount)
             }),
             script: self.get_funding_lock_script(),
             local_amount: self.to_local_amount as u64,
-            local_fee_rate: fee_rate,
+            local_fee_rate: commitment_fee_rate,
             remote_amount: self.to_remote_amount as u64,
         }
     }
@@ -2154,8 +2158,7 @@ impl ChannelActorState {
                             NetworkActorCommand::UpdateChannelFunding(
                                 self.get_id(),
                                 msg.tx.clone(),
-                                // TODO: use fee rate set by the user.
-                                self.get_funding_request(20000),
+                                self.get_funding_request(),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -2792,7 +2795,6 @@ impl ChannelActorState {
         debug!("Built outputs for commitment transaction: {:?}", &outputs);
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
-        let tx_builder = self.fix_commitment_transaction_fee(tx_builder, local);
         let tx = tx_builder.build();
         let version = self.get_current_commitment_number(local);
         let message = get_funding_cell_message_to_sign(version, funding_out_point, &tx);
@@ -3008,58 +3010,6 @@ impl ChannelActorState {
             let outputs_data = vec![Bytes::default(); outputs.len()];
             (outputs, outputs_data)
         }
-    }
-
-    fn fix_commitment_transaction_fee(
-        &self,
-        tx_builder: TransactionBuilder,
-        local: bool,
-    ) -> TransactionBuilder {
-        let fee_rate: FeeRate = FeeRate::from_u64(self.commitment_fee_rate);
-        let ret_tx_builder = tx_builder.clone();
-
-        if fee_rate.as_u64() == 0 {
-            return ret_tx_builder;
-        }
-
-        let tx = tx_builder.build();
-        let tx_size = tx.data().serialized_size_in_block();
-        let fee = fee_rate.fee(tx_size as u64);
-        let outputs = tx.outputs();
-
-        // The change output is the first output if we are the acceptor, otherwise it is the second output.
-        let change_index = match (self.is_acceptor, local) {
-            (true, true) => 0,
-            (true, false) => 1,
-            (false, true) => 1,
-            (false, false) => 0,
-        };
-        let change_output = outputs.get(change_index).expect("Change output exists");
-        let old_capacity: u64 = change_output.capacity().unpack();
-        let change_capacity: u64 = old_capacity - fee.as_u64();
-        let change_output = change_output
-            .as_builder()
-            .capacity(change_capacity.pack())
-            .build();
-        debug!(
-            "old_capacity: {}, fee: {}, change_capacity: {}",
-            old_capacity,
-            fee.as_u64(),
-            change_capacity
-        );
-        ret_tx_builder.set_outputs(
-            outputs
-                .into_iter()
-                .enumerate()
-                .map(|(i, output)| {
-                    if i == change_index {
-                        change_output.clone()
-                    } else {
-                        output
-                    }
-                })
-                .collect(),
-        )
     }
 
     pub fn build_and_verify_commitment_tx(
