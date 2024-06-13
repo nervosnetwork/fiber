@@ -1,14 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::super::FundingError;
-use crate::ckb::serde_utils::EntityHex;
+use crate::{
+    ckb::serde_utils::EntityHex,
+    ckb_chain::contracts::{get_cell_deps_by_contracts, Contract},
+};
 
+use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
+    rpc::ckb_indexer::SearchMode,
     traits::{
-        CellCollector, CellDepResolver, DefaultCellCollector, DefaultCellDepResolver,
-        DefaultHeaderDepResolver, DefaultTransactionDependencyProvider, HeaderDepResolver,
-        SecpCkbRawKeySigner, TransactionDependencyProvider,
+        CellCollector, CellDepResolver, CellQueryOptions, DefaultCellCollector,
+        DefaultCellDepResolver, DefaultHeaderDepResolver, DefaultTransactionDependencyProvider,
+        HeaderDepResolver, SecpCkbRawKeySigner, TransactionDependencyProvider, ValueRangeOption,
     },
     tx_builder::{unlock_tx, CapacityBalancer, TxBuilder, TxBuilderError},
     unlock::{ScriptUnlocker, SecpSighashUnlocker},
@@ -16,9 +21,10 @@ use ckb_sdk::{
 };
 use ckb_types::{
     core::{BlockView, Capacity, TransactionView},
-    packed::{self, Script, Transaction},
+    packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
+use log::warn;
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
@@ -54,11 +60,25 @@ impl From<Transaction> for FundingTx {
 pub struct FundingUdtInfo {
     /// The UDT type script
     #[serde_as(as = "EntityHex")]
-    type_script: packed::Script,
+    pub type_script: packed::Script,
     /// CKB amount to be provided by the local party.
-    local_ckb_amount: u64,
+    pub local_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
-    remote_ckb_amount: u64,
+    pub remote_ckb_amount: u64,
+}
+
+impl FundingUdtInfo {
+    pub fn new(
+        type_script: &packed::Script,
+        local_ckb_amount: u64,
+        remote_ckb_amount: u64,
+    ) -> Self {
+        Self {
+            type_script: type_script.clone(),
+            local_ckb_amount,
+            remote_ckb_amount,
+        }
+    }
 }
 
 #[serde_as]
@@ -96,19 +116,33 @@ struct FundingTxBuilder {
 impl TxBuilder for FundingTxBuilder {
     fn build_base(
         &self,
-        _cell_collector: &mut dyn CellCollector,
+        cell_collector: &mut dyn CellCollector,
         _cell_dep_resolver: &dyn CellDepResolver,
         _header_dep_resolver: &dyn HeaderDepResolver,
         _tx_dep_provider: &dyn TransactionDependencyProvider,
     ) -> Result<TransactionView, TxBuilderError> {
-        let funding_cell = self
+        let (funding_cell_output, funding_cell_output_data) = self
             .build_funding_cell()
             .map_err(|err| TxBuilderError::Other(err.into()))?;
 
-        // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
-        let mut outputs: Vec<packed::CellOutput> = vec![funding_cell.0];
-        let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell.1];
+        let mut inputs = vec![];
+        let mut cell_deps = HashSet::new();
 
+        // Funding cell does not need new cell deps and header deps. The type script deps will be added with inputs.
+        let mut outputs: Vec<packed::CellOutput> = vec![funding_cell_output];
+        let mut outputs_data: Vec<packed::Bytes> = vec![funding_cell_output_data];
+
+        if let Some(ref tx) = self.funding_tx.tx {
+            inputs = tx.inputs().into_iter().collect();
+            cell_deps = tx.cell_deps().into_iter().collect();
+        }
+        self.build_udt_inputs_outputs(
+            cell_collector,
+            &mut inputs,
+            &mut outputs,
+            &mut outputs_data,
+            &mut cell_deps,
+        )?;
         if let Some(ref tx) = self.funding_tx.tx {
             for (i, output) in tx.outputs().into_iter().enumerate().skip(1) {
                 outputs.push(output.clone());
@@ -120,11 +154,14 @@ impl TxBuilder for FundingTxBuilder {
             Some(ref tx) => tx.as_advanced_builder(),
             None => packed::Transaction::default().as_advanced_builder(),
         };
-        let tx = builder
+
+        let tx_builder = builder
+            .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
-            .build();
-
+            .set_cell_deps(cell_deps.into_iter().collect());
+        warn!("tx_builder: {:?}", tx_builder);
+        let tx = tx_builder.build();
         Ok(tx)
     }
 }
@@ -175,9 +212,88 @@ impl FundingTxBuilder {
                     .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
+                warn!("build_funding_cell debug ckb_output: {:?}", ckb_output);
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
+    }
+
+    fn build_udt_inputs_outputs(
+        &self,
+        cell_collector: &mut dyn CellCollector,
+        inputs: &mut Vec<CellInput>,
+        outputs: &mut Vec<packed::CellOutput>,
+        outputs_data: &mut Vec<packed::Bytes>,
+        cell_deps: &mut HashSet<packed::CellDep>,
+    ) -> Result<(), TxBuilderError> {
+        let udt_amount = self.request.local_amount as u128;
+        let udt_info = match &self.request.udt_info {
+            Some(ref udt_info) if self.request.local_amount > 0 => udt_info,
+            _ => return Ok(()),
+        };
+
+        let udt_type_script = udt_info.type_script.clone();
+        let owner = self.context.funding_source_lock_script.clone();
+        let mut found_udt_amount = 0;
+
+        let mut query = CellQueryOptions::new_lock(owner.clone());
+        query.script_search_mode = Some(SearchMode::Exact);
+        query.secondary_script = Some(udt_type_script.clone());
+        query.data_len_range = Some(ValueRangeOption::new_min(16));
+
+        loop {
+            // each query will found at most one cell because of `min_total_capacity == 1` in CellQueryOptions
+            let (udt_cells, _) = cell_collector.collect_live_cells(&query, true)?;
+            if udt_cells.is_empty() {
+                break;
+            }
+            for cell in udt_cells.iter() {
+                let mut amount_bytes = [0u8; 16];
+                amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
+                let cell_udt_amount = u128::from_le_bytes(amount_bytes);
+                let ckb_amount: u64 = cell.output.capacity().unpack();
+                warn!(
+                    "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
+                    ckb_amount, cell_udt_amount, cell
+                );
+                found_udt_amount += cell_udt_amount;
+                inputs.push(CellInput::new(cell.out_point.clone(), 0));
+
+                if found_udt_amount >= udt_amount {
+                    let change_output_data: Bytes =
+                        (found_udt_amount - udt_amount).to_le_bytes().pack();
+
+                    let dummy_output = CellOutput::new_builder()
+                        .lock(owner.clone())
+                        .type_(Some(udt_type_script.clone()).pack())
+                        .build();
+                    let required_capacity = dummy_output
+                        .occupied_capacity(Capacity::bytes(change_output_data.len()).unwrap())
+                        .unwrap()
+                        .pack();
+                    let change_output = dummy_output
+                        .as_builder()
+                        .capacity(required_capacity)
+                        .build();
+
+                    outputs.push(change_output);
+                    outputs_data.push(change_output_data);
+
+                    warn!("find proper UDT owner cells: {:?}", inputs);
+
+                    // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+                    // we need to filter the cell deps by the contracts_context
+                    let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+                    for cell_dep in udt_cell_deps {
+                        cell_deps.insert(cell_dep);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        return Err(TxBuilderError::Other(anyhow!(
+            "can not find enough UDT owner cells for funding transaction"
+        )));
     }
 
     fn build(self) -> Result<FundingTx, FundingError> {
@@ -204,6 +320,7 @@ impl FundingTxBuilder {
             let genesis_block = ckb_client.get_block_by_number(0.into()).unwrap().unwrap();
             DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).unwrap()
         };
+
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
@@ -218,6 +335,8 @@ impl FundingTxBuilder {
         )?;
 
         let mut funding_tx = self.funding_tx;
+        let tx_builder = tx.as_advanced_builder();
+        warn!("final tx_builder: {:?}", tx_builder);
         funding_tx.update_for_self(tx)?;
         Ok(funding_tx)
     }

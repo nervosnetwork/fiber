@@ -29,6 +29,7 @@ use std::{cmp::Ordering, str::FromStr};
 
 const SIGNATURE_U5_SIZE: usize = 104;
 
+/// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
     Ckb,
@@ -153,21 +154,6 @@ pub struct InvoiceData {
     pub attrs: Vec<Attribute>,
 }
 
-macro_rules! attr_getter {
-    ($name:ident, $attr_name:ident, $attr:ty) => {
-        pub fn $name(&self) -> Option<&$attr> {
-            self.data
-                .attrs
-                .iter()
-                .filter_map(|attr| match attr {
-                    Attribute::$attr_name(val) => Some(val),
-                    _ => None,
-                })
-                .next()
-        }
-    };
-}
-
 /// Represents a syntactically and semantically correct lightning BOLT11 invoice
 ///
 /// There are three ways to construct a `CkbInvoice`:
@@ -183,6 +169,21 @@ pub struct CkbInvoice {
     pub prefix: Option<SiPrefix>,
     pub signature: Option<InvoiceSignature>,
     pub data: InvoiceData,
+}
+
+macro_rules! attr_getter {
+    ($name:ident, $attr_name:ident, $attr:ty) => {
+        pub fn $name(&self) -> Option<&$attr> {
+            self.data
+                .attrs
+                .iter()
+                .filter_map(|attr| match attr {
+                    Attribute::$attr_name(val) => Some(val),
+                    _ => None,
+                })
+                .next()
+        }
+    };
 }
 
 impl CkbInvoice {
@@ -311,6 +312,17 @@ impl CkbInvoice {
         })
     }
 
+    pub fn udt_type_script(&self) -> Option<&Script> {
+        self.data
+            .attrs
+            .iter()
+            .filter_map(|attr| match attr {
+                Attribute::UdtScript(script) => Some(&script.0),
+                _ => None,
+            })
+            .next()
+    }
+
     attr_getter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_getter!(expiry_time, ExpiryTime, Duration);
     attr_getter!(description, Description, String);
@@ -320,7 +332,6 @@ impl CkbInvoice {
         FinalHtlcMinimumCltvExpiry,
         u64
     );
-    attr_getter!(udt_script, UdtScript, CkbScript);
     attr_getter!(payment_preimage, PaymentPreimage, Hash256);
     attr_getter!(fallback_address, FallbackAddr, String);
 }
@@ -616,6 +627,10 @@ impl InvoiceBuilder {
     pub fn payment_hash(mut self, payment_hash: Hash256) -> Self {
         self.payment_hash = Some(payment_hash);
         self
+    }
+
+    pub fn udt_type_script(self, script: Script) -> Self {
+        self.add_attr(Attribute::UdtScript(CkbScript(script)))
     }
 
     attr_setter!(payment_preimage, PaymentPreimage, Hash256);
@@ -1223,5 +1238,24 @@ mod tests {
             .unwrap();
         let payment_preimage = invoice.payment_preimage();
         assert!(payment_preimage.is_none());
+    }
+
+    #[test]
+    fn test_invoice_udt_script() {
+        let script = Script::default();
+        let private_key = gen_rand_private_key();
+        let invoice = InvoiceBuilder::new(Currency::Ckb)
+            .amount(Some(1280))
+            .prefix(Some(SiPrefix::Kilo))
+            .payment_hash(rand_sha256_hash())
+            .udt_type_script(script.clone())
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+            .unwrap();
+        assert_eq!(invoice.udt_type_script().unwrap(), &script);
+
+        let res = serde_json::to_string(&invoice);
+        assert_eq!(res.is_ok(), true);
+        let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
+        assert_eq!(decoded, invoice);
     }
 }

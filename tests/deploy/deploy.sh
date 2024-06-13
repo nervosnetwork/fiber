@@ -4,6 +4,8 @@ set -xeuo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 data_dir="$script_dir/node-data"
+udt_init_dir="$script_dir/udt-init"
+nodes_dir="$script_dir/../nodes"
 cd "$script_dir" || exit 1
 
 miner_key_file="$data_dir/specs/miner.key"
@@ -34,7 +36,7 @@ function deploy() {
     GENESIS_TX0="$(ckb -C "$data_dir" list-hashes | sed -n 's/tx_hash = "\(.*\)"/\1/p' | head -1)"
     sed "s/0x8f8c79eb6671709633fe6a46de93c0fedc9c1b8a6527a18d3983879542635c9f/$GENESIS_TX0/" "$TEMPLATE_FILE" >"$CONFIG_FILE"
 
-    ckb-cli deploy gen-txs --from-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqwgx292hnvmn68xf779vmzrshpmm6epn4c0cgwga \
+    ckb-cli deploy gen-txs --from-address $(cat "$nodes_dir/deployer/ckb-chain/wallet") \
         --fee-rate 100000 --deployment-config "$CONFIG_FILE" --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
 
     ckb-cli deploy sign-txs --add-signatures --info-file "$INFO_FILE" --privkey-path "$miner_key_file" --output-format json | sed -n 's/: \("[^"]*"\)/: [\1]/p'
@@ -55,8 +57,19 @@ deploy_and_generate_blocks() {
     generate_blocks
 }
 
+run_udt_init() {
+    export $(xargs <".env")
+    export NODES_DIR="$nodes_dir"
+    (
+        cd "$udt_init_dir" || exit 1
+        cargo run -- "$@"
+    )
+}
+
 deploy_and_generate_blocks always_success
 deploy_and_generate_blocks funding-lock
 deploy_and_generate_blocks commitment-lock
+deploy_and_generate_blocks simple-udt
 
 ./create-dotenv-file.sh >.env
+run_udt_init

@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::ckb::serde_utils::{U128Hex, U64Hex};
 use crate::ckb::types::Hash256;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
+use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ pub struct NewInvoiceParams {
     pub final_cltv: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
     pub final_htlc_timeout: Option<u64>,
+    pub udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -90,6 +92,9 @@ where
         };
         if let Some(final_cltv) = params.final_cltv {
             invoice_builder = invoice_builder.final_cltv(final_cltv);
+        };
+        if let Some(udt_type_script) = &params.udt_type_script {
+            invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
         };
 
         match invoice_builder.build() {

@@ -8,7 +8,7 @@ vector SignatureVec <Signature>;
 table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
-    funding_type_script:         ScriptOpt,
+    funding_udt_type_script:     ScriptOpt,
     funding_amount:              Uint128,
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,

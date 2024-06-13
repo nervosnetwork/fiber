@@ -427,7 +427,7 @@ impl TryFrom<Byte66> for PubNonce {
 pub struct OpenChannel {
     pub chain_hash: Hash256,
     pub channel_id: Hash256,
-    pub funding_type_script: Option<Script>,
+    pub funding_udt_type_script: Option<Script>,
     pub funding_amount: u128,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
@@ -451,7 +451,7 @@ impl From<OpenChannel> for molecule_pcn::OpenChannel {
         molecule_pcn::OpenChannel::new_builder()
             .chain_hash(open_channel.chain_hash.into())
             .channel_id(open_channel.channel_id.into())
-            .funding_type_script(open_channel.funding_type_script.pack())
+            .funding_udt_type_script(open_channel.funding_udt_type_script.pack())
             .funding_amount(open_channel.funding_amount.pack())
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
@@ -479,7 +479,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
         Ok(OpenChannel {
             chain_hash: open_channel.chain_hash().into(),
             channel_id: open_channel.channel_id().into(),
-            funding_type_script: open_channel.funding_type_script().to_opt(),
+            funding_udt_type_script: open_channel.funding_udt_type_script().to_opt(),
             funding_amount: open_channel.funding_amount().unpack(),
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
@@ -503,7 +503,7 @@ impl TryFrom<molecule_pcn::OpenChannel> for OpenChannel {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AcceptChannel {
     pub channel_id: Hash256,
     pub funding_amount: u128,

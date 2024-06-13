@@ -20,12 +20,13 @@ use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenChannelParams {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub funding_udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -183,6 +184,10 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount.clone(),
+                    funding_udt_type_script: params
+                        .funding_udt_type_script
+                        .clone()
+                        .map(|s| s.into()),
                 },
                 rpc_reply,
             ))

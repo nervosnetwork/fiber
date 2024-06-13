@@ -124,7 +124,6 @@ pub enum Contract {
     Secp256k1Lock,
     AlwaysSuccess,
     CkbAuth,
-    #[allow(dead_code)]
     SimpleUDT,
 }
 
@@ -155,7 +154,6 @@ impl std::fmt::Debug for ContractsContext {
 
 enum EnvironmentVariableType {
     CodeHash,
-    // FIXME(yukang): warning suppression
     #[allow(dead_code)]
     TypeHash,
     TxIndex,
@@ -189,6 +187,7 @@ fn get_environment_variable(
         Contract::FundingLock => "FUNDING_LOCK",
         Contract::CommitmentLock => "COMMITMENT_LOCK",
         Contract::AlwaysSuccess => "ALWAYS_SUCCESS",
+        Contract::SimpleUDT => "SIMPLE_UDT",
         _ => panic!("Unsupported contract type {:?}", contract),
     };
     let type_desc = match env_type {
@@ -238,6 +237,7 @@ impl ContractsContext {
                         DepType::DepGroup,
                         vec![Contract::FundingLock, Contract::CommitmentLock],
                     ),
+                    (DepType::Code, DepType::Code, vec![Contract::SimpleUDT]),
                 ] {
                     for contract in contracts {
                         let program_code_hash = get_hash_from_environment_variable(

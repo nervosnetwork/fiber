@@ -35,7 +35,7 @@ use crate::{
     ckb::types::Shutdown,
     ckb_chain::{
         contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
-        FundingRequest,
+        FundingRequest, FundingUdtInfo,
     },
     NetworkServiceEvent,
 };
@@ -133,6 +133,7 @@ pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
+pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 = 200 * 100_000_000; // 200 CKB
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -146,7 +147,7 @@ pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
-    OpenChannel(u128, [u8; 32], oneshot::Sender<Hash256>),
+    OpenChannel(u128, [u8; 32], Option<Script>, oneshot::Sender<Hash256>),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// original OpenChannel message and an oneshot
@@ -199,6 +200,9 @@ impl<S> ChannelActor<S> {
                             state.to_local_amount,
                             state.to_remote_amount,
                             state.get_funding_lock_script(),
+                            state.funding_udt_type_script.clone(),
+                            state.local_ckb_amount,
+                            state.remote_ckb_amount,
                         ),
                     ))
                     .expect("network actor alive");
@@ -787,6 +791,7 @@ impl<S> ChannelActor<S> {
                 )?;
             }
             TxCollaborationCommand::TxComplete(_) => {
+                state.check_tx_complete_preconditions()?;
                 let pcn_msg = PCNMessage::TxComplete(TxComplete {
                     channel_id: state.get_id(),
                 });
@@ -798,8 +803,6 @@ impl<S> ChannelActor<S> {
                         )),
                     ))
                     .expect("network actor alive");
-
-                state.check_tx_complete_preconditions()?;
                 state.update_state(ChannelState::CollaboratingFundingTx(
                     flags | CollaboratingFundingTxFlags::OUR_TX_COMPLETE_SENT,
                 ));
@@ -880,7 +883,7 @@ where
                 let OpenChannel {
                     channel_id,
                     chain_hash,
-                    funding_type_script,
+                    funding_udt_type_script,
                     funding_amount,
                     to_local_delay,
                     first_per_commitment_point,
@@ -896,17 +899,10 @@ where
                     ))));
                 }
 
-                if funding_type_script.is_some() {
-                    // We have not implemented funding type script yet.
-                    // But don't panic, otherwise adversary can easily take us down.
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Funding type script is not none, but we are currently unable to process this".to_string(),
-                    )));
-                }
-
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     my_funding_amount,
+                    funding_udt_type_script.clone(),
                     &seed,
                     peer_id.clone(),
                     *funding_amount,
@@ -968,7 +964,12 @@ where
                 }
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannel(funding_amount, seed, tx) => {
+            ChannelInitializationParameter::OpenChannel(
+                funding_amount,
+                seed,
+                funding_udt_type_script,
+                tx,
+            ) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
@@ -976,6 +977,7 @@ where
                     &seed,
                     self.peer_id.clone(),
                     funding_amount,
+                    funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
@@ -983,7 +985,7 @@ where
                 let message = PCNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
-                    funding_type_script: None,
+                    funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
                     funding_fee_rate: DEFAULT_FEE_RATE,
                     commitment_fee_rate: DEFAULT_COMMITMENT_FEE_RATE,
@@ -1182,12 +1184,21 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_udt_type_script: Option<Script>,
+
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
     pub to_local_amount: u128,
     pub to_remote_amount: u128,
+
+    // only used for UDT scenario:
+    // `to_local_amount` and `to_remote_amount` are the amount of UDT
+    // we need to keep track of the CKB amount from partners in the channel.
+    pub local_ckb_amount: u64,
+    pub remote_ckb_amount: u64,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
@@ -1410,6 +1421,7 @@ impl ChannelActorState {
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
         local_value: u128,
+        funding_udt_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
         remote_value: u128,
@@ -1437,6 +1449,7 @@ impl ChannelActorState {
             peer_id,
             funding_tx: None,
             is_acceptor: true,
+            funding_udt_type_script,
             to_local_amount: local_value,
             id: channel_id,
             next_offering_tlc_id: 0,
@@ -1463,6 +1476,8 @@ impl ChannelActorState {
             local_shutdown_fee: None,
             remote_shutdown_signature: None,
             remote_shutdown_fee: None,
+            local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+            remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
         }
     }
 
@@ -1470,6 +1485,7 @@ impl ChannelActorState {
         seed: &[u8],
         peer_id: PeerId,
         value: u128,
+        funding_udt_type_script: Option<Script>,
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -1480,6 +1496,7 @@ impl ChannelActorState {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             peer_id,
             funding_tx: None,
+            funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
             id: temp_channel_id,
@@ -1504,6 +1521,8 @@ impl ChannelActorState {
             remote_shutdown_fee: None,
             local_shutdown_signature: None,
             remote_shutdown_signature: None,
+            local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+            remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
         }
     }
 
@@ -1663,9 +1682,10 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
-        debug!("Generating funding request");
         FundingRequest {
-            udt_info: None,
+            udt_info: self.funding_udt_type_script.as_ref().map(|script| {
+                FundingUdtInfo::new(script, self.local_ckb_amount, self.remote_ckb_amount)
+            }),
             script: self.get_funding_lock_script(),
             local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
@@ -1984,7 +2004,6 @@ impl ChannelActorState {
         ));
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
-
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
             pubkeys: remote_pubkeys,
@@ -2356,6 +2375,28 @@ impl ChannelActorState {
             panic!("Invalid funding transation")
         }
 
+        if self.funding_udt_type_script.is_some() {
+            let (_output, data) =
+                tx.output_with_data(0)
+                    .ok_or(ProcessingChannelError::InvalidParameter(
+                        "Funding transaction should have at least one output".to_string(),
+                    ))?;
+            if data.as_ref().len() >= 16 {
+                let mut amount_bytes = [0u8; 16];
+                amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+                let udt_amount = u128::from_le_bytes(amount_bytes);
+                debug!(
+                    "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
+                    udt_amount, self.to_remote_amount, self.to_local_amount
+                );
+                return Ok(udt_amount == self.to_remote_amount + self.to_local_amount);
+            }
+            debug!(
+                "is_tx_final: output data length {} is less than 16",
+                data.as_ref().len()
+            );
+            return Ok(false);
+        }
         let current_capacity: u64 = first_output.capacity().unpack();
         let is_complete = current_capacity == (self.to_local_amount + self.to_remote_amount) as u64;
         Ok(is_complete)
@@ -2417,22 +2458,11 @@ impl ChannelActorState {
                     "Received TxComplete message, funding tx is present {:?}",
                     tx
                 );
-                let first_output =
-                    tx.raw()
-                        .outputs()
-                        .get(0)
-                        .ok_or(ProcessingChannelError::InvalidParameter(
-                            "Funding transaction should have at least one output".to_string(),
-                        ))?;
-
-                let first_output_capacity =
-                    u64::from_le_bytes(first_output.capacity().as_slice().try_into().unwrap())
-                        as u128;
-
-                if self.to_local_amount + self.to_remote_amount != first_output_capacity {
-                    return Err(ProcessingChannelError::InvalidParameter(
-                        format!("Funding transaction output amount mismatch ({} given, {} to local , {} to remote)", first_output_capacity, self.to_local_amount, self.to_remote_amount)
-                    ));
+                let check = self.is_tx_final(tx);
+                if !check.is_ok_and(|ok| ok) {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Received TxComplete message, but funding tx is not final"
+                    )));
                 }
             }
         }
@@ -2525,43 +2555,96 @@ impl ChannelActorState {
                 )));
             }
         };
-        let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
-            .input(
-                CellInput::new_builder()
-                    .previous_output(self.get_funding_transaction_outpoint())
-                    .build(),
+
+        let mut contracts = vec![Contract::CommitmentLock];
+        if self.funding_udt_type_script.is_some() {
+            // TODO(yukang): we need to find corresponding dep cells for UDT
+            contracts.push(Contract::SimpleUDT);
+        }
+        let cell_deps = get_cell_deps_by_contracts(contracts);
+        let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
+            CellInput::new_builder()
+                .previous_output(self.get_funding_transaction_outpoint())
+                .build(),
+        );
+
+        if let Some(type_script) = &self.funding_udt_type_script {
+            debug!(
+                "shutdown UDT local_amount: {}, remote_amount: {}",
+                self.to_local_amount, self.to_remote_amount
             );
 
-        // TODO: Check UDT type, if it is ckb then convert it into u64.
-        let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
-        let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
-        debug!(
-            "Building shutdown transaction with values: {} {}",
-            local_value, remote_value
-        );
-        let local_output = CellOutput::new_builder()
-            .capacity(local_value.pack())
-            .lock(local_shutdown_script)
-            .build();
-        let remote_output = CellOutput::new_builder()
-            .capacity(remote_value.pack())
-            .lock(remote_shutdown_script)
-            .build();
-        let outputs = self.order_things_for_musig2(local_output, remote_output);
-        let tx_builder = tx_builder.set_outputs(outputs.to_vec());
-        let tx_builder = tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
-        let tx = tx_builder.build();
-        let message = get_funding_cell_message_to_sign(
-            u64::MAX,
-            self.get_funding_transaction_outpoint(),
-            &tx,
-        );
-        debug!(
-            "Building message to sign for shutdown transaction {:?}",
-            hex::encode(message.as_slice())
-        );
-        Ok((tx, message))
+            let local_capacity: u64 = self.local_ckb_amount - local_shutdown_fee as u64;
+            debug!(
+                "shutdown_tx local_capacity: {} - {} = {}",
+                self.local_ckb_amount, local_shutdown_fee, local_capacity
+            );
+            let local_output = CellOutput::new_builder()
+                .lock(local_shutdown_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .capacity(local_capacity.pack())
+                .build();
+            let local_output_data = self.to_local_amount.to_le_bytes().pack();
+
+            let remote_capacity: u64 = self.remote_ckb_amount - remote_shutdown_fee as u64;
+            debug!(
+                "shutdown_tx remote_capacity: {} - {} = {}",
+                self.remote_ckb_amount, remote_shutdown_fee, remote_capacity
+            );
+            let remote_output = CellOutput::new_builder()
+                .lock(remote_shutdown_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .capacity(remote_capacity.pack())
+                .build();
+            let remote_output_data = self.to_remote_amount.to_le_bytes().pack();
+
+            let outputs = self.order_things_for_musig2(local_output, remote_output);
+            let outputs_data = self.order_things_for_musig2(local_output_data, remote_output_data);
+            let tx_builder = tx_builder
+                .set_outputs(outputs.to_vec())
+                .set_outputs_data(outputs_data.to_vec());
+            let tx = tx_builder.build();
+            let message = get_funding_cell_message_to_sign(
+                u64::MAX,
+                self.get_funding_transaction_outpoint(),
+                &tx,
+            );
+            debug!(
+                "Building message to sign for shutdown transaction {:?}",
+                hex::encode(message.as_slice())
+            );
+            Ok((tx, message))
+        } else {
+            let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
+            let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
+            debug!(
+                "Building shutdown transaction with values: {} {}",
+                local_value, remote_value
+            );
+            let local_output = CellOutput::new_builder()
+                .capacity(local_value.pack())
+                .lock(local_shutdown_script)
+                .build();
+            let remote_output = CellOutput::new_builder()
+                .capacity(remote_value.pack())
+                .lock(remote_shutdown_script)
+                .build();
+            let outputs = self.order_things_for_musig2(local_output, remote_output);
+            let tx_builder = tx_builder.set_outputs(outputs.to_vec());
+            let tx_builder =
+                tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
+            let tx = tx_builder.build();
+            let message = get_funding_cell_message_to_sign(
+                u64::MAX,
+                self.get_funding_transaction_outpoint(),
+                &tx,
+            );
+            debug!(
+                "Building message to sign for shutdown transaction {:?}",
+                hex::encode(message.as_slice())
+            );
+            Ok((tx, message))
+        }
     }
 
     // The parameter `local` here specifies whether we are building the commitment transaction
@@ -2575,8 +2658,13 @@ impl ChannelActorState {
     // so as to consume the funding cell.
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32]) {
         let funding_out_point = self.get_funding_transaction_outpoint();
+        let mut contracts = vec![Contract::CommitmentLock];
+        if self.funding_udt_type_script.is_some() {
+            // TODO(yukang): we need to find corresponding dep cells for UDT
+            contracts.push(Contract::SimpleUDT);
+        }
         let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
+            .cell_deps(get_cell_deps_by_contracts(contracts))
             .input(
                 CellInput::new_builder()
                     .previous_output(funding_out_point.clone())
@@ -2761,19 +2849,45 @@ impl ChannelActorState {
         let commitment_lock_script =
             get_script_by_contract(Contract::CommitmentLock, &blake2b_256(witnesses)[0..20]);
 
-        let outputs = vec![
-            CellOutput::new_builder()
-                .capacity((immediately_spendable_value as u64).pack())
-                .lock(immediate_secp256k1_lock_script)
-                .build(),
-            CellOutput::new_builder()
-                .capacity((time_locked_value as u64).pack())
-                .lock(commitment_lock_script)
-                .build(),
-        ];
-        let outputs_data = vec![Bytes::default(); outputs.len()];
+        if let Some(udt_type_script) = &self.funding_udt_type_script {
+            //FIXME(yukang): we need to add logic for transaction fee here
+            let (time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
+                (self.local_ckb_amount, self.remote_ckb_amount)
+            } else {
+                (self.remote_ckb_amount, self.local_ckb_amount)
+            };
 
-        (outputs, outputs_data)
+            let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
+            let immediate_output = CellOutput::new_builder()
+                .lock(immediate_secp256k1_lock_script.clone())
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(immediately_spendable_ckb_amount.pack())
+                .build();
+
+            let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
+            let commitment_lock_output = CellOutput::new_builder()
+                .lock(commitment_lock_script.clone())
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(time_locked_ckb_amount.pack())
+                .build();
+
+            let outputs = vec![immediate_output, commitment_lock_output];
+            let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
+            (outputs, outputs_data)
+        } else {
+            let outputs = vec![
+                CellOutput::new_builder()
+                    .capacity((immediately_spendable_value as u64).pack())
+                    .lock(immediate_secp256k1_lock_script)
+                    .build(),
+                CellOutput::new_builder()
+                    .capacity((time_locked_value as u64).pack())
+                    .lock(commitment_lock_script)
+                    .build(),
+            ];
+            let outputs_data = vec![Bytes::default(); outputs.len()];
+            (outputs, outputs_data)
+        }
     }
 
     pub fn build_and_verify_commitment_tx(
@@ -3369,6 +3483,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3401,6 +3516,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3449,6 +3565,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))
@@ -3564,6 +3681,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
+                    funding_udt_type_script: None,
                 },
                 rpc_reply,
             ))

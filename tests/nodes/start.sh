@@ -30,6 +30,7 @@ else
     fi
     export $(xargs <"$deploy_dir/.env")
 fi
+
 if [[ -f "$deploy_dir/.env.local" ]]; then
     # Local environment variables, may used to override the default ones.
     export $(xargs <"$deploy_dir/.env.local")
