@@ -288,6 +288,11 @@ impl<S> ChannelActor<S> {
             }
             PCNMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(revoke_and_ack)?;
+                if let ChannelState::ChannelReady(flags) = state.state {
+                    if flags.is_empty() {
+                        self.handle_commitment_signed_command(state)?;
+                    }
+                }
                 state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
@@ -825,6 +830,7 @@ impl<S> ChannelActor<S> {
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
+                        self.handle_commitment_signed_command(state)?;
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
@@ -837,6 +843,7 @@ impl<S> ChannelActor<S> {
             ChannelCommand::RemoveTlc(command, reply) => {
                 match self.handle_remove_tlc_command(state, command) {
                     Ok(_) => {
+                        self.handle_commitment_signed_command(state)?;
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
@@ -1748,7 +1755,7 @@ impl ChannelActorState {
 
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady(_) => Ok(()),
+            ChannelState::ChannelReady(flags) if flags.is_empty() => Ok(()),
             ChannelState::ShuttingDown(_) => Ok(()),
             _ => Err(ProcessingChannelError::InvalidState(format!(
                 "Invalid state {:?} for adding tlc",
