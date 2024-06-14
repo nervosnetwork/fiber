@@ -288,7 +288,8 @@ where
                         if state.auto_accept_channel_ckb_funding_amount > 0 {
                             let open_channel = AcceptChannelCommand {
                                 temp_channel_id,
-                                funding_amount: state.auto_accept_channel_ckb_funding_amount,
+                                funding_amount: state.auto_accept_channel_ckb_funding_amount
+                                    as u128,
                             };
                             state
                                 .create_inbound_channel(open_channel, self.store.clone())
@@ -743,8 +744,8 @@ pub struct NetworkActorState {
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
     chain_actor: ActorRef<CkbChainMessage>,
-    open_channel_min_ckb_funding_amount: u128,
-    auto_accept_channel_ckb_funding_amount: u128,
+    open_channel_min_ckb_funding_amount: u64,
+    auto_accept_channel_ckb_funding_amount: u64,
 }
 
 impl NetworkActorState {
@@ -944,7 +945,7 @@ impl NetworkActorState {
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
         if open_channel.funding_udt_type_script.is_none()
-            && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount
+            && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount as u128
         {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Funding amount too low: {}",

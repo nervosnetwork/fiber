@@ -124,8 +124,8 @@ pub enum RemoveTlcReason {
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
-    #[serde_as(as = "U128Hex")]
-    pub fee: u128,
+    #[serde_as(as = "U64Hex")]
+    pub fee: u64,
 }
 
 #[rpc(server)]

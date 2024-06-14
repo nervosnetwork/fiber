@@ -819,7 +819,7 @@ impl TryFrom<molecule_cfn::TxAckRBF> for TxAckRBF {
 pub struct Shutdown {
     pub channel_id: Hash256,
     pub close_script: Script,
-    pub fee: u128,
+    pub fee: u64,
 }
 
 impl From<Shutdown> for molecule_cfn::Shutdown {
