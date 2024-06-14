@@ -487,8 +487,8 @@ impl<S> ChannelActor<S> {
             version,
         } = state.build_and_sign_commitment_tx()?;
         debug!(
-            "Built and signed a commitment tx ({:?}) with partial signature {:?}",
-            &tx, &signature
+            "Built and signed commitment tx #{}: transaction: ({:?}), partial signature: {:?}",
+            version, &tx, &signature
         );
 
         let commitment_signed = CommitmentSigned {
@@ -1856,41 +1856,9 @@ impl ChannelActorState {
         commitment_point
     }
 
-    pub fn get_current_local_commitment_point(&self) -> Pubkey {
-        self.get_local_commitment_point(self.get_local_commitment_number())
-    }
-
-    // Get the commitment secret for previous commitment transaction.
-    // This is used to revoke previous commitment transaction.
-    pub fn get_previous_local_commitment_secret(&self) -> [u8; 32] {
-        let prev_commitment_number =
-            if self.get_local_commitment_number() == INITIAL_COMMITMENT_NUMBER {
-                INITIAL_COMMITMENT_NUMBER
-            } else {
-                self.get_local_commitment_number() - 1
-            };
-        self.signer.get_commitment_secret(prev_commitment_number)
-    }
-
-    // Get the commitment point for previous commitment transaction.
-    // This is used to verify counterparty's revocation of previous
-    // commitment transaction.
-    pub fn get_previous_remote_commitment_point(&self) -> Pubkey {
-        let prev_commitment_number =
-            if self.get_remote_commitment_number() == INITIAL_COMMITMENT_NUMBER {
-                INITIAL_COMMITMENT_NUMBER
-            } else {
-                self.get_remote_commitment_number() - 1
-            };
-        self.get_remote_commitment_point(prev_commitment_number)
-    }
-
-    pub fn get_current_remote_commitment_point(&self) -> Pubkey {
-        self.get_remote_commitment_point(self.get_remote_commitment_number())
-    }
-
     /// Get the counterparty commitment point for the given commitment number.
     fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
+        debug!("Getting remote commitment point #{}", commitment_number);
         let index = commitment_number as usize;
         let commitment_point = self.remote_commitment_points[index];
         debug!(
@@ -2016,48 +1984,49 @@ impl ChannelActorState {
             .sum::<u128>()
     }
 
-    pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo, local: bool) -> (Pubkey, Pubkey) {
+    // Get the pubkeys for the tlc. Tlc pubkeys are the pubkeys held by each party
+    // while this tlc was created (pubkeys are derived from the commitment number
+    // when this tlc was created). The pubkeys returned here are sorted.
+    // The offerer who offered this tlc will have the first pubkey, and the receiver
+    // will have the second pubkey.
+    pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo) -> (Pubkey, Pubkey) {
+        debug!("Getting tlc pubkeys for tlc: {:?}", tlc);
         let is_offered = tlc.tlc.is_offered();
-        let pubkey1 = derive_tlc_pubkey(
+        let (local_commitment_number, remote_commitment_number) = if is_offered {
+            (tlc.committed_at.get_local(), tlc.committed_at.get_remote())
+        } else {
+            (tlc.committed_at.get_remote(), tlc.committed_at.get_local())
+        };
+        let local_pubkey = derive_tlc_pubkey(
             &self.get_local_channel_parameters().pubkeys.tlc_base_key,
-            &self.get_local_commitment_point(if local {
-                tlc.committed_at.get_local()
-            } else {
-                tlc.committed_at.get_remote()
-            }),
+            &self.get_local_commitment_point(remote_commitment_number),
         );
-        let pubkey2 = derive_tlc_pubkey(
+        let remote_pubkey = derive_tlc_pubkey(
             &self.get_remote_channel_parameters().pubkeys.tlc_base_key,
-            &self.get_remote_commitment_point(if local {
-                tlc.committed_at.get_remote()
-            } else {
-                tlc.committed_at.get_local()
-            }),
+            &self.get_remote_commitment_point(local_commitment_number),
         );
 
         if is_offered {
-            (pubkey1, pubkey2)
+            (local_pubkey, remote_pubkey)
         } else {
-            (pubkey2, pubkey1)
+            (remote_pubkey, local_pubkey)
         }
     }
 
     pub fn get_active_received_tlc_with_pubkeys(
         &self,
-        local: bool,
     ) -> impl Iterator<Item = (&DetailedTLCInfo, Pubkey, Pubkey)> {
         self.get_active_received_tlcs().into_iter().map(move |tlc| {
-            let (k1, k2) = self.get_tlc_pubkeys(tlc, local);
+            let (k1, k2) = self.get_tlc_pubkeys(tlc);
             (tlc, k1, k2)
         })
     }
 
     pub fn get_active_offered_tlc_with_pubkeys(
         &self,
-        local: bool,
     ) -> impl Iterator<Item = (&DetailedTLCInfo, Pubkey, Pubkey)> {
         self.get_active_offered_tlcs().into_iter().map(move |tlc| {
-            let (k1, k2) = self.get_tlc_pubkeys(tlc, local);
+            let (k1, k2) = self.get_tlc_pubkeys(tlc);
             (tlc, k1, k2)
         })
     }
@@ -2067,11 +2036,11 @@ impl ChannelActorState {
         debug!("All tlcs: {:?}", self.tlcs);
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlc_with_pubkeys(local)
+                self.get_active_received_tlc_with_pubkeys()
                     .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
-                self.get_active_offered_tlc_with_pubkeys(local)
+                self.get_active_offered_tlc_with_pubkeys()
                     .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
@@ -2599,26 +2568,32 @@ impl ChannelActorState {
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
+                self.increment_remote_commitment_number();
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady(_) | CommitmentSignedFlags::PendingShutdown(_) => {
                 // Now we should revoke previous transation by revealing preimage.
-                let revocation_preimage = self.get_previous_local_commitment_secret();
+                let old_number = self.get_remote_commitment_number();
+                let secret = self.signer.get_commitment_secret(old_number);
+                self.increment_remote_commitment_number();
+                let new_number = self.get_remote_commitment_number();
+                let point = self.get_local_commitment_point(new_number);
+
                 debug!(
-                    "Revealing preimage for revocation: {:?}",
-                    &revocation_preimage
+                    "Revealing revocation preimage #{}: {:?}",
+                    old_number, &secret
                 );
-                let next_commitment_point = self.get_current_local_commitment_point();
+                debug!("Sending new commitment point #{}: {:?}", new_number, &point);
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                             peer_id: self.peer_id.clone(),
                             message: CFNMessage::RevokeAndAck(RevokeAndAck {
                                 channel_id: self.get_id(),
-                                per_commitment_secret: revocation_preimage.into(),
-                                next_per_commitment_point: next_commitment_point,
+                                per_commitment_secret: secret.into(),
+                                next_per_commitment_point: point,
                             }),
                         }),
                     ))
@@ -2641,7 +2616,6 @@ impl ChannelActorState {
                 }
             }
         }
-        self.increment_remote_commitment_number();
         Ok(())
     }
 
@@ -2754,7 +2728,7 @@ impl ChannelActorState {
         );
         debug_assert_eq!(
             self.remote_commitment_points.len() as u64,
-            self.get_current_commitment_number(false) + 1
+            self.get_current_commitment_number(true)
         );
         self.remote_commitment_points.push(commitment_point);
     }
@@ -2768,12 +2742,16 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        debug!("Checking commitment secret and point for revocation");
-        let per_commitment_point = self.get_previous_remote_commitment_point();
+        let commitment_number = self.get_local_commitment_number() - 1;
+        debug!(
+            "Checking commitment secret and point for revocation #{}",
+            commitment_number
+        );
+        let per_commitment_point = self.get_remote_commitment_point(commitment_number);
         if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Per commitment secret and per commitment point mismatch: secret {:?}, point: {:?}",
-                per_commitment_secret, per_commitment_point,
+                "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
+                commitment_number, per_commitment_secret, per_commitment_point
             )));
         }
         self.append_remote_commitment_point(next_per_commitment_point);
@@ -3205,12 +3183,16 @@ impl ChannelActorState {
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
-                    self.get_current_remote_commitment_point(),
+                    // Note that we're building a local commitment transaction, so we need to use
+                    // the local commitment number.
+                    self.get_remote_commitment_point(self.get_local_commitment_number()),
                     self.get_remote_channel_parameters().payment_base_key(),
                 )
             } else {
                 (
-                    self.get_current_local_commitment_point(),
+                    // Note that we're building a remote commitment transaction, so we need to use
+                    // the remote commitment number.
+                    self.get_local_commitment_point(self.get_remote_commitment_number()),
                     self.get_local_channel_parameters().payment_base_key(),
                 )
             };
