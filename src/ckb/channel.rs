@@ -40,7 +40,7 @@ use crate::{
 };
 
 use super::{
-    config::MIN_UDT_OCCUPIED_CAPACITY,
+    config::{MIN_CHANNEL_CAPACITY, MIN_UDT_OCCUPIED_CAPACITY},
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
     serde_utils::EntityHex,
@@ -533,7 +533,9 @@ impl<S> ChannelActor<S> {
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
+        warn!("handle add tlc command : {:?}", &command);
         state.check_state_for_tlc_update()?;
+        state.check_add_tlc_amount(command.amount)?;
 
         let tlc = state.create_outbounding_tlc(command);
         state.insert_tlc(tlc)?;
@@ -2267,6 +2269,10 @@ impl ChannelActorState {
         } else {
             self.local_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
         };
+        debug!(
+            "verify_shutdown_fee local_amount: {} remote_amount: {} min_occupied_capacity: {}",
+            self.to_local_amount, self.to_remote_amount, MIN_OCCUPIED_CAPACITY
+        );
         if fee > available_max_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Local balance is not enough to pay the fee, you can pay at most {} as fee",
@@ -2297,6 +2303,26 @@ impl ChannelActorState {
                 self.state
             ))),
         }
+    }
+
+    pub fn check_add_tlc_amount(&self, amount: u128) -> ProcessingChannelResult {
+        debug!("begin check_add_tlc_amount: {}", amount);
+        let available_amount = if self.funding_udt_type_script.is_none() {
+            self.to_local_amount - MIN_CHANNEL_CAPACITY as u128
+        } else {
+            self.to_local_amount
+        };
+        debug!(
+            "check amount: {} available_amount: {}",
+            amount, available_amount
+        );
+        if amount > available_amount {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Local balance is not enough to add tlc with amount {}, you can add at most {}",
+                amount, available_amount
+            )));
+        }
+        Ok(())
     }
 
     pub fn create_outbounding_tlc(&mut self, command: AddTlcCommand) -> TLC {
