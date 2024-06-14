@@ -475,6 +475,10 @@ impl<S> ChannelActor<S> {
             }
         };
 
+        debug!(
+            "Building and signing commitment tx for state {:?}",
+            &state.state
+        );
         let PartiallySignedCommitmentTransaction {
             tx,
             signature,
@@ -530,6 +534,7 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
+        state.increment_local_commitment_number();
         Ok(())
     }
 
@@ -543,6 +548,7 @@ impl<S> ChannelActor<S> {
         let tlc = state.create_outbounding_tlc(command);
         state.insert_tlc(tlc)?;
 
+        debug!("Inserted tlc into channel state: {:?}", &tlc);
         // TODO: Note that since message sending is async,
         // we can't guarantee anything about the order of message sending
         // and state updating. And any of these may fail while the other succeeds.
@@ -560,6 +566,7 @@ impl<S> ChannelActor<S> {
                 expiry: tlc.lock_time,
             }),
         };
+        debug!("Sending AddTlc message: {:?}", &msg);
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(msg),
@@ -2603,7 +2610,6 @@ impl ChannelActorState {
                     "Revealing preimage for revocation: {:?}",
                     &revocation_preimage
                 );
-                self.increment_local_commitment_number();
                 let next_commitment_point = self.get_current_local_commitment_point();
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -2622,6 +2628,8 @@ impl ChannelActorState {
                         self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                     }
                     CommitmentSignedFlags::PendingShutdown(_) => {
+                        // TODO: Handle error in the below function call.
+                        // We've already updated our state, we should never fail here.
                         self.maybe_transition_to_shutdown(&network)?;
                     }
                     _ => {
@@ -2633,6 +2641,7 @@ impl ChannelActorState {
                 }
             }
         }
+        self.increment_remote_commitment_number();
         Ok(())
     }
 
@@ -2730,8 +2739,6 @@ impl ChannelActorState {
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-        self.increment_local_commitment_number();
-        self.increment_remote_commitment_number();
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -2750,7 +2757,6 @@ impl ChannelActorState {
             self.get_current_commitment_number(false) + 1
         );
         self.remote_commitment_points.push(commitment_point);
-        self.increment_remote_commitment_number();
     }
 
     pub fn handle_revoke_and_ack_message(
@@ -2924,7 +2930,7 @@ impl ChannelActorState {
         }
     }
 
-    // Should we (also called holder) send tx_signatures first?
+    // Should the local send tx_signatures first?
     // In order to avoid deadlock, we need to define an order for sending tx_signatures.
     // Currently the order of sending tx_signatures is defined as follows:
     // If the amount to self is less than the amount to remote, then we should send,
@@ -3074,6 +3080,9 @@ impl ChannelActorState {
     // so as to consume the funding cell. The last element is the witnesses for the
     // commitment transaction.
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32], Vec<u8>) {
+        let version = self.get_current_commitment_number(local);
+        debug!("Building {} commitment transaction #{} with local commtiment number {} and remote commitment number {}", if local { "local" } else { "remote" }, version,
+    self.get_local_commitment_number(), self.get_remote_commitment_number());
         let funding_out_point = self.get_funding_transaction_outpoint();
         let mut contracts = vec![Contract::FundingLock];
         if self.funding_udt_type_script.is_some() {
@@ -3090,15 +3099,20 @@ impl ChannelActorState {
 
         let (outputs, outputs_data, witnesses) =
             self.build_commitment_transaction_parameters(local);
-        debug!("Built outputs for commitment transaction: {:?}", &outputs);
+        debug!(
+            "Building {} commitment transaction #{}'s outputs: {:?}",
+            if local { "local" } else { "remote" },
+            version,
+            &outputs
+        );
         let tx_builder = tx_builder.set_outputs(outputs);
         let tx_builder = tx_builder.set_outputs_data(outputs_data);
         let tx = tx_builder.build();
-        let version = self.get_current_commitment_number(local);
         let message = get_funding_cell_message_to_sign(version, funding_out_point, &tx);
         debug!(
-            "Built commitment transaction {:?}, message pending to sign: {:?}, witnesses for commitment tx (version {}): {:?}",
-            &tx, hex::encode(message.as_slice()), version, hex::encode(&witnesses)
+            "Built {} commitment transaction #{}: transaction: {:?}, signing message: {:?}, witnesses: {:?}",
+            if local { "local" } else { "remote" }, version,
+            &tx, hex::encode(message.as_slice()), hex::encode(&witnesses)
         );
         (tx, message, witnesses)
     }
@@ -3138,7 +3152,7 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
-            debug!("Get base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, base_delayed_payment_key, base_revocation_key);
+            debug!("Got base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, base_delayed_payment_key, base_revocation_key);
             (
                 delay,
                 derive_delayed_payment_pubkey(base_delayed_payment_key, &commitment_point),
@@ -3154,20 +3168,14 @@ impl ChannelActorState {
         ]
         .map(|x| {
             debug!(
-                "Witness element for commitment transaction #{} of {} party: {:?}",
-                commitment_number,
+                "Extending {} commitment transaction #{}'s witness with {:?}",
                 if local { "local" } else { "remote" },
+                commitment_number,
                 hex::encode(&x)
             );
             x
         })
         .concat();
-        debug!(
-            "Built commitment transaction #{}'s witnesses of {} party: {:?}",
-            commitment_number,
-            if local { "local" } else { "remote" },
-            hex::encode(&witnesses)
-        );
         witnesses
     }
 
