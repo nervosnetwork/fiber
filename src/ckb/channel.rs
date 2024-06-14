@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use std::{
     borrow::Borrow,
-    collections::{btree_map::Entry, BTreeMap},
+    collections::BTreeMap,
     fmt::Debug,
     hash::{Hash, Hasher},
 };
@@ -1331,6 +1331,11 @@ pub struct ChannelActorState {
     pub local_shutdown_fee: Option<u128>,
     pub remote_shutdown_signature: Option<PartialSignature>,
     pub remote_shutdown_fee: Option<u128>,
+
+    // A redundant field to record the total amount of the channel.
+    // Used only for debugging purposes.
+    #[cfg(debug_assertions)]
+    pub total_amount: u128,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1566,6 +1571,9 @@ impl ChannelActorState {
             remote_shutdown_fee: None,
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+
+            #[cfg(debug_assertions)]
+            total_amount: local_value + remote_value,
         }
     }
 
@@ -1608,6 +1616,9 @@ impl ChannelActorState {
             remote_shutdown_signature: None,
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
+
+            #[cfg(debug_assertions)]
+            total_amount: value,
         }
     }
 
@@ -1702,6 +1713,10 @@ impl ChannelActorState {
     }
 
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
+        debug_assert_eq!(
+            self.total_amount,
+            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
+        );
         if let Some(current) = self.tlcs.get(&tlc.id) {
             if current.tlc == tlc {
                 debug!(
@@ -1742,6 +1757,10 @@ impl ChannelActorState {
             self.to_local_amount,
             self.to_remote_amount
         );
+        debug_assert_eq!(
+            self.total_amount,
+            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
+        );
         Ok(detailed_tlc)
     }
 
@@ -1753,11 +1772,20 @@ impl ChannelActorState {
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) -> Result<DetailedTLCInfo, ProcessingChannelError> {
+        debug_assert_eq!(
+            self.total_amount,
+            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
+        );
         let commitment_numbers = self.get_current_commitment_numbers();
 
-        match self.tlcs.entry(tlc_id) {
-            Entry::Occupied(mut entry) => {
-                let current = entry.get_mut();
+        let tlc = match self.tlcs.get_mut(&tlc_id) {
+            None => {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Trying to remove non-existing tlc with id {:?}",
+                    tlc_id
+                )))
+            }
+            Some(current) => {
                 match current.removal_info {
                     Some((removed_at, remove_reason))
                         if removed_at == commitment_numbers && reason == remove_reason =>
@@ -1769,7 +1797,8 @@ impl ChannelActorState {
                         return Ok(current.clone());
                     }
                     Some((removed_at, remove_reason)) => {
-                        error!("Trying to remove an already removed tlc {:?} (removed at {:?}) with different reason: {:?} (old reason {:?})", current, removed_at, reason, remove_reason);
+                        return Err(ProcessingChannelError::InvalidParameter(
+                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}", tlc_id,  removed_at, reason, current, remove_reason)));
                     }
                     None => {
                         if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
@@ -1783,7 +1812,7 @@ impl ChannelActorState {
                             }
                         }
                     }
-                }
+                };
                 // We are sure that this tlc removal is not repeated and the reason is valid now.
                 let should_increase_our_balance = match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => tlc_id.is_received(),
@@ -1795,23 +1824,14 @@ impl ChannelActorState {
                     self.to_remote_amount += current.tlc.amount;
                 }
                 current.removal_info = Some((commitment_numbers, reason));
-                Ok(current.clone())
+                current.clone()
             }
-            Entry::Vacant(_) => {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Trying to remove non-existing tlc with id {:?}",
-                    tlc_id
-                )));
-            }
-        }
-    }
-
-    pub fn get_channel_parameters(&self, local: bool) -> &ChannelParametersOneParty {
-        if local {
-            self.get_local_channel_parameters()
-        } else {
-            self.get_remote_channel_parameters()
-        }
+        };
+        debug_assert_eq!(
+            self.total_amount,
+            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
+        );
+        Ok(tlc)
     }
 
     pub fn get_local_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -2344,6 +2364,11 @@ impl ChannelActorState {
             NegotiatingFundingFlags::INIT_SENT,
         ));
         self.to_remote_amount = accept_channel.funding_amount;
+        #[cfg(debug_assertions)]
+        {
+            self.total_amount = self.to_local_amount + self.to_remote_amount;
+        }
+
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
