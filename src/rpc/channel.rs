@@ -326,7 +326,7 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: params.clone().close_script.into(),
+                            close_script: params.close_script.clone().into(),
                             fee: params.fee,
                         },
                         rpc_reply,
