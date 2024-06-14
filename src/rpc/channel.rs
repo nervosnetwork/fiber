@@ -345,16 +345,28 @@ where
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::Shutdown(ShutdownCommand {
-                    close_script: params.close_script.into(),
-                    fee: params.fee,
-                }),
-            },
-        ));
-        self.actor.cast(message).unwrap();
-        Ok(())
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: params.channel_id,
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: params.close_script.clone().into(),
+                            fee: params.fee,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+
+        match call!(self.actor, message).unwrap() {
+            Ok(_response) => Ok(()),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                e,
+                Some(params),
+            )),
+        }
     }
 }

@@ -28,7 +28,10 @@ use tokio::sync::oneshot;
 use std::{borrow::Borrow, collections::BTreeMap};
 
 use crate::{
-    ckb::types::Shutdown,
+    ckb::{
+        config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
+        types::Shutdown,
+    },
     ckb_chain::{
         contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
         FundingRequest, FundingUdtInfo,
@@ -37,7 +40,7 @@ use crate::{
 };
 
 use super::{
-    config::{CKB_SHANNONS, DEFAULT_MIN_SHUTDOWN_FEE},
+    config::MIN_UDT_OCCUPIED_CAPACITY,
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
     serde_utils::EntityHex,
@@ -85,7 +88,7 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
-    Shutdown(ShutdownCommand),
+    Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
 }
 
 #[derive(Debug)]
@@ -132,7 +135,6 @@ pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 = 142 * CKB_SHANNONS + DEFAULT_MIN_SHUTDOWN_FEE; // 143 CKB for minimal UDT amount
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -616,6 +618,8 @@ impl<S> ChannelActor<S> {
                 ));
             }
         };
+
+        state.verify_shutdown_fee(command.fee)?;
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -782,7 +786,18 @@ impl<S> ChannelActor<S> {
                     }
                 }
             }
-            ChannelCommand::Shutdown(command) => self.handle_shutdown_command(state, command),
+            ChannelCommand::Shutdown(command, reply) => {
+                match self.handle_shutdown_command(state, command) {
+                    Ok(_) => {
+                        let _ = reply.send(Ok(()));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        let _ = reply.send(Err(err.to_string()));
+                        Err(err)
+                    }
+                }
+            }
         }
     }
 
@@ -2246,6 +2261,33 @@ impl ChannelActorState {
         &self.get_remote_channel_parameters().pubkeys.funding_pubkey
     }
 
+    pub fn verify_shutdown_fee(&self, fee: u64) -> ProcessingChannelResult {
+        let available_max_fee = if self.funding_udt_type_script.is_none() {
+            self.to_local_amount as u64 - MIN_OCCUPIED_CAPACITY
+        } else {
+            self.local_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+        };
+        if fee > available_max_fee {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Local balance is not enough to pay the fee, you can pay at most {} as fee",
+                available_max_fee
+            )));
+        }
+
+        let (shutdown_tx, _) = self.build_shutdown_tx(false)?;
+        let tx_size = shutdown_tx.data().serialized_size_in_block();
+        let expected_minimal_fee = tx_size as u64 * self.commitment_fee_rate;
+        if let Some(fee) = self.local_shutdown_fee {
+            if fee < expected_minimal_fee {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Shutdown fee is not enough for minimal fee rate, expected fee >= {}",
+                    expected_minimal_fee
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ChannelReady() => Ok(()),
@@ -2439,7 +2481,7 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let (shutdown_tx, message) = self.build_shutdown_tx()?;
+        let (shutdown_tx, message) = self.build_shutdown_tx(true)?;
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
@@ -3080,7 +3122,12 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
+    // `apply` = true means we are building the shutdown transaction to be broadcasted
+    // `apply` = false means we want to mock the shutdown transaction and only for calculating the fee
+    pub fn build_shutdown_tx(
+        &self,
+        apply: bool,
+    ) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
         // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
         // This function may be called in a state where these scripts are not present.
@@ -3089,30 +3136,35 @@ impl ChannelActorState {
             remote_shutdown_script,
             local_shutdown_fee,
             remote_shutdown_fee,
-        ) = match (
-            self.local_shutdown_script.clone(),
-            self.remote_shutdown_script.clone(),
-            self.local_shutdown_fee,
-            self.remote_shutdown_fee,
-        ) {
-            (
-                Some(local_shutdown_script),
-                Some(remote_shutdown_script),
-                Some(local_shutdown_fee),
-                Some(remote_shutdown_fee),
-            ) => (
-                local_shutdown_script,
-                remote_shutdown_script,
-                local_shutdown_fee,
-                remote_shutdown_fee,
-            ),
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
+        ) = if apply {
+            match (
+                self.local_shutdown_script.clone(),
+                self.remote_shutdown_script.clone(),
+                self.local_shutdown_fee,
+                self.remote_shutdown_fee,
+            ) {
+                (
+                    Some(local_shutdown_script),
+                    Some(remote_shutdown_script),
+                    Some(local_shutdown_fee),
+                    Some(remote_shutdown_fee),
+                ) => (
+                    local_shutdown_script,
+                    remote_shutdown_script,
+                    local_shutdown_fee,
+                    remote_shutdown_fee,
+                ),
+                _ => {
+                    return Err(ProcessingChannelError::InvalidState(format!(
                     "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee {:?}, remote_shutdown_fee {:?}",
                     &self.local_shutdown_script, &self.remote_shutdown_script,
                     &self.local_shutdown_fee, &self.remote_shutdown_fee
                 )));
+                }
             }
+        } else {
+            let script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
+            (script.clone(), script.clone(), 0, 0)
         };
 
         let mut contracts = vec![Contract::FundingLock];
