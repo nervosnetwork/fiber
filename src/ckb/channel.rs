@@ -111,7 +111,7 @@ pub struct RemoveTlcCommand {
 #[derive(Debug)]
 pub struct ShutdownCommand {
     pub close_script: Script,
-    pub fee: u128,
+    pub fee: u64,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -132,7 +132,7 @@ pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u128 = 142 * CKB_SHANNONS + DEFAULT_MIN_SHUTDOWN_FEE; // 143 CKB for minimal UDT amount
+pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 = 142 * CKB_SHANNONS + DEFAULT_MIN_SHUTDOWN_FEE; // 143 CKB for minimal UDT amount
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -1336,14 +1336,13 @@ pub struct ChannelActorState {
     pub remote_commitment_points: Vec<Pubkey>,
     pub remote_channel_parameters: Option<ChannelParametersOneParty>,
     pub local_shutdown_signature: Option<PartialSignature>,
-    pub local_shutdown_fee: Option<u128>,
+    pub local_shutdown_fee: Option<u64>,
     pub remote_shutdown_signature: Option<PartialSignature>,
-    pub remote_shutdown_fee: Option<u128>,
-
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
     pub total_amount: u128,
+    pub remote_shutdown_fee: Option<u64>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1551,7 +1550,6 @@ impl ChannelActorState {
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
-            to_remote_amount: remote_value,
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_pubkeys,
@@ -1602,7 +1600,6 @@ impl ChannelActorState {
             id: temp_channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
-            to_remote_amount: 0,
             signer,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_pubkeys,
@@ -3193,8 +3190,8 @@ impl ChannelActorState {
                 self.to_local_amount, local_shutdown_fee,
                 self.to_remote_amount, remote_shutdown_fee
             );
-            let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
-            let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
+            let local_value = self.to_local_amount as u64 - local_shutdown_fee;
+            let remote_value = self.to_remote_amount as u64 - remote_shutdown_fee;
             debug!(
                 "Building shutdown transaction with values: local {}, remote {}",
                 local_value, remote_value

@@ -10,10 +10,10 @@ use serde::Deserialize;
 
 use crate::Result;
 
-pub const CKB_SHANNONS: u128 = 100_000_000;
-pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u128 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u128 = 1 * CKB_SHANNONS; // 1 ckb prepared for shutdown transaction fee
-pub const MIN_OCCUPIED_CAPACITY: u128 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
+pub const CKB_SHANNONS: u64 = 100_000_000;
+pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 ckb prepared for shutdown transaction fee
+pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
@@ -59,7 +59,7 @@ pub struct CkbConfig {
         env,
         help = "minimum ckb funding amount for open channel requests, unit: shannons [default: 16100000000 shannons]"
     )]
-    pub open_channel_min_ckb_funding_amount: Option<u128>,
+    pub open_channel_min_ckb_funding_amount: Option<u64>,
     /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept
     #[arg(
         name = "CKB_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
@@ -67,17 +67,17 @@ pub struct CkbConfig {
         env,
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
-    pub auto_accept_channel_ckb_funding_amount: Option<u128>,
+    pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 }
 
 impl CkbConfig {
-    pub fn open_channel_min_ckb_funding_amount(&self) -> u128 {
+    pub fn open_channel_min_ckb_funding_amount(&self) -> u64 {
         self.open_channel_min_ckb_funding_amount.unwrap_or(
             DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE,
         )
     }
 
-    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u128 {
+    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
             .unwrap_or(MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE)
     }
