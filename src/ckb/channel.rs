@@ -37,6 +37,7 @@ use crate::{
 };
 
 use super::{
+    config::{CKB_SHANNONS, DEFAULT_MIN_SHUTDOWN_FEE},
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
     serde_utils::EntityHex,
@@ -131,7 +132,7 @@ pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 = 200 * 100_000_000; // 200 CKB
+pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u128 = 142 * CKB_SHANNONS + DEFAULT_MIN_SHUTDOWN_FEE; // 143 CKB for minimal UDT amount
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
