@@ -51,7 +51,7 @@ pub struct CkbChainConfig {
         value_parser,
         help = "a list of supported UDT scripts"
     )]
-    pub udt_whitelist: Option<UdtInfos>,
+    udt_whitelist: Option<UdtInfos>,
 }
 
 impl CkbChainConfig {
@@ -105,8 +105,8 @@ impl CkbChainConfig {
         })
     }
 
-    pub fn udt_whitelist(&self) -> Vec<(String, Script, CellDepVec)> {
-        let mut udt_whitelist: Vec<(String, Script, CellDepVec)> = vec![];
+    pub fn udt_whitelist(&self) -> Vec<UdtScriptInfo> {
+        let mut udt_whitelist: Vec<UdtScriptInfo> = vec![];
         if let Some(udt_infos) = &self.udt_whitelist {
             for udt_info in udt_infos.0.iter() {
                 let cell_deps: Vec<CellDep> = udt_info
@@ -116,17 +116,16 @@ impl CkbChainConfig {
                     .collect();
                 let cell_deps = CellDepVec::new_builder().set(cell_deps).build();
                 let script: Script = (&udt_info.script).into();
-                udt_whitelist.push((udt_info.name.clone(), script, cell_deps));
+                let arg_pattern = udt_info.script.args.clone();
+                udt_whitelist.push((udt_info.name.clone(), script, arg_pattern, cell_deps));
             }
         }
-
-        eprintln!("udt_whitelist: {:?}", udt_whitelist);
         return udt_whitelist;
     }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
-pub enum UdtScriptHashType {
+enum UdtScriptHashType {
     Type,
     Data,
     Data1,
@@ -134,28 +133,31 @@ pub enum UdtScriptHashType {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct UdtScript {
-    pub code_hash: String,
-    pub hash_type: UdtScriptHashType,
-    pub args: String,
+struct UdtScript {
+    code_hash: H256,
+    hash_type: UdtScriptHashType,
+    /// args may be used in pattern matching
+    args: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-pub struct UdtCellDep {
-    pub dep_type: String,
-    pub tx_hash: String,
-    pub index: u32,
+struct UdtCellDep {
+    dep_type: String,
+    tx_hash: H256,
+    index: u32,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-pub struct UdtInfo {
-    pub name: String,
-    pub script: UdtScript,
-    pub cell_deps: Vec<UdtCellDep>,
+struct UdtInfo {
+    name: String,
+    script: UdtScript,
+    cell_deps: Vec<UdtCellDep>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-pub struct UdtInfos(Vec<UdtInfo>);
+struct UdtInfos(Vec<UdtInfo>);
+
+pub type UdtScriptInfo = (String, Script, String, CellDepVec);
 
 impl FromStr for UdtInfos {
     type Err = serde_json::Error;
@@ -167,19 +169,21 @@ impl FromStr for UdtInfos {
 
 impl From<&UdtScript> for Script {
     fn from(script: &UdtScript) -> Self {
-        let code_hash = H256::from_str(&script.code_hash).expect("code_hash");
         let _type = match script.hash_type {
             UdtScriptHashType::Data => ScriptHashType::Data,
             UdtScriptHashType::Data1 => ScriptHashType::Data1,
             UdtScriptHashType::Data2 => ScriptHashType::Data2,
             UdtScriptHashType::Type => ScriptHashType::Type,
         };
-        let script = Script::new_builder()
-            .code_hash(code_hash.pack())
-            .hash_type(_type.into())
-            .args(script.args.clone().pack())
-            .build();
-        script
+        let mut builder = Script::new_builder()
+            .code_hash(script.code_hash.pack())
+            .hash_type(_type.into());
+
+        let arg = script.args.strip_prefix("0x").unwrap_or(&script.args);
+        if let Ok(packed_args) = H256::from_str(arg) {
+            builder = builder.args(packed_args.as_bytes().pack());
+        }
+        builder.build()
     }
 }
 
@@ -190,12 +194,11 @@ impl From<&UdtCellDep> for CellDep {
             "dep_group" => DepType::DepGroup,
             _ => panic!("invalid dep type"),
         };
-        let tx_hash = H256::from_str(&cell_dep.tx_hash).expect("invalid tx hash");
         CellDep::new_builder()
             .dep_type(dep_type.into())
             .out_point(
                 OutPoint::new_builder()
-                    .tx_hash(tx_hash.pack())
+                    .tx_hash(cell_dep.tx_hash.pack())
                     .index(cell_dep.index.pack())
                     .build(),
             )

@@ -23,7 +23,7 @@ pub struct CkbConfig {
 
     /// listening port for ckb fiber network
     #[arg(name = "CKB_LISTENING_PORT", long = "ckb-listening-port", env)]
-    pub listening_port: u16,
+    pub(crate) listening_port: u16,
 
     /// addresses to be announced to ckb fiber network (separated by `,`)
     #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDRS", long = "ckb-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
@@ -39,7 +39,7 @@ pub struct CkbConfig {
         long = "ckb-announced-node-name",
         env
     )]
-    pub announced_node_name: String,
+    pub(crate) announced_node_name: String,
 
     /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
     #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]

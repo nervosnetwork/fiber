@@ -4,7 +4,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use log::debug;
-
+use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 
 use crate::ckb::{config::CkbNetwork, types::Hash256};
@@ -16,6 +16,8 @@ use ckb_types::bytes::Bytes;
 use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
 #[cfg(test)]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use super::config::UdtScriptInfo;
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -127,7 +129,7 @@ pub enum Contract {
 struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
     script_cell_deps: HashMap<Contract, CellDepVec>,
-    udt_whitelist: Vec<(String, Script, CellDepVec)>,
+    udt_whitelist: Vec<UdtScriptInfo>,
 }
 
 #[derive(Clone)]
@@ -216,7 +218,7 @@ impl From<MockContext> for ContractsContext {
 }
 
 impl ContractsContext {
-    pub fn new(network: CkbNetwork, udt_whitelist: Vec<(String, Script, CellDepVec)>) -> Self {
+    pub fn new(network: CkbNetwork, udt_whitelist: Vec<UdtScriptInfo>) -> Self {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
@@ -427,7 +429,7 @@ impl ContractsContext {
         res.build()
     }
 
-    fn get_udt_whitelist(&self) -> &Vec<(String, Script, CellDepVec)> {
+    fn get_udt_whitelist(&self) -> &Vec<UdtScriptInfo> {
         match self {
             #[cfg(test)]
             Self::Mock(mock) => &mock.contracts_context.udt_whitelist,
@@ -446,20 +448,27 @@ impl ContractsContext {
     }
 
     pub(crate) fn check_udt_script(&self, udt_script: &Script) -> bool {
-        self.get_udt_whitelist().iter().any(|(_name, script, _)| {
-            if script.code_hash() == udt_script.code_hash()
-                && script.hash_type() == udt_script.hash_type()
-            {
-                return true;
-            }
-            false
-        })
+        self.get_udt_whitelist()
+            .iter()
+            .any(|(_name, script, arg_pattern, _)| {
+                if script == udt_script {
+                    return true;
+                }
+                if script.code_hash() == udt_script.code_hash()
+                    && script.hash_type() == udt_script.hash_type()
+                {
+                    let args = format!("0x{:x}", udt_script.args().raw_data());
+                    let pattern = Regex::new(arg_pattern).expect("invalid expressio");
+                    return pattern.is_match(&args);
+                }
+                false
+            })
     }
 }
 
 pub fn init_contracts_context(
     network: Option<CkbNetwork>,
-    udt_whitelist: Option<Vec<(String, Script, CellDepVec)>>,
+    udt_whitelist: Option<Vec<UdtScriptInfo>>,
 ) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| {

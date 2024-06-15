@@ -16,11 +16,11 @@ ckb_chain:
   udt_whitelist:
     - name: simple_udt
       script:
-        code_hash: e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419
+        code_hash: 0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419
         hash_type: Data1
-        args: eeee
+        args: 0x.*
       cell_deps:
-        - tx_hash: dce1d5c46170c5624076c06884bb169b712e6fcde38d3a78999f1be2d75adcde
+        - tx_hash: 0xdce1d5c46170c5624076c06884bb169b712e6fcde38d3a78999f1be2d75adcde
           index: 0
           dep_type: code
 
