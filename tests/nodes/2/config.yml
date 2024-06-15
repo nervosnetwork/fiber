@@ -2,6 +2,16 @@ ckb:
   listening_port: 8345
   bootnode_addrs:
     - "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8"
+  udt_whitelist:
+    - name: simple_udt
+      script:
+        code_hash: e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419
+        hash_type: Data1
+        args: eeee
+      cell_deps:
+        - tx_hash: dce1d5c46170c5624076c06884bb169b712e6fcde38d3a78999f1be2d75adcde
+          index: 0
+          dep_type: code
 
 rpc:
   listening_addr: 127.0.0.1:41715
@@ -19,3 +29,17 @@ services:
   - ckb
   - rpc
   - ckb_chain
+
+udt_whitelist:
+  simple_udt:
+    script:
+      code_hash:
+      hash_type:
+      args:
+    cell_deps:
+      - out_point:
+          tx_hash:
+          index:
+      - out_point:
+          tx_hash:
+          index:

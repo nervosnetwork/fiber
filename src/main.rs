@@ -67,6 +67,9 @@ pub async fn main() {
             let bootnodes = ckb_config.bootnode_addrs.clone();
 
             info!("Starting ckb");
+            eprintln!("udt_config_list: {:?}", ckb_config.udt_whitelist);
+            eprintln!("announced_node_name: {:?}", ckb_config.announced_node_name);
+            eprintln!("listening_port: {:?}", ckb_config.listening_port);
             let ckb_actor = start_ckb(
                 ckb_config,
                 ckb_chain_actor,

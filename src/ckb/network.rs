@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
-use ckb_types::packed::{OutPoint, Script, Transaction};
+use ckb_types::packed::{CellDepVec, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use log::{debug, error, info, warn};
 
@@ -744,6 +744,7 @@ pub struct NetworkActorState {
     chain_actor: ActorRef<CkbChainMessage>,
     open_channel_min_ckb_funding_amount: u128,
     auto_accept_channel_ckb_funding_amount: u128,
+    udt_whitelist: Vec<(String, Script, CellDepVec)>,
 }
 
 impl NetworkActorState {
@@ -940,9 +941,17 @@ impl NetworkActorState {
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        if open_channel.funding_udt_type_script.is_none()
-            && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount
-        {
+        if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
+            if !self.udt_whitelist.iter().any(|(_name, script, _)| {
+                script.code_hash() == udt_type_script.code_hash()
+                    && script.hash_type() == udt_type_script.hash_type()
+            }) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Invalid UDT type script: {:?}",
+                    udt_type_script
+                )));
+            }
+        } else if open_channel.funding_amount < self.open_channel_min_ckb_funding_amount {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Funding amount too low: {}",
                 open_channel.funding_amount
@@ -1168,6 +1177,7 @@ where
             chain_actor: self.chain_actor.clone(),
             open_channel_min_ckb_funding_amount: config.open_channel_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            udt_whitelist: config.udt_whitelist(),
         })
     }
 
