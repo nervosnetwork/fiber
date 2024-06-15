@@ -2,16 +2,6 @@ ckb:
   listening_port: 8345
   bootnode_addrs:
     - "/ip4/127.0.0.1/tcp/8344/p2p/QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8"
-  udt_whitelist:
-    - name: simple_udt
-      script:
-        code_hash: e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419
-        hash_type: Data1
-        args: eeee
-      cell_deps:
-        - tx_hash: dce1d5c46170c5624076c06884bb169b712e6fcde38d3a78999f1be2d75adcde
-          index: 0
-          dep_type: code
 
 rpc:
   listening_addr: 127.0.0.1:41715
@@ -24,6 +14,17 @@ ckb_chain:
   # funding lock
   funding_cell_lock_script_code_hash: "0x8090ce20be9976e2407511502acebf74ac1cfed10d7b35b7f33f56c9bd0daec6"
   funding_cell_lock_script_hash_type: "type"
+
+  udt_whitelist:
+    - name: simple_udt
+      script:
+        code_hash: e1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419
+        hash_type: Data1
+        args: eeee
+      cell_deps:
+        - tx_hash: dce1d5c46170c5624076c06884bb169b712e6fcde38d3a78999f1be2d75adcde
+          index: 0
+          dep_type: code
 
 services:
   - ckb

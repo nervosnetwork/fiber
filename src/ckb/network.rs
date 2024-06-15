@@ -1,6 +1,6 @@
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
-use ckb_types::packed::{CellDepVec, OutPoint, Script, Transaction};
+use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use log::{debug, error, info, warn};
 
@@ -45,6 +45,7 @@ use super::{
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::types::TxSignatures;
+use crate::ckb_chain::contracts::check_udt_script;
 use crate::ckb_chain::{
     CkbChainMessage, FundingRequest, FundingTx, FundingUdtInfo, TraceTxRequest,
 };
@@ -744,7 +745,6 @@ pub struct NetworkActorState {
     chain_actor: ActorRef<CkbChainMessage>,
     open_channel_min_ckb_funding_amount: u128,
     auto_accept_channel_ckb_funding_amount: u128,
-    udt_whitelist: Vec<(String, Script, CellDepVec)>,
 }
 
 impl NetworkActorState {
@@ -942,10 +942,7 @@ impl NetworkActorState {
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
         if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
-            if !self.udt_whitelist.iter().any(|(_name, script, _)| {
-                script.code_hash() == udt_type_script.code_hash()
-                    && script.hash_type() == udt_type_script.hash_type()
-            }) {
+            if !check_udt_script(&udt_type_script) {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Invalid UDT type script: {:?}",
                     udt_type_script
@@ -1177,7 +1174,6 @@ where
             chain_actor: self.chain_actor.clone(),
             open_channel_min_ckb_funding_amount: config.open_channel_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            udt_whitelist: config.udt_whitelist(),
         })
     }
 

@@ -97,6 +97,7 @@ impl MockContext {
             contracts_context: Arc::new(ContractsInfo {
                 contract_default_scripts: map,
                 script_cell_deps,
+                udt_whitelist: vec![],
             }),
         };
         debug!("Created mock context to test transactions.");
@@ -126,6 +127,7 @@ pub enum Contract {
 struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
     script_cell_deps: HashMap<Contract, CellDepVec>,
+    udt_whitelist: Vec<(String, Script, CellDepVec)>,
 }
 
 #[derive(Clone)]
@@ -214,7 +216,7 @@ impl From<MockContext> for ContractsContext {
 }
 
 impl ContractsContext {
-    pub fn new(network: CkbNetwork) -> Self {
+    pub fn new(network: CkbNetwork, udt_whitelist: Vec<(String, Script, CellDepVec)>) -> Self {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
@@ -306,6 +308,7 @@ impl ContractsContext {
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     script_cell_deps,
+                    udt_whitelist,
                 }))
             }
             CkbNetwork::Testnet => {
@@ -379,6 +382,7 @@ impl ContractsContext {
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     script_cell_deps,
+                    udt_whitelist,
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
@@ -392,6 +396,7 @@ impl ContractsContext {
             Self::Real(real) => &real.contract_default_scripts,
         }
     }
+
     pub(crate) fn get_cell_deps(&self, contracts: Vec<Contract>) -> CellDepVec {
         let (script_cell_deps, contracts) = match self {
             #[cfg(test)]
@@ -422,6 +427,14 @@ impl ContractsContext {
         res.build()
     }
 
+    fn get_udt_whitelist(&self) -> &Vec<(String, Script, CellDepVec)> {
+        match self {
+            #[cfg(test)]
+            Self::Mock(mock) => &mock.contracts_context.udt_whitelist,
+            Self::Real(real) => &real.udt_whitelist,
+        }
+    }
+
     pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
@@ -431,11 +444,30 @@ impl ContractsContext {
             .args(args.pack())
             .build()
     }
+
+    pub(crate) fn check_udt_script(&self, udt_script: &Script) -> bool {
+        self.get_udt_whitelist().iter().any(|(_name, script, _)| {
+            if script.code_hash() == udt_script.code_hash()
+                && script.hash_type() == udt_script.hash_type()
+            {
+                return true;
+            }
+            false
+        })
+    }
 }
 
-pub fn init_contracts_context(network: Option<CkbNetwork>) -> &'static ContractsContext {
+pub fn init_contracts_context(
+    network: Option<CkbNetwork>,
+    udt_whitelist: Option<Vec<(String, Script, CellDepVec)>>,
+) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
-    INSTANCE.get_or_init(|| ContractsContext::new(network.unwrap_or(DEFAULT_CONTRACT_NETWORK)));
+    INSTANCE.get_or_init(|| {
+        ContractsContext::new(
+            network.unwrap_or(DEFAULT_CONTRACT_NETWORK),
+            udt_whitelist.unwrap_or(vec![]),
+        )
+    });
     INSTANCE.get().unwrap()
 }
 
@@ -445,11 +477,15 @@ const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Mocknet;
 const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Dev;
 
 pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
-    init_contracts_context(None).get_script(contract, args)
+    init_contracts_context(None, None).get_script(contract, args)
 }
 
 pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
-    init_contracts_context(None).get_cell_deps(contracts)
+    init_contracts_context(None, None).get_cell_deps(contracts)
+}
+
+pub fn check_udt_script(script: &Script) -> bool {
+    init_contracts_context(None, None).check_udt_script(script)
 }
 
 #[cfg(test)]
