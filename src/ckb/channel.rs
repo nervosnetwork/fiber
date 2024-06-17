@@ -1635,20 +1635,20 @@ impl ChannelActorState {
         let local = !is_received;
         // If this revoke_and_ack message is received from the counterparty,
         // then we should be operating on remote commitment numbers.
-        let commitment_number = self.get_current_commitment_number(is_received);
+        let commitment_numbers = self.get_current_commitment_numbers();
         let (mut to_local_amount, mut to_remote_amount) =
             (self.to_local_amount, self.to_remote_amount);
         debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}", 
-            if is_received { "received" } else { "sent" }, commitment_number, to_local_amount, to_remote_amount);
+            if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
         self.get_active_tlcs_mut(local).for_each(|tlc| {
             let amount = tlc.tlc.amount;
             // This tlc has not been committed yet.
             if tlc.creation_confirmed_at.is_none() {
                 debug!(
                     "Setting local_committed_at for tlc {:?} to commitment number {:?}",
-                    tlc.tlc.id, commitment_number
+                    tlc.tlc.id, commitment_numbers
                 );
-                tlc.creation_confirmed_at = Some(commitment_number);
+                tlc.creation_confirmed_at = Some(commitment_numbers);
                 // We offered a tlc, so we should decrease our balance.
                 if tlc.tlc.is_offered() {
                     to_local_amount -= amount;
@@ -1658,7 +1658,7 @@ impl ChannelActorState {
             }
             match (tlc.removed_at, tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {
-                    tlc.removal_confirmed_at = Some(commitment_number);
+                    tlc.removal_confirmed_at = Some(commitment_numbers);
                     let should_increase_our_balance = match reason {
                         RemoveTlcReason::RemoveTlcFulfill(_) => !tlc.is_offered(),
                         RemoveTlcReason::RemoveTlcFail(_) => tlc.is_offered(),
@@ -1670,7 +1670,7 @@ impl ChannelActorState {
                     }
                     debug!(
                         "Setting removal_confirmed_at for tlc {:?} to commitment number {:?}",
-                        tlc.tlc.id, commitment_number)
+                        tlc.tlc.id, commitment_numbers)
                 }
                 (Some((removed_at, reason)), Some(removal_confirmed_at)) => {
                     debug!(
@@ -1684,7 +1684,7 @@ impl ChannelActorState {
             }
         });
         debug!("Updated local state on revoke_and_ack message {}: current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
-        if is_received { "received" } else { "sent" }, commitment_number, to_local_amount, to_remote_amount);
+        if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
         self.to_local_amount = to_local_amount;
         self.to_remote_amount = to_remote_amount;
     }
@@ -1795,7 +1795,7 @@ impl ChannelActorState {
         );
         let detailed_tlc = DetailedTLCInfo {
             tlc,
-            created_at: self.get_current_commitment_number(tlc.is_offered()),
+            created_at: self.get_current_commitment_numbers(),
             creation_confirmed_at: None,
             removed_at: None,
             removal_confirmed_at: None,
@@ -1824,7 +1824,7 @@ impl ChannelActorState {
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) -> Result<DetailedTLCInfo, ProcessingChannelError> {
-        let removed_at = self.get_current_commitment_number(tlc_id.is_received());
+        let removed_at = self.get_current_commitment_numbers();
 
         let tlc = match self.tlcs.get_mut(&tlc_id) {
             None => {
@@ -2111,17 +2111,10 @@ impl ChannelActorState {
     pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo, local: bool) -> (Pubkey, Pubkey) {
         debug!("Getting tlc pubkeys for tlc: {:?}", tlc);
         let is_offered = tlc.tlc.is_offered();
-        let (local_commitment_number, remote_commitment_number) = if is_offered {
-            (
-                tlc.get_local_commitment_number(),
-                tlc.get_remote_commitment_number(),
-            )
-        } else {
-            (
-                tlc.get_remote_commitment_number(),
-                tlc.get_local_commitment_number(),
-            )
-        };
+        let CommitmentNumbers {
+            local: local_commitment_number,
+            remote: remote_commitment_number,
+        } = tlc.get_commitment_numbers(local);
         let local_pubkey = derive_tlc_pubkey(
             &self.get_local_channel_parameters().pubkeys.tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
@@ -3763,17 +3756,17 @@ pub struct DetailedTLCInfo {
     tlc: TLC,
     // The commitment number of the party that offered this tlc
     // (also called offerer) when this tlc is created.
-    created_at: u64,
+    created_at: CommitmentNumbers,
     // The commitment number of the party that received this tlc
     // (also called receiver) when this tlc is first included in
     // the commitment transaction of the receiver.
-    creation_confirmed_at: Option<u64>,
+    creation_confirmed_at: Option<CommitmentNumbers>,
     // The commitment number of the party that removed this tlc
     // (only the receiver is allowed to remove) when the tlc is removed.
-    removed_at: Option<(u64, RemoveTlcReason)>,
+    removed_at: Option<(CommitmentNumbers, RemoveTlcReason)>,
     // The initial commitment number of the party (the offerer) that
     // has confirmed the removal of this tlc.
-    removal_confirmed_at: Option<u64>,
+    removal_confirmed_at: Option<CommitmentNumbers>,
 }
 
 impl DetailedTLCInfo {
@@ -3781,21 +3774,19 @@ impl DetailedTLCInfo {
         self.tlc.is_offered()
     }
 
-    fn get_local_commitment_number(&self) -> u64 {
-        if self.is_offered() {
+    fn get_commitment_numbers(&self, local: bool) -> CommitmentNumbers {
+        let am_i_sending_the_tlc = {
+            if self.is_offered() {
+                local
+            } else {
+                !local
+            }
+        };
+        if am_i_sending_the_tlc {
             self.created_at
         } else {
             self.creation_confirmed_at
-                .expect("Local commitment number is present")
-        }
-    }
-
-    fn get_remote_commitment_number(&self) -> u64 {
-        if self.is_offered() {
-            self.creation_confirmed_at
-                .expect("Remote commitment number is present")
-        } else {
-            self.created_at
+                .expect("Commitment number is present")
         }
     }
 }
