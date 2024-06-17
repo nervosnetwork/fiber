@@ -291,11 +291,6 @@ impl<S> ChannelActor<S> {
             }
             CFNMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(revoke_and_ack)?;
-                if let ChannelState::ChannelReady(flags) = state.state {
-                    if flags.is_empty() {
-                        self.handle_commitment_signed_command(state)?;
-                    }
-                }
                 state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
@@ -2002,35 +1997,6 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    fn should_received_tlc_be_includes(info: &DetailedTLCInfo, local: bool) -> bool {
-        !info.is_offered() && Self::should_tlc_be_included_in_commitment_tx(info, local)
-    }
-
-    pub fn get_active_received_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
-        self.tlcs.values().filter(move |info| {
-            let should_be_included = Self::should_received_tlc_be_includes(info, local);
-            debug!(
-                "Should received tlc {:?} be included: {}, local: {}",
-                info, should_be_included, local
-            );
-            should_be_included
-        })
-    }
-
-    pub fn get_active_received_tlcs_mut(
-        &mut self,
-        local: bool,
-    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
-        self.tlcs.values_mut().filter(move |info| {
-            let should_be_included = Self::should_received_tlc_be_includes(info, local);
-            debug!(
-                "Should received tlc mut {:?} be included: {}, local: {}",
-                info, should_be_included, local
-            );
-            should_be_included
-        })
-    }
-
     fn should_tlc_be_included_in_commitment_tx(info: &DetailedTLCInfo, local: bool) -> bool {
         match info {
             DetailedTLCInfo {
@@ -2073,32 +2039,15 @@ impl ChannelActorState {
         }
     }
 
-    fn should_offered_tlc_be_included(info: &DetailedTLCInfo, local: bool) -> bool {
-        info.is_offered() && Self::should_tlc_be_included_in_commitment_tx(info, local)
-    }
-
-    pub fn get_active_offered_tlcs_mut(
-        &mut self,
-        local: bool,
-    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
-        self.tlcs.values_mut().filter(move |info| {
-            let should_be_included = Self::should_offered_tlc_be_included(info, local);
-            debug!(
-                "Should offered tlc mut {:?} be included: {}, local: {}",
-                info, should_be_included, local
-            );
-            should_be_included
+    pub fn get_active_received_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
+        self.tlcs.values().filter(move |info| {
+            Self::should_tlc_be_included_in_commitment_tx(info, local) && !info.is_offered()
         })
     }
 
     pub fn get_active_offered_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
         self.tlcs.values().filter(move |info| {
-            let should_be_included = Self::should_offered_tlc_be_included(info, local);
-            debug!(
-                "Should offered tlc mut {:?} be included: {}, local: {}",
-                info, should_be_included, local
-            );
-            should_be_included
+            Self::should_tlc_be_included_in_commitment_tx(info, local) && info.is_offered()
         })
     }
 
@@ -3306,15 +3255,24 @@ impl ChannelActorState {
         &self,
         local: bool,
     ) -> (Vec<CellOutput>, Vec<Bytes>, Vec<u8>) {
+        // The time_locked_value is amount of assets locked by commitment-lock.
+        // Our value is always time-locked. Additionally, we need to add the value of
+        // all the TLCs that we have received from the counterparty.
         let (time_locked_value, immediately_spendable_value) = if local {
             (self.to_local_amount, self.to_remote_amount)
         } else {
             (self.to_remote_amount, self.to_local_amount)
         };
 
-        // The time_locked_value is amount of assets locked by commitment-lock.
-        // We need also to include the total balance of all pending TLCs.
-        let tlc_value = self.get_active_tlcs_value(local);
+        let tlc_value = if local {
+            self.get_active_received_tlcs(local)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        } else {
+            self.get_active_offered_tlcs(local)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        };
         debug!(
             "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_value: {}, immediately_spendable_value: {}",
             if local { "local" } else { "remote" },
