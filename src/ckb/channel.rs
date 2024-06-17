@@ -3695,8 +3695,14 @@ impl TLC {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedTLCInfo {
     tlc: TLC,
-    // The commitment number of the party that offered this tlc
-    // (also called offerer) when this tlc is created.
+    // The commitment numbers of both parties when this tlc is created
+    // as the offerer sees it.
+    // TODO: There is a potential bug here. The commitment number of the
+    // receiver may have been updated by the time this tlc is included
+    // in a commitment of the offerer. Currently we assume that the commitment
+    // number of the receiver when the time this tlc is actually committed by
+    // the offerer is just the same as the commitment number of the receiver
+    // when the this tlc is created.
     created_at: CommitmentNumbers,
     // The commitment number of the party that received this tlc
     // (also called receiver) when this tlc is first included in
