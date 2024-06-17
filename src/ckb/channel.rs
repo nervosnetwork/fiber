@@ -1641,58 +1641,48 @@ impl ChannelActorState {
         self.get_active_tlcs_mut().for_each(|tlc| {
             let amount = tlc.tlc.amount;
             // This tlc has not been committed yet.
-            if tlc.local_committed_at.is_none() {
+            if tlc.creation_confirmed_at.is_none() {
                 debug!(
                     "Setting local_committed_at for tlc {:?} to commitment number {:?}",
                     tlc.tlc.id, commitment_number
                 );
-                if is_received {
-                    tlc.remote_committed_at = Some(commitment_number);
-                } else {
-                    tlc.local_committed_at = Some(commitment_number);
-                }
+                tlc.creation_confirmed_at = Some(commitment_number);
                 // We offered a tlc, so we should decrease our balance.
                 if tlc.tlc.is_offered() {
                     to_local_amount -= amount;
                 } else {
                     to_remote_amount -= amount;
                 };
-                debug!("Updated tlc {:?} with local_committed_at: {:?}, remote_committed_at: {:?}, to_local_amount: {}, to_remote_amount: {}", 
-                    tlc.tlc.id, tlc.local_committed_at, tlc.remote_committed_at, to_local_amount, to_remote_amount);
             }
-            match (tlc.remove_reason, tlc.local_removed_at) {
-                (Some(reason), None) => {
-                    if is_received {
-                        tlc.remote_committed_at = Some(commitment_number);
-                    } else {
-                        tlc.local_committed_at = Some(commitment_number);
-                    }
+            match (tlc.removed_at, tlc.removal_confirmed_at) {
+                (Some((_removed_at, reason)), None) => {
+                    tlc.removal_confirmed_at = Some(commitment_number);
                     let should_increase_our_balance = match reason {
-                        RemoveTlcReason::RemoveTlcFulfill(_) => tlc.tlc.is_received(),
-                        RemoveTlcReason::RemoveTlcFail(_) => tlc.tlc.is_offered(),
+                        RemoveTlcReason::RemoveTlcFulfill(_) => !tlc.is_offered(),
+                        RemoveTlcReason::RemoveTlcFail(_) => tlc.is_offered(),
                     };
                     if should_increase_our_balance {
                         to_local_amount += amount;
                     } else {
                         to_remote_amount += amount;
                     }
-                    debug!("Updated tlc {:?} with local_committed_at: {:?}, remote_committed_at: {:?}, to_local_amount: {}, to_remote_amount: {}", 
-                        tlc.tlc.id, tlc.local_committed_at, tlc.remote_committed_at, to_local_amount, to_remote_amount);
+                    debug!(
+                        "Setting removal_confirmed_at for tlc {:?} to commitment number {:?}",
+                        tlc.tlc.id, commitment_number)
                 }
-                (None, None) => {
-                    debug!("TLC {:?} is not removed", tlc.tlc.id);
+                (Some((removed_at, reason)), Some(removal_confirmed_at)) => {
+                    debug!(
+                        "TLC {:?} is already removed with reason {:?} at commitment number {:?} and is confirmed at {:?}",
+                        tlc.tlc.id, reason, removed_at, removal_confirmed_at
+                    );
                 }
-                (None, Some(_)) => {
-                    panic!(
-                        "TLC {:?} has no remove reason but local_removed_at is set",
-                        tlc.tlc.id
-                    )
-                }
-                (Some(_), Some(_)) => {
-                    debug!("TLC {:?} is already removed", tlc.tlc.id);
+                _ => {
+                    debug!("Ignoring processing TLC {:?} as it is not removed yet", tlc.tlc.id);
                 }
             }
         });
+        debug!("Updated local state on revoke_and_ack message {}: current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
+        if is_received { "received" } else { "sent" }, commitment_number, to_local_amount, to_remote_amount);
         self.to_local_amount = to_local_amount;
         self.to_remote_amount = to_remote_amount;
     }
@@ -1780,10 +1770,6 @@ impl ChannelActorState {
     }
 
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
-        debug_assert_eq!(
-            self.total_amount,
-            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
-        );
         if let Some(current) = self.tlcs.get(&tlc.id) {
             if current.tlc == tlc {
                 debug!(
@@ -1807,11 +1793,10 @@ impl ChannelActorState {
         );
         let detailed_tlc = DetailedTLCInfo {
             tlc,
-            local_committed_at: None,
-            remote_committed_at: None,
-            local_removed_at: None,
-            remote_removed_at: None,
-            remove_reason: None,
+            created_at: self.get_current_commitment_number(tlc.is_offered()),
+            creation_confirmed_at: None,
+            removed_at: None,
+            removal_confirmed_at: None,
         };
         self.tlcs.insert(tlc.id, detailed_tlc);
         if tlc.is_offered() {
@@ -1826,10 +1811,6 @@ impl ChannelActorState {
             self.to_local_amount,
             self.to_remote_amount
         );
-        debug_assert_eq!(
-            self.total_amount,
-            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
-        );
         Ok(detailed_tlc)
     }
 
@@ -1841,13 +1822,7 @@ impl ChannelActorState {
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) -> Result<DetailedTLCInfo, ProcessingChannelError> {
-        debug_assert_eq!(
-            self.total_amount,
-            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
-        );
-
-        let local_commitment_number = self.get_local_commitment_number();
-        let remote_commitment_number = self.get_remote_commitment_number();
+        let removed_at = self.get_current_commitment_number(tlc_id.is_received());
 
         let tlc = match self.tlcs.get_mut(&tlc_id) {
             None => {
@@ -1857,32 +1832,23 @@ impl ChannelActorState {
                 )))
             }
             Some(current) => {
-                let (current_commitment_number, tlc_removed_at) = if current.tlc.is_offered() {
-                    (remote_commitment_number, current.remote_removed_at)
-                } else {
-                    (local_commitment_number, current.local_removed_at)
-                };
-                match (current.remove_reason, tlc_removed_at) {
-                    (Some(current_remove_reason), Some(removed_at))
-                        if current_remove_reason == reason
-                            && removed_at == current_commitment_number =>
+                match current.removed_at {
+                    Some((current_removed_at, current_remove_reason))
+                        if current_remove_reason == reason && removed_at == current_removed_at =>
                     {
                         debug!(
                             "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
                         );
                         return Ok(current.clone());
                     }
-                    (Some(current_remove_reason), Some(removed_at)) => {
+                    Some((current_remove_reason, current_removed_at)) => {
                         return Err(ProcessingChannelError::InvalidParameter(
-                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}", tlc_id,  removed_at, reason, tlc_removed_at, current_remove_reason)));
+                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}", tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
                     }
-                    (Some(_), None) | (None, Some(_)) => {
-                        panic!("Invalid state: tlc {:?} has remove_reason and removed_at must be present or absent at the same time", current);
-                    }
-                    (None, None) => {
+                    None => {
                         debug!(
                             "Inserting remove reason {:?} at commitment number {:?} for tlc {:?}",
-                            reason, current_commitment_number, current
+                            reason, removed_at, current
                         );
                         if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
                             let filled_payment_hash: Hash256 =
@@ -1896,14 +1862,10 @@ impl ChannelActorState {
                         }
                     }
                 };
-                current.remove_reason = Some(reason);
+                current.removed_at = Some((removed_at, reason));
                 current.clone()
             }
         };
-        debug_assert_eq!(
-            self.total_amount,
-            self.to_local_amount + self.to_remote_amount + self.get_active_tlcs_value()
-        );
         Ok(tlc)
     }
 
@@ -3702,19 +3664,19 @@ impl TLC {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedTLCInfo {
     tlc: TLC,
-    // Only on receiving the RevokeAndAck message, can we be sure that the counterparty has committed this tlc.
-    local_committed_at: Option<u64>,
-    // If we received a AddTlc message, we can be sure that the counterparty will commit this tlc in the next commitment transaction.
-    remote_committed_at: Option<u64>,
-    local_removed_at: Option<u64>,
-    remote_removed_at: Option<u64>,
-    remove_reason: Option<RemoveTlcReason>,
+    created_at: u64,
+    creation_confirmed_at: Option<u64>,
+    removed_at: Option<(u64, RemoveTlcReason)>,
+    removal_confirmed_at: Option<u64>,
 }
 
 impl DetailedTLCInfo {
+    fn is_offered(&self) -> bool {
+        self.tlc.is_offered()
+    }
+
     fn is_removed_for_both_parties(&self) -> bool {
-        if self.local_removed_at.is_some() && self.remote_removed_at.is_some() {
-            debug_assert!(self.remove_reason.is_some());
+        if self.removed_at.is_some() && self.removal_confirmed_at.is_some() {
             true
         } else {
             false
@@ -3722,13 +3684,21 @@ impl DetailedTLCInfo {
     }
 
     fn get_local_commitment_number(&self) -> u64 {
-        self.local_committed_at
-            .expect("Local commitment number is present")
+        if self.is_offered() {
+            self.created_at
+        } else {
+            self.creation_confirmed_at
+                .expect("Local commitment number is present")
+        }
     }
 
     fn get_remote_commitment_number(&self) -> u64 {
-        self.remote_committed_at
-            .expect("Remote commitment number is present")
+        if self.is_offered() {
+            self.creation_confirmed_at
+                .expect("Remote commitment number is present")
+        } else {
+            self.created_at
+        }
     }
 }
 
