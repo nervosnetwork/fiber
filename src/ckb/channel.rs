@@ -1631,16 +1631,26 @@ impl ChannelActorState {
     }
 
     fn on_revoke_and_ack_message_sent_or_received(&mut self, is_received: bool) {
-        // If we received a revoke_and_ack message, then we're building local commitment numbers.
-        let local = !is_received;
+        #[cfg(debug_assertions)]
+        {
+            self.total_amount = self.to_local_amount + self.to_remote_amount;
+        }
+
         // If this revoke_and_ack message is received from the counterparty,
         // then we should be operating on remote commitment numbers.
         let commitment_numbers = self.get_current_commitment_numbers();
+
         let (mut to_local_amount, mut to_remote_amount) =
             (self.to_local_amount, self.to_remote_amount);
+
         debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}", 
             if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
-        self.get_active_tlcs_mut(local).for_each(|tlc| {
+
+        self.tlcs.values_mut().for_each(|tlc| {
+            if tlc.removal_confirmed_at.is_some() {
+                return;
+            }
+
             let amount = tlc.tlc.amount;
             // This tlc has not been committed yet.
             if tlc.creation_confirmed_at.is_none() {
@@ -1687,6 +1697,10 @@ impl ChannelActorState {
         if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
         self.to_local_amount = to_local_amount;
         self.to_remote_amount = to_remote_amount;
+        #[cfg(debug_assertions)]
+        {
+            self.total_amount = self.to_local_amount + self.to_remote_amount;
+        }
     }
 }
 
@@ -1755,7 +1769,7 @@ impl ChannelActorState {
         self.tlc_ids.get_next_received()
     }
 
-    pub fn increment_next_offering_tlc_id(&mut self) {
+    pub fn increment_next_offered_tlc_id(&mut self) {
         self.tlc_ids.increment_offering();
     }
 
@@ -1802,7 +1816,7 @@ impl ChannelActorState {
         };
         self.tlcs.insert(tlc.id, detailed_tlc);
         if tlc.is_offered() {
-            self.to_local_amount -= tlc.amount;
+            self.increment_next_offered_tlc_id();
         } else {
             self.increment_next_received_tlc_id();
         }
@@ -2079,19 +2093,6 @@ impl ChannelActorState {
                 info, should_be_included, local
             );
             should_be_included
-        })
-    }
-
-    pub fn get_active_tlcs_mut(
-        &mut self,
-        local: bool,
-    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
-        self.tlcs.values_mut().filter(move |info| {
-            if info.tlc.is_offered() {
-                Self::should_offered_tlc_be_included(info, local)
-            } else {
-                Self::should_received_tlc_be_includes(info, local)
-            }
         })
     }
 
@@ -3309,11 +3310,19 @@ impl ChannelActorState {
         // We need also to include the total balance of all pending TLCs.
         let tlc_value = self.get_active_tlcs_value(local);
         debug!(
-            "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_vle: {}, immediately_spendable_value: {}",
+            "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_value: {}, immediately_spendable_value: {}",
             if local { "local" } else { "remote" },
             self.get_current_commitment_number(local),
             time_locked_value, tlc_value, immediately_spendable_value);
         let time_locked_value = time_locked_value + tlc_value;
+        let immediately_spendable_value = immediately_spendable_value - tlc_value;
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                self.total_amount,
+                time_locked_value + immediately_spendable_value
+            );
+        }
 
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
