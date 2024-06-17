@@ -1631,6 +1631,8 @@ impl ChannelActorState {
     }
 
     fn on_revoke_and_ack_message_sent_or_received(&mut self, is_received: bool) {
+        // If we received a revoke_and_ack message, then we're building local commitment numbers.
+        let local = !is_received;
         // If this revoke_and_ack message is received from the counterparty,
         // then we should be operating on remote commitment numbers.
         let commitment_number = self.get_current_commitment_number(is_received);
@@ -1638,7 +1640,7 @@ impl ChannelActorState {
             (self.to_local_amount, self.to_remote_amount);
         debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}", 
             if is_received { "received" } else { "sent" }, commitment_number, to_local_amount, to_remote_amount);
-        self.get_active_tlcs_mut().for_each(|tlc| {
+        self.get_active_tlcs_mut(local).for_each(|tlc| {
             let amount = tlc.tlc.amount;
             // This tlc has not been committed yet.
             if tlc.creation_confirmed_at.is_none() {
@@ -1980,33 +1982,122 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    pub fn get_active_received_tlcs(&self) -> impl Iterator<Item = &DetailedTLCInfo> {
-        self.get_active_tlcs()
-            .into_iter()
-            .filter(|tlc| tlc.tlc.is_received())
+    fn should_received_tlc_be_includes(info: &DetailedTLCInfo, local: bool) -> bool {
+        !info.is_offered() && Self::should_tlc_be_included_in_commitment_tx(info, local)
     }
 
-    pub fn get_active_offered_tlcs(&self) -> impl Iterator<Item = &DetailedTLCInfo> {
-        self.get_active_tlcs()
-            .into_iter()
-            .filter(|tlc| tlc.tlc.is_offered())
+    pub fn get_active_received_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
+        self.tlcs.values().filter(move |info| {
+            let should_be_included = Self::should_received_tlc_be_includes(info, local);
+            debug!(
+                "Should received tlc {:?} be included: {}, local: {}",
+                info, should_be_included, local
+            );
+            should_be_included
+        })
     }
 
-    pub fn get_active_tlcs(&self) -> impl Iterator<Item = &DetailedTLCInfo> {
-        self.tlcs
-            .values()
-            .filter(|tlc| !tlc.is_removed_for_both_parties())
+    pub fn get_active_received_tlcs_mut(
+        &mut self,
+        local: bool,
+    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
+        self.tlcs.values_mut().filter(move |info| {
+            let should_be_included = Self::should_received_tlc_be_includes(info, local);
+            debug!(
+                "Should received tlc mut {:?} be included: {}, local: {}",
+                info, should_be_included, local
+            );
+            should_be_included
+        })
     }
 
-    pub fn get_active_tlcs_mut(&mut self) -> impl Iterator<Item = &mut DetailedTLCInfo> {
-        self.tlcs
-            .values_mut()
-            .filter(|tlc| !tlc.is_removed_for_both_parties())
+    fn should_tlc_be_included_in_commitment_tx(info: &DetailedTLCInfo, local: bool) -> bool {
+        match info {
+            DetailedTLCInfo {
+                tlc,
+                creation_confirmed_at,
+                removed_at,
+                removal_confirmed_at,
+                ..
+            } => {
+                let am_i_sending_add_tlc_message = {
+                    if tlc.is_offered() {
+                        local
+                    } else {
+                        !local
+                    }
+                };
+                let am_i_sending_remove_tlc_message = !am_i_sending_add_tlc_message;
+                match (removal_confirmed_at, removed_at, creation_confirmed_at) {
+                    (Some(_), _, _) => {
+                        debug!("Not including TLC {:?} to commitment transction as it is already removed", tlc.id);
+                        return false;
+                    }
+                    (_, Some(_), Some(_)) => {
+                        debug!("Will only include TLC {:?} to commitment transaction if I am sending remove tlc message ({})", tlc.id,am_i_sending_remove_tlc_message);
+                        return am_i_sending_remove_tlc_message;
+                    }
+                    (_, Some(_), None) => {
+                        panic!("TLC {:?} is removed but not confirmed yet", tlc.id);
+                    }
+                    (_, _, Some(n)) => {
+                        debug!("Including TLC {:?} to commitment transaction because tlc confirmed at {:?}", tlc.id, n);
+                        return true;
+                    }
+                    (None, None, None) => {
+                        debug!("Will only include TLC {:?} to commitment transaction if I am sending add tlc message ({})", tlc.id, am_i_sending_add_tlc_message);
+                        am_i_sending_add_tlc_message
+                    }
+                }
+            }
+        }
     }
 
-    pub fn get_active_tlcs_value(&self) -> u128 {
-        self.get_active_tlcs()
-            .into_iter()
+    fn should_offered_tlc_be_included(info: &DetailedTLCInfo, local: bool) -> bool {
+        info.is_offered() && Self::should_tlc_be_included_in_commitment_tx(info, local)
+    }
+
+    pub fn get_active_offered_tlcs_mut(
+        &mut self,
+        local: bool,
+    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
+        self.tlcs.values_mut().filter(move |info| {
+            let should_be_included = Self::should_offered_tlc_be_included(info, local);
+            debug!(
+                "Should offered tlc mut {:?} be included: {}, local: {}",
+                info, should_be_included, local
+            );
+            should_be_included
+        })
+    }
+
+    pub fn get_active_offered_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
+        self.tlcs.values().filter(move |info| {
+            let should_be_included = Self::should_offered_tlc_be_included(info, local);
+            debug!(
+                "Should offered tlc mut {:?} be included: {}, local: {}",
+                info, should_be_included, local
+            );
+            should_be_included
+        })
+    }
+
+    pub fn get_active_tlcs_mut(
+        &mut self,
+        local: bool,
+    ) -> impl Iterator<Item = &mut DetailedTLCInfo> {
+        self.tlcs.values_mut().filter(move |info| {
+            if info.tlc.is_offered() {
+                Self::should_offered_tlc_be_included(info, local)
+            } else {
+                Self::should_received_tlc_be_includes(info, local)
+            }
+        })
+    }
+
+    pub fn get_active_tlcs_value(&self, local: bool) -> u128 {
+        self.get_active_offered_tlcs(local)
+            .chain(self.get_active_received_tlcs(local))
             .map(|tlc| tlc.tlc.amount)
             .sum::<u128>()
     }
@@ -2017,7 +2108,7 @@ impl ChannelActorState {
     // The offerer who offered this tlc will have the first pubkey, and the receiver
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
-    pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo) -> (Pubkey, Pubkey) {
+    pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo, local: bool) -> (Pubkey, Pubkey) {
         debug!("Getting tlc pubkeys for tlc: {:?}", tlc);
         let is_offered = tlc.tlc.is_offered();
         let (local_commitment_number, remote_commitment_number) = if is_offered {
@@ -2049,18 +2140,20 @@ impl ChannelActorState {
 
     pub fn get_active_received_tlc_with_pubkeys(
         &self,
+        local: bool,
     ) -> impl Iterator<Item = (&DetailedTLCInfo, Pubkey, Pubkey)> {
-        self.get_active_received_tlcs().into_iter().map(move |tlc| {
-            let (k1, k2) = self.get_tlc_pubkeys(tlc);
-            (tlc, k1, k2)
+        self.get_active_received_tlcs(local).map(move |tlc| {
+            let (k1, k2) = self.get_tlc_pubkeys(tlc, local);
+            (&(*tlc), k1, k2)
         })
     }
 
     pub fn get_active_offered_tlc_with_pubkeys(
         &self,
+        local: bool,
     ) -> impl Iterator<Item = (&DetailedTLCInfo, Pubkey, Pubkey)> {
-        self.get_active_offered_tlcs().into_iter().map(move |tlc| {
-            let (k1, k2) = self.get_tlc_pubkeys(tlc);
+        self.get_active_offered_tlcs(local).map(move |tlc| {
+            let (k1, k2) = self.get_tlc_pubkeys(tlc, local);
             (tlc, k1, k2)
         })
     }
@@ -2070,11 +2163,11 @@ impl ChannelActorState {
         debug!("All tlcs: {:?}", self.tlcs);
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlc_with_pubkeys()
+                self.get_active_received_tlc_with_pubkeys(local)
                     .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
-                self.get_active_offered_tlc_with_pubkeys()
+                self.get_active_offered_tlc_with_pubkeys(local)
                     .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
@@ -2115,7 +2208,11 @@ impl ChannelActorState {
     }
 
     fn any_tlc_pending(&self) -> bool {
-        self.get_active_tlcs().into_iter().next().is_some()
+        self.tlcs.values().any(|tlc| {
+            tlc.creation_confirmed_at.is_none()
+                || tlc.removal_confirmed_at.is_none()
+                || tlc.removed_at.is_none()
+        })
     }
 
     pub fn get_remote_funding_pubkey(&self) -> &Pubkey {
@@ -2303,7 +2400,7 @@ impl ChannelActorState {
             debug!(
                 "Will not shutdown the channel because we require all tlcs resolved and both parties sent the Shutdown message, current state: {:?}, pending tlcs: {:?}",
                 &self.state,
-                &self.get_active_tlcs().into_iter().collect::<Vec<_>>()
+                &self.tlcs
             );
             return Ok(());
         }
@@ -3217,7 +3314,7 @@ impl ChannelActorState {
 
         // The time_locked_value is amount of assets locked by commitment-lock.
         // We need also to include the total balance of all pending TLCs.
-        let tlc_value = self.get_active_tlcs_value();
+        let tlc_value = self.get_active_tlcs_value(local);
         debug!(
             "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_vle: {}, immediately_spendable_value: {}",
             if local { "local" } else { "remote" },
@@ -3664,23 +3761,24 @@ impl TLC {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedTLCInfo {
     tlc: TLC,
+    // The commitment number of the party that offered this tlc
+    // (also called offerer) when this tlc is created.
     created_at: u64,
+    // The commitment number of the party that received this tlc
+    // (also called receiver) when this tlc is first included in
+    // the commitment transaction of the receiver.
     creation_confirmed_at: Option<u64>,
+    // The commitment number of the party that removed this tlc
+    // (only the receiver is allowed to remove) when the tlc is removed.
     removed_at: Option<(u64, RemoveTlcReason)>,
+    // The initial commitment number of the party (the offerer) that
+    // has confirmed the removal of this tlc.
     removal_confirmed_at: Option<u64>,
 }
 
 impl DetailedTLCInfo {
     fn is_offered(&self) -> bool {
         self.tlc.is_offered()
-    }
-
-    fn is_removed_for_both_parties(&self) -> bool {
-        if self.removed_at.is_some() && self.removal_confirmed_at.is_some() {
-            true
-        } else {
-            false
-        }
     }
 
     fn get_local_commitment_number(&self) -> u64 {
