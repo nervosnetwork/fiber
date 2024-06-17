@@ -25,12 +25,7 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use std::{
-    borrow::Borrow,
-    collections::BTreeMap,
-    fmt::Debug,
-    hash::{Hash, Hasher},
-};
+use std::{borrow::Borrow, collections::BTreeMap};
 
 use crate::{
     ckb::types::Shutdown,
@@ -1131,16 +1126,12 @@ pub struct CommitmentNumbers {
 
 impl Default for CommitmentNumbers {
     fn default() -> Self {
-        Self::initial()
+        Self::new()
     }
 }
 
 impl CommitmentNumbers {
-    pub fn new(local: u64, remote: u64) -> Self {
-        Self { local, remote }
-    }
-
-    pub fn initial() -> Self {
+    pub fn new() -> Self {
         Self {
             local: INITIAL_COMMITMENT_NUMBER,
             remote: INITIAL_COMMITMENT_NUMBER,
@@ -1172,16 +1163,12 @@ pub struct TLCIds {
 
 impl Default for TLCIds {
     fn default() -> Self {
-        Self::initial()
+        Self::new()
     }
 }
 
 impl TLCIds {
-    pub fn new(offering: u64, received: u64) -> Self {
-        Self { offering, received }
-    }
-
-    pub fn initial() -> Self {
+    pub fn new() -> Self {
         Self {
             offering: 0,
             received: 0,
@@ -1209,23 +1196,6 @@ impl TLCIds {
 pub enum TLCId {
     Offered(u64),
     Received(u64),
-}
-
-// Required for using TLCId as key in BTreeMap.
-// See https://stackoverflow.com/questions/69186841/how-do-i-implement-hash-for-an-enum-with-a-special-case
-impl Hash for TLCId {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            TLCId::Offered(id) => {
-                state.write_u64(0);
-                state.write_u64(*id);
-            }
-            TLCId::Received(id) => {
-                state.write_u64(1);
-                state.write_u64(*id);
-            }
-        }
-    }
 }
 
 impl From<TLCId> for u64 {
@@ -2113,11 +2083,9 @@ impl ChannelActorState {
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.get_active_received_tlc_with_pubkeys(local)
-                    .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
                 self.get_active_offered_tlc_with_pubkeys(local)
-                    .into_iter()
                     .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
             );
@@ -2126,9 +2094,9 @@ impl ChannelActorState {
             let (mut a, mut b) = if local {
                 (received_tlcs, offered_tlcs)
             } else {
-                for tlc in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
+                for (tlc, _, _) in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
                     // Need to flip these fields for the counterparty.
-                    tlc.0.tlc.flip_mut();
+                    tlc.tlc.flip_mut();
                 }
                 (offered_tlcs, received_tlcs)
             };
