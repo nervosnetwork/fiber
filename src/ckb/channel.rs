@@ -1629,6 +1629,73 @@ impl ChannelActorState {
         );
         self.state = new_state;
     }
+
+    fn on_revoke_and_ack_message_sent_or_received(&mut self, is_received: bool) {
+        // If this revoke_and_ack message is received from the counterparty,
+        // then we should be operating on remote commitment numbers.
+        let commitment_number = self.get_current_commitment_number(is_received);
+        let (mut to_local_amount, mut to_remote_amount) =
+            (self.to_local_amount, self.to_remote_amount);
+        debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}", 
+            if is_received { "received" } else { "sent" }, commitment_number, to_local_amount, to_remote_amount);
+        self.get_active_tlcs_mut().for_each(|tlc| {
+            let amount = tlc.tlc.amount;
+            // This tlc has not been committed yet.
+            if tlc.local_committed_at.is_none() {
+                debug!(
+                    "Setting local_committed_at for tlc {:?} to commitment number {:?}",
+                    tlc.tlc.id, commitment_number
+                );
+                if is_received {
+                    tlc.remote_committed_at = Some(commitment_number);
+                } else {
+                    tlc.local_committed_at = Some(commitment_number);
+                }
+                // We offered a tlc, so we should decrease our balance.
+                if tlc.tlc.is_offered() {
+                    to_local_amount -= amount;
+                } else {
+                    to_remote_amount -= amount;
+                };
+                debug!("Updated tlc {:?} with local_committed_at: {:?}, remote_committed_at: {:?}, to_local_amount: {}, to_remote_amount: {}", 
+                    tlc.tlc.id, tlc.local_committed_at, tlc.remote_committed_at, to_local_amount, to_remote_amount);
+            }
+            match (tlc.remove_reason, tlc.local_removed_at) {
+                (Some(reason), None) => {
+                    if is_received {
+                        tlc.remote_committed_at = Some(commitment_number);
+                    } else {
+                        tlc.local_committed_at = Some(commitment_number);
+                    }
+                    let should_increase_our_balance = match reason {
+                        RemoveTlcReason::RemoveTlcFulfill(_) => tlc.tlc.is_received(),
+                        RemoveTlcReason::RemoveTlcFail(_) => tlc.tlc.is_offered(),
+                    };
+                    if should_increase_our_balance {
+                        to_local_amount += amount;
+                    } else {
+                        to_remote_amount += amount;
+                    }
+                    debug!("Updated tlc {:?} with local_committed_at: {:?}, remote_committed_at: {:?}, to_local_amount: {}, to_remote_amount: {}", 
+                        tlc.tlc.id, tlc.local_committed_at, tlc.remote_committed_at, to_local_amount, to_remote_amount);
+                }
+                (None, None) => {
+                    debug!("TLC {:?} is not removed", tlc.tlc.id);
+                }
+                (None, Some(_)) => {
+                    panic!(
+                        "TLC {:?} has no remove reason but local_removed_at is set",
+                        tlc.tlc.id
+                    )
+                }
+                (Some(_), Some(_)) => {
+                    debug!("TLC {:?} is already removed", tlc.tlc.id);
+                }
+            }
+        });
+        self.to_local_amount = to_local_amount;
+        self.to_remote_amount = to_remote_amount;
+    }
 }
 
 // Properties for the channel actor state.
@@ -1741,11 +1808,7 @@ impl ChannelActorState {
         let detailed_tlc = DetailedTLCInfo {
             tlc,
             local_committed_at: None,
-            remote_committed_at: if tlc.is_received() {
-                Some(self.get_local_commitment_number())
-            } else {
-                None
-            },
+            remote_committed_at: None,
             local_removed_at: None,
             remote_removed_at: None,
             remove_reason: None,
@@ -1753,9 +1816,8 @@ impl ChannelActorState {
         self.tlcs.insert(tlc.id, detailed_tlc);
         if tlc.is_offered() {
             self.to_local_amount -= tlc.amount;
-            self.increment_next_offering_tlc_id();
         } else {
-            self.to_remote_amount -= tlc.amount;
+            self.increment_next_received_tlc_id();
         }
         debug!(
             "Channel ({:?}) balance after adding tlc {:?}: local balance: {}, remote balance: {}",
@@ -1834,22 +1896,7 @@ impl ChannelActorState {
                         }
                     }
                 };
-                // We are sure that this tlc removal is not repeated and the reason is valid now.
-                let should_increase_our_balance = match reason {
-                    RemoveTlcReason::RemoveTlcFulfill(_) => tlc_id.is_received(),
-                    RemoveTlcReason::RemoveTlcFail(_) => tlc_id.is_offered(),
-                };
-                if should_increase_our_balance {
-                    self.to_local_amount += current.tlc.amount;
-                } else {
-                    self.to_remote_amount += current.tlc.amount;
-                }
                 current.remove_reason = Some(reason);
-                if current.tlc.is_offered() {
-                    current.remote_removed_at = Some(current_commitment_number);
-                } else {
-                    current.local_removed_at = Some(current_commitment_number);
-                }
                 current.clone()
             }
         };
@@ -1986,6 +2033,12 @@ impl ChannelActorState {
     pub fn get_active_tlcs(&self) -> impl Iterator<Item = &DetailedTLCInfo> {
         self.tlcs
             .values()
+            .filter(|tlc| !tlc.is_removed_for_both_parties())
+    }
+
+    pub fn get_active_tlcs_mut(&mut self) -> impl Iterator<Item = &mut DetailedTLCInfo> {
+        self.tlcs
+            .values_mut()
             .filter(|tlc| !tlc.is_removed_for_both_parties())
     }
 
@@ -2610,6 +2663,8 @@ impl ChannelActorState {
                     old_number, &secret
                 );
                 debug!("Sending new commitment point #{}: {:?}", new_number, &point);
+
+                self.on_revoke_and_ack_message_sent_or_received(true);
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -2778,6 +2833,7 @@ impl ChannelActorState {
                 commitment_number, per_commitment_secret, per_commitment_point
             )));
         }
+        self.on_revoke_and_ack_message_sent_or_received(false);
         self.append_remote_commitment_point(next_per_commitment_point);
         Ok(())
     }
