@@ -1630,7 +1630,13 @@ impl ChannelActorState {
         self.state = new_state;
     }
 
-    fn on_revoke_and_ack_message_sent_or_received(&mut self, is_received: bool) {
+    // After sending or receiving a RevokeAndAck message, all messages before
+    // are considered confirmed by both parties. These messages include
+    // AddTlc and RemoveTlc to operate on TLCs.
+    // Update state on revoke and ack message received on sent.
+    // This may fill in the creation_confirmed_at and removal_confirmed_at fields
+    // of the tlcs. And update the to_local_amount and to_remote_amount.
+    fn update_state_on_raa_msg(&mut self, is_received: bool) {
         #[cfg(debug_assertions)]
         {
             self.total_amount = self.to_local_amount + self.to_remote_amount;
@@ -1693,10 +1699,10 @@ impl ChannelActorState {
                 }
             }
         });
-        debug!("Updated local state on revoke_and_ack message {}: current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
-        if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
         self.to_local_amount = to_local_amount;
         self.to_remote_amount = to_remote_amount;
+        debug!("Updated local state on revoke_and_ack message {}: current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
+        if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
         #[cfg(debug_assertions)]
         {
             self.total_amount = self.to_local_amount + self.to_remote_amount;
@@ -2717,7 +2723,7 @@ impl ChannelActorState {
                 );
                 debug!("Sending new commitment point #{}: {:?}", new_number, &point);
 
-                self.on_revoke_and_ack_message_sent_or_received(true);
+                self.update_state_on_raa_msg(true);
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -2886,7 +2892,7 @@ impl ChannelActorState {
                 commitment_number, per_commitment_secret, per_commitment_point
             )));
         }
-        self.on_revoke_and_ack_message_sent_or_received(false);
+        self.update_state_on_raa_msg(false);
         self.append_remote_commitment_point(next_per_commitment_point);
         Ok(())
     }
