@@ -1653,7 +1653,9 @@ impl ChannelActorState {
                 // We offered a tlc, so we should decrease our balance.
                 if tlc.tlc.is_offered() {
                     to_local_amount -= amount;
+                    to_remote_amount += amount;
                 } else {
+                    to_local_amount += amount;
                     to_remote_amount -= amount;
                 };
             }
@@ -3914,8 +3916,10 @@ mod tests {
 
     use crate::{
         ckb::{
+            channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
+            types::LockTime,
             NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
@@ -4137,6 +4141,180 @@ mod tests {
             node_b.submit_tx(node_b_commitment_tx.clone()).await,
             Status::Committed
         );
+    }
+
+    #[tokio::test]
+    async fn test_channel_with_tlc_updates() {
+        let _ = env_logger::try_init();
+
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 100000000000,
+                    funding_udt_type_script: None,
+                },
+                rpc_reply,
+            ))
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 1000,
+                },
+                rpc_reply,
+            ))
+        };
+        let accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
+        let new_channel_id = accept_channel_result.new_channel_id;
+
+        let node_a_commitment_tx = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+                    println!(
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        let node_b_commitment_tx = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+                    println!(
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        // We can submit the commitment txs to the chain now.
+        assert_eq!(
+            node_a.submit_tx(node_a_commitment_tx.clone()).await,
+            Status::Committed
+        );
+        assert_eq!(
+            node_b.submit_tx(node_b_commitment_tx.clone()).await,
+            Status::Committed
+        );
+
+        let create_add_tlc_message = |add_tlc, rpc_reply| {
+            NetworkActorMessage::new_command({
+                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id.clone(),
+                    command: ChannelCommand::AddTlc(add_tlc, rpc_reply),
+                })
+            })
+        };
+
+        let create_remove_tlc_message = |remove_tlc, rpc_reply| {
+            NetworkActorMessage::new_command({
+                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id.clone(),
+                    command: ChannelCommand::RemoveTlc(remove_tlc, rpc_reply),
+                })
+            })
+        };
+
+        let add_tlc1 = |rpc| {
+            create_add_tlc_message(
+                AddTlcCommand {
+                    amount: 1000,
+                    preimage: Some([1u8; 32].into()),
+                    payment_hash: None,
+                    expiry: LockTime::new(100),
+                },
+                rpc,
+            )
+        };
+
+        let accept_channel_result = call!(node_a.network_actor, add_tlc1)
+            .expect("node_a alive")
+            .expect("accept channel success");
+
+        dbg!(&accept_channel_result);
+
+        let add_tlc2 = |rpc| {
+            create_add_tlc_message(
+                AddTlcCommand {
+                    amount: 2000,
+                    preimage: Some([2u8; 32].into()),
+                    payment_hash: None,
+                    expiry: LockTime::new(100),
+                },
+                rpc,
+            )
+        };
+
+        // tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+        let accept_channel_result = call!(node_a.network_actor, add_tlc2)
+            .expect("node_a alive")
+            .expect("accept channel success");
+
+        dbg!(&accept_channel_result);
     }
 
     #[tokio::test]
