@@ -28,7 +28,6 @@ const CKB_SHANNONS: u64 = 100_000_000;
 fn get_env_hex(name: &str) -> H256 {
     let value = std::env::var(name).expect("env var");
     // strip prefix 0x
-    eprintln!("{}: {}", name, value);
     let value = value.trim_start_matches("0x");
     H256::from_str(&value).expect("parse hex")
 }
@@ -180,7 +179,6 @@ fn get_nodes_info(node: &str) -> (String, H256) {
     let wallet =
         std::fs::read_to_string(format!("{}/ckb-chain/wallet", node_dir)).expect("read failed");
     let key = std::fs::read_to_string(format!("{}/ckb-chain/key", node_dir)).expect("read failed");
-    eprintln!("node {}: wallet: {}", node, wallet);
     (wallet, H256::from_str(&key.trim()).expect("parse hex"))
 }
 
