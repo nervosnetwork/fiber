@@ -2652,7 +2652,7 @@ impl ChannelActorState {
             }
         };
 
-        let mut contracts = vec![Contract::CommitmentLock];
+        let mut contracts = vec![Contract::FundingLock];
         if self.funding_udt_type_script.is_some() {
             // TODO(yukang): we need to find corresponding dep cells for UDT
             contracts.push(Contract::SimpleUDT);
@@ -2754,7 +2754,7 @@ impl ChannelActorState {
     // so as to consume the funding cell.
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32]) {
         let funding_out_point = self.get_funding_transaction_outpoint();
-        let mut contracts = vec![Contract::CommitmentLock];
+        let mut contracts = vec![Contract::FundingLock];
         if self.funding_udt_type_script.is_some() {
             // TODO(yukang): we need to find corresponding dep cells for UDT
             contracts.push(Contract::SimpleUDT);

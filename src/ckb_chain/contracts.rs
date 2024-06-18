@@ -1,6 +1,6 @@
 use ckb_types::{
     core::{DepType, ScriptHashType},
-    packed::{CellDep, CellDepVec, OutPoint, Script},
+    packed::{CellDep, CellDepVec, CellDepVecBuilder, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use log::debug;
@@ -65,9 +65,9 @@ impl MockContext {
     pub fn new() -> Self {
         let mut context = Context::default();
 
-        let (map, cell_deps) = Self::get_contract_binaries().into_iter().enumerate().fold(
-            (HashMap::new(), vec![]),
-            |(mut map, mut cell_deps), (i, (contract, binary))| {
+        let (map, script_cell_deps) = Self::get_contract_binaries().into_iter().enumerate().fold(
+            (HashMap::new(), HashMap::new()),
+            |(mut map, mut script_cell_deps), (i, (contract, binary))| {
                 use ckb_hash::blake2b_256;
                 use rand::{rngs::StdRng, SeedableRng};
                 let i = i + 123_456_789;
@@ -81,27 +81,22 @@ impl MockContext {
                     .build_script(&out_point, Default::default())
                     .expect("valid script");
                 map.insert(contract, script);
-                cell_deps.push(
-                    CellDep::new_builder()
-                        .out_point(out_point)
-                        .dep_type(DepType::Code.into())
-                        .build(),
-                );
-                (map, cell_deps)
+                let cell_dep = CellDep::new_builder()
+                    .out_point(out_point)
+                    .dep_type(DepType::Code.into())
+                    .build();
+
+                script_cell_deps.insert(contract, CellDepVec::new_builder().push(cell_dep).build());
+                (map, script_cell_deps)
             },
         );
-        let cell_dep_vec = cell_deps.pack();
         debug!("Loaded contracts into the mock environement: {:?}", &map);
-        debug!(
-            "Use these contracts by specifying cell deps to {:?}",
-            &cell_dep_vec
-        );
 
         let context = MockContext {
             context: Arc::new(RwLock::new(context)),
             contracts_context: Arc::new(ContractsInfo {
                 contract_default_scripts: map,
-                cell_deps: cell_dep_vec,
+                script_cell_deps,
             }),
         };
         debug!("Created mock context to test transactions.");
@@ -130,8 +125,7 @@ pub enum Contract {
 #[derive(Clone, Debug)]
 struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
-    // TODO: We bundle all the cell deps together, but some of they are not always needed.
-    cell_deps: CellDepVec,
+    script_cell_deps: HashMap<Contract, CellDepVec>,
 }
 
 #[derive(Clone)]
@@ -229,7 +223,7 @@ impl ContractsContext {
             }
             CkbNetwork::Dev => {
                 let mut map = HashMap::new();
-                let mut cell_deps = vec![];
+                let mut script_cell_deps = HashMap::new();
                 for (program_dep_type, group_dep_type, contracts) in [
                     (DepType::Code, DepType::Code, vec![Contract::AlwaysSuccess]),
                     (
@@ -266,12 +260,14 @@ impl ContractsContext {
                             .hash_type(ScriptHashType::Data1.into())
                             .args(Bytes::new().pack())
                             .build();
+                        let cell_dep = CellDep::new_builder()
+                            .out_point(dep_group_out_point.clone())
+                            .dep_type(group_dep_type.into())
+                            .build();
                         map.insert(contract, script);
-                        cell_deps.push(
-                            CellDep::new_builder()
-                                .out_point(dep_group_out_point)
-                                .dep_type(group_dep_type.into())
-                                .build(),
+                        script_cell_deps.insert(
+                            contract,
+                            CellDepVec::new_builder().push(cell_dep).build().pack(),
                         );
                     }
                 }
@@ -292,27 +288,24 @@ impl ContractsContext {
                     .args(Bytes::new().pack())
                     .build();
                 map.insert(Contract::Secp256k1Lock, secp256k1_script);
-                cell_deps.push(
-                    CellDep::new_builder()
-                        .out_point(
-                            OutPoint::new_builder()
-                                .tx_hash(tx1.into())
-                                .index(0u32.pack())
-                                .build(),
-                        )
-                        .dep_type(DepType::DepGroup.into())
-                        .build(),
+                let cell_dep = CellDep::new_builder()
+                    .out_point(
+                        OutPoint::new_builder()
+                            .tx_hash(tx1.into())
+                            .index(0u32.pack())
+                            .build(),
+                    )
+                    .dep_type(DepType::DepGroup.into())
+                    .build();
+                script_cell_deps.insert(
+                    Contract::Secp256k1Lock,
+                    CellDepVec::new_builder().push(cell_dep).build().pack(),
                 );
 
-                let cell_dep_vec = cell_deps.pack();
                 debug!("Loaded contracts into the real environement: {:?}", &map);
-                debug!(
-                    "Use these contracts by specifying cell deps to {:?}",
-                    &cell_dep_vec
-                );
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
-                    cell_deps: cell_dep_vec,
+                    script_cell_deps,
                 }))
             }
             CkbNetwork::Testnet => {
@@ -339,7 +332,7 @@ impl ContractsContext {
                     )
                 })
                 .collect();
-                let cell_dep_vec = [
+                let script_cell_deps = [
                     (
                         Contract::Secp256k1Lock,
                         "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37",
@@ -366,8 +359,8 @@ impl ContractsContext {
                     ),
                 ]
                 .into_iter()
-                .map(|(_contract, tx, index, dep_type)| {
-                    CellDep::new_builder()
+                .map(|(contract, tx, index, dep_type)| {
+                    let cell_dep = CellDep::new_builder()
                         .out_point(
                             OutPoint::new_builder()
                                 .tx_hash(Hash256::from_str(tx).unwrap().into())
@@ -375,12 +368,17 @@ impl ContractsContext {
                                 .build(),
                         )
                         .dep_type(dep_type.into())
-                        .build()
+                        .build();
+                    (
+                        contract,
+                        CellDepVec::new_builder().push(cell_dep).build().pack(),
+                    )
                 })
-                .pack();
+                .collect();
+
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
-                    cell_deps: cell_dep_vec.pack(),
+                    script_cell_deps,
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
@@ -394,12 +392,34 @@ impl ContractsContext {
             Self::Real(real) => &real.contract_default_scripts,
         }
     }
-    pub(crate) fn get_cell_deps(&self, _contracts: Vec<Contract>) -> CellDepVec {
-        match self {
+    pub(crate) fn get_cell_deps(&self, contracts: Vec<Contract>) -> CellDepVec {
+        let (script_cell_deps, contracts) = match self {
             #[cfg(test)]
-            Self::Mock(mock) => mock.contracts_context.cell_deps.clone(),
-            Self::Real(real) => real.cell_deps.clone(),
+            Self::Mock(mock) => {
+                // ckb-testtool need to include CkbAuth
+                let mut contracts = contracts;
+                contracts.push(Contract::CkbAuth);
+                (&mock.contracts_context.script_cell_deps, contracts)
+            }
+            Self::Real(real) => (&real.script_cell_deps, contracts),
+        };
+
+        let cell_deps_vec = contracts
+            .into_iter()
+            .map(|contract| {
+                script_cell_deps
+                    .get(&contract)
+                    .expect(
+                        format!("Cell dep for contract {:?} does not exists", contract).as_str(),
+                    )
+                    .clone()
+            })
+            .collect::<Vec<CellDepVec>>();
+        let mut res: CellDepVecBuilder = CellDepVec::new_builder();
+        for cell_dep in cell_deps_vec.into_iter().flatten() {
+            res = res.push(cell_dep);
         }
+        res.build()
     }
 
     pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
