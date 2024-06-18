@@ -3154,10 +3154,15 @@ impl ChannelActorState {
             );
             Ok((tx, message))
         } else {
+            debug!(
+                "Final balance partition before shutting down: local {} (fee {}), remote {} (fee {})",
+                self.to_local_amount, local_shutdown_fee,
+                self.to_remote_amount, remote_shutdown_fee
+            );
             let local_value = (self.to_local_amount - local_shutdown_fee) as u64;
             let remote_value = (self.to_remote_amount - remote_shutdown_fee) as u64;
             debug!(
-                "Building shutdown transaction with values: {} {}",
+                "Building shutdown transaction with values: local {}, remote {}",
                 local_value, remote_value
             );
             let local_output = CellOutput::new_builder()
