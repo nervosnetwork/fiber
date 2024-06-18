@@ -771,6 +771,13 @@ impl NetworkActorState {
             funding_amount,
             funding_udt_type_script,
         } = open_channel;
+        if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
+            if !check_udt_script(udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Invalid UDT type script".to_string(),
+                ));
+            }
+        }
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
