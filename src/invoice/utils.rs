@@ -10,7 +10,7 @@ use nom::{
 use rand::Rng;
 use std::io::{Cursor, Result as IoResult};
 
-use super::invoice_impl::{Currency, SiPrefix};
+use super::invoice_impl::Currency;
 use super::InvoiceError;
 use crate::ckb::types::Hash256;
 use std::str::FromStr;
@@ -164,19 +164,15 @@ impl<'a, W: WriteBase32> Drop for BytesToBase32<'a, W> {
     }
 }
 
-fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>, Option<&str>)> {
-    let (input, _) = tag("ln")(input)?;
-    let (input, currency) = alt((tag("ckb"), tag("ckt")))(input)?;
+fn nom_scan_hrp(input: &str) -> IResult<&str, (&str, Option<&str>)> {
+    let (input, currency) = alt((tag("fibb"), tag("fibt"), tag("fibd")))(input)?;
     let (input, amount) = opt(take_while1(|c: char| c.is_numeric()))(input)?;
-    let (input, si) = opt(take_while1(|c: char| ['m', 'u', 'k'].contains(&c)))(input)?;
-    Ok((input, (currency, amount, si)))
+    Ok((input, (currency, amount)))
 }
 
-pub(crate) fn parse_hrp(
-    input: &str,
-) -> Result<(Currency, Option<u128>, Option<SiPrefix>), InvoiceError> {
+pub(crate) fn parse_hrp(input: &str) -> Result<(Currency, Option<u128>), InvoiceError> {
     match nom_scan_hrp(input) {
-        Ok((left, (currency, amount, si_prefix))) => {
+        Ok((left, (currency, amount))) => {
             if !left.is_empty() {
                 return Err(InvoiceError::MalformedHRP(format!(
                     "{}, unexpected ending `{}`",
@@ -187,8 +183,7 @@ pub(crate) fn parse_hrp(
             let amount = amount
                 .map(|x| x.parse().map_err(InvoiceError::ParseAmountError))
                 .transpose()?;
-            let si_prefix = si_prefix.map(SiPrefix::from_str).transpose()?;
-            Ok((currency, amount, si_prefix))
+            Ok((currency, amount))
         }
         Err(_) => Err(InvoiceError::MalformedHRP(input.to_string())),
     }
@@ -220,4 +215,62 @@ pub(crate) fn rand_sha256_hash() -> Hash256 {
     let mut result = [0u8; 32];
     rng.fill(&mut result[..]);
     result.into()
+}
+
+#[test]
+fn test_parse_hrp() {
+    let res = parse_hrp("fibb1280");
+    assert_eq!(res, Ok((Currency::Fibb, Some(1280))));
+
+    let res = parse_hrp("fibb");
+    assert_eq!(res, Ok((Currency::Fibb, None)));
+
+    let res = parse_hrp("fibt1023");
+    assert_eq!(res, Ok((Currency::Fibt, Some(1023))));
+
+    let res = parse_hrp("fibt10");
+    assert_eq!(res, Ok((Currency::Fibt, Some(10))));
+
+    let res = parse_hrp("fibt");
+    assert_eq!(res, Ok((Currency::Fibt, None)));
+
+    let res = parse_hrp("xnfibb");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("xnfibb".to_string())));
+
+    let res = parse_hrp("lxfibt");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("lxfibt".to_string())));
+
+    let res = parse_hrp("fibt");
+    assert_eq!(res, Ok((Currency::Fibt, None)));
+
+    let res = parse_hrp("fixt");
+    assert_eq!(res, Err(InvoiceError::MalformedHRP("fixt".to_string())));
+
+    let res = parse_hrp("fibtt");
+    assert_eq!(
+        res,
+        Err(InvoiceError::MalformedHRP(
+            "fibtt, unexpected ending `t`".to_string()
+        ))
+    );
+
+    let res = parse_hrp("fibt1x24");
+    assert_eq!(
+        res,
+        Err(InvoiceError::MalformedHRP(
+            "fibt1x24, unexpected ending `x24`".to_string()
+        ))
+    );
+
+    let res = parse_hrp("fibt000");
+    assert_eq!(res, Ok((Currency::Fibt, Some(0))));
+
+    let res = parse_hrp("fibt1024444444444444444444444444444444444444444444444444444444444444");
+    assert!(matches!(res, Err(InvoiceError::ParseAmountError(_))));
+
+    let res = parse_hrp("fibt0x");
+    assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
+
+    let res = parse_hrp("");
+    assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
 }
