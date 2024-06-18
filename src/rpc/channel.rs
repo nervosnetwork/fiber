@@ -72,6 +72,10 @@ pub struct Channel {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub state: ChannelState,
+    pub local_balance: u128,
+    pub sent_tlc_balance: u128,
+    pub remote_balance: u128,
+    pub received_tlc_balance: u128,
 }
 
 #[serde_as]
@@ -237,10 +241,18 @@ where
         Ok(ListChannelsResult {
             channels: channels
                 .into_iter()
-                .map(|(peer_id, channel_id, state)| Channel {
-                    channel_id,
-                    peer_id,
-                    state,
+                .filter_map(|(peer_id, channel_id, _state)| {
+                    self.store
+                        .get_channel_actor_state(&channel_id)
+                        .map(|state| Channel {
+                            channel_id,
+                            peer_id,
+                            state: state.state,
+                            local_balance: state.get_local_balance(),
+                            remote_balance: state.get_remote_balance(),
+                            sent_tlc_balance: state.get_sent_tlc_balance(),
+                            received_tlc_balance: state.get_received_tlc_balance(),
+                        })
                 })
                 .collect(),
         })
