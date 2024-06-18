@@ -1614,6 +1614,22 @@ impl ChannelActorState {
         }
     }
 
+    pub fn get_local_balance(&self) -> u128 {
+        self.to_local_amount
+    }
+
+    pub fn get_remote_balance(&self) -> u128 {
+        self.to_remote_amount
+    }
+
+    pub fn get_sent_tlc_balance(&self) -> u128 {
+        self.get_tlc_value_sent_by_local(true)
+    }
+
+    pub fn get_received_tlc_balance(&self) -> u128 {
+        self.get_tlc_value_received_from_remote(false)
+    }
+
     fn update_state(&mut self, new_state: ChannelState) {
         debug!(
             "Updating channel state from {:?} to {:?}",
@@ -1812,7 +1828,7 @@ impl ChannelActorState {
             }
         };
         if tlc.is_offered() {
-            let sent_tlc_value = self.get_tlc_value_sent_by_local(true);
+            let sent_tlc_value = self.get_sent_tlc_balance();
             debug_assert!(self.to_local_amount > sent_tlc_value);
             // TODO: handle transaction fee here.
             if sent_tlc_value + tlc.amount > self.to_local_amount {
@@ -1822,7 +1838,7 @@ impl ChannelActorState {
                 )));
             }
         } else {
-            let received_tlc_value = self.get_tlc_value_received_from_remote(false);
+            let received_tlc_value = self.get_received_tlc_balance();
             debug_assert!(self.to_remote_amount > received_tlc_value);
             // TODO: handle transaction fee here.
             if received_tlc_value + tlc.amount > self.to_remote_amount {
