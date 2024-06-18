@@ -133,12 +133,7 @@ table RemoveTlc {
     reason:             RemoveTlcReason,
 }
 
-table TestMessage {
-    bytes: Bytes,
-}
-
-union PCNMessage {
-    TestMessage,
+union CFNMessage {
     OpenChannel,
     AcceptChannel,
     CommitmentSigned,

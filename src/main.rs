@@ -1,5 +1,5 @@
-use ckb_pcn_node::ckb_chain::contracts::init_contracts_context;
-use ckb_pcn_node::store::Store;
+use cfn_node::ckb_chain::contracts::init_contracts_context;
+use cfn_node::store::Store;
 use log::{debug, error, info};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -8,14 +8,14 @@ use tokio::{select, signal};
 
 use std::str::FromStr;
 
-use ckb_pcn_node::actors::RootActor;
-use ckb_pcn_node::cch::CchCommand;
-use ckb_pcn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
-use ckb_pcn_node::ckb_chain::CkbChainActor;
-use ckb_pcn_node::tasks::{
+use cfn_node::actors::RootActor;
+use cfn_node::cch::CchCommand;
+use cfn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
+use cfn_node::ckb_chain::CkbChainActor;
+use cfn_node::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use ckb_pcn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
+use cfn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[tokio::main]
 pub async fn main() {

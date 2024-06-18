@@ -23,11 +23,11 @@ pub struct CkbConfig {
     )]
     pub(crate) base_dir: Option<PathBuf>,
 
-    /// listening port for ckb payment channel network
+    /// listening port for ckb fiber network
     #[arg(name = "CKB_LISTENING_PORT", long = "ckb-listening-port", env)]
     pub(crate) listening_port: u16,
 
-    /// addresses to be announced to payment channel network (separated by `,`)
+    /// addresses to be announced to ckb fiber network (separated by `,`)
     #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDRS", long = "ckb-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_listen_addrs: Vec<String>,
 

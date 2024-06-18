@@ -1,5 +1,5 @@
 [package]
-name = "ckb-pcn-node"
+name = "cfn-node"
 version = "0.1.0"
 edition = "2021"
 

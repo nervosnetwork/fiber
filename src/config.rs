@@ -17,7 +17,7 @@ const DEFAULT_LDK_DIR_NAME: &str = "ldk";
 
 fn get_default_base_dir() -> PathBuf {
     let mut path = home_dir().expect("get home directory");
-    path.push(".ckb-pcn-node");
+    path.push(".cfn-node");
     path
 }
 
@@ -73,7 +73,7 @@ struct Args {
     #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
     services: Vec<Service>,
 
-    /// config for ckb (payment channel network over ckb)
+    /// config for ckb fiber network
     #[command(flatten)]
     pub ckb: <CkbConfig as ClapSerde>::Opt,
 
