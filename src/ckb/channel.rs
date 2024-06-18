@@ -30,7 +30,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use crate::{
     ckb::types::Shutdown,
     ckb_chain::{
-        contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
+        contracts::{get_cell_deps, get_script_by_contract, Contract},
         FundingRequest, FundingUdtInfo,
     },
     NetworkServiceEvent,
@@ -1641,7 +1641,7 @@ impl ChannelActorState {
         let (mut to_local_amount, mut to_remote_amount) =
             (self.to_local_amount, self.to_remote_amount);
 
-        debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}", 
+        debug!("Updating local state on revoke_and_ack message {}, current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
             if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
 
         self.tlcs.values_mut().for_each(|tlc| {
@@ -3095,12 +3095,7 @@ impl ChannelActorState {
             }
         };
 
-        let mut contracts = vec![Contract::FundingLock];
-        if self.funding_udt_type_script.is_some() {
-            // TODO(yukang): we need to find corresponding dep cells for UDT
-            contracts.push(Contract::SimpleUDT);
-        }
-        let cell_deps = get_cell_deps_by_contracts(contracts);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
                 .previous_output(self.get_funding_transaction_outpoint())
@@ -3204,23 +3199,18 @@ impl ChannelActorState {
     pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32], Vec<u8>) {
         let version = self.get_current_commitment_number(local);
         debug!(
-            "Building {} commitment transaction #{} with local commtiment number {} and remote commitment number {}", 
+            "Building {} commitment transaction #{} with local commtiment number {} and remote commitment number {}",
             if local { "local" } else { "remote" }, version,
             self.get_local_commitment_number(), self.get_remote_commitment_number()
         );
+
         let funding_out_point = self.get_funding_transaction_outpoint();
-        let mut contracts = vec![Contract::FundingLock];
-        if self.funding_udt_type_script.is_some() {
-            // TODO(yukang): we need to find corresponding dep cells for UDT
-            contracts.push(Contract::SimpleUDT);
-        }
-        let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(contracts))
-            .input(
-                CellInput::new_builder()
-                    .previous_output(funding_out_point.clone())
-                    .build(),
-            );
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+        let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
+            CellInput::new_builder()
+                .previous_output(funding_out_point.clone())
+                .build(),
+        );
 
         let (outputs, outputs_data, witnesses) =
             self.build_commitment_transaction_parameters(local);

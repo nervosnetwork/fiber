@@ -16,7 +16,9 @@ use ckb_types::{
     H256,
 };
 use ckb_types::{packed::CellDep, prelude::Builder};
+use serde::{Deserialize, Serialize};
 
+use serde_yaml;
 use std::{error::Error as StdErr, str::FromStr};
 
 const SIMPLE_CODE_HASH: H256 =
@@ -182,7 +184,68 @@ fn get_nodes_info(node: &str) -> (String, H256) {
     (wallet, H256::from_str(&key.trim()).expect("parse hex"))
 }
 
-fn main() -> Result<(), Box<dyn StdErr>> {
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct UdtScript {
+    code_hash: H256,
+    hash_type: String,
+    /// args may be used in pattern matching
+    args: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct UdtCellDep {
+    dep_type: String,
+    tx_hash: H256,
+    index: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct UdtInfo {
+    name: String,
+    script: UdtScript,
+    cell_deps: Vec<UdtCellDep>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct UdtInfos {
+    infos: Vec<UdtInfo>,
+}
+
+fn genrate_nodes_config() {
+    let nodes_dir = std::env::var("NODES_DIR").expect("env var");
+    let yaml_file_path = format!("{}/config.yml", nodes_dir);
+    let content = std::fs::read_to_string(yaml_file_path).expect("read failed");
+    let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
+    let udt_info = UdtInfo {
+        name: "simple_udt".to_string(),
+        script: UdtScript {
+            code_hash: SIMPLE_CODE_HASH.clone(),
+            hash_type: "Data1".to_string(),
+            args: "0x.*".to_string(),
+        },
+        cell_deps: vec![UdtCellDep {
+            dep_type: "code".to_string(),
+            tx_hash: get_env_hex("NEXT_PUBLIC_SIMPLE_UDT_TX_HASH"),
+            index: 0,
+        }],
+    };
+
+    let header = "# generated from nodes/config.yml, don't edit it manually\n";
+    for i in 1..=3 {
+        let mut data = data.clone();
+        data["ckb"]["listening_port"] =
+            serde_yaml::Value::Number(serde_yaml::Number::from(8344 + i - 1));
+        data["ckb"]["annouced_name"] = serde_yaml::Value::String(format!("ckb-{}", i));
+        data["rpc"]["listening_addr"] =
+            serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
+        data["ckb_chain"]["udt_whitelist"] = serde_yaml::to_value(vec![&udt_info]).unwrap();
+        let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
+        let config_path = format!("{}/{}/config.yml", nodes_dir, i);
+        std::fs::write(config_path, new_yaml).expect("write failed");
+    }
+}
+
+fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     let udt_owner = get_nodes_info("deployer");
     let wallets = [
         get_nodes_info("1"),
@@ -227,6 +290,11 @@ fn main() -> Result<(), Box<dyn StdErr>> {
 
     let script = generate_udt_type_script(&udt_owner.0);
     println!("initialized udt_type_script: {} ...", script);
+    Ok(())
+}
 
+fn main() -> Result<(), Box<dyn StdErr>> {
+    init_udt_accounts()?;
+    genrate_nodes_config();
     Ok(())
 }

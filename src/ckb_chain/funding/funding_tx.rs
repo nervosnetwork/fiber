@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::FundingError;
-use crate::{
-    ckb::serde_utils::EntityHex,
-    ckb_chain::contracts::{get_cell_deps_by_contracts, Contract},
-};
+use crate::{ckb::serde_utils::EntityHex, ckb_chain::contracts::get_udt_cell_deps};
 
 use anyhow::anyhow;
 use ckb_sdk::{
@@ -24,7 +21,7 @@ use ckb_types::{
     packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
-use log::warn;
+use log::{debug, warn};
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
@@ -279,11 +276,10 @@ impl FundingTxBuilder {
                     outputs.push(change_output);
                     outputs_data.push(change_output_data);
 
-                    warn!("find proper UDT owner cells: {:?}", inputs);
-
-                    // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+                    debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+                    let udt_cell_deps =
+                        get_udt_cell_deps(&udt_type_script).expect("get_udt_cell_deps failed");
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
                     }

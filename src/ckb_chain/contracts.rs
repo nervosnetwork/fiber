@@ -447,22 +447,19 @@ impl ContractsContext {
             .build()
     }
 
-    pub(crate) fn check_udt_script(&self, udt_script: &Script) -> bool {
-        self.get_udt_whitelist()
-            .iter()
-            .any(|(_name, script, arg_pattern, _)| {
-                if script == udt_script {
-                    return true;
+    pub(crate) fn get_udt_cell_deps(&self, udt_script: &Script) -> Option<CellDepVec> {
+        for (_name, script, arg_pattern, cell_deps) in self.get_udt_whitelist().iter() {
+            if script.code_hash() == udt_script.code_hash()
+                && script.hash_type() == udt_script.hash_type()
+            {
+                let args = format!("0x{:x}", udt_script.args().raw_data());
+                let pattern = Regex::new(arg_pattern).expect("invalid expressio");
+                if pattern.is_match(&args) {
+                    return Some(cell_deps.clone());
                 }
-                if script.code_hash() == udt_script.code_hash()
-                    && script.hash_type() == udt_script.hash_type()
-                {
-                    let args = format!("0x{:x}", udt_script.args().raw_data());
-                    let pattern = Regex::new(arg_pattern).expect("invalid expressio");
-                    return pattern.is_match(&args);
-                }
-                false
-            })
+            }
+        }
+        None
     }
 }
 
@@ -494,7 +491,27 @@ pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
 }
 
 pub fn check_udt_script(script: &Script) -> bool {
-    init_contracts_context(None, None).check_udt_script(script)
+    init_contracts_context(None, None)
+        .get_udt_cell_deps(script)
+        .is_some()
+}
+
+pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
+    init_contracts_context(None, None).get_udt_cell_deps(script)
+}
+
+pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> CellDepVec {
+    let cell_deps = get_cell_deps_by_contracts(contracts);
+    if let Some(udt_script) = udt_script {
+        if let Some(udt_cell_deps) = get_udt_cell_deps(udt_script) {
+            let res = cell_deps
+                .into_iter()
+                .chain(udt_cell_deps.into_iter())
+                .collect::<Vec<CellDep>>();
+            return res.pack();
+        }
+    }
+    cell_deps
 }
 
 #[cfg(test)]
