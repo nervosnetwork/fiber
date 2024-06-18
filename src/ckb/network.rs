@@ -1011,7 +1011,7 @@ impl NetworkActorState {
     ) {
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
-        for channel_id in store.get_channel_ids_by_peer(peer_id) {
+        for channel_id in store.get_active_channel_ids_by_peer(&peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
                 Some(generate_channel_actor_name(&self.peer_id, peer_id)),

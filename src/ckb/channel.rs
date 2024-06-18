@@ -1584,6 +1584,12 @@ pub enum ChannelState {
     Closed,
 }
 
+impl ChannelState {
+    fn is_closed(&self) -> bool {
+        matches!(self, ChannelState::Closed)
+    }
+}
+
 pub fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
     blake2b_256(seed).into()
 }
@@ -1801,6 +1807,10 @@ impl ChannelActorState {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_micros() as u64
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.state.is_closed()
     }
 
     fn update_state(&mut self, new_state: ChannelState) {
@@ -3947,7 +3957,25 @@ pub trait ChannelActorStateStore {
     fn insert_channel_actor_state(&self, state: ChannelActorState);
     fn delete_channel_actor_state(&self, id: &Hash256);
     fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256>;
+    fn get_active_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
+        self.get_channel_ids_by_peer(peer_id)
+            .into_iter()
+            .filter(|id| match self.get_channel_actor_state(&id) {
+                Some(state) if !state.is_closed() => true,
+                _ => false,
+            })
+            .collect()
+    }
     fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)>;
+    fn get_active_channel_states(
+        &self,
+        peer_id: Option<PeerId>,
+    ) -> Vec<(PeerId, Hash256, ChannelState)> {
+        self.get_channel_states(peer_id)
+            .into_iter()
+            .filter(|(_, _, state)| !state.is_closed())
+            .collect()
+    }
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with
