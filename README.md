@@ -16,7 +16,11 @@ But as a prototype, it's a good starting point for developers to understand the 
 
 ## Build and Run
 
-## RPC
+## Documentation
+
+* [RPC Documentation](./src/rpc/README.md)
+* [P2P Message Protocol](./docs/specs/p2p-message.md)
+* [Invoice Protocol](./docs/specs/payment-invoice.md)
 
 ## Testnet Deployment Information
 
