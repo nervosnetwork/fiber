@@ -42,11 +42,11 @@ use crate::{
 
 use super::{
     key::blake2b_hash_with_salt,
-    network::PCNMessageWithPeerId,
+    network::CFNMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, Hash256, LockTime,
-        OpenChannel, PCNMessage, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
+        AcceptChannel, AddTlc, CFNMessage, ChannelReady, ClosingSigned, CommitmentSigned, Hash256,
+        LockTime, OpenChannel, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
         TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
@@ -72,7 +72,7 @@ pub enum ChannelActorMessage {
     /// Some system events associated to a channel, such as the funding transaction confirmed.
     Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
-    PeerMessage(PCNMessage),
+    PeerMessage(CFNMessage),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,13 +183,13 @@ impl<S> ChannelActor<S> {
     pub fn handle_peer_message(
         &self,
         state: &mut ChannelActorState,
-        message: PCNMessage,
+        message: CFNMessage,
     ) -> Result<(), ProcessingChannelError> {
         match message {
-            PCNMessage::OpenChannel(_) => {
+            CFNMessage::OpenChannel(_) => {
                 panic!("OpenChannel message should be processed while prestarting")
             }
-            PCNMessage::AcceptChannel(accept_channel) => {
+            CFNMessage::AcceptChannel(accept_channel) => {
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
@@ -210,10 +210,10 @@ impl<S> ChannelActor<S> {
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(())
             }
-            PCNMessage::TxUpdate(tx) => {
+            CFNMessage::TxUpdate(tx) => {
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
             }
-            PCNMessage::TxComplete(tx) => {
+            CFNMessage::TxComplete(tx) => {
                 state.handle_tx_collaboration_msg(
                     TxCollaborationMsg::TxComplete(tx),
                     &self.network,
@@ -225,7 +225,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            PCNMessage::CommitmentSigned(commitment_signed) => {
+            CFNMessage::CommitmentSigned(commitment_signed) => {
                 state.handle_commitment_signed_message(commitment_signed, &self.network)?;
                 if let ChannelState::SigningCommitment(flags) = state.state {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
@@ -247,7 +247,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            PCNMessage::TxSignatures(tx_signatures) => {
+            CFNMessage::TxSignatures(tx_signatures) => {
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
@@ -288,7 +288,7 @@ impl<S> ChannelActor<S> {
                 state.handle_tx_signatures(&self.network, Some(tx_signatures.witnesses))?;
                 Ok(())
             }
-            PCNMessage::RevokeAndAck(revoke_and_ack) => {
+            CFNMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(revoke_and_ack)?;
                 if let ChannelState::ChannelReady(flags) = state.state {
                     if flags.is_empty() {
@@ -298,7 +298,7 @@ impl<S> ChannelActor<S> {
                 state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
-            PCNMessage::ChannelReady(channel_ready) => {
+            CFNMessage::ChannelReady(channel_ready) => {
                 let flags = match state.state {
                     ChannelState::AwaitingTxSignatures(flags) => {
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
@@ -330,7 +330,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            PCNMessage::AddTlc(add_tlc) => {
+            CFNMessage::AddTlc(add_tlc) => {
                 state.check_state_for_tlc_update()?;
 
                 let tlc = state.create_inbounding_tlc(add_tlc);
@@ -366,7 +366,7 @@ impl<S> ChannelActor<S> {
                 // this message, and our processing of this message is idempotent.
                 Ok(())
             }
-            PCNMessage::RemoveTlc(remove_tlc) => {
+            CFNMessage::RemoveTlc(remove_tlc) => {
                 state.check_state_for_tlc_update()?;
 
                 match state.pending_offered_tlcs.entry(remove_tlc.tlc_id) {
@@ -400,7 +400,7 @@ impl<S> ChannelActor<S> {
                     }
                 }
             }
-            PCNMessage::Shutdown(shutdown) => {
+            CFNMessage::Shutdown(shutdown) => {
                 let flags = match state.state {
                     ChannelState::ChannelReady(_) => ShuttingDownFlags::empty(),
                     ChannelState::ShuttingDown(flags)
@@ -428,7 +428,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            PCNMessage::ClosingSigned(closing) => {
+            CFNMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
                     partial_signature,
                     channel_id,
@@ -547,9 +547,9 @@ impl<S> ChannelActor<S> {
         );
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                     peer_id: state.peer_id.clone(),
-                    message: PCNMessage::CommitmentSigned(commitment_signed),
+                    message: CFNMessage::CommitmentSigned(commitment_signed),
                 }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -587,9 +587,9 @@ impl<S> ChannelActor<S> {
         // To make things worse, we currently don't have a way to ACK all the messages.
 
         // Send tlc update message to peer.
-        let msg = PCNMessageWithPeerId {
+        let msg = CFNMessageWithPeerId {
             peer_id: self.peer_id.clone(),
-            message: PCNMessage::AddTlc(AddTlc {
+            message: CFNMessage::AddTlc(AddTlc {
                 channel_id: state.get_id(),
                 tlc_id: tlc.id,
                 amount: tlc.amount,
@@ -599,7 +599,7 @@ impl<S> ChannelActor<S> {
         };
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(msg),
+                NetworkActorCommand::SendCFNMessage(msg),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -635,9 +635,9 @@ impl<S> ChannelActor<S> {
         // Notes: state updating and message sending are not atomic.
         match state.pending_received_tlcs.remove(&command.id) {
             Some(tlc) => {
-                let msg = PCNMessageWithPeerId {
+                let msg = CFNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
-                    message: PCNMessage::RemoveTlc(RemoveTlc {
+                    message: CFNMessage::RemoveTlc(RemoveTlc {
                         channel_id: state.get_id(),
                         tlc_id: tlc.id,
                         reason: command.reason,
@@ -655,7 +655,7 @@ impl<S> ChannelActor<S> {
                 }
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(msg),
+                        NetworkActorCommand::SendCFNMessage(msg),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 match command.reason {
@@ -704,9 +704,9 @@ impl<S> ChannelActor<S> {
         };
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
-                    message: PCNMessage::Shutdown(Shutdown {
+                    message: CFNMessage::Shutdown(Shutdown {
                         channel_id: state.get_id(),
                         close_script: command.close_script.clone(),
                         fee: command.fee,
@@ -787,15 +787,15 @@ impl<S> ChannelActor<S> {
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
             TxCollaborationCommand::TxUpdate(tx_update) => {
-                let pcn_msg = PCNMessage::TxUpdate(TxUpdate {
+                let cfn_msg = CFNMessage::TxUpdate(TxUpdate {
                     channel_id: state.get_id(),
                     tx: tx_update.transaction.clone(),
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId::new(
                             self.peer_id.clone(),
-                            pcn_msg,
+                            cfn_msg,
                         )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -811,14 +811,14 @@ impl<S> ChannelActor<S> {
             }
             TxCollaborationCommand::TxComplete(_) => {
                 state.check_tx_complete_preconditions()?;
-                let pcn_msg = PCNMessage::TxComplete(TxComplete {
+                let cfn_msg = CFNMessage::TxComplete(TxComplete {
                     channel_id: state.get_id(),
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId::new(
                             self.peer_id.clone(),
-                            pcn_msg,
+                            cfn_msg,
                         )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -893,9 +893,9 @@ impl<S> ChannelActor<S> {
                 };
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                             peer_id: state.peer_id.clone(),
-                            message: PCNMessage::ChannelReady(ChannelReady {
+                            message: CFNMessage::ChannelReady(ChannelReady {
                                 channel_id: state.get_id(),
                             }),
                         }),
@@ -1000,14 +1000,14 @@ where
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
-                let command = PCNMessageWithPeerId {
+                let command = CFNMessageWithPeerId {
                     peer_id,
-                    message: PCNMessage::AcceptChannel(accept_channel),
+                    message: CFNMessage::AcceptChannel(accept_channel),
                 };
                 // TODO: maybe we should not use try_send here.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(command),
+                        NetworkActorCommand::SendCFNMessage(command),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -1046,7 +1046,7 @@ where
                 );
 
                 let commitment_number = 0;
-                let message = PCNMessage::OpenChannel(OpenChannel {
+                let message = CFNMessage::OpenChannel(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
@@ -1090,7 +1090,7 @@ where
                 );
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                             peer_id,
                             message,
                         }),
@@ -1993,9 +1993,9 @@ impl ChannelActorState {
 
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                    NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                         peer_id: self.peer_id.clone(),
-                        message: PCNMessage::ClosingSigned(ClosingSigned {
+                        message: CFNMessage::ClosingSigned(ClosingSigned {
                             partial_signature: signature,
                             channel_id: self.get_id(),
                         }),
@@ -2283,9 +2283,9 @@ impl ChannelActorState {
                 let next_commitment_point = self.get_current_local_commitment_point();
                 network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId {
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                             peer_id: self.peer_id.clone(),
-                            message: PCNMessage::RevokeAndAck(RevokeAndAck {
+                            message: CFNMessage::RevokeAndAck(RevokeAndAck {
                                 channel_id: self.get_id(),
                                 per_commitment_secret: revocation_preimage.into(),
                                 next_per_commitment_point: next_commitment_point,
@@ -2511,16 +2511,16 @@ impl ChannelActorState {
         );
 
         if is_complete {
-            // We need to send a SendPcnMessage command here (instead of a ControlPcnChannel),
+            // We need to send a SendCFNMessage command here (instead of a ControlCfnChannel),
             // to guarantee that the TxComplete message immediately is sent to the network actor.
-            // Otherwise, it is possible that when the network actor is processing ControlPcnChannel,
-            // it receives another SendPcnMessage command, and that message (e.g. CommitmentSigned)
+            // Otherwise, it is possible that when the network actor is processing ControlCfnChannel,
+            // it receives another SendCFNMessage command, and that message (e.g. CommitmentSigned)
             // is processed first, thus breaking the order of messages.
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendPcnMessage(PCNMessageWithPeerId::new(
+                    NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId::new(
                         self.peer_id.clone(),
-                        PCNMessage::TxComplete(TxComplete {
+                        CFNMessage::TxComplete(TxComplete {
                             channel_id: self.get_id(),
                         }),
                     )),

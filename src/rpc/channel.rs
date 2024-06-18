@@ -250,7 +250,7 @@ where
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
             ChannelCommandWithId {
                 channel_id: params.channel_id,
                 command: ChannelCommand::CommitmentSigned(),
@@ -262,7 +262,7 @@ where
 
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: params.channel_id,
                     command: ChannelCommand::AddTlc(
@@ -291,7 +291,7 @@ where
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: params.channel_id,
                     command: ChannelCommand::RemoveTlc(
@@ -330,7 +330,7 @@ where
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlPcnChannel(
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
             ChannelCommandWithId {
                 channel_id: params.channel_id,
                 command: ChannelCommand::Shutdown(ShutdownCommand {

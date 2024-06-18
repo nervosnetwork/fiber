@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 export SHELLOPTS
-export RUST_BACKTRACE=full RUST_LOG=info,ckb_pcn_node=debug
+export RUST_BACKTRACE=full RUST_LOG=info,cfn_node=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
