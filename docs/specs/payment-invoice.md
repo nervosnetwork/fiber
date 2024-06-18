@@ -6,7 +6,7 @@ CKB Fiber network invoice will be generated and parsed by CKB Fiber Node, we ref
 
 - The invoice is encode/decoded base on [molecule](https://github.com/nervosnetwork/molecule), which is widely used in the CKB projects.
 - Instead of using `bech32`, we switch to `bech32m`.
-- The interface and usage is similar to [lightning-invoice](https://github.com/lightningdevkit/rust-lightning/tree/main/lightning-invoice/src) as possible, but not compatible with lightning invoice, any cross-chain compatibility needs will be handled through the hub in ckb-pcn.
+- The interface and usage is similar to [lightning-invoice](https://github.com/lightningdevkit/rust-lightning/tree/main/lightning-invoice/src) as possible, but not compatible with lightning invoice, any cross-chain compatibility needs will be handled through the hub in cfn-node.
 
 ## Human-readable part
 
