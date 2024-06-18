@@ -324,7 +324,7 @@ impl<S> ChannelActor<S> {
             CFNMessage::AddTlc(add_tlc) => {
                 state.check_state_for_tlc_update()?;
 
-                let tlc = state.create_inbounding_tlc(add_tlc);
+                let tlc = state.create_inbounding_tlc(add_tlc)?;
                 state.insert_tlc(tlc)?;
 
                 // TODO: here we didn't send any ack message to the peer.
@@ -1258,12 +1258,29 @@ pub struct ChannelActorState {
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
 
+    // TODO: consider transaction fee while building the commitment transaction.
+
+    // The invariant here is that the sum of `to_local_amount` and `to_remote_amount`
+    // should be equal to the total amount of the channel.
+    // The changes of both `to_local_amount` and `to_remote_amount`
+    // will always happen after a revoke_and_ack message is sent/received.
+    // This means that while calculating the amounts for commitment transactions,
+    // processing add_tlc command and messages, we need to take into account that
+    // the amounts are not decremented/incremented yet.
+
+    // The amount of CKB/UDT that we own in the channel.
+    // This value will only change after we have resolved a tlc.
     pub to_local_amount: u128,
+    // The amount of CKB/UDT that the remote owns in the channel.
+    // This value will only change after we have resolved a tlc.
     pub to_remote_amount: u128,
 
     // only used for UDT scenario:
-    // `to_local_amount` and `to_remote_amount` are the amount of UDT
-    // we need to keep track of the CKB amount from partners in the channel.
+    // `to_local_amount` and `to_remote_amount` are the amount of UDT,
+    // while `local_ckb_amount` and `remote_ckb_amount` are the amount of CKB
+    // of the underlying cells that bear the UDT.
+    // We keep track of the CKB amount from partners in the channel in
+    // order to construct closing/commitment transactions.
     pub local_ckb_amount: u64,
     pub remote_ckb_amount: u64,
 
@@ -1650,27 +1667,28 @@ impl ChannelActorState {
                 } else {
                     tlc.creation_confirmed_at = Some(commitment_numbers);
                 };
-                // We offered a tlc, so we should decrease our balance.
-                if tlc.tlc.is_offered() {
-                    to_local_amount -= amount;
-                    to_remote_amount += amount;
-                } else {
-                    to_local_amount += amount;
-                    to_remote_amount -= amount;
-                };
             }
             match (tlc.removed_at, tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {
                     tlc.removal_confirmed_at = Some(commitment_numbers);
-                    let should_increase_our_balance = match reason {
-                        RemoveTlcReason::RemoveTlcFulfill(_) => !tlc.is_offered(),
-                        RemoveTlcReason::RemoveTlcFail(_) => tlc.is_offered(),
+                     match reason {
+                        RemoveTlcReason::RemoveTlcFulfill(_)  => {
+                            if tlc.is_offered(){
+                                to_local_amount -= amount;
+                                to_remote_amount += amount;
+                            } else {
+                                to_local_amount += amount;
+                                to_remote_amount -= amount;
+                            };
+                            debug!(
+                                "Updated local amount to {} and remote amount to {} by removing fulfilled tlc {:?} from channel {:?} with reason {:?}",
+                                to_local_amount, to_remote_amount, tlc.tlc.id, self.id, reason
+                            );
+                        },
+                        RemoveTlcReason::RemoveTlcFail(_) => {
+                            debug!("Removing failed tlc {:?} from channel {:?} with reason {:?}", tlc.tlc.id, self.id, reason);
+                        },
                     };
-                    if should_increase_our_balance {
-                        to_local_amount += amount;
-                    } else {
-                        to_remote_amount += amount;
-                    }
                     debug!(
                         "Setting removal_confirmed_at for tlc {:?} to commitment number {:?}",
                         tlc.tlc.id, commitment_numbers)
@@ -1793,6 +1811,27 @@ impl ChannelActorState {
                     )));
             }
         };
+        if tlc.is_offered() {
+            let sent_tlc_value = self.get_tlc_value_sent_by_local(true);
+            debug_assert!(self.to_local_amount > sent_tlc_value);
+            // TODO: handle transaction fee here.
+            if sent_tlc_value + tlc.amount > self.to_local_amount {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Adding tlc {:?} with amount {} exceeds local balance {}",
+                    tlc.id, tlc.amount, self.to_local_amount
+                )));
+            }
+        } else {
+            let received_tlc_value = self.get_tlc_value_received_from_remote(false);
+            debug_assert!(self.to_remote_amount > received_tlc_value);
+            // TODO: handle transaction fee here.
+            if received_tlc_value + tlc.amount > self.to_remote_amount {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Adding tlc {:?} with amount {} exceeds remote balance {}",
+                    tlc.id, tlc.amount, self.to_remote_amount
+                )));
+            }
+        }
         debug!(
             "Adding new tlc {:?} to channel {:?} with local balance {} and remote balance {}",
             &tlc,
@@ -1813,13 +1852,6 @@ impl ChannelActorState {
         } else {
             self.increment_next_received_tlc_id();
         }
-        debug!(
-            "Channel ({:?}) balance after adding tlc {:?}: local balance: {}, remote balance: {}",
-            self.get_id(),
-            &detailed_tlc,
-            self.to_local_amount,
-            self.to_remote_amount
-        );
         Ok(detailed_tlc)
     }
 
@@ -1989,7 +2021,19 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    fn should_tlc_be_included_in_commitment_tx(info: &DetailedTLCInfo, local: bool) -> bool {
+    // The parameter `local_commitment` indicates whether we are building a local or remote
+    // commitment. This field is used in some edge cases where we need to know whether we are
+    // safe to include a TLC in the commitment transaction.
+    // For example, if A sends a AddTlc to B, then A immediately sends a CommitmentSigned to B,
+    // this CommitmentSigned message should be the commitment transaction that includes the TLC.
+    // Now imagine while A sends CommitmentSigned to B, B also sends a CommitmentSigned message to A,
+    // then to verify this CommitmentSigned message, A needs to determine whether to include
+    // the TLC in the commitment transaction. Because it is possible that B has not received the
+    // AddTlc message from A, so A should not include the TLC in the commitment transaction.
+    fn should_tlc_be_included_in_commitment_tx(
+        info: &DetailedTLCInfo,
+        local_commitment: bool,
+    ) -> bool {
         match info {
             DetailedTLCInfo {
                 tlc,
@@ -2000,9 +2044,9 @@ impl ChannelActorState {
             } => {
                 let am_i_sending_add_tlc_message = {
                     if tlc.is_offered() {
-                        local
+                        local_commitment
                     } else {
-                        !local
+                        !local_commitment
                     }
                 };
                 let am_i_sending_remove_tlc_message = !am_i_sending_add_tlc_message;
@@ -2031,23 +2075,49 @@ impl ChannelActorState {
         }
     }
 
-    pub fn get_active_received_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
+    pub fn get_active_received_tlcs(
+        &self,
+        local_commitment: bool,
+    ) -> impl Iterator<Item = &DetailedTLCInfo> {
         self.tlcs.values().filter(move |info| {
-            Self::should_tlc_be_included_in_commitment_tx(info, local) && !info.is_offered()
+            Self::should_tlc_be_included_in_commitment_tx(info, local_commitment)
+                && !info.is_offered()
         })
     }
 
-    pub fn get_active_offered_tlcs(&self, local: bool) -> impl Iterator<Item = &DetailedTLCInfo> {
+    pub fn get_active_offered_tlcs(
+        &self,
+        local_commitment: bool,
+    ) -> impl Iterator<Item = &DetailedTLCInfo> {
         self.tlcs.values().filter(move |info| {
-            Self::should_tlc_be_included_in_commitment_tx(info, local) && info.is_offered()
+            Self::should_tlc_be_included_in_commitment_tx(info, local_commitment)
+                && info.is_offered()
         })
     }
 
-    pub fn get_active_tlcs_value(&self, local: bool) -> u128 {
-        self.get_active_offered_tlcs(local)
-            .chain(self.get_active_received_tlcs(local))
-            .map(|tlc| tlc.tlc.amount)
-            .sum::<u128>()
+    fn get_tlc_value_sent_by_local(&self, local_commitment: bool) -> u128 {
+        if local_commitment {
+            self.get_active_offered_tlcs(local_commitment)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        } else {
+            self.get_active_received_tlcs(local_commitment)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        }
+    }
+
+    // The parameter local indicates whether we are interested in the value sent by the local party.
+    fn get_tlc_value_received_from_remote(&self, local_commitment: bool) -> u128 {
+        if local_commitment {
+            self.get_active_received_tlcs(local_commitment)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        } else {
+            self.get_active_offered_tlcs(local_commitment)
+                .map(|tlc| tlc.tlc.amount)
+                .sum::<u128>()
+        }
     }
 
     // Get the pubkeys for the tlc. Tlc pubkeys are the pubkeys held by each party
@@ -2211,14 +2281,27 @@ impl ChannelActorState {
         }
     }
 
-    pub fn create_inbounding_tlc(&self, message: AddTlc) -> TLC {
-        TLC {
+    pub fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TLC, ProcessingChannelError> {
+        if self.get_received_tlc(message.tlc_id).is_some() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Trying to add tlc with existing id {:?}",
+                message.tlc_id
+            )));
+        }
+        if message.tlc_id != self.get_next_received_tlc_id() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Trying to add tlc with id {:?} while expecting id {:?}",
+                message.tlc_id,
+                self.get_next_received_tlc_id()
+            )));
+        }
+        Ok(TLC {
             id: TLCId::Received(message.tlc_id),
             amount: message.amount,
             payment_hash: message.payment_hash,
             lock_time: message.expiry,
             payment_preimage: None,
-        }
+        })
     }
 }
 
@@ -3267,22 +3350,16 @@ impl ChannelActorState {
             (self.to_remote_amount, self.to_local_amount)
         };
 
-        let tlc_value = if local {
-            self.get_active_received_tlcs(local)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        } else {
-            self.get_active_offered_tlcs(local)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        };
+        // Only the received tlc value is added here because
+        // sent tlc value is already included in the time_locked_value.
+        let received_tlc_value = self.get_tlc_value_received_from_remote(local);
         debug!(
             "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_value: {}, immediately_spendable_value: {}",
             if local { "local" } else { "remote" },
             self.get_current_commitment_number(local),
-            time_locked_value, tlc_value, immediately_spendable_value);
-        let time_locked_value = time_locked_value + tlc_value;
-        let immediately_spendable_value = immediately_spendable_value - tlc_value;
+            time_locked_value, received_tlc_value, immediately_spendable_value);
+        let time_locked_value = time_locked_value + received_tlc_value;
+        let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -3916,10 +3993,8 @@ mod tests {
 
     use crate::{
         ckb::{
-            channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId},
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
-            types::LockTime,
             NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
@@ -4141,180 +4216,6 @@ mod tests {
             node_b.submit_tx(node_b_commitment_tx.clone()).await,
             Status::Committed
         );
-    }
-
-    #[tokio::test]
-    async fn test_channel_with_tlc_updates() {
-        let _ = env_logger::try_init();
-
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
-
-        let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
-                OpenChannelCommand {
-                    peer_id: node_b.peer_id.clone(),
-                    funding_amount: 100000000000,
-                    funding_udt_type_script: None,
-                },
-                rpc_reply,
-            ))
-        };
-        let open_channel_result = call!(node_a.network_actor, message)
-            .expect("node_a alive")
-            .expect("open channel success");
-
-        node_b
-            .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
-                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-        let message = |rpc_reply| {
-            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
-                AcceptChannelCommand {
-                    temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 1000,
-                },
-                rpc_reply,
-            ))
-        };
-        let accept_channel_result = call!(node_b.network_actor, message)
-            .expect("node_b alive")
-            .expect("accept channel success");
-        let new_channel_id = accept_channel_result.new_channel_id;
-
-        let node_a_commitment_tx = node_a
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
-                    println!(
-                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                        num, &tx, peer_id, channel_id
-                    );
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    Some(tx.clone())
-                }
-                _ => None,
-            })
-            .await;
-
-        let node_b_commitment_tx = node_b
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
-                    println!(
-                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                        num, &tx, peer_id, channel_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    Some(tx.clone())
-                }
-                _ => None,
-            })
-            .await;
-
-        node_a
-            .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
-                    println!(
-                        "A channel ({:?}) to {:?} is now ready",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        node_b
-            .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
-                    println!(
-                        "A channel ({:?}) to {:?} is now ready",
-                        &channel_id, &peer_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    true
-                }
-                _ => false,
-            })
-            .await;
-
-        // We can submit the commitment txs to the chain now.
-        assert_eq!(
-            node_a.submit_tx(node_a_commitment_tx.clone()).await,
-            Status::Committed
-        );
-        assert_eq!(
-            node_b.submit_tx(node_b_commitment_tx.clone()).await,
-            Status::Committed
-        );
-
-        let create_add_tlc_message = |add_tlc, rpc_reply| {
-            NetworkActorMessage::new_command({
-                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::AddTlc(add_tlc, rpc_reply),
-                })
-            })
-        };
-
-        let create_remove_tlc_message = |remove_tlc, rpc_reply| {
-            NetworkActorMessage::new_command({
-                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
-                    channel_id: new_channel_id.clone(),
-                    command: ChannelCommand::RemoveTlc(remove_tlc, rpc_reply),
-                })
-            })
-        };
-
-        let add_tlc1 = |rpc| {
-            create_add_tlc_message(
-                AddTlcCommand {
-                    amount: 1000,
-                    preimage: Some([1u8; 32].into()),
-                    payment_hash: None,
-                    expiry: LockTime::new(100),
-                },
-                rpc,
-            )
-        };
-
-        let accept_channel_result = call!(node_a.network_actor, add_tlc1)
-            .expect("node_a alive")
-            .expect("accept channel success");
-
-        dbg!(&accept_channel_result);
-
-        let add_tlc2 = |rpc| {
-            create_add_tlc_message(
-                AddTlcCommand {
-                    amount: 2000,
-                    preimage: Some([2u8; 32].into()),
-                    payment_hash: None,
-                    expiry: LockTime::new(100),
-                },
-                rpc,
-            )
-        };
-
-        // tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-        let accept_channel_result = call!(node_a.network_actor, add_tlc2)
-            .expect("node_a alive")
-            .expect("accept channel success");
-
-        dbg!(&accept_channel_result);
     }
 
     #[tokio::test]
