@@ -83,6 +83,14 @@ pub struct CkbConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+    /// whether to keep closed channels from store [default: false]
+    #[arg(
+        name = "CKB_KEEP_CLOSED_CHANNELS",
+        long = "ckb-keep-closed-channels",
+        env,
+        help = "whether to keep closed channels from store [default: false]"
+    )]
+    pub keep_closed_channels: Option<bool>,
 }
 
 impl CkbConfig {
@@ -119,6 +127,10 @@ impl CkbConfig {
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
             .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+    }
+
+    pub fn keep_closed_channels(&self) -> bool {
+        self.keep_closed_channels.unwrap_or(false)
     }
 }
 
