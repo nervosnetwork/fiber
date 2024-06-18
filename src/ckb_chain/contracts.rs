@@ -353,8 +353,8 @@ impl ContractsContext {
                     ),
                     (
                         Contract::CommitmentLock,
-                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
-                        2,
+                        "0xd33bd0d7d6e3b087ffdafa0dd769b7a4caa91e28ce87cd04ee1aa1814c5e460e",
+                        0,
                         DepType::Code,
                     ),
                 ]
