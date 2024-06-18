@@ -513,6 +513,10 @@ impl<S> ChannelActor<S> {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
+                // Normally commitment number will be incremented after received a RevokeAndAck message.
+                // But here channel has not been etablished yet, so we will not receive RevokeAndAck message.
+                // We increment the commitment number here instead.
+                state.increment_local_commitment_number();
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
@@ -524,7 +528,6 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
         }
-        state.increment_local_commitment_number();
         Ok(())
     }
 
@@ -1153,6 +1156,13 @@ impl CommitmentNumbers {
     pub fn increment_remote(&mut self) {
         self.remote += 1;
     }
+
+    pub fn flip(&self) -> Self {
+        Self {
+            local: self.remote,
+            remote: self.local,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
@@ -1607,6 +1617,12 @@ impl ChannelActorState {
             self.total_amount = self.to_local_amount + self.to_remote_amount;
         }
 
+        if is_received {
+            self.increment_local_commitment_number();
+        } else {
+            self.increment_remote_commitment_number();
+        }
+
         // If this revoke_and_ack message is received from the counterparty,
         // then we should be operating on remote commitment numbers.
         let commitment_numbers = self.get_current_commitment_numbers();
@@ -1629,7 +1645,11 @@ impl ChannelActorState {
                     "Setting local_committed_at for tlc {:?} to commitment number {:?}",
                     tlc.tlc.id, commitment_numbers
                 );
-                tlc.creation_confirmed_at = Some(commitment_numbers);
+                if is_received {
+                    tlc.creation_confirmed_at = Some(commitment_numbers);
+                } else {
+                    tlc.creation_confirmed_at = Some(commitment_numbers);
+                };
                 // We offered a tlc, so we should decrease our balance.
                 if tlc.tlc.is_offered() {
                     to_local_amount -= amount;
@@ -1904,8 +1924,8 @@ impl ChannelActorState {
         let index = commitment_number as usize;
         let commitment_point = self.remote_commitment_points[index];
         debug!(
-            "Obtained remote commitment point #{} (counting from 1) of {}: {:?}",
-            index + 1,
+            "Obtained remote commitment point #{} (counting from 0) out of total {} commitment points: {:?}",
+            index,
             self.remote_commitment_points.len(),
             commitment_point
         );
@@ -1994,7 +2014,7 @@ impl ChannelActorState {
                         return am_i_sending_remove_tlc_message;
                     }
                     (_, Some(_), None) => {
-                        panic!("TLC {:?} is removed but not confirmed yet", tlc.id);
+                        panic!("TLC {:?} is removed but not confirmed yet", info);
                     }
                     (_, _, Some(n)) => {
                         debug!("Including TLC {:?} to commitment transaction because tlc confirmed at {:?}", tlc.id, n);
@@ -2041,6 +2061,10 @@ impl ChannelActorState {
             local: local_commitment_number,
             remote: remote_commitment_number,
         } = tlc.get_commitment_numbers(local);
+        debug!(
+            "Local commitment number: {}, remote commitment number: {}",
+            local_commitment_number, remote_commitment_number
+        );
         let local_pubkey = derive_tlc_pubkey(
             &self.get_local_channel_parameters().pubkeys.tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
@@ -2621,6 +2645,9 @@ impl ChannelActorState {
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
+                // Normally commitment number will be incremented after sent a RevokeAndAck message.
+                // But here channel has not been etablished yet, so we will not send RevokeAndAck message.
+                // We increment the commitment number here instead.
                 self.increment_remote_commitment_number();
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
@@ -2630,7 +2657,9 @@ impl ChannelActorState {
                 // Now we should revoke previous transation by revealing preimage.
                 let old_number = self.get_remote_commitment_number();
                 let secret = self.signer.get_commitment_secret(old_number);
-                self.increment_remote_commitment_number();
+
+                self.update_state_on_raa_msg(false);
+
                 let new_number = self.get_remote_commitment_number();
                 let point = self.get_local_commitment_point(new_number);
 
@@ -2640,7 +2669,6 @@ impl ChannelActorState {
                 );
                 debug!("Sending new commitment point #{}: {:?}", new_number, &point);
 
-                self.update_state_on_raa_msg(true);
                 network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -2777,13 +2805,13 @@ impl ChannelActorState {
 
     pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
         debug!(
-            "Appending remote commitment point #{}: {:?}",
-            self.remote_commitment_points.len() + 1,
+            "Setting remote commitment point #{} (counting from 0)): {:?}",
+            self.remote_commitment_points.len(),
             commitment_point
         );
-        debug_assert_eq!(
+        assert_eq!(
             self.remote_commitment_points.len() as u64,
-            self.get_current_commitment_number(true)
+            self.get_local_commitment_number()
         );
         self.remote_commitment_points.push(commitment_point);
     }
@@ -2797,7 +2825,7 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let commitment_number = self.get_local_commitment_number() - 1;
+        let commitment_number = self.get_local_commitment_number();
         debug!(
             "Checking commitment secret and point for revocation #{}",
             commitment_number
@@ -2809,7 +2837,7 @@ impl ChannelActorState {
                 commitment_number, per_commitment_secret, per_commitment_point
             )));
         }
-        self.update_state_on_raa_msg(false);
+        self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
         Ok(())
     }
@@ -3170,6 +3198,11 @@ impl ChannelActorState {
         local: bool,
         commitment_number: u64,
     ) -> Vec<u8> {
+        debug!(
+            "Building {} commitment transaction witnesses for commitment number {}",
+            if local { "local" } else { "remote" },
+            commitment_number
+        );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (delay, commitment_point, base_delayed_payment_key, base_revocation_key) = if local
             {
@@ -3256,6 +3289,7 @@ impl ChannelActorState {
             );
         }
 
+        debug!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
