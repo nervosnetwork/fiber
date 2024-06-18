@@ -2423,27 +2423,30 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
-        let local_shutdown_signature = self.local_shutdown_signature.unwrap_or({
-            let signature = sign_ctx.clone().sign(message.as_slice())?;
-            self.local_shutdown_signature = Some(signature);
-            debug!(
-                "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
-                &shutdown_tx, &message, &signature,
-            );
+        let local_shutdown_signature = match self.local_shutdown_signature {
+            Some(signature) => signature,
+            None => {
+                let signature = sign_ctx.clone().sign(message.as_slice())?;
+                self.local_shutdown_signature = Some(signature);
+                debug!(
+                    "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
+                    &shutdown_tx, &message, &signature,
+                );
 
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                        peer_id: self.peer_id.clone(),
-                        message: CFNMessage::ClosingSigned(ClosingSigned {
-                            partial_signature: signature,
-                            channel_id: self.get_id(),
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                            peer_id: self.peer_id.clone(),
+                            message: CFNMessage::ClosingSigned(ClosingSigned {
+                                partial_signature: signature,
+                                channel_id: self.get_id(),
+                            }),
                         }),
-                    }),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            signature
-        });
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                signature
+            }
+        };
 
         match self.remote_shutdown_signature {
             Some(remote_shutdown_signature) => {
