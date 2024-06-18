@@ -188,7 +188,7 @@ pub struct ChannelActor<S> {
     keep_on_closed: bool,
 }
 
-impl<S> ChannelActor<S> {
+impl<S: ChannelActorStateStore> ChannelActor<S> {
     pub fn new(
         peer_id: PeerId,
         network: ActorRef<NetworkActorMessage>,
@@ -880,6 +880,12 @@ impl<S> ChannelActor<S> {
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
+            ChannelEvent::ClosingTransactionConfirmed => {
+                myself.stop(Some("ChannelClosed".to_string()));
+                if !self.keep_on_closed {
+                    self.store.delete_channel_actor_state(&state.get_id());
+                }
+            }
         }
         Ok(())
     }
@@ -1235,10 +1241,9 @@ where
         }
         match state.state {
             ChannelState::Closed => {
-                myself.stop(Some("ChannelClosed".to_string()));
-                if self.keep_on_closed {
-                    self.store.delete_channel_actor_state(&state.get_id());
-                }
+                debug!(
+                    "The channel is closed, waiting for the closing transaction to be confirmed."
+                );
             }
             _ => {
                 self.store.insert_channel_actor_state(state.clone());
@@ -1474,8 +1479,9 @@ pub struct ClosedChannel {}
 
 #[derive(Debug)]
 pub enum ChannelEvent {
-    FundingTransactionConfirmed,
     PeerDisconnected,
+    FundingTransactionConfirmed,
+    ClosingTransactionConfirmed,
 }
 
 pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
