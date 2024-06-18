@@ -8,8 +8,6 @@ option SignatureOpt (Signature);
 
 option AmountOpt (Uint128);
 
-// SI prefix comes from: https://en.wikipedia.org/wiki/International_System_of_Units
-option SiPrefixOpt (byte);
 option FeatureOpt (Uint32);
 
 table Duration {
@@ -85,7 +83,6 @@ table RawInvoiceData {
 table RawCkbInvoice {
     currency: byte,
     amount: AmountOpt,
-    prefix: SiPrefixOpt,
     signature: SignatureOpt,
     data: RawInvoiceData,
 }

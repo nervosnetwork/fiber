@@ -29,7 +29,7 @@ pub struct NewInvoiceParams {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NewInvoiceResult {
-    pub invoice_string: String,
+    pub invoice_address: String,
     pub invoice: CkbInvoice,
 }
 
@@ -100,7 +100,7 @@ where
         match invoice_builder.build() {
             Ok(invoice) => match self.store.insert_invoice(invoice.clone()) {
                 Ok(_) => Ok(NewInvoiceResult {
-                    invoice_string: invoice.to_string(),
+                    invoice_address: invoice.to_string(),
                     invoice,
                 }),
                 Err(e) => {

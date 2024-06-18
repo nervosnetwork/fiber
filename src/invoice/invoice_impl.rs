@@ -32,8 +32,9 @@ const SIGNATURE_U5_SIZE: usize = 104;
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Currency {
-    Ckb,
-    CkbTestNet,
+    Fibb,
+    Fibt,
+    Fibd,
 }
 
 impl TryFrom<u8> for Currency {
@@ -41,8 +42,9 @@ impl TryFrom<u8> for Currency {
 
     fn try_from(byte: u8) -> Result<Self, Self::Error> {
         match byte {
-            0 => Ok(Self::Ckb),
-            1 => Ok(Self::CkbTestNet),
+            0 => Ok(Self::Fibb),
+            1 => Ok(Self::Fibt),
+            2 => Ok(Self::Fibd),
             _ => Err(InvoiceError::UnknownCurrency(byte.to_string())),
         }
     }
@@ -51,8 +53,9 @@ impl TryFrom<u8> for Currency {
 impl ToString for Currency {
     fn to_string(&self) -> String {
         match self {
-            Currency::Ckb => "ckb".to_string(),
-            Currency::CkbTestNet => "ckt".to_string(),
+            Currency::Fibb => "fibb".to_string(),
+            Currency::Fibt => "fibt".to_string(),
+            Currency::Fibd => "fibd".to_string(),
         }
     }
 }
@@ -62,67 +65,10 @@ impl FromStr for Currency {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ckb" => Ok(Self::Ckb),
-            "ckt" => Ok(Self::CkbTestNet),
+            "fibb" => Ok(Self::Fibb),
+            "fibt" => Ok(Self::Fibt),
+            "fibd" => Ok(Self::Fibd),
             _ => Err(InvoiceError::UnknownCurrency(s.to_string())),
-        }
-    }
-}
-
-// FYI: https://en.wikipedia.org/wiki/International_System_of_Units
-#[derive(Eq, PartialEq, Debug, Clone, Copy, Ord, PartialOrd, Serialize, Deserialize)]
-pub enum SiPrefix {
-    /// 10^-3
-    Milli,
-    /// 10^-6
-    Micro,
-    /// 10^3
-    Kilo,
-}
-
-impl SiPrefix {
-    // 1 CKB = 100_000_000 shannons
-    pub fn multiplier(&self) -> u64 {
-        match *self {
-            SiPrefix::Milli => 100_000,
-            SiPrefix::Micro => 100,
-            SiPrefix::Kilo => 100_000_000_000,
-        }
-    }
-}
-
-impl ToString for SiPrefix {
-    fn to_string(&self) -> String {
-        match self {
-            SiPrefix::Milli => "m".to_string(),
-            SiPrefix::Micro => "u".to_string(),
-            SiPrefix::Kilo => "k".to_string(),
-        }
-    }
-}
-
-impl TryFrom<u8> for SiPrefix {
-    type Error = InvoiceError;
-
-    fn try_from(byte: u8) -> Result<Self, Self::Error> {
-        match byte {
-            0 => Ok(Self::Milli),
-            1 => Ok(Self::Micro),
-            2 => Ok(Self::Kilo),
-            _ => Err(InvoiceError::UnknownSiPrefix(format!("{}", byte))),
-        }
-    }
-}
-
-impl FromStr for SiPrefix {
-    type Err = InvoiceError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "m" => Ok(Self::Milli),
-            "u" => Ok(Self::Micro),
-            "k" => Ok(Self::Kilo),
-            _ => Err(InvoiceError::UnknownSiPrefix(s.to_string())),
         }
     }
 }
@@ -166,7 +112,6 @@ pub struct CkbInvoice {
     pub currency: Currency,
     #[serde_as(as = "Option<U128Hex>")]
     pub amount: Option<u128>,
-    pub prefix: Option<SiPrefix>,
     pub signature: Option<InvoiceSignature>,
     pub data: InvoiceData,
 }
@@ -189,11 +134,9 @@ macro_rules! attr_getter {
 impl CkbInvoice {
     fn hrp_part(&self) -> String {
         format!(
-            "ln{}{}{}",
+            "{}{}",
             self.currency.to_string(),
             self.amount
-                .map_or_else(|| "".to_string(), |x| x.to_string()),
-            self.prefix
                 .map_or_else(|| "".to_string(), |x| x.to_string()),
         )
     }
@@ -303,13 +246,8 @@ impl CkbInvoice {
         Ok(())
     }
 
-    pub fn amount_ckb_shannons(&self) -> Option<u128> {
-        self.amount.map(|v| {
-            v * self
-                .prefix
-                .as_ref()
-                .map_or(100_000_000, |si| si.multiplier() as u128)
-        })
+    pub fn amount(&self) -> Option<u128> {
+        self.amount
     }
 
     pub fn udt_type_script(&self) -> Option<&Script> {
@@ -446,7 +384,7 @@ impl FromStr for CkbInvoice {
         if data.len() < SIGNATURE_U5_SIZE {
             return Err(InvoiceError::TooShortDataPart);
         }
-        let (currency, amount, prefix) = parse_hrp(&hrp)?;
+        let (currency, amount) = parse_hrp(&hrp)?;
         let is_signed = data[0].to_u8() == 1;
         let data_end = if is_signed {
             data.len() - SIGNATURE_U5_SIZE
@@ -469,7 +407,6 @@ impl FromStr for CkbInvoice {
         let invoice = CkbInvoice {
             currency,
             amount,
-            prefix,
             signature,
             data: invoice_data.try_into().unwrap(),
         };
@@ -574,14 +511,13 @@ impl From<InvoiceAttr> for Attribute {
 pub struct InvoiceBuilder {
     currency: Currency,
     amount: Option<u128>,
-    prefix: Option<SiPrefix>,
     payment_hash: Option<Hash256>,
     attrs: Vec<Attribute>,
 }
 
 impl Default for InvoiceBuilder {
     fn default() -> Self {
-        Self::new(Currency::Ckb)
+        Self::new(Currency::Fibb)
     }
 }
 
@@ -598,7 +534,6 @@ impl InvoiceBuilder {
         Self {
             currency,
             amount: None,
-            prefix: None,
             payment_hash: None,
             attrs: Vec::new(),
         }
@@ -611,11 +546,6 @@ impl InvoiceBuilder {
 
     pub fn amount(mut self, amount: Option<u128>) -> Self {
         self.amount = amount;
-        self
-    }
-
-    pub fn prefix(mut self, prefix: Option<SiPrefix>) -> Self {
-        self.prefix = prefix;
         self
     }
 
@@ -666,7 +596,6 @@ impl InvoiceBuilder {
         Ok(CkbInvoice {
             currency: self.currency,
             amount: self.amount,
-            prefix: self.prefix,
             signature: None,
             data: InvoiceData {
                 timestamp,
@@ -705,11 +634,6 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
         Ok(CkbInvoice {
             currency: (u8::from(invoice.currency())).try_into().unwrap(),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
-            prefix: invoice
-                .prefix()
-                .to_opt()
-                .map(|x| u8::from(x).try_into())
-                .transpose()?,
             signature: invoice.signature().to_opt().map(|x| {
                 InvoiceSignature::from_base32(
                     &x.as_bytes()
@@ -731,11 +655,6 @@ impl From<CkbInvoice> for RawCkbInvoice {
             .amount(
                 AmountOpt::new_builder()
                     .set(invoice.amount.map(|x| x.pack()))
-                    .build(),
-            )
-            .prefix(
-                SiPrefixOpt::new_builder()
-                    .set(invoice.prefix.map(|x| (x as u8).into()))
                     .build(),
             )
             .signature(
@@ -832,9 +751,8 @@ mod tests {
     fn mock_invoice() -> CkbInvoice {
         let (public_key, private_key) = gen_rand_keypair();
         let mut invoice = CkbInvoice {
-            currency: Currency::Ckb,
+            currency: Currency::Fibb,
             amount: Some(1280),
-            prefix: Some(SiPrefix::Kilo),
             signature: None,
             data: InvoiceData {
                 payment_hash: rand_sha256_hash(),
@@ -860,71 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hrp() {
-        let res = parse_hrp("lnckb1280k");
-        assert_eq!(res, Ok((Currency::Ckb, Some(1280), Some(SiPrefix::Kilo))));
-
-        let res = parse_hrp("lnckb");
-        assert_eq!(res, Ok((Currency::Ckb, None, None)));
-
-        let res = parse_hrp("lnckt1023");
-        assert_eq!(res, Ok((Currency::CkbTestNet, Some(1023), None)));
-
-        let res = parse_hrp("lnckt1023u");
-        assert_eq!(
-            res,
-            Ok((Currency::CkbTestNet, Some(1023), Some(SiPrefix::Micro)))
-        );
-
-        let res = parse_hrp("lncktk");
-        assert_eq!(res, Ok((Currency::CkbTestNet, None, Some(SiPrefix::Kilo))));
-
-        let res = parse_hrp("xnckb");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP("xnckb".to_string())));
-
-        let res = parse_hrp("lxckb");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP("lxckb".to_string())));
-
-        let res = parse_hrp("lnckt");
-        assert_eq!(res, Ok((Currency::CkbTestNet, None, None)));
-
-        let res = parse_hrp("lnxkt");
-        assert_eq!(res, Err(InvoiceError::MalformedHRP("lnxkt".to_string())));
-
-        let res = parse_hrp("lncktt");
-        assert_eq!(
-            res,
-            Err(InvoiceError::MalformedHRP(
-                "lncktt, unexpected ending `t`".to_string()
-            ))
-        );
-
-        let res = parse_hrp("lnckt1x24");
-        assert_eq!(
-            res,
-            Err(InvoiceError::MalformedHRP(
-                "lnckt1x24, unexpected ending `x24`".to_string()
-            ))
-        );
-
-        let res = parse_hrp("lnckt000k");
-        assert_eq!(
-            res,
-            Ok((Currency::CkbTestNet, Some(0), Some(SiPrefix::Kilo)))
-        );
-
-        let res =
-            parse_hrp("lnckt1024444444444444444444444444444444444444444444444444444444444444");
-        assert!(matches!(res, Err(InvoiceError::ParseAmountError(_))));
-
-        let res = parse_hrp("lnckt0x");
-        assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
-
-        let res = parse_hrp("");
-        assert!(matches!(res, Err(InvoiceError::MalformedHRP(_))));
-    }
-
-    #[test]
     fn test_signature() {
         let private_key = gen_rand_private_key();
         let signature = Secp256k1::new()
@@ -945,7 +798,7 @@ mod tests {
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
         assert_eq!(decoded_invoice, ckb_invoice_clone);
         let address = ckb_invoice_clone.to_string();
-        assert!(address.starts_with("lnckb1280k1"));
+        assert!(address.starts_with("fibb1280"));
     }
 
     #[test]
@@ -955,15 +808,12 @@ mod tests {
         assert_eq!(invoice.check_signature(), Ok(()));
 
         let address = invoice.to_string();
-        assert!(address.starts_with("lnckb1280k1"));
+        assert!(address.starts_with("fibb1280"));
 
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
         assert_eq!(decoded_invoice.is_signed(), true);
-        assert_eq!(
-            decoded_invoice.amount_ckb_shannons(),
-            Some(1280 * 1000 * 100_000_000)
-        );
+        assert_eq!(decoded_invoice.amount(), Some(1280));
     }
 
     #[test]
@@ -971,7 +821,7 @@ mod tests {
         let invoice = mock_invoice();
 
         let address = invoice.to_string();
-        assert!(address.starts_with("lnckb1280k1"));
+        assert!(address.starts_with("fibb1280"));
 
         let mut wrong = address.clone();
         wrong.push_str("1");
@@ -1013,9 +863,8 @@ mod tests {
         let signature = Secp256k1::new()
             .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
         let invoice = CkbInvoice {
-            currency: Currency::Ckb,
+            currency: Currency::Fibb,
             amount: Some(1280),
-            prefix: Some(SiPrefix::Kilo),
             signature: Some(InvoiceSignature(signature)),
             data: InvoiceData {
                 payment_hash: [0u8; 32].into(),
@@ -1056,9 +905,8 @@ mod tests {
         let gen_payment_hash = rand_sha256_hash();
         let (public_key, private_key) = gen_rand_keypair();
 
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
             .fallback_address("address".to_string())
             .expiry_time(Duration::from_secs(1024))
@@ -1074,9 +922,8 @@ mod tests {
 
         assert_eq!(invoice, address.parse::<CkbInvoice>().unwrap());
 
-        assert_eq!(invoice.currency, Currency::Ckb);
+        assert_eq!(invoice.currency, Currency::Fibb);
         assert_eq!(invoice.amount, Some(1280));
-        assert_eq!(invoice.prefix, Some(SiPrefix::Kilo));
         assert_eq!(invoice.payment_hash(), &gen_payment_hash);
         assert_eq!(invoice.payment_preimage(), None);
         assert_eq!(invoice.data.attrs.len(), 7);
@@ -1088,9 +935,8 @@ mod tests {
         let (_, private_key) = gen_rand_keypair();
         let public_key = gen_rand_public_key();
 
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
             .fallback_address("address".to_string())
             .expiry_time(Duration::from_secs(1024))
@@ -1108,9 +954,8 @@ mod tests {
     fn test_invoice_builder_duplicated_attr() {
         let gen_payment_hash = rand_sha256_hash();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(gen_payment_hash)
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .add_attr(Attribute::FinalHtlcTimeout(6))
@@ -1128,17 +973,15 @@ mod tests {
     #[test]
     fn test_invoice_builder_missing() {
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_preimage(rand_sha256_hash())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
         assert_eq!(invoice.err(), None);
 
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(rand_sha256_hash())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
@@ -1149,9 +992,8 @@ mod tests {
     fn test_invoice_builder_preimage() {
         let preimage = rand_sha256_hash();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_preimage(preimage)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
@@ -1169,9 +1011,8 @@ mod tests {
         let preimage = rand_sha256_hash();
         let payment_hash = rand_sha256_hash();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(payment_hash)
             .payment_preimage(preimage)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
@@ -1195,16 +1036,14 @@ mod tests {
     fn test_invoice_timestamp() {
         let payment_hash = rand_sha256_hash();
         let private_key = gen_rand_private_key();
-        let invoice1 = InvoiceBuilder::new(Currency::Ckb)
+        let invoice1 = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(payment_hash)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
 
-        let invoice2 = InvoiceBuilder::new(Currency::Ckb)
+        let invoice2 = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(payment_hash)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
@@ -1216,9 +1055,8 @@ mod tests {
     #[test]
     fn test_invoice_gen_payment_hash() {
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_preimage(rand_sha256_hash())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
@@ -1231,9 +1069,8 @@ mod tests {
     #[test]
     fn test_invoice_rand_payment_hash() {
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
         let payment_preimage = invoice.payment_preimage();
@@ -1244,9 +1081,8 @@ mod tests {
     fn test_invoice_udt_script() {
         let script = Script::default();
         let private_key = gen_rand_private_key();
-        let invoice = InvoiceBuilder::new(Currency::Ckb)
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .prefix(Some(SiPrefix::Kilo))
             .payment_hash(rand_sha256_hash())
             .udt_type_script(script.clone())
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
