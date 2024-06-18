@@ -286,7 +286,6 @@ impl<S> ChannelActor<S> {
             }
             CFNMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(revoke_and_ack)?;
-                state.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
                 Ok(())
             }
             CFNMessage::ChannelReady(channel_ready) => {
@@ -342,7 +341,7 @@ impl<S> ChannelActor<S> {
             }
             CFNMessage::Shutdown(shutdown) => {
                 let flags = match state.state {
-                    ChannelState::ChannelReady(_) => ShuttingDownFlags::empty(),
+                    ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
                     ChannelState::ShuttingDown(flags)
                         if flags.contains(ShuttingDownFlags::THEIR_SHUTDOWN_SENT) =>
                     {
@@ -434,15 +433,7 @@ impl<S> ChannelActor<S> {
                 );
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady(flags)
-                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to process commitment_signed command in state {:?}, which requires the remote to send a revoke message first.",
-                    &state.state
-                )));
-            }
-            ChannelState::ChannelReady(flags) => CommitmentSignedFlags::ChannelReady(flags),
+            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
@@ -520,10 +511,7 @@ impl<S> ChannelActor<S> {
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
-            CommitmentSignedFlags::ChannelReady(flags) => {
-                let flags = flags | ChannelReadyFlags::AWAITING_REMOTE_REVOKE;
-                state.update_state(ChannelState::ChannelReady(flags));
-            }
+            CommitmentSignedFlags::ChannelReady() => {}
             CommitmentSignedFlags::PendingShutdown(_) => {
                 state.maybe_transition_to_shutdown(&self.network)?;
             }
@@ -609,7 +597,7 @@ impl<S> ChannelActor<S> {
     ) -> ProcessingChannelResult {
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
-            ChannelState::ChannelReady(_) => {
+            ChannelState::ChannelReady() => {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
             }
@@ -1402,16 +1390,6 @@ bitflags! {
 
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
-    pub struct ChannelReadyFlags: u32 {
-        /// Indicates that we have sent a `commitment_signed` but are awaiting the responding
-        ///	`revoke_and_ack` message. During this period, we can't generate new messages as
-        /// we'd be unable to determine which TLCs they included in their `revoke_and_ack`
-        ///	implicit ACK, so instead we have to hold them away temporarily to be sent later.
-        const AWAITING_REMOTE_REVOKE = 1;
-    }
-
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(transparent)]
     pub struct ShuttingDownFlags: u32 {
         /// Indicates that we have sent a `shutdown` message.
         const OUR_SHUTDOWN_SENT = 1;
@@ -1432,7 +1410,7 @@ bitflags! {
 enum CommitmentSignedFlags {
     SigningCommitment(SigningCommitmentFlags),
     PendingShutdown(ShuttingDownFlags),
-    ChannelReady(ChannelReadyFlags),
+    ChannelReady(),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1456,7 +1434,7 @@ pub enum ChannelState {
     AwaitingChannelReady(AwaitingChannelReadyFlags),
     /// Both we and our counterparty consider the funding transaction confirmed and the channel is
     /// now operational.
-    ChannelReady(ChannelReadyFlags),
+    ChannelReady(),
     /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
@@ -2250,18 +2228,7 @@ impl ChannelActorState {
 
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady(flags) => {
-                // TODO: Even if we are awaiting remote revoke, we should still stash these tlc updates,
-                // and perform corresponding actions after we receive the revoke_and_ack message.
-                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) {
-                    Err(ProcessingChannelError::InvalidState(
-                        "Trying to update tlc while channel is awaiting remote revocation"
-                            .to_string(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
+            ChannelState::ChannelReady() => Ok(()),
             ChannelState::ShuttingDown(_) => Ok(()),
             _ => Err(ProcessingChannelError::InvalidState(format!(
                 "Invalid state {:?} for adding tlc",
@@ -2680,23 +2647,9 @@ impl ChannelActorState {
                 );
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            // TODO: There is a chance that both parties unknowingly send commitment_signed messages,
-            // and both of they thought they are the first one to send the message and fail the other
-            // party's message. What to do in this case?
-            ChannelState::ChannelReady(flags)
-                if flags.contains(ChannelReadyFlags::AWAITING_REMOTE_REVOKE) =>
-            {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Unable to process commitment_signed message in state {:?}, as we are have already sent a commitment_signed, the remote should have sent a revoke message first.",
-                    &self.state
-                )));
-            }
-            ChannelState::ChannelReady(flags) => {
-                debug!(
-                    "Processing commitment_signed message in state {:?}",
-                    &self.state
-                );
-                CommitmentSignedFlags::ChannelReady(flags)
+            ChannelState::ChannelReady() => {
+                debug!("Processing commitment_signed message while channel ready");
+                CommitmentSignedFlags::ChannelReady()
             }
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
@@ -2754,7 +2707,7 @@ impl ChannelActorState {
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
-            CommitmentSignedFlags::ChannelReady(_) | CommitmentSignedFlags::PendingShutdown(_) => {
+            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
                 // Now we should revoke previous transation by revealing preimage.
                 let old_number = self.get_remote_commitment_number();
                 let secret = self.signer.get_commitment_secret(old_number);
@@ -2783,9 +2736,7 @@ impl ChannelActorState {
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 match flags {
-                    CommitmentSignedFlags::ChannelReady(_) => {
-                        self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
-                    }
+                    CommitmentSignedFlags::ChannelReady() => {}
                     CommitmentSignedFlags::PendingShutdown(_) => {
                         // TODO: Handle error in the below function call.
                         // We've already updated our state, we should never fail here.
@@ -2896,7 +2847,7 @@ impl ChannelActorState {
     }
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        self.update_state(ChannelState::ChannelReady(ChannelReadyFlags::empty()));
+        self.update_state(ChannelState::ChannelReady());
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
