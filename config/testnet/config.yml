@@ -1,0 +1,14 @@
+ckb:
+  listening_port: 8228
+  network: "Testnet"
+
+rpc:
+  listening_addr: 127.0.0.1:8227
+
+ckb_chain:
+  rpc_url: "https://testnet.ckbapp.dev/"
+
+services:
+  - ckb
+  - rpc
+  - ckb_chain
