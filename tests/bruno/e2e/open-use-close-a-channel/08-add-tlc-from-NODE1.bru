@@ -33,11 +33,11 @@ body:json {
 
 assert {
   res.body.error: isDefined
-  res.body.result isUndefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("TLC_ID2", res.body.result.tlc_id);
+  // bru.setVar("TLC_ID2", res.body.result.tlc_id);
 }
