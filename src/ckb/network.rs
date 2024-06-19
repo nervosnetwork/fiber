@@ -47,7 +47,7 @@ use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{
-    CkbChainMessage, FundingRequest, FundingTx, FundingUdtInfo, TraceTxRequest,
+    CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest,
 };
 use crate::{unwrap_or_return, Error};
 
@@ -393,17 +393,13 @@ where
                                     new,
                                     Default::default(),
                                     FundingRequest {
-                                        udt_info: funding_script.as_ref().map(|type_script| {
-                                            FundingUdtInfo::new(
-                                                type_script,
-                                                local_reserve_ckb_amount,
-                                                remote_reserve_ckb_amount,
-                                            )
-                                        }),
                                         script,
+                                        udt_type_script: funding_script.clone(),
                                         local_amount: local as u64,
                                         local_fee_rate: 0,
                                         remote_amount: remote as u64,
+                                        local_reserve_ckb_amount: local_reserve_ckb_amount as u64,
+                                        remote_reserve_ckb_amount: remote_reserve_ckb_amount as u64,
                                     },
                                 ),
                             ))

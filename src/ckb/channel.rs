@@ -34,7 +34,7 @@ use crate::{
     },
     ckb_chain::{
         contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
-        FundingRequest, FundingUdtInfo,
+        FundingRequest,
     },
     NetworkServiceEvent,
 };
@@ -2039,17 +2039,13 @@ impl ChannelActorState {
 
     pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
         FundingRequest {
-            udt_info: self.funding_udt_type_script.as_ref().map(|script| {
-                FundingUdtInfo::new(
-                    script,
-                    self.local_reserve_ckb_amount,
-                    self.remote_reserve_ckb_amount,
-                )
-            }),
             script: self.get_funding_lock_script(),
+            udt_type_script: self.funding_udt_type_script.clone(),
             local_amount: self.to_local_amount as u64,
             local_fee_rate: fee_rate,
             remote_amount: self.to_remote_amount as u64,
+            local_reserve_ckb_amount: self.local_reserve_ckb_amount,
+            remote_reserve_ckb_amount: self.remote_reserve_ckb_amount,
         }
     }
 
