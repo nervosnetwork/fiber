@@ -62,21 +62,21 @@ pub struct FundingUdtInfo {
     #[serde_as(as = "EntityHex")]
     pub type_script: packed::Script,
     /// CKB amount to be provided by the local party.
-    pub local_ckb_amount: u64,
+    pub local_reserve_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
-    pub remote_ckb_amount: u64,
+    pub remote_reserve_ckb_amount: u64,
 }
 
 impl FundingUdtInfo {
     pub fn new(
         type_script: &packed::Script,
-        local_ckb_amount: u64,
-        remote_ckb_amount: u64,
+        local_reserve_ckb_amount: u64,
+        remote_reserve_ckb_amount: u64,
     ) -> Self {
         Self {
             type_script: type_script.clone(),
-            local_ckb_amount,
-            remote_ckb_amount,
+            local_reserve_ckb_amount,
+            remote_reserve_ckb_amount,
         }
     }
 }
@@ -179,14 +179,14 @@ impl FundingTxBuilder {
         match self.request.udt_info {
             Some(ref udt_info) => {
                 let mut udt_amount = self.request.local_amount as u128;
-                let mut ckb_amount = udt_info.local_ckb_amount;
+                let mut ckb_amount = udt_info.local_reserve_ckb_amount;
 
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
                     udt_amount += self.request.remote_amount as u128;
                     ckb_amount = ckb_amount
-                        .checked_add(udt_info.remote_ckb_amount)
+                        .checked_add(udt_info.remote_reserve_ckb_amount)
                         .ok_or(FundingError::InvalidChannel)?;
                 }
 
