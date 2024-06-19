@@ -364,8 +364,8 @@ where
                 remote,
                 script,
                 funding_script,
-                local_ckb_amount,
-                remote_ckb_amount,
+                local_reserve_ckb_amount,
+                remote_reserve_ckb_amount,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
@@ -389,8 +389,8 @@ where
                                         udt_info: funding_script.as_ref().map(|type_script| {
                                             FundingUdtInfo::new(
                                                 type_script,
-                                                local_ckb_amount,
-                                                remote_ckb_amount,
+                                                local_reserve_ckb_amount,
+                                                remote_reserve_ckb_amount,
                                             )
                                         }),
                                         script,

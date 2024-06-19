@@ -21,11 +21,11 @@ pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UD
 /// 62 CKB minimal channel amount, at any time a partner should keep at least
 /// `MIN_OCCUPIED_CAPACITY` CKB in the channel, so that he can build a valid shutdown transaction
 /// and pay proper fee.
-pub const MIN_CHANNEL_CAPACITY: u64 = MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+pub const MIN_CHANNEL_CKB_AMOUNT: u64 = MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
 /// 162 CKB to open a channel,
 /// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity
-pub const MIN_CHANNEL_OPEN_CAPACITY: u64 =
+pub const MIN_CHANNEL_OPEN_CKB_AMOUNT: u64 =
     DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
@@ -86,12 +86,12 @@ pub struct CkbConfig {
 impl CkbConfig {
     pub fn open_channel_min_ckb_funding_amount(&self) -> u64 {
         self.open_channel_min_ckb_funding_amount
-            .unwrap_or(MIN_CHANNEL_OPEN_CAPACITY)
+            .unwrap_or(MIN_CHANNEL_OPEN_CKB_AMOUNT)
     }
 
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
-            .unwrap_or(MIN_CHANNEL_CAPACITY)
+            .unwrap_or(MIN_CHANNEL_CKB_AMOUNT)
     }
 }
 
