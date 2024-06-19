@@ -2330,21 +2330,15 @@ impl ChannelActorState {
         }
     }
 
-    pub fn check_add_tlc_amount(&self, amount: u128) -> ProcessingChannelResult {
-        debug!("begin check_add_tlc_amount: {}", amount);
-        let available_amount = if self.funding_udt_type_script.is_none() {
-            self.to_local_amount - DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT as u128
-        } else {
-            self.to_local_amount
-        };
+    fn check_add_tlc_amount(&self, amount: u128) -> ProcessingChannelResult {
         debug!(
-            "check amount: {} available_amount: {}",
-            amount, available_amount
+            "check_add_tlc_amount: {} available_amount: {}",
+            amount, self.to_local_amount
         );
-        if amount > available_amount {
+        if amount > self.to_local_amount {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Local balance is not enough to add tlc with amount {}, you can add at most {}",
-                amount, available_amount
+                amount, self.to_local_amount
             )));
         }
         Ok(())
@@ -3283,8 +3277,10 @@ impl ChannelActorState {
                 self.to_local_amount, local_shutdown_fee,
                 self.to_remote_amount, remote_shutdown_fee
             );
-            let local_value = self.to_local_amount as u64 - local_shutdown_fee;
-            let remote_value = self.to_remote_amount as u64 - remote_shutdown_fee;
+            let local_value =
+                self.to_local_amount as u64 + self.local_reserve_ckb_amount - local_shutdown_fee;
+            let remote_value =
+                self.to_remote_amount as u64 + self.remote_reserve_ckb_amount - remote_shutdown_fee;
             debug!(
                 "Building shutdown transaction with values: local {}, remote {}",
                 local_value, remote_value
