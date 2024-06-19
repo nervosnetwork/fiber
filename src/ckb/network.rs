@@ -287,9 +287,11 @@ where
                     .await
                 {
                     Ok(()) => {
-                        if state.auto_accept_channel_ckb_funding_amount > 0
+                        if (state.auto_accept_channel_ckb_funding_amount > 0
                             && open_channel.all_ckb_amount()
-                                >= state.open_channel_auto_accept_min_ckb_funding_amount
+                                >= state.open_channel_auto_accept_min_ckb_funding_amount)
+                            || open_channel.funding_udt_type_script.is_some()
+                        // TODO: UDT auto accept?
                         {
                             let open_channel = AcceptChannelCommand {
                                 temp_channel_id,
