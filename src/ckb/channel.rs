@@ -1509,10 +1509,10 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_base_pubkeys = signer.get_base_public_keys();
 
         let channel_id = derive_channel_id_from_revocation_keys(
-            &local_pubkeys.revocation_base_key,
+            &local_base_pubkeys.revocation_base_key,
             &remote_pubkeys.revocation_base_key,
         );
 
@@ -1534,7 +1534,7 @@ impl ChannelActorState {
             to_remote_amount: remote_value,
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
-                pubkeys: local_pubkeys,
+                pubkeys: local_base_pubkeys,
                 selected_contest_delay: remote_delay,
             },
             signer,
@@ -1566,7 +1566,7 @@ impl ChannelActorState {
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id =
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
@@ -3878,7 +3878,6 @@ pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey
     derive_public_key(base_key, commitment_point)
 }
 
-
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
 ///
 /// This implementation performs no policy checks and is insufficient by itself as
@@ -3941,13 +3940,13 @@ impl InMemorySigner {
         }
     }
 
-    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelBasePublicKeys {
+    fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_base_key: self.derive_revocation_key(commitment_number).pubkey(),
-            payment_base_key: self.derive_payment_key(commitment_number).pubkey(),
-            delayed_payment_base_key: self.derive_delayed_payment_key(commitment_number).pubkey(),
-            tlc_base_key: self.derive_tlc_key(commitment_number).pubkey(),
+            revocation_base_key: self.revocation_base_key.pubkey(),
+            payment_base_key: self.payment_key.pubkey(),
+            delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
+            tlc_base_key: self.tlc_base_key.pubkey(),
         }
     }
 
@@ -3993,10 +3992,6 @@ impl InMemorySigner {
 
 #[cfg(test)]
 mod tests {
-
-    use ckb_jsonrpc_types::Status;
-    use ractor::call;
-
     use crate::{
         ckb::{
             network::{AcceptChannelCommand, OpenChannelCommand},
@@ -4005,6 +4000,9 @@ mod tests {
         },
         NetworkServiceEvent,
     };
+
+    use ckb_jsonrpc_types::Status;
+    use ractor::call;
 
     use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey, InMemorySigner};
 
