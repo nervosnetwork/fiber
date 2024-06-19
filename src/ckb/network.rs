@@ -44,6 +44,7 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
+use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::{
     CkbChainMessage, FundingRequest, FundingTx, FundingUdtInfo, TraceTxRequest,
@@ -283,9 +284,15 @@ where
             // to the channel id in the message yet.
             CFNMessage::OpenChannel(open_channel) => {
                 let temp_channel_id = open_channel.channel_id.clone();
-                match state.on_open_channel_msg(peer_id, open_channel).await {
+                match state
+                    .on_open_channel_msg(peer_id, open_channel.clone())
+                    .await
+                {
                     Ok(()) => {
-                        if state.auto_accept_channel_ckb_funding_amount > 0 {
+                        if state.auto_accept_channel_ckb_funding_amount > 0
+                            && open_channel.all_ckb_amount()
+                                >= state.open_channel_auto_accept_min_ckb_funding_amount
+                        {
                             let open_channel = AcceptChannelCommand {
                                 temp_channel_id,
                                 funding_amount: state.auto_accept_channel_ckb_funding_amount
@@ -744,7 +751,9 @@ pub struct NetworkActorState {
     pending_channels: HashMap<OutPoint, Hash256>,
     // Used to broadcast and query network info.
     chain_actor: ActorRef<CkbChainMessage>,
-    open_channel_min_ckb_funding_amount: u64,
+    // If the other party funding more than this amount, we will automatically accept the channel.
+    open_channel_auto_accept_min_ckb_funding_amount: u64,
+    // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
 }
 
@@ -802,6 +811,7 @@ impl NetworkActorState {
             temp_channel_id,
             funding_amount,
         } = accept_channel;
+
         let (peer_id, open_channel) = self
             .to_be_accepted_channels
             .remove(&temp_channel_id)
@@ -809,6 +819,25 @@ impl NetworkActorState {
                 "No channel with temp id {:?} found",
                 &temp_channel_id
             )))?;
+
+        let funding_udt_type_script = open_channel.funding_udt_type_script.clone();
+        let reserve_ckb_amount = if funding_udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+        if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The value of the channel should be greater than the reserve amount: {}",
+                reserve_ckb_amount
+            )));
+        }
+        let funding_amount = if funding_udt_type_script.is_some() {
+            funding_amount
+        } else {
+            funding_amount - reserve_ckb_amount as u128
+        };
+
         let network = self.network.clone();
         let id = open_channel.channel_id;
         if let Some(channel) = self.channels.get(&id) {
@@ -823,6 +852,7 @@ impl NetworkActorState {
             ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(
                 funding_amount,
+                reserve_ckb_amount,
                 seed,
                 open_channel,
                 Some(tx),
@@ -944,8 +974,12 @@ impl NetworkActorState {
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        if open_channel.funding_udt_type_script.is_none()
-            && open_channel.funding_amount < self.open_channel_min_ckb_funding_amount as u128
+        // check CKB amount is in valid range
+        if (open_channel.funding_udt_type_script.is_none()
+            && open_channel.funding_amount as u64 + open_channel.reserve_ckb_amount
+                < DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+            || (open_channel.funding_udt_type_script.is_some()
+                && open_channel.reserve_ckb_amount < DEFAULT_UDT_MINIMAL_CKB_AMOUNT)
         {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Funding amount too low: {}",
@@ -1170,7 +1204,8 @@ where
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
             chain_actor: self.chain_actor.clone(),
-            open_channel_min_ckb_funding_amount: config.open_channel_min_ckb_funding_amount(),
+            open_channel_auto_accept_min_ckb_funding_amount: config
+                .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
         })
     }
