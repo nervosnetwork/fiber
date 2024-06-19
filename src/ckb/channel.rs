@@ -3846,11 +3846,38 @@ impl DetailedTLCInfo {
     }
 }
 
-pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
-    // TODO: Currently we only copy the input secret. We need to actually derive new private keys
-    // from the per_commitment_point.
-    *secret
+pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(&commitment_point.serialize());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
 }
+
+fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
+    secret.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
 
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
 ///
@@ -3874,22 +3901,6 @@ pub struct InMemorySigner {
     pub musig2_base_nonce: SecNonce,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
-}
-
-pub fn derive_revocation_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_tlc_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
 }
 
 impl InMemorySigner {
