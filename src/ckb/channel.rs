@@ -3897,7 +3897,7 @@ pub struct InMemorySigner {
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
     // TODO: use rust's ownership to make sure musig_nonce is used once.
-    pub musig2_base_nonce: SecNonce,
+    pub musig2_base_nonce: Privkey,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
 }
@@ -3926,8 +3926,7 @@ impl InMemorySigner {
         let delayed_payment_base_key =
             key_derive(payment_key.as_ref(), b"delayed payment base key");
         let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
-        let misig_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
-        let musig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
+        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
         Self {
             funding_key,
@@ -3935,7 +3934,7 @@ impl InMemorySigner {
             payment_key,
             delayed_payment_base_key,
             tlc_base_key,
-            musig2_base_nonce: musig_nonce,
+            musig2_base_nonce,
             commitment_seed,
         }
     }
@@ -3984,9 +3983,13 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_musig2_nonce(&self, _new_commitment_number: u64) -> SecNonce {
-        // TODO: generate new musig nonce here
-        self.musig2_base_nonce.clone()
+    pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
+        // TODO: Verify that this is a secure way to derive the nonce.
+        let commitment_point = self.get_commitment_point(commitment_number);
+        let message = get_tweak_by_commitment_point(&commitment_point);
+        SecNonce::build(self.musig2_base_nonce.as_ref())
+            // .with_message(&message)
+            .build()
     }
 }
 
