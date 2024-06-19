@@ -3491,175 +3491,6 @@ impl From<Uint128> for AmountOpt {
     }
 }
 #[derive(Clone)]
-pub struct SiPrefixOpt(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for SiPrefixOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for SiPrefixOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for SiPrefixOpt {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        if let Some(v) = self.to_opt() {
-            write!(f, "{}(Some({}))", Self::NAME, v)
-        } else {
-            write!(f, "{}(None)", Self::NAME)
-        }
-    }
-}
-impl ::core::default::Default for SiPrefixOpt {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        SiPrefixOpt::new_unchecked(v)
-    }
-}
-impl SiPrefixOpt {
-    const DEFAULT_VALUE: [u8; 0] = [];
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub fn is_some(&self) -> bool {
-        !self.0.is_empty()
-    }
-    pub fn to_opt(&self) -> Option<Byte> {
-        if self.is_none() {
-            None
-        } else {
-            Some(Byte::new_unchecked(self.0.clone()))
-        }
-    }
-    pub fn as_reader<'r>(&'r self) -> SiPrefixOptReader<'r> {
-        SiPrefixOptReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for SiPrefixOpt {
-    type Builder = SiPrefixOptBuilder;
-    const NAME: &'static str = "SiPrefixOpt";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        SiPrefixOpt(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SiPrefixOptReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SiPrefixOptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().set(self.to_opt())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct SiPrefixOptReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for SiPrefixOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for SiPrefixOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for SiPrefixOptReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        if let Some(v) = self.to_opt() {
-            write!(f, "{}(Some({}))", Self::NAME, v)
-        } else {
-            write!(f, "{}(None)", Self::NAME)
-        }
-    }
-}
-impl<'r> SiPrefixOptReader<'r> {
-    pub fn is_none(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub fn is_some(&self) -> bool {
-        !self.0.is_empty()
-    }
-    pub fn to_opt(&self) -> Option<ByteReader<'r>> {
-        if self.is_none() {
-            None
-        } else {
-            Some(ByteReader::new_unchecked(self.as_slice()))
-        }
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for SiPrefixOptReader<'r> {
-    type Entity = SiPrefixOpt;
-    const NAME: &'static str = "SiPrefixOptReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        SiPrefixOptReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
-        if !slice.is_empty() {
-            ByteReader::verify(&slice[..], compatible)?;
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct SiPrefixOptBuilder(pub(crate) Option<Byte>);
-impl SiPrefixOptBuilder {
-    pub fn set(mut self, v: Option<Byte>) -> Self {
-        self.0 = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for SiPrefixOptBuilder {
-    type Entity = SiPrefixOpt;
-    const NAME: &'static str = "SiPrefixOptBuilder";
-    fn expected_length(&self) -> usize {
-        self.0
-            .as_ref()
-            .map(|ref inner| inner.as_slice().len())
-            .unwrap_or(0)
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        self.0
-            .as_ref()
-            .map(|ref inner| writer.write_all(inner.as_slice()))
-            .unwrap_or(Ok(()))
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        SiPrefixOpt::new_unchecked(inner.into())
-    }
-}
-impl From<Byte> for SiPrefixOpt {
-    fn from(value: Byte) -> Self {
-        Self::new_builder().set(Some(value)).build()
-    }
-}
-#[derive(Clone)]
 pub struct FeatureOpt(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for FeatureOpt {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -7676,7 +7507,6 @@ impl ::core::fmt::Display for RawCkbInvoice {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "currency", self.currency())?;
         write!(f, ", {}: {}", "amount", self.amount())?;
-        write!(f, ", {}: {}", "prefix", self.prefix())?;
         write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "data", self.data())?;
         let extra_count = self.count_extra_fields();
@@ -7693,13 +7523,13 @@ impl ::core::default::Default for RawCkbInvoice {
     }
 }
 impl RawCkbInvoice {
-    const DEFAULT_VALUE: [u8; 93] = [
-        93, 0, 0, 0, 24, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 25, 0, 0, 0, 0, 68, 0, 0,
-        0, 16, 0, 0, 0, 32, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 89] = [
+        89, 0, 0, 0, 20, 0, 0, 0, 21, 0, 0, 0, 21, 0, 0, 0, 21, 0, 0, 0, 0, 68, 0, 0, 0, 16, 0, 0,
+        0, 32, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0,
+        0,
     ];
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 4;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7728,23 +7558,17 @@ impl RawCkbInvoice {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         AmountOpt::new_unchecked(self.0.slice(start..end))
     }
-    pub fn prefix(&self) -> SiPrefixOpt {
+    pub fn signature(&self) -> SignatureOpt {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        SiPrefixOpt::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn signature(&self) -> SignatureOpt {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
         SignatureOpt::new_unchecked(self.0.slice(start..end))
     }
     pub fn data(&self) -> RawInvoiceData {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[24..]) as usize;
+            let end = molecule::unpack_number(&slice[20..]) as usize;
             RawInvoiceData::new_unchecked(self.0.slice(start..end))
         } else {
             RawInvoiceData::new_unchecked(self.0.slice(start..))
@@ -7779,7 +7603,6 @@ impl molecule::prelude::Entity for RawCkbInvoice {
         Self::new_builder()
             .currency(self.currency())
             .amount(self.amount())
-            .prefix(self.prefix())
             .signature(self.signature())
             .data(self.data())
     }
@@ -7805,7 +7628,6 @@ impl<'r> ::core::fmt::Display for RawCkbInvoiceReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "currency", self.currency())?;
         write!(f, ", {}: {}", "amount", self.amount())?;
-        write!(f, ", {}: {}", "prefix", self.prefix())?;
         write!(f, ", {}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "data", self.data())?;
         let extra_count = self.count_extra_fields();
@@ -7816,7 +7638,7 @@ impl<'r> ::core::fmt::Display for RawCkbInvoiceReader<'r> {
     }
 }
 impl<'r> RawCkbInvoiceReader<'r> {
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 4;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7845,23 +7667,17 @@ impl<'r> RawCkbInvoiceReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         AmountOptReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn prefix(&self) -> SiPrefixOptReader<'r> {
+    pub fn signature(&self) -> SignatureOptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        SiPrefixOptReader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn signature(&self) -> SignatureOptReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
-        let end = molecule::unpack_number(&slice[20..]) as usize;
         SignatureOptReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn data(&self) -> RawInvoiceDataReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[20..]) as usize;
+        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[24..]) as usize;
+            let end = molecule::unpack_number(&slice[20..]) as usize;
             RawInvoiceDataReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             RawInvoiceDataReader::new_unchecked(&self.as_slice()[start..])
@@ -7916,9 +7732,8 @@ impl<'r> molecule::prelude::Reader<'r> for RawCkbInvoiceReader<'r> {
         }
         ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         AmountOptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        SiPrefixOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        SignatureOptReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
-        RawInvoiceDataReader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        SignatureOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        RawInvoiceDataReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Ok(())
     }
 }
@@ -7926,22 +7741,17 @@ impl<'r> molecule::prelude::Reader<'r> for RawCkbInvoiceReader<'r> {
 pub struct RawCkbInvoiceBuilder {
     pub(crate) currency: Byte,
     pub(crate) amount: AmountOpt,
-    pub(crate) prefix: SiPrefixOpt,
     pub(crate) signature: SignatureOpt,
     pub(crate) data: RawInvoiceData,
 }
 impl RawCkbInvoiceBuilder {
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 4;
     pub fn currency(mut self, v: Byte) -> Self {
         self.currency = v;
         self
     }
     pub fn amount(mut self, v: AmountOpt) -> Self {
         self.amount = v;
-        self
-    }
-    pub fn prefix(mut self, v: SiPrefixOpt) -> Self {
-        self.prefix = v;
         self
     }
     pub fn signature(mut self, v: SignatureOpt) -> Self {
@@ -7960,7 +7770,6 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.currency.as_slice().len()
             + self.amount.as_slice().len()
-            + self.prefix.as_slice().len()
             + self.signature.as_slice().len()
             + self.data.as_slice().len()
     }
@@ -7972,8 +7781,6 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
         offsets.push(total_size);
         total_size += self.amount.as_slice().len();
         offsets.push(total_size);
-        total_size += self.prefix.as_slice().len();
-        offsets.push(total_size);
         total_size += self.signature.as_slice().len();
         offsets.push(total_size);
         total_size += self.data.as_slice().len();
@@ -7983,7 +7790,6 @@ impl molecule::prelude::Builder for RawCkbInvoiceBuilder {
         }
         writer.write_all(self.currency.as_slice())?;
         writer.write_all(self.amount.as_slice())?;
-        writer.write_all(self.prefix.as_slice())?;
         writer.write_all(self.signature.as_slice())?;
         writer.write_all(self.data.as_slice())?;
         Ok(())

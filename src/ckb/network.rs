@@ -4,6 +4,7 @@ use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use log::{debug, error, info, warn};
 
+use molecule::prelude::Entity;
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RpcReplyPort, SupervisionEvent,

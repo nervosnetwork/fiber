@@ -3,7 +3,6 @@ import blockchain;
 array Signature [byte; 64];
 array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 array Pubkey [byte; 33];
-vector SignatureVec <Signature>;
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -102,12 +101,6 @@ table AddTlc {
     expiry:         Uint64,
 }
 
-table TlcsSigned {
-    channel_id:     Byte32,
-    signature:      Signature,
-    tlc_signatures: SignatureVec,
-}
-
 table RevokeAndAck {
     channel_id:                 Byte32,
     per_commitment_secret:      Byte32,
@@ -133,21 +126,27 @@ table RemoveTlc {
     reason:             RemoveTlcReason,
 }
 
+table ReestablishChannel {
+    channel_id: Byte32,
+    local_commitment_number: Uint64,
+    remote_commitment_number: Uint64,
+}
+
 union CFNMessage {
     OpenChannel,
     AcceptChannel,
-    CommitmentSigned,
     TxSignatures,
-    ChannelReady,
     TxUpdate,
     TxComplete,
     TxAbort,
     TxInitRBF,
     TxAckRBF,
+    CommitmentSigned,
+    ChannelReady,
+    AddTlc,
+    RemoveTlc,
+    RevokeAndAck,
     Shutdown,
     ClosingSigned,
-    AddTlc,
-    TlcsSigned,
-    RevokeAndAck,
-    RemoveTlc,
+    ReestablishChannel,
 }

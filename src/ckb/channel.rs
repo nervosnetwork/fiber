@@ -42,8 +42,8 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, CFNMessage, ChannelReady, ClosingSigned, CommitmentSigned, Hash256,
-        LockTime, OpenChannel, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcReason,
+        RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -390,8 +390,11 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-
-            _ => {
+            CFNMessage::ReestablishChannel(reestablish_channel) => {
+                state.handle_reestablish_channel_message(reestablish_channel)?;
+                Ok(())
+            }
+            CFNMessage::TxAbort(_) | CFNMessage::TxInitRBF(_) | CFNMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
             }
@@ -2914,6 +2917,13 @@ impl ChannelActorState {
         }
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+        Ok(())
+    }
+
+    fn handle_reestablish_channel_message(
+        &mut self,
+        reestablish_channel: ReestablishChannel,
+    ) -> ProcessingChannelResult {
         Ok(())
     }
 
