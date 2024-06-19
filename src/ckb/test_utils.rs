@@ -194,7 +194,7 @@ impl NetworkNode {
                         None => panic!("Event emitter unexpectedly stopped"),
                         Some(event) => {
                             println!("Recevied event when waiting for specific event: {:?}", &event);
-                            if let Some(r) =  event_processor(&event) {
+                            if let Some(r) = event_processor(&event) {
                                 println!("Event ({:?}) matching filter received, exiting waiting for event loop", &event);
                                 return r;
                             }

@@ -46,9 +46,7 @@ use super::{
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
-use crate::ckb_chain::{
-    CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest,
-};
+use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error};
 
 pub const CFN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
