@@ -1726,8 +1726,13 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn get_local_secnonce(&self) -> SecNonce {
+        self.signer
+            .derive_musig2_nonce(self.get_local_commitment_number())
+    }
+
     pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
-        self.get_next_local_secnonce().public_nonce()
+        self.get_local_secnonce().public_nonce()
     }
 
     pub fn get_next_local_secnonce(&self) -> SecNonce {
@@ -1736,9 +1741,7 @@ impl ChannelActorState {
     }
 
     pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_next_commitment_number(true))
-            .public_nonce()
+        self.get_next_local_secnonce().public_nonce().clone()
     }
 
     pub fn get_remote_nonce(&self) -> &PubNonce {
