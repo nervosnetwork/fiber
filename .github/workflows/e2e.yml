@@ -12,6 +12,7 @@ jobs:
           - invoice-ops
           - open-use-close-a-channel
           - udt
+          - xudt
         release:
           - "0.116.1"
     name: e2e test for ${{ matrix.workflow }}
@@ -53,7 +54,15 @@ jobs:
             fi
           done
 
-          (cd ./tests/bruno; npm exec -- @usebruno/cli run e2e/${{ matrix.workflow }} -r --env test) &
+          test_dir="${{ matrix.workflow }}"
+          test_env="test"
+          if [[ "${{ matrix.workflow }}" == "xudt" ]]; then
+            test_dir="udt"
+            test_env="xudt-test"
+          fi
+
+          (cd ./tests/bruno; npm exec -- @usebruno/cli run e2e/${test_dir} -r --env ${test_env} ) &
+
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
           wait -n
