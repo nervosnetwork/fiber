@@ -32,12 +32,12 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
+  console.log("step 10 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("TLC_ID4", res.body.result.tlc_id);
 }
