@@ -472,6 +472,11 @@ impl<S> ChannelActor<S> {
             version, &tx, &signature
         );
 
+        debug!(
+            "Sending next local nonce {:?} (previous nonce {:?})",
+            state.get_next_local_nonce(),
+            state.get_local_nonce().borrow()
+        );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             partial_signature: signature,
@@ -504,10 +509,6 @@ impl<S> ChannelActor<S> {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                // Normally commitment number will be incremented after received a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not receive RevokeAndAck message.
-                // We increment the commitment number here instead.
-                state.increment_local_commitment_number();
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
@@ -1761,10 +1762,20 @@ impl ChannelActorState {
     }
 
     pub fn increment_local_commitment_number(&mut self) {
+        debug!(
+            "Incrementing local commitment number from {} to {}",
+            self.get_local_commitment_number(),
+            self.get_local_commitment_number() + 1
+        );
         self.commitment_numbers.increment_local();
     }
 
     pub fn increment_remote_commitment_number(&mut self) {
+        debug!(
+            "Incrementing remote commitment number from {} to {}",
+            self.get_remote_commitment_number(),
+            self.get_remote_commitment_number() + 1
+        );
         self.commitment_numbers.increment_remote();
     }
 
@@ -2705,14 +2716,14 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        debug!("Updating peer next local nonce");
+        debug!(
+            "Updating peer next remote nonce from {:?} to {:?}",
+            self.get_remote_nonce(),
+            &commitment_signed.next_local_nonce
+        );
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
-                // Normally commitment number will be incremented after sent a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not send RevokeAndAck message.
-                // We increment the commitment number here instead.
-                self.increment_remote_commitment_number();
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
@@ -2858,6 +2869,8 @@ impl ChannelActorState {
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
+        self.increment_local_commitment_number();
+        self.increment_remote_commitment_number();
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -3296,6 +3309,11 @@ impl ChannelActorState {
                 derive_revocation_pubkey(revocation_base_key, &revocation_commitment_point),
             )
         };
+
+        debug!(
+            "Parameters for witnesses: epoch {:?}, payment key: {:?}, revocation key: {:?}",
+            delayed_epoch, delayed_payment_key, revocation_key
+        );
 
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
