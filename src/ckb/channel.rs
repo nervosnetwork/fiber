@@ -536,8 +536,6 @@ impl<S> ChannelActor<S> {
     ) -> Result<u64, ProcessingChannelError> {
         warn!("handle add tlc command : {:?}", &command);
         state.check_state_for_tlc_update()?;
-        state.check_add_tlc_amount(command.amount)?;
-
         let tlc = state.create_outbounding_tlc(command);
         state.insert_tlc(tlc)?;
 
@@ -1873,24 +1871,31 @@ impl ChannelActorState {
                     )));
             }
         };
+        if tlc.amount == 0 {
+            return Err(ProcessingChannelError::InvalidParameter(
+                "Expect the amount of tlc is larger than zero".to_string(),
+            ));
+        }
         if tlc.is_offered() {
             let sent_tlc_value = self.get_sent_tlc_balance();
-            debug_assert!(self.to_local_amount > sent_tlc_value);
-            // TODO: handle transaction fee here.
+            debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
-                    tlc.id, tlc.amount, self.to_local_amount
+                    tlc.id,
+                    tlc.amount,
+                    self.to_local_amount - sent_tlc_value
                 )));
             }
         } else {
             let received_tlc_value = self.get_received_tlc_balance();
-            debug_assert!(self.to_remote_amount > received_tlc_value);
-            // TODO: handle transaction fee here.
+            debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds remote balance {}",
-                    tlc.id, tlc.amount, self.to_remote_amount
+                    tlc.id,
+                    tlc.amount,
+                    self.to_remote_amount - received_tlc_value
                 )));
             }
         }
@@ -1946,7 +1951,8 @@ impl ChannelActorState {
                     }
                     Some((current_remove_reason, current_removed_at)) => {
                         return Err(ProcessingChannelError::InvalidParameter(
-                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}", tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
+                            format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}",
+                                tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
                     }
                     None => {
                         debug!(
@@ -2334,21 +2340,7 @@ impl ChannelActorState {
         }
     }
 
-    fn check_add_tlc_amount(&self, amount: u128) -> ProcessingChannelResult {
-        debug!(
-            "check_add_tlc_amount: {} available_amount: {}",
-            amount, self.to_local_amount
-        );
-        if amount > self.to_local_amount {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Local balance is not enough to add tlc with amount {}, you can add at most {}",
-                amount, self.to_local_amount
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn create_outbounding_tlc(&mut self, command: AddTlcCommand) -> TLC {
+    pub fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TLC {
         // TODO: we are filling the user command with a new id here.
         // The advantage of this is that we don't need to burden the users to
         // provide a next id for each tlc. The disadvantage is that users may
