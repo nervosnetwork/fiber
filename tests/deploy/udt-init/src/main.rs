@@ -223,7 +223,7 @@ fn genrate_nodes_config() {
         },
         cell_deps: vec![UdtCellDep {
             dep_type: "code".to_string(),
-            tx_hash: get_env_hex("NEXT_PUBLIC_SIMPLE_UDT_TX_HASH"),
+            tx_hash: get_env_hex("NEXT_PUBLIC_XUDT_TX_HASH"),
             index: 0,
         }],
     };

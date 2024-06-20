@@ -52,7 +52,7 @@ use super::{
 // - `funding_out_point`: 36 bytes, out point of the funding transaction
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
-const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
+const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
 // Some part of the code liberally gets previous commitment number, which is
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
@@ -3512,6 +3512,9 @@ pub fn create_witness_for_funding_cell(
     version: u64,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
+
+    let empty_witness = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+    witness.extend_from_slice(&empty_witness);
     for bytes in [
         version.to_le_bytes().as_ref(),
         out_point.as_slice(),
