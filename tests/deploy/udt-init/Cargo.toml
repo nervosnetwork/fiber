@@ -6,7 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ckb-sdk = { version = "3.2.0", git = "https://github.com/chenyukang/ckb-sdk-rust.git", branch = "pcn-udt"}
+#ckb-sdk = { version = "3.2.0", git = "https://github.com/chenyukang/ckb-sdk-rust.git", branch = "pcn-udt"}
+ckb-sdk = { path = "/Users/yukang/code/playground/ckb-sdk-rust" }
 ckb-types = "0.116.1"
 ckb-jsonrpc-types = "0.116.1"
 serde = { version = "1.0", features = ["derive"] }

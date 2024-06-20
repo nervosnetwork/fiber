@@ -22,7 +22,7 @@ use serde_yaml;
 use std::{error::Error as StdErr, str::FromStr};
 
 const SIMPLE_CODE_HASH: H256 =
-    h256!("0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419");
+    h256!("0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95");
 const CKB_SHANNONS: u64 = 100_000_000;
 
 fn get_env_hex(name: &str) -> H256 {
@@ -33,7 +33,7 @@ fn get_env_hex(name: &str) -> H256 {
 }
 
 fn gen_dev_udt_handler() -> SudtHandler {
-    let simple_udt_tx = get_env_hex("NEXT_PUBLIC_SIMPLE_UDT_TX_HASH");
+    let simple_udt_tx = get_env_hex("NEXT_PUBLIC_XUDT_TX_HASH");
 
     let (out_point, script_id) = (
         OutPoint::new_builder()
