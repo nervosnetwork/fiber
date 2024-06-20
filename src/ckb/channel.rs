@@ -2023,6 +2023,12 @@ impl ChannelActorState {
         let local_nonce = local_nonce.borrow();
         let remote_nonce = self.get_remote_nonce();
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
+        debug!(
+            "Got agg nonces {:?} from peer {:?}: {:?}",
+            AggNonce::sum(nonces),
+            &self.peer_id,
+            nonces
+        );
         AggNonce::sum(nonces)
     }
 
@@ -3622,14 +3628,23 @@ impl From<Musig2SignContext> for Musig2VerifyContext {
 
 impl Musig2VerifyContext {
     pub fn verify(&self, signature: PartialSignature, message: &[u8]) -> ProcessingChannelResult {
-        Ok(verify_partial(
+        let result = verify_partial(
             &self.key_agg_ctx,
             signature,
             &self.agg_nonce,
             self.pubkey,
             &self.pubnonce,
             message,
-        )?)
+        );
+        debug!(
+            "Verifying partial signature {:?} with message {:?}, nonce {:?}, agg nonce {:?}, result {:?}",
+            &signature,
+            hex::encode(message),
+            &self.pubnonce,
+            &self.agg_nonce,
+            result
+        );
+        Ok(result?)
     }
 }
 
@@ -3643,7 +3658,13 @@ pub struct Musig2SignContext {
 
 impl Musig2SignContext {
     pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
-        debug!("Musig2 signing partial message {:?}", hex::encode(&message));
+        debug!(
+            "Musig2 signing partial message {:?} with nonce {:?} (public nonce: {:?}), agg nonce {:?}",
+            hex::encode(&message),
+            self.secnonce,
+            self.secnonce.public_nonce(),
+            &self.agg_nonce
+        );
         Ok(sign_partial(
             &self.key_agg_ctx,
             self.seckey,
@@ -3983,13 +4004,15 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
+    // TODO: Verify that this is a secure way to derive the nonce.
     pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
-        // TODO: Verify that this is a secure way to derive the nonce.
         let commitment_point = self.get_commitment_point(commitment_number);
-        let message = get_tweak_by_commitment_point(&commitment_point);
-        SecNonce::build(self.musig2_base_nonce.as_ref())
-            // .with_message(&message)
-            .build()
+        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
+        debug!(
+            "Deriving Musig2 nonce: commitment number: {}, commitment point: {:?}",
+            commitment_number, commitment_point
+        );
+        SecNonce::build(seckey.as_ref()).build()
     }
 }
 
