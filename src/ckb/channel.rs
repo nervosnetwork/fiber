@@ -3476,6 +3476,14 @@ impl ChannelActorState {
         &self,
         local: bool,
     ) -> (Vec<CellOutput>, Vec<Bytes>, Vec<u8>) {
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                self.total_amount,
+                self.to_local_amount + self.to_remote_amount
+            );
+        }
+
         // The time_locked_value is amount of assets locked by commitment-lock.
         // Our value is always time-locked. Additionally, we need to add the value of
         // all the TLCs that we have received from the counterparty.
@@ -3501,13 +3509,6 @@ impl ChannelActorState {
             time_locked_value, received_tlc_value, immediately_spendable_value);
         let time_locked_value = time_locked_value + received_tlc_value;
         let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
-        // #[cfg(debug_assertions)]
-        // {
-        //     debug_assert_eq!(
-        //         self.total_amount,
-        //         time_locked_value + immediately_spendable_value
-        //     );
-        // }
 
         eprintln!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
         let immediate_payment_key = {
