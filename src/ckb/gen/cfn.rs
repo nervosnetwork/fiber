@@ -6761,7 +6761,7 @@ impl ::core::fmt::Display for Shutdown {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "fee", self.fee())?;
+        write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6806,7 +6806,7 @@ impl Shutdown {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn fee(&self) -> Uint64 {
+    pub fn fee_rate(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
@@ -6850,7 +6850,7 @@ impl molecule::prelude::Entity for Shutdown {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .fee(self.fee())
+            .fee_rate(self.fee_rate())
             .close_script(self.close_script())
     }
 }
@@ -6874,7 +6874,7 @@ impl<'r> ::core::fmt::Display for ShutdownReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "fee", self.fee())?;
+        write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6907,7 +6907,7 @@ impl<'r> ShutdownReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn fee(&self) -> Uint64Reader<'r> {
+    pub fn fee_rate(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
@@ -6979,7 +6979,7 @@ impl<'r> molecule::prelude::Reader<'r> for ShutdownReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct ShutdownBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) fee: Uint64,
+    pub(crate) fee_rate: Uint64,
     pub(crate) close_script: Script,
 }
 impl ShutdownBuilder {
@@ -6988,8 +6988,8 @@ impl ShutdownBuilder {
         self.channel_id = v;
         self
     }
-    pub fn fee(mut self, v: Uint64) -> Self {
-        self.fee = v;
+    pub fn fee_rate(mut self, v: Uint64) -> Self {
+        self.fee_rate = v;
         self
     }
     pub fn close_script(mut self, v: Script) -> Self {
@@ -7003,7 +7003,7 @@ impl molecule::prelude::Builder for ShutdownBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.fee.as_slice().len()
+            + self.fee_rate.as_slice().len()
             + self.close_script.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -7012,7 +7012,7 @@ impl molecule::prelude::Builder for ShutdownBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.fee.as_slice().len();
+        total_size += self.fee_rate.as_slice().len();
         offsets.push(total_size);
         total_size += self.close_script.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -7020,7 +7020,7 @@ impl molecule::prelude::Builder for ShutdownBuilder {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.fee.as_slice())?;
+        writer.write_all(self.fee_rate.as_slice())?;
         writer.write_all(self.close_script.as_slice())?;
         Ok(())
     }
