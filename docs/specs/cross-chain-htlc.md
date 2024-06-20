@@ -57,7 +57,7 @@ To understand how HTLCs can be used for cross-chain payments, let's break down t
 - Bob wants to receive $X$ BTC in Bitcoin.
 - Alice negotiates the swap with Ingrid that if Alice sends $X+F$ wrapped BTC in CKB to Ingrid, Ingrid with send $X$ BTC in Bitcoin to Bob. Ingrid will keep $F$ BTC as the fee.
 
-### From CKB to Bitcoin
+### From Bitcoin to CKB
 
 - Alice wants to receive $X$ wrapped BTC in CKB.
 - Alice negotiates the swap with Ingrid that if Bob sends $X+F$ BTC in Bitcoin to Ingrid, Ingrid with send $X$ wrapped BTC in CKB to Alice. Ingrid will keep $F$ wrapped BTC as the fee.
