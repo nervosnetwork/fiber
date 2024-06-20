@@ -13,6 +13,7 @@ jobs:
           - open-use-close-a-channel
           - udt
           - xudt
+          - reestablish
         release:
           - "0.116.1"
     name: e2e test for ${{ matrix.workflow }}

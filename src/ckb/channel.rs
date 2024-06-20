@@ -1054,10 +1054,11 @@ where
                 Ok(channel)
             }
             ChannelInitializationParameter::ReestablishChannel(channel_id) => {
-                let channel = self
+                let mut channel = self
                     .store
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
+                channel.reestablishing = true;
 
                 let reestablish_channel = ReestablishChannel {
                     channel_id,
@@ -1098,8 +1099,22 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(state, message) {
-                    error!("Error while processing channel message: {:?}", error);
+                if state.reestablishing {
+                    match message {
+                        CFNMessage::ReestablishChannel(reestablish_channel) => {
+                            state.handle_reestablish_channel_message(
+                                reestablish_channel,
+                                &self.network,
+                            )?;
+                        }
+                        _ => {
+                            debug!("Ignoring message while reestablishing: {:?}", message);
+                        }
+                    }
+                } else {
+                    if let Err(error) = self.handle_peer_message(state, message) {
+                        error!("Error while processing channel message: {:?}", error);
+                    }
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -1346,6 +1361,9 @@ pub struct ChannelActorState {
     pub remote_shutdown_signature: Option<PartialSignature>,
     pub remote_shutdown_fee: Option<u128>,
 
+    // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
+    pub reestablishing: bool,
+
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
@@ -1576,6 +1594,7 @@ impl ChannelActorState {
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
         }
@@ -1621,6 +1640,7 @@ impl ChannelActorState {
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: value,
         }
@@ -2944,50 +2964,38 @@ impl ChannelActorState {
         reestablish_channel: ReestablishChannel,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
+        debug!(
+            "Handling reestablish channel message: {:?}, our commitment_numbers {:?}",
+            reestablish_channel, self.commitment_numbers,
+        );
+        self.reestablishing = false;
         match self.state {
             ChannelState::NegotiatingFunding(_flags) => {
                 // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
                 // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
             }
             ChannelState::ChannelReady() => {
-                // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
-                let local_commitment_number = reestablish_channel.local_commitment_number;
-                let mut need_resend_commitment_signed = false;
-                for info in self.tlcs.values() {
-                    if info.is_offered() {
-                        if info.created_at.get_local() > local_commitment_number
-                            && info.creation_confirmed_at.is_none()
-                        {
-                            // resend AddTlc message
-                            network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                                        peer_id: self.peer_id.clone(),
-                                        message: CFNMessage::AddTlc(AddTlc {
-                                            channel_id: self.get_id(),
-                                            tlc_id: info.tlc.get_id(),
-                                            amount: info.tlc.amount,
-                                            payment_hash: info.tlc.payment_hash,
-                                            expiry: info.tlc.lock_time,
-                                        }),
-                                    }),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                            need_resend_commitment_signed = true;
-                        }
-                    } else {
-                        if let Some((commitment_number, remove_reason)) = info.removed_at {
-                            if commitment_number.get_local() > local_commitment_number {
-                                // resend RemoveTlc message
+                let expected_local_commitment_number = self.get_local_commitment_number();
+                let acutal_local_commitment_number = reestablish_channel.remote_commitment_number;
+                if acutal_local_commitment_number == expected_local_commitment_number {
+                    // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
+                    let mut need_resend_commitment_signed = false;
+                    for info in self.tlcs.values() {
+                        if info.is_offered() {
+                            if info.created_at.get_local() >= acutal_local_commitment_number
+                                && info.creation_confirmed_at.is_none()
+                            {
+                                // resend AddTlc message
                                 network
                                     .send_message(NetworkActorMessage::new_command(
                                         NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                                             peer_id: self.peer_id.clone(),
-                                            message: CFNMessage::RemoveTlc(RemoveTlc {
+                                            message: CFNMessage::AddTlc(AddTlc {
                                                 channel_id: self.get_id(),
                                                 tlc_id: info.tlc.get_id(),
-                                                reason: remove_reason,
+                                                amount: info.tlc.amount,
+                                                payment_hash: info.tlc.payment_hash,
+                                                expiry: info.tlc.lock_time,
                                             }),
                                         }),
                                     ))
@@ -2995,18 +3003,79 @@ impl ChannelActorState {
 
                                 need_resend_commitment_signed = true;
                             }
+                        } else {
+                            if let Some((commitment_number, remove_reason)) = info.removed_at {
+                                if commitment_number.get_local() >= acutal_local_commitment_number {
+                                    // resend RemoveTlc message
+                                    network
+                                        .send_message(NetworkActorMessage::new_command(
+                                            NetworkActorCommand::SendCFNMessage(
+                                                CFNMessageWithPeerId {
+                                                    peer_id: self.peer_id.clone(),
+                                                    message: CFNMessage::RemoveTlc(RemoveTlc {
+                                                        channel_id: self.get_id(),
+                                                        tlc_id: info.tlc.get_id(),
+                                                        reason: remove_reason,
+                                                    }),
+                                                },
+                                            ),
+                                        ))
+                                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                                    need_resend_commitment_signed = true;
+                                }
+                            }
                         }
                     }
+                    if need_resend_commitment_signed {
+                        debug!("Resend CommitmentSigned message");
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                } else if acutal_local_commitment_number > expected_local_commitment_number {
+                    // wait for remote to resend the RevokeAndAck message, do nothing here
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid remote commitment number: expected {}, actual {}",
+                        expected_local_commitment_number, acutal_local_commitment_number
+                    );
                 }
-                if need_resend_commitment_signed {
+
+                let expected_remote_commitment_number = self.get_remote_commitment_number();
+                let acutal_remote_commitment_number = reestablish_channel.local_commitment_number;
+                if expected_remote_commitment_number == acutal_remote_commitment_number {
+                    // synced with remote, do nothing
+                } else if expected_remote_commitment_number > acutal_remote_commitment_number {
+                    debug!("Resend RevokeAndAck message");
+                    let secret = self
+                        .signer
+                        .get_commitment_secret(acutal_remote_commitment_number);
+                    let point = self.get_local_commitment_point(acutal_remote_commitment_number);
                     network
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
-                                channel_id: self.get_id(),
-                                command: ChannelCommand::CommitmentSigned(),
+                            NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                                peer_id: self.peer_id.clone(),
+                                message: CFNMessage::RevokeAndAck(RevokeAndAck {
+                                    channel_id: self.get_id(),
+                                    per_commitment_secret: secret.into(),
+                                    next_per_commitment_point: point,
+                                }),
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
+                        expected_remote_commitment_number, acutal_remote_commitment_number
+                    );
                 }
             }
             _ => {
