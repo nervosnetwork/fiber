@@ -10,6 +10,7 @@ use crate::ckb::{
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
+use ckb_types::core::FeeRate;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -127,7 +128,7 @@ pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
     #[serde_as(as = "U64Hex")]
-    pub fee: u64,
+    pub fee_rate: u64,
 }
 
 #[rpc(server)]
@@ -327,7 +328,7 @@ where
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
                             close_script: params.close_script.clone().into(),
-                            fee: params.fee,
+                            fee_rate: FeeRate::from_u64(params.fee_rate),
                         },
                         rpc_reply,
                     ),

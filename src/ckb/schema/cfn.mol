@@ -87,7 +87,7 @@ table TxAckRBF {
 
 table Shutdown {
     channel_id: Byte32,
-    fee:        Uint64,
+    fee_rate:        Uint64,
     close_script: Script,
 }
 

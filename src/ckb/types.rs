@@ -4,6 +4,7 @@ use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66, SignatureVec};
 use super::serde_utils::SliceHex;
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
+use ckb_types::core::FeeRate;
 use ckb_types::packed::Uint64;
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
@@ -835,7 +836,7 @@ impl TryFrom<molecule_cfn::TxAckRBF> for TxAckRBF {
 pub struct Shutdown {
     pub channel_id: Hash256,
     pub close_script: Script,
-    pub fee: u64,
+    pub fee_rate: FeeRate,
 }
 
 impl From<Shutdown> for molecule_cfn::Shutdown {
@@ -843,7 +844,7 @@ impl From<Shutdown> for molecule_cfn::Shutdown {
         molecule_cfn::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
-            .fee(shutdown.fee.pack())
+            .fee_rate(shutdown.fee_rate.as_u64().pack())
             .build()
     }
 }
@@ -855,7 +856,7 @@ impl TryFrom<molecule_cfn::Shutdown> for Shutdown {
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
-            fee: shutdown.fee().unpack(),
+            fee_rate: FeeRate::from_u64(shutdown.fee_rate().unpack()),
         })
     }
 }

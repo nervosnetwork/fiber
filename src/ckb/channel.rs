@@ -2,7 +2,7 @@ use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
-    core::{TransactionBuilder, TransactionView},
+    core::{FeeRate, TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
@@ -114,7 +114,7 @@ pub struct RemoveTlcCommand {
 #[derive(Debug)]
 pub struct ShutdownCommand {
     pub close_script: Script,
-    pub fee: u64,
+    pub fee_rate: FeeRate,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -369,7 +369,7 @@ impl<S> ChannelActor<S> {
                     }
                 };
                 state.remote_shutdown_script = Some(shutdown.close_script);
-                state.remote_shutdown_fee = Some(shutdown.fee);
+                state.remote_shutdown_fee_rate = Some(shutdown.fee_rate.as_u64());
 
                 let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
                 state.update_state(ChannelState::ShuttingDown(flags));
@@ -622,7 +622,7 @@ impl<S> ChannelActor<S> {
             }
         };
 
-        state.verify_shutdown_fee(command.fee)?;
+        state.verify_shutdown_fee_rate(command.fee_rate)?;
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -630,13 +630,13 @@ impl<S> ChannelActor<S> {
                     message: CFNMessage::Shutdown(Shutdown {
                         channel_id: state.get_id(),
                         close_script: command.close_script.clone(),
-                        fee: command.fee,
+                        fee_rate: command.fee_rate,
                     }),
                 }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.local_shutdown_script = Some(command.close_script.clone());
-        state.local_shutdown_fee = Some(command.fee);
+        state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
         let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
         state.update_state(ChannelState::ShuttingDown(flags));
         debug!(
@@ -978,6 +978,12 @@ where
                 info!("Trying to open a channel to {:?}", &peer_id);
 
                 let commitment_fee_rate = min_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
+                if commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                        "The commitment fee rate is too low, expect {} >= {}",
+                        commitment_fee_rate, DEFAULT_COMMITMENT_FEE_RATE
+                    ))));
+                }
                 let reserve_ckb_amount = if funding_udt_type_script.is_some() {
                     DEFAULT_UDT_MINIMAL_CKB_AMOUNT
                 } else {
@@ -985,8 +991,8 @@ where
                 };
                 if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "The value of the channel should be greater than the reserve amount: {}",
-                        reserve_ckb_amount
+                        "The foundin amount of the channel should be greater than the reserve amount, expect {} >= {}",
+                        funding_amount, reserve_ckb_amount
                     ))));
                 }
                 let funding_amount = if funding_udt_type_script.is_some() {
@@ -1324,8 +1330,8 @@ pub struct ChannelActorState {
     pub remote_reserve_ckb_amount: u64,
 
     // The commitment fee rate is used to calculate the fee for the commitment transactions.
-    // this fee rate is only paid by the initiator of the channel, so we can use `is_acceptor`
-    // field to determine who should pay the fee.
+    // The side who starting a shutdown command need to pay at least this fee for building shutdown transaction,
+    // the other side may choose to pay less fee rate if the current fee is enough.
     pub commitment_fee_rate: u64,
 
     // Signer is used to sign the commitment transactions.
@@ -1364,13 +1370,13 @@ pub struct ChannelActorState {
     pub remote_commitment_points: Vec<Pubkey>,
     pub remote_channel_parameters: Option<ChannelParametersOneParty>,
     pub local_shutdown_signature: Option<PartialSignature>,
-    pub local_shutdown_fee: Option<u64>,
+    pub local_shutdown_fee_rate: Option<u64>,
+    pub remote_shutdown_fee_rate: Option<u64>,
     pub remote_shutdown_signature: Option<PartialSignature>,
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
     pub total_amount: u128,
-    pub remote_shutdown_fee: Option<u64>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1595,9 +1601,9 @@ impl ChannelActorState {
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
             local_shutdown_signature: None,
-            local_shutdown_fee: None,
+            local_shutdown_fee_rate: None,
             remote_shutdown_signature: None,
-            remote_shutdown_fee: None,
+            remote_shutdown_fee_rate: None,
             local_reserve_ckb_amount,
             remote_reserve_ckb_amount,
 
@@ -1641,9 +1647,9 @@ impl ChannelActorState {
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
             local_shutdown_script: None,
-            local_shutdown_fee: None,
+            local_shutdown_fee_rate: None,
             remote_shutdown_script: None,
-            remote_shutdown_fee: None,
+            remote_shutdown_fee_rate: None,
             local_shutdown_signature: None,
             remote_shutdown_signature: None,
             local_reserve_ckb_amount,
@@ -2288,33 +2294,31 @@ impl ChannelActorState {
         &self.get_remote_channel_parameters().pubkeys.funding_pubkey
     }
 
-    pub fn verify_shutdown_fee(&self, fee: u64) -> ProcessingChannelResult {
+    fn verify_shutdown_fee_rate(&self, fee_rate: FeeRate) -> ProcessingChannelResult {
+        if fee_rate.as_u64() < self.commitment_fee_rate {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Fee rate {} is less than commitment fee rate {}",
+                fee_rate, self.commitment_fee_rate
+            )));
+        }
+
+        let (shutdown_tx, _) = self.build_shutdown_tx(false).expect("Valid shutdown tx");
+        let tx_size = shutdown_tx.data().serialized_size_in_block() as u64;
+        let fee = fee_rate.fee(tx_size).as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_local_amount as u64 - MIN_OCCUPIED_CAPACITY
+            self.to_local_amount as u64 + self.local_reserve_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
             self.local_reserve_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
         };
         debug!(
-            "verify_shutdown_fee local_amount: {} remote_amount: {} min_occupied_capacity: {}",
-            self.to_local_amount, self.to_remote_amount, MIN_OCCUPIED_CAPACITY
+            "verify_shutdown_fee fee: {} available_max_fee: {}",
+            fee, available_max_fee,
         );
         if fee > available_max_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Local balance is not enough to pay the fee, you can pay at most {} as fee",
-                available_max_fee
+                "Local balance is not enough to pay the fee, expect fee {} <= available_max_fee {}",
+                fee, available_max_fee
             )));
-        }
-
-        let (shutdown_tx, _) = self.build_shutdown_tx(false)?;
-        let tx_size = shutdown_tx.data().serialized_size_in_block();
-        let expected_minimal_fee = tx_size as u64 * self.commitment_fee_rate;
-        if let Some(fee) = self.local_shutdown_fee {
-            if fee < expected_minimal_fee {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Shutdown fee is not enough for minimal fee rate, expected fee >= {}",
-                    expected_minimal_fee
-                )));
-            }
         }
         Ok(())
     }
@@ -3178,40 +3182,62 @@ impl ChannelActorState {
         &self,
         apply: bool,
     ) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
-        // Don't use get_local_shutdown_script and get_remote_shutdown_script here
-        // as they will panic if the scripts are not present.
-        // This function may be called in a state where these scripts are not present.
         let (
             local_shutdown_script,
             remote_shutdown_script,
             local_shutdown_fee,
             remote_shutdown_fee,
         ) = if apply {
-            match (
+            // Don't use get_local_shutdown_script and get_remote_shutdown_script here
+            // as they will panic if the scripts are not present.
+            // This function may be called in a state where these scripts are not present.
+            let (
+                local_shutdown_script,
+                remote_shutdown_script,
+                local_shutdown_fee_rate,
+                remote_shutdown_fee_rate,
+            ) = match (
                 self.local_shutdown_script.clone(),
                 self.remote_shutdown_script.clone(),
-                self.local_shutdown_fee,
-                self.remote_shutdown_fee,
+                self.local_shutdown_fee_rate,
+                self.remote_shutdown_fee_rate,
             ) {
                 (
                     Some(local_shutdown_script),
                     Some(remote_shutdown_script),
-                    Some(local_shutdown_fee),
-                    Some(remote_shutdown_fee),
+                    Some(local_shutdown_fee_rate),
+                    Some(remote_shutdown_fee_rate),
                 ) => (
                     local_shutdown_script,
                     remote_shutdown_script,
-                    local_shutdown_fee,
-                    remote_shutdown_fee,
+                    local_shutdown_fee_rate,
+                    remote_shutdown_fee_rate,
                 ),
                 _ => {
                     return Err(ProcessingChannelError::InvalidState(format!(
-                    "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee {:?}, remote_shutdown_fee {:?}",
+                    "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee_rate {:?}, remote_shutdown_fee_rate {:?}",
                     &self.local_shutdown_script, &self.remote_shutdown_script,
-                    &self.local_shutdown_fee, &self.remote_shutdown_fee
+                    &self.local_shutdown_fee_rate, &self.remote_shutdown_fee_rate
                 )));
                 }
-            }
+            };
+
+            let tx_size = self
+                .build_shutdown_tx(false)
+                .expect("build shutdown tx failed")
+                .0
+                .data()
+                .serialized_size_in_block() as u64;
+            (
+                local_shutdown_script,
+                remote_shutdown_script,
+                FeeRate::from_u64(local_shutdown_fee_rate)
+                    .fee(tx_size)
+                    .as_u64(),
+                FeeRate::from_u64(remote_shutdown_fee_rate)
+                    .fee(tx_size)
+                    .as_u64(),
+            )
         } else {
             let script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
             (script.clone(), script.clone(), 0, 0)
