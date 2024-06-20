@@ -2308,19 +2308,6 @@ impl ChannelActorState {
     }
 }
 
-impl From<&ChannelActorState> for Musig2Context {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2Context {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            local_seckey: value.signer.funding_key,
-            local_secnonce: value.get_local_musig2_secnonce(),
-            remote_pubkey: *value.get_remote_funding_pubkey(),
-            remote_pubnonce: value.get_remote_nonce().clone(),
-        }
-    }
-}
-
 impl From<&ChannelActorState> for Musig2SignContext {
     fn from(value: &ChannelActorState) -> Self {
         Musig2SignContext {
@@ -3573,42 +3560,6 @@ pub fn create_witness_for_funding_cell(
     witness
         .try_into()
         .expect("Witness length should be correct")
-}
-
-pub struct Musig2Context {
-    pub key_agg_ctx: KeyAggContext,
-    pub agg_nonce: AggNonce,
-    pub local_seckey: Privkey,
-    pub local_secnonce: SecNonce,
-    pub remote_pubkey: Pubkey,
-    pub remote_pubnonce: PubNonce,
-}
-
-impl Musig2Context {
-    pub fn split(self) -> (Musig2SignContext, Musig2VerifyContext) {
-        let Musig2Context {
-            key_agg_ctx,
-            agg_nonce,
-            local_seckey,
-            local_secnonce,
-            remote_pubkey,
-            remote_pubnonce,
-        } = self;
-        (
-            Musig2SignContext {
-                key_agg_ctx: key_agg_ctx.clone(),
-                agg_nonce: agg_nonce.clone(),
-                seckey: local_seckey,
-                secnonce: local_secnonce,
-            },
-            Musig2VerifyContext {
-                key_agg_ctx,
-                agg_nonce,
-                pubkey: remote_pubkey,
-                pubnonce: remote_pubnonce,
-            },
-        )
-    }
 }
 
 pub struct Musig2VerifyContext {
