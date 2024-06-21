@@ -3280,7 +3280,11 @@ impl ChannelActorState {
             )
         };
 
+        // for xudt compatibility issue,
+        // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+        let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
         let witnesses: Vec<u8> = [
+            empty_witness_args.to_vec(),
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
@@ -3513,8 +3517,10 @@ pub fn create_witness_for_funding_cell(
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
 
-    let empty_witness = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-    witness.extend_from_slice(&empty_witness);
+    // for xudt compatibility issue,
+    // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+    witness.extend_from_slice(&empty_witness_args);
     for bytes in [
         version.to_le_bytes().as_ref(),
         out_point.as_slice(),
