@@ -139,6 +139,7 @@ pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 #[derive(Debug)]
 pub struct TxUpdateCommand {
     pub transaction: Transaction,
+    pub funding_source_lock_script: Script,
 }
 
 #[derive(Debug)]
@@ -371,7 +372,28 @@ impl<S> ChannelActor<S> {
                 state.remote_shutdown_script = Some(shutdown.close_script);
                 state.remote_shutdown_fee_rate = Some(shutdown.fee_rate.as_u64());
 
-                let flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+                let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
+
+                if state.check_valid_to_auto_accept() {
+                    let funding_source_lock_script =
+                        state.funding_source_lock_script.as_ref().unwrap();
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                                peer_id: self.peer_id.clone(),
+                                message: CFNMessage::Shutdown(Shutdown {
+                                    channel_id: state.get_id(),
+                                    close_script: funding_source_lock_script.clone(),
+                                    fee_rate: FeeRate::from_u64(0),
+                                }),
+                            }),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    state.local_shutdown_script = Some(funding_source_lock_script.clone());
+                    state.local_shutdown_fee_rate = Some(0);
+                    flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+                    debug!("Auto accept shutdown ...");
+                }
                 state.update_state(ChannelState::ShuttingDown(flags));
                 state.maybe_transition_to_shutdown(&self.network)?;
 
@@ -723,6 +745,7 @@ impl<S> ChannelActor<S> {
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 ));
                 state.funding_tx = Some(tx_update.transaction.clone());
+                state.funding_source_lock_script = Some(tx_update.funding_source_lock_script);
                 state.maybe_complete_tx_collaboration(
                     tx_update.transaction.clone(),
                     &self.network,
@@ -1299,6 +1322,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 
+    #[serde_as(as = "Option<EntityHex>")]
+    pub funding_source_lock_script: Option<Script>,
+
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
@@ -1585,6 +1611,7 @@ impl ChannelActorState {
             tlc_ids: Default::default(),
             tlcs: Default::default(),
             local_shutdown_script: None,
+            funding_source_lock_script: None,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_pubkeys,
                 selected_contest_delay: remote_delay,
@@ -1644,6 +1671,7 @@ impl ChannelActorState {
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
+            funding_source_lock_script: None,
             local_shutdown_script: None,
             local_shutdown_fee_rate: None,
             remote_shutdown_script: None,
@@ -2327,6 +2355,25 @@ impl ChannelActorState {
             )));
         }
         Ok(())
+    }
+
+    fn check_valid_to_auto_accept(&self) -> bool {
+        let Some(remote_fee_rate) = self.remote_shutdown_fee_rate else {
+            return false;
+        };
+        if remote_fee_rate < self.commitment_fee_rate {
+            return false;
+        }
+
+        let (shutdown_tx, _) = self.build_shutdown_tx(false).expect("Valid shutdown tx");
+        let tx_size = shutdown_tx.data().serialized_size_in_block() as u64;
+        let fee = FeeRate::from_u64(remote_fee_rate).fee(tx_size).as_u64();
+        let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
+            self.to_remote_amount as u64 + self.remote_reserve_ckb_amount - MIN_OCCUPIED_CAPACITY
+        } else {
+            self.remote_reserve_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+        };
+        return fee <= remote_available_max_fee;
     }
 
     pub fn check_state_for_tlc_update(&self) -> ProcessingChannelResult {

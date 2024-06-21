@@ -1,7 +1,7 @@
 use ckb_sdk::{CkbRpcClient, RpcError};
 use ckb_types::{
     core::TransactionView,
-    packed::{self},
+    packed::{self, Script},
     prelude::*,
 };
 use ractor::{
@@ -35,7 +35,7 @@ pub enum CkbChainMessage {
     Fund(
         FundingTx,
         FundingRequest,
-        RpcReplyPort<Result<FundingTx, FundingError>>,
+        RpcReplyPort<Result<(FundingTx, Script), FundingError>>,
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),

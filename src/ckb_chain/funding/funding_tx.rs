@@ -276,7 +276,7 @@ impl FundingTxBuilder {
         )));
     }
 
-    fn build(self) -> Result<FundingTx, FundingError> {
+    fn build(self) -> Result<(FundingTx, Script), FundingError> {
         // Build ScriptUnlocker
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
@@ -292,8 +292,11 @@ impl FundingTxBuilder {
         let placeholder_witness = packed::WitnessArgs::new_builder()
             .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 65])).pack())
             .build();
-        let balancer =
-            CapacityBalancer::new_simple(sender, placeholder_witness, self.request.local_fee_rate);
+        let balancer = CapacityBalancer::new_simple(
+            sender.clone(),
+            placeholder_witness,
+            self.request.local_fee_rate,
+        );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = {
@@ -318,7 +321,7 @@ impl FundingTxBuilder {
         let tx_builder = tx.as_advanced_builder();
         warn!("final tx_builder: {:?}", tx_builder);
         funding_tx.update_for_self(tx)?;
-        Ok(funding_tx)
+        Ok((funding_tx, sender))
     }
 }
 
@@ -343,7 +346,7 @@ impl FundingTx {
         self,
         request: FundingRequest,
         context: FundingContext,
-    ) -> Result<Self, FundingError> {
+    ) -> Result<(Self, Script), FundingError> {
         let builder = FundingTxBuilder {
             funding_tx: self,
             request,
