@@ -202,7 +202,7 @@ struct UdtInfos {
 
 fn genrate_nodes_config() {
     let nodes_dir = std::env::var("NODES_DIR").expect("env var");
-    let yaml_file_path = format!("{}/config.yml", nodes_dir);
+    let yaml_file_path = format!("{}/deployer/config.yml", nodes_dir);
     let content = std::fs::read_to_string(yaml_file_path).expect("read failed");
     let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
     let mut udt_infos = vec![];
@@ -222,8 +222,11 @@ fn genrate_nodes_config() {
         };
         udt_infos.push(udt_info);
     }
-
-    let header = "# generated from nodes/config.yml, don't edit it manually\n";
+    let header = format!(
+        "{}\n{}\n\n",
+        "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
+        "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh` to regenerate"
+    );
     for i in 1..=3 {
         let mut data = data.clone();
         data["ckb"]["listening_port"] =
