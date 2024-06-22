@@ -14,7 +14,8 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
-use ractor::{call, ActorRef};
+use log::error;
+use ractor::{call, ActorRef, RpcReplyPort};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
@@ -35,7 +36,7 @@ pub struct OpenChannelResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
@@ -48,7 +49,7 @@ pub struct AcceptChannelResult {
 }
 
 // TODO @quake remove this unnecessary struct and rpc after refactoring
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CommitmentSignedParams {
     pub channel_id: Hash256,
 }
@@ -79,7 +80,7 @@ pub struct Channel {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AddTlcParams {
     pub channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
@@ -96,7 +97,7 @@ pub struct AddTlcResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct RemoveTlcParams {
     pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
@@ -105,7 +106,7 @@ pub struct RemoveTlcParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill {
@@ -118,7 +119,7 @@ pub enum RemoveTlcReason {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
@@ -174,6 +175,28 @@ impl<S> ChannelRpcServerImpl<S> {
     }
 }
 
+macro_rules! log_and_error {
+    ($params:expr, $err:expr) => {{
+        error!("channel request params {:?} => error: {:?}", $params, $err);
+        Err(ErrorObjectOwned::owned(
+            CALL_EXECUTION_FAILED_CODE,
+            $err,
+            Some($params),
+        ))
+    }};
+}
+macro_rules! handle_actor_call {
+    ($actor:expr, $message:expr, $params:expr) => {
+        match call!($actor, $message) {
+            Ok(result) => match result {
+                Ok(res) => Ok(res),
+                Err(e) => log_and_error!($params, e),
+            },
+            Err(e) => log_and_error!($params, e.to_string()),
+        }
+    };
+}
+
 #[async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
@@ -196,16 +219,9 @@ where
                 rpc_reply,
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(OpenChannelResult {
-                temporary_channel_id: response.channel_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+        handle_actor_call!(self.actor, message, params).map(|response| OpenChannelResult {
+            temporary_channel_id: response.channel_id,
+        })
     }
 
     async fn accept_channel(
@@ -221,16 +237,10 @@ where
                 rpc_reply,
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(AcceptChannelResult {
-                channel_id: response.new_channel_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+
+        handle_actor_call!(self.actor, message, params).map(|response| AcceptChannelResult {
+            channel_id: response.new_channel_id,
+        })
     }
 
     async fn list_channels(
@@ -262,14 +272,15 @@ where
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::CommitmentSigned(),
-            },
-        ));
-        self.actor.cast(message).unwrap();
-        Ok(())
+        let message = |reply: RpcReplyPort<Result<(), String>>| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: params.channel_id,
+                    command: ChannelCommand::CommitmentSigned(reply),
+                },
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
     }
 
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
@@ -289,16 +300,10 @@ where
                 },
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(AddTlcResult {
-                tlc_id: response.tlc_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e,
-                Some(params),
-            )),
-        }
+
+        handle_actor_call!(self.actor, message, params).map(|response| AddTlcResult {
+            tlc_id: response.tlc_id,
+        })
     }
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
@@ -328,30 +333,27 @@ where
             ))
         };
 
-        match call!(self.actor, message).unwrap() {
-            Ok(_response) => Ok(()),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e,
-                Some(params),
-            )),
-        }
+        handle_actor_call!(self.actor, message, params)
     }
 
     async fn shutdown_channel(
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::Shutdown(ShutdownCommand {
-                    close_script: params.close_script.into(),
-                    fee: params.fee,
-                }),
-            },
-        ));
-        self.actor.cast(message).unwrap();
-        Ok(())
+        let message = |rpc_reply: RpcReplyPort<Result<(), String>>| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: params.channel_id,
+                    command: ChannelCommand::Shutdown(
+                        ShutdownCommand {
+                            close_script: params.clone().close_script.into(),
+                            fee: params.fee,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
     }
 }
