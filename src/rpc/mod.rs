@@ -3,6 +3,7 @@ mod channel;
 mod config;
 mod invoice;
 mod peer;
+mod utils;
 
 use crate::{
     cch::CchCommand,
