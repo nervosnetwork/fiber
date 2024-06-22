@@ -1416,7 +1416,7 @@ pub type ProcessingChannelResult = Result<(), ProcessingChannelError>;
 
 #[derive(Error, Debug)]
 pub enum ProcessingChannelError {
-    #[error("Invalid state: ")]
+    #[error("Invalid state: {0}")]
     InvalidState(String),
     #[error("Repeated processing message: {0}")]
     RepeatedProcessing(String),

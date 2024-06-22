@@ -8,6 +8,7 @@ use crate::ckb::{
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
+use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::core::FeeRate;
 use jsonrpsee::{
@@ -15,6 +16,7 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
+use log::error;
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -38,7 +40,7 @@ pub struct OpenChannelResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
@@ -51,7 +53,7 @@ pub struct AcceptChannelResult {
 }
 
 // TODO @quake remove this unnecessary struct and rpc after refactoring
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CommitmentSignedParams {
     pub channel_id: Hash256,
 }
@@ -82,7 +84,7 @@ pub struct Channel {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct AddTlcParams {
     pub channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
@@ -99,7 +101,7 @@ pub struct AddTlcResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct RemoveTlcParams {
     pub channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
@@ -108,7 +110,7 @@ pub struct RemoveTlcParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill {
@@ -121,7 +123,7 @@ pub enum RemoveTlcReason {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
@@ -200,16 +202,9 @@ where
                 rpc_reply,
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(OpenChannelResult {
-                temporary_channel_id: response.channel_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+        handle_actor_call!(self.actor, message, params).map(|response| OpenChannelResult {
+            temporary_channel_id: response.channel_id,
+        })
     }
 
     async fn accept_channel(
@@ -225,16 +220,10 @@ where
                 rpc_reply,
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(AcceptChannelResult {
-                channel_id: response.new_channel_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e.to_string(),
-                Some(params),
-            )),
-        }
+
+        handle_actor_call!(self.actor, message, params).map(|response| AcceptChannelResult {
+            channel_id: response.new_channel_id,
+        })
     }
 
     async fn list_channels(
@@ -272,8 +261,7 @@ where
                 command: ChannelCommand::CommitmentSigned(),
             },
         ));
-        self.actor.cast(message).unwrap();
-        Ok(())
+        handle_actor_cast!(self.actor, message, params)
     }
 
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
@@ -293,16 +281,10 @@ where
                 },
             ))
         };
-        match call!(self.actor, message).unwrap() {
-            Ok(response) => Ok(AddTlcResult {
-                tlc_id: response.tlc_id,
-            }),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e,
-                Some(params),
-            )),
-        }
+
+        handle_actor_call!(self.actor, message, params).map(|response| AddTlcResult {
+            tlc_id: response.tlc_id,
+        })
     }
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
@@ -332,14 +314,7 @@ where
             ))
         };
 
-        match call!(self.actor, message).unwrap() {
-            Ok(_response) => Ok(()),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e,
-                Some(params),
-            )),
-        }
+        handle_actor_call!(self.actor, message, params)
     }
 
     async fn shutdown_channel(
@@ -360,14 +335,6 @@ where
                 },
             ))
         };
-
-        match call!(self.actor, message).unwrap() {
-            Ok(_response) => Ok(()),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                CALL_EXECUTION_FAILED_CODE,
-                e,
-                Some(params),
-            )),
-        }
+        handle_actor_call!(self.actor, message, params)
     }
 }
