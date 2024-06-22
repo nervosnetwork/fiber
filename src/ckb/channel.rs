@@ -3326,10 +3326,11 @@ impl ChannelActorState {
 
             let outputs = self.order_things_for_musig2(local_output, remote_output);
             let outputs_data = self.order_things_for_musig2(local_output_data, remote_output_data);
-            let tx_builder = tx_builder
+            let tx = tx_builder
                 .set_outputs(outputs.to_vec())
-                .set_outputs_data(outputs_data.to_vec());
-            let tx = tx_builder.build();
+                .set_outputs_data(outputs_data.to_vec())
+                .set_witnesses(vec![[0; 140].pack()]) // we need to add a dummy witness for calculating shutdown tx size
+                .build();
             let message = get_funding_cell_message_to_sign(
                 u64::MAX,
                 self.get_funding_transaction_outpoint(),
@@ -3363,10 +3364,11 @@ impl ChannelActorState {
                 .lock(remote_shutdown_script)
                 .build();
             let outputs = self.order_things_for_musig2(local_output, remote_output);
-            let tx_builder = tx_builder.set_outputs(outputs.to_vec());
-            let tx_builder =
-                tx_builder.set_outputs_data(vec![Default::default(), Default::default()]);
-            let tx = tx_builder.build();
+            let tx = tx_builder
+                .set_outputs(outputs.to_vec())
+                .set_outputs_data(vec![Default::default(), Default::default()])
+                .set_witnesses(vec![[0; 140].pack()]) // we need to add a dummy witness for calculating shutdown tx size
+                .build();
             let message = get_funding_cell_message_to_sign(
                 u64::MAX,
                 self.get_funding_transaction_outpoint(),
