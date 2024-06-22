@@ -8,6 +8,7 @@ use crate::ckb::{
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
+use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::{
     core::async_trait,
@@ -15,7 +16,7 @@ use jsonrpsee::{
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
 use log::error;
-use ractor::{call, ActorRef, RpcReplyPort};
+use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
@@ -175,28 +176,6 @@ impl<S> ChannelRpcServerImpl<S> {
     }
 }
 
-macro_rules! log_and_error {
-    ($params:expr, $err:expr) => {{
-        error!("channel request params {:?} => error: {:?}", $params, $err);
-        Err(ErrorObjectOwned::owned(
-            CALL_EXECUTION_FAILED_CODE,
-            $err,
-            Some($params),
-        ))
-    }};
-}
-macro_rules! handle_actor_call {
-    ($actor:expr, $message:expr, $params:expr) => {
-        match call!($actor, $message) {
-            Ok(result) => match result {
-                Ok(res) => Ok(res),
-                Err(e) => log_and_error!($params, e),
-            },
-            Err(e) => log_and_error!($params, e.to_string()),
-        }
-    };
-}
-
 #[async_trait]
 impl<S> ChannelRpcServer for ChannelRpcServerImpl<S>
 where
@@ -272,15 +251,13 @@ where
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = |reply: RpcReplyPort<Result<(), String>>| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
-                ChannelCommandWithId {
-                    channel_id: params.channel_id,
-                    command: ChannelCommand::CommitmentSigned(reply),
-                },
-            ))
-        };
-        handle_actor_call!(self.actor, message, params)
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+            ChannelCommandWithId {
+                channel_id: params.channel_id,
+                command: ChannelCommand::CommitmentSigned(),
+            },
+        ));
+        handle_actor_cast!(self.actor, message, params)
     }
 
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
@@ -340,7 +317,7 @@ where
         &self,
         params: ShutdownChannelParams,
     ) -> Result<(), ErrorObjectOwned> {
-        let message = |rpc_reply: RpcReplyPort<Result<(), String>>| -> NetworkActorMessage {
+        let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: params.channel_id,

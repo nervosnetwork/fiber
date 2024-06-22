@@ -81,7 +81,7 @@ pub enum ChannelCommand {
     TxCollaborationCommand(TxCollaborationCommand),
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
-    CommitmentSigned(RpcReplyPort<Result<(), String>>),
+    CommitmentSigned(),
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
@@ -748,18 +748,7 @@ impl<S> ChannelActor<S> {
             ChannelCommand::TxCollaborationCommand(tx_collaboration_command) => {
                 self.handle_tx_collaboration_command(state, tx_collaboration_command)
             }
-            ChannelCommand::CommitmentSigned(reply) => {
-                match self.handle_commitment_signed_command(state) {
-                    Ok(_) => {
-                        let _ = reply.send(Ok(()));
-                        Ok(())
-                    }
-                    Err(err) => {
-                        let _ = reply.send(Err(err.to_string()));
-                        Err(err)
-                    }
-                }
-            }
+            ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
