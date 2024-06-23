@@ -35,8 +35,8 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
