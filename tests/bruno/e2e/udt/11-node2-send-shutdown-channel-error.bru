@@ -1,7 +1,7 @@
 meta {
-  name: Node2 send shutdown channel1, error shutdowno
+  name: Node2 send shutdown channel1, will report error for closed channel
   type: http
-  seq: 10
+  seq: 11
 }
 
 post {
@@ -40,6 +40,10 @@ assert {
 }
 
 script:post-response {
-  // Channel is already shutdown in previous step, will return proper error
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  // will get error message since channel is closed in previous step
   await new Promise(r => setTimeout(r, 100));
+  if (!(res.body.error.message === "Messaging failed because channel is closed")) {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }
