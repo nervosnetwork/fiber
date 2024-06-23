@@ -30,7 +30,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use crate::{
     ckb::types::Shutdown,
     ckb_chain::{
-        contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract},
+        contracts::{get_cell_deps, get_script_by_contract, Contract},
         FundingRequest, FundingUdtInfo,
     },
     NetworkServiceEvent,
@@ -52,7 +52,7 @@ use super::{
 // - `funding_out_point`: 36 bytes, out point of the funding transaction
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
-const FUNDING_CELL_WITNESS_LEN: usize = 8 + 36 + 32 + 64;
+const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
 // Some part of the code liberally gets previous commitment number, which is
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
@@ -3106,12 +3106,7 @@ impl ChannelActorState {
             }
         };
 
-        let mut contracts = vec![Contract::FundingLock];
-        if self.funding_udt_type_script.is_some() {
-            // TODO(yukang): we need to find corresponding dep cells for UDT
-            contracts.push(Contract::SimpleUDT);
-        }
-        let cell_deps = get_cell_deps_by_contracts(contracts);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
                 .previous_output(self.get_funding_transaction_outpoint())
@@ -3219,19 +3214,14 @@ impl ChannelActorState {
             if local { "local" } else { "remote" }, version,
             self.get_local_commitment_number(), self.get_remote_commitment_number()
         );
+
         let funding_out_point = self.get_funding_transaction_outpoint();
-        let mut contracts = vec![Contract::FundingLock];
-        if self.funding_udt_type_script.is_some() {
-            // TODO(yukang): we need to find corresponding dep cells for UDT
-            contracts.push(Contract::SimpleUDT);
-        }
-        let tx_builder = TransactionBuilder::default()
-            .cell_deps(get_cell_deps_by_contracts(contracts))
-            .input(
-                CellInput::new_builder()
-                    .previous_output(funding_out_point.clone())
-                    .build(),
-            );
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+        let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
+            CellInput::new_builder()
+                .previous_output(funding_out_point.clone())
+                .build(),
+        );
 
         let (outputs, outputs_data, witnesses) =
             self.build_commitment_transaction_parameters(local);
@@ -3311,7 +3301,11 @@ impl ChannelActorState {
             )
         };
 
+        // for xudt compatibility issue,
+        // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+        let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
         let witnesses: Vec<u8> = [
+            empty_witness_args.to_vec(),
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
@@ -3543,6 +3537,11 @@ pub fn create_witness_for_funding_cell(
     version: u64,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
+
+    // for xudt compatibility issue,
+    // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+    let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+    witness.extend_from_slice(&empty_witness_args);
     for bytes in [
         version.to_le_bytes().as_ref(),
         out_point.as_slice(),

@@ -1,5 +1,4 @@
-use std::{fs, path::PathBuf};
-
+use crate::Result;
 use ckb_sdk::NetworkType;
 use clap::ValueEnum;
 use clap_serde_derive::{
@@ -7,8 +6,7 @@ use clap_serde_derive::{
     ClapSerde,
 };
 use serde::Deserialize;
-
-use crate::Result;
+use std::{fs, path::PathBuf};
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
@@ -66,6 +64,31 @@ pub struct CkbConfig {
 }
 
 impl CkbConfig {
+    pub fn base_dir(&self) -> &PathBuf {
+        self.base_dir.as_ref().expect("have set base dir")
+    }
+
+    pub fn create_base_dir(&self) -> Result<()> {
+        if !self.base_dir().exists() {
+            fs::create_dir_all(self.base_dir()).map_err(Into::into)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+        self.create_base_dir()?;
+        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
+    }
+
+    pub fn store_path(&self) -> PathBuf {
+        let path = self.base_dir().join("store");
+        if !path.exists() {
+            fs::create_dir_all(&path).expect("create store directory");
+        }
+        path
+    }
+
     pub fn open_channel_min_ckb_funding_amount(&self) -> u128 {
         self.open_channel_min_ckb_funding_amount
             .unwrap_or(16100000000)
@@ -97,32 +120,5 @@ impl From<CkbNetwork> for Option<NetworkType> {
             CkbNetwork::Staging => Some(NetworkType::Staging),
             CkbNetwork::Dev => Some(NetworkType::Dev),
         }
-    }
-}
-
-impl CkbConfig {
-    pub fn base_dir(&self) -> &PathBuf {
-        self.base_dir.as_ref().expect("have set base dir")
-    }
-
-    pub fn create_base_dir(&self) -> Result<()> {
-        if !self.base_dir().exists() {
-            fs::create_dir_all(self.base_dir()).map_err(Into::into)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
-        self.create_base_dir()?;
-        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
-    }
-
-    pub fn store_path(&self) -> PathBuf {
-        let path = self.base_dir().join("store");
-        if !path.exists() {
-            fs::create_dir_all(&path).expect("create store directory");
-        }
-        path
     }
 }

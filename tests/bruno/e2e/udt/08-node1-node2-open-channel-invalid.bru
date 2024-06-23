@@ -1,7 +1,7 @@
 meta {
-  name: Node1 open a channel to Node2
+  name: Node1 open a invalid channel to Node3
   type: http
-  seq: 2
+  seq: 8
 }
 
 post {
@@ -26,7 +26,7 @@ body:json {
         "peer_id": "{{NODE2_PEERID}}",
           "funding_amount": "0x4b0",
           "funding_udt_type_script": {
-            "code_hash": "{{UDT_CODE_HASH}}",
+            "code_hash": "0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df410",
             "hash_type": "data1",
             "args": "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
           }
@@ -36,13 +36,11 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result.temporary_channel_id: isDefined
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
+  console.log("Node1 open a invalid channel to Node3:", res.body);
   await new Promise(r => setTimeout(r, 1000));
-  console.log("N1N2 response: ", res.body);
-  console.log("N1N2 response: ", res.body.result.temporary_channel_id);
-  bru.setVar("N1N2_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
 }
