@@ -1,7 +1,7 @@
 meta {
-  name: remove tlc from NODE2
+  name: get channel list from node2
   type: http
-  seq: 7
+  seq: 3
 }
 
 post {
@@ -19,14 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "list_channels",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "tlc_id": "{{N1N2_TLC_ID1}}",
-        "reason": {
-          "payment_preimage": "{{payment_preimage}}"
-        }
+        "peer_id": "{{NODE1_PEERID}}"
       }
     ]
   }
@@ -34,10 +30,14 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.result.channels: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 2000));
+  console.log("accept channel result: ", res.body);
+  if (res.body.result.channels.length != 0) {
+    throw new Error("Assertion failed: expect there is no channel");
+  }
 }
