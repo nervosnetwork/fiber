@@ -51,7 +51,7 @@ pub struct CkbChainConfig {
         value_parser,
         help = "a list of supported UDT scripts"
     )]
-    udt_whitelist: Option<UdtInfos>,
+    udt_whitelist: Option<UdtArgInfos>,
 }
 
 impl CkbChainConfig {
@@ -106,21 +106,14 @@ impl CkbChainConfig {
     }
 
     pub fn udt_whitelist(&self) -> Vec<UdtScriptInfo> {
-        let mut udt_whitelist: Vec<UdtScriptInfo> = vec![];
-        if let Some(udt_infos) = &self.udt_whitelist {
-            for udt_info in udt_infos.0.iter() {
-                let cell_deps: Vec<CellDep> = udt_info
-                    .cell_deps
-                    .iter()
-                    .map(|dep| CellDep::from(dep))
-                    .collect();
-                let cell_deps = CellDepVec::new_builder().set(cell_deps).build();
-                let script: Script = (&udt_info.script).into();
-                let arg_pattern = udt_info.script.args.clone();
-                udt_whitelist.push((udt_info.name.clone(), script, arg_pattern, cell_deps));
-            }
-        }
-        return udt_whitelist;
+        let udt_infos: Vec<UdtScriptInfo> = self
+            .udt_whitelist
+            .iter()
+            .map(|arg_info| arg_info.0.iter().map(|u| u.into()))
+            .flatten()
+            .collect();
+
+        return udt_infos;
     }
 }
 
@@ -147,19 +140,20 @@ struct UdtCellDep {
     index: u32,
 }
 
+/// This is only used fro configuration file parsing
+/// it will converted into UdtScriptInfo
 #[derive(Deserialize, Clone, Debug)]
-struct UdtInfo {
+struct UdtArgInfo {
     name: String,
     script: UdtScript,
+    auto_accept_amount: Option<u128>,
     cell_deps: Vec<UdtCellDep>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-struct UdtInfos(Vec<UdtInfo>);
+struct UdtArgInfos(Vec<UdtArgInfo>);
 
-pub type UdtScriptInfo = (String, Script, String, CellDepVec);
-
-impl FromStr for UdtInfos {
+impl FromStr for UdtArgInfos {
     type Err = serde_json::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
@@ -203,5 +197,34 @@ impl From<&UdtCellDep> for CellDep {
                     .build(),
             )
             .build()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UdtScriptInfo {
+    pub name: String,
+    pub script: Script,
+    pub arg_pattern: String,
+    pub auto_accept_amount: Option<u128>,
+    pub cell_deps: CellDepVec,
+}
+
+impl From<&UdtArgInfo> for UdtScriptInfo {
+    fn from(arg_info: &UdtArgInfo) -> Self {
+        let cell_deps: Vec<CellDep> = arg_info
+            .cell_deps
+            .iter()
+            .map(|dep| CellDep::from(dep))
+            .collect();
+        let cell_deps = CellDepVec::new_builder().set(cell_deps).build();
+        let script: Script = (&arg_info.script).into();
+        let arg_pattern = arg_info.script.args.clone();
+        UdtScriptInfo {
+            name: arg_info.name.clone(),
+            auto_accept_amount: arg_info.auto_accept_amount,
+            script,
+            arg_pattern,
+            cell_deps,
+        }
     }
 }

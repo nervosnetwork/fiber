@@ -447,15 +447,15 @@ impl ContractsContext {
             .build()
     }
 
-    pub(crate) fn get_udt_cell_deps(&self, udt_script: &Script) -> Option<CellDepVec> {
-        for (_name, script, arg_pattern, cell_deps) in self.get_udt_whitelist().iter() {
-            if script.code_hash() == udt_script.code_hash()
-                && script.hash_type() == udt_script.hash_type()
+    pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtScriptInfo> {
+        for udt in self.get_udt_whitelist().iter() {
+            if udt.script.code_hash() == udt_script.code_hash()
+                && udt.script.hash_type() == udt_script.hash_type()
             {
                 let args = format!("0x{:x}", udt_script.args().raw_data());
-                let pattern = Regex::new(arg_pattern).expect("invalid expressio");
+                let pattern = Regex::new(&udt.arg_pattern).expect("invalid expressio");
                 if pattern.is_match(&args) {
-                    return Some(cell_deps.clone());
+                    return Some(udt);
                 }
             }
         }
@@ -490,14 +490,25 @@ pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
     init_contracts_context(None, None).get_cell_deps(contracts)
 }
 
+fn get_udt_info(script: &Script) -> Option<&UdtScriptInfo> {
+    init_contracts_context(None, None).get_udt_info(script)
+}
+
 pub fn check_udt_script(script: &Script) -> bool {
-    init_contracts_context(None, None)
-        .get_udt_cell_deps(script)
-        .is_some()
+    get_udt_info(script).is_some()
 }
 
 pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
-    init_contracts_context(None, None).get_udt_cell_deps(script)
+    get_udt_info(script).map(|udt| udt.cell_deps.clone())
+}
+
+pub fn is_udt_type_auto_accept(script: &Script, amount: u128) -> bool {
+    if let Some(udt_info) = get_udt_info(script) {
+        if let Some(auto_accept_amount) = udt_info.auto_accept_amount {
+            return amount >= auto_accept_amount;
+        }
+    }
+    false
 }
 
 pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> CellDepVec {

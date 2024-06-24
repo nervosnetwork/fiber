@@ -46,7 +46,7 @@ use super::{
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
-use crate::ckb_chain::contracts::check_udt_script;
+use crate::ckb_chain::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error};
 
@@ -290,12 +290,16 @@ where
                     .await
                 {
                     Ok(()) => {
-                        if (state.auto_accept_channel_ckb_funding_amount > 0
-                            && open_channel.all_ckb_amount()
-                                >= state.open_channel_auto_accept_min_ckb_funding_amount)
-                            || open_channel.funding_udt_type_script.is_some()
-                        // TODO: UDT auto accept?
+                        let auto_accept = if let Some(udt_type_script) =
+                            open_channel.funding_udt_type_script
                         {
+                            is_udt_type_auto_accept(&udt_type_script, open_channel.funding_amount)
+                        } else {
+                            state.auto_accept_channel_ckb_funding_amount > 0
+                                && open_channel.all_ckb_amount()
+                                    >= state.open_channel_auto_accept_min_ckb_funding_amount
+                        };
+                        if auto_accept {
                             let open_channel = AcceptChannelCommand {
                                 temp_channel_id,
                                 funding_amount: state.auto_accept_channel_ckb_funding_amount

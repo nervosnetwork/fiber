@@ -192,6 +192,7 @@ struct UdtCellDep {
 struct UdtInfo {
     name: String,
     script: UdtScript,
+    auto_accept_amount: Option<u128>,
     cell_deps: Vec<UdtCellDep>,
 }
 
@@ -209,6 +210,7 @@ fn genrate_nodes_config() {
     for udt in UDT_KINDS {
         let udt_info = UdtInfo {
             name: udt.to_string(),
+            auto_accept_amount: Some(0),
             script: UdtScript {
                 code_hash: get_code_hash(udt),
                 hash_type: "Data1".to_string(),
