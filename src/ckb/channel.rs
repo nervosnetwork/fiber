@@ -94,7 +94,7 @@ pub enum ChannelCommand {
 #[derive(Debug)]
 pub enum TxCollaborationCommand {
     TxUpdate(TxUpdateCommand),
-    TxComplete(TxCompleteCommand),
+    TxComplete(),
 }
 
 #[derive(Debug)]
@@ -141,32 +141,33 @@ pub struct TxUpdateCommand {
     pub transaction: Transaction,
 }
 
-#[derive(Debug)]
-pub struct TxCompleteCommand {}
+pub struct OpenChannelParameter {
+    pub funding_amount: u128,
+    pub seed: [u8; 32],
+    pub funding_udt_type_script: Option<Script>,
+    pub channel_id_sender: oneshot::Sender<Hash256>,
+    pub commitment_fee_rate: Option<u64>,
+    pub funding_fee_rate: Option<u64>,
+}
+
+pub struct AcceptChannelParameter {
+    pub funding_amount: u128,
+    pub reserve_ckb_amount: u64,
+    pub seed: [u8; 32],
+    pub open_channel: OpenChannel,
+    pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
+}
 
 pub enum ChannelInitializationParameter {
     /// To open a new channel to another peer, the funding amount,
     /// the temporary channel id a unique channel seed to generate
     /// channel secrets must be given.
-    OpenChannel(
-        u128,
-        [u8; 32],
-        Option<Script>,
-        oneshot::Sender<Hash256>,
-        Option<u64>,
-        Option<u64>,
-    ),
+    OpenChannel(OpenChannelParameter),
     /// To accept a new channel from another peer, the funding amount,
     /// a unique channel seed to generate unique channel id,
     /// original OpenChannel message and an oneshot
     /// channel to receive the new channel ID must be given.
-    AcceptChannel(
-        u128,
-        u64,
-        [u8; 32],
-        OpenChannel,
-        Option<oneshot::Sender<Hash256>>,
-    ),
+    AcceptChannel(AcceptChannelParameter),
     /// Reestablish a channel with given channel id.
     ReestablishChannel(Hash256),
 }
@@ -657,7 +658,7 @@ impl<S> ChannelActor<S> {
     ) -> Result<(), ProcessingChannelError> {
         debug!("Handling tx collaboration command: {:?}", &command);
         let is_complete_command = match command {
-            TxCollaborationCommand::TxComplete(_) => true,
+            TxCollaborationCommand::TxComplete() => true,
             _ => false,
         };
         let is_waiting_for_remote = match state.state {
@@ -730,7 +731,7 @@ impl<S> ChannelActor<S> {
                     &self.network,
                 )?;
             }
-            TxCollaborationCommand::TxComplete(_) => {
+            TxCollaborationCommand::TxComplete() => {
                 state.check_tx_complete_preconditions()?;
                 let cfn_msg = CFNMessage::TxComplete(TxComplete {
                     channel_id: state.get_id(),
@@ -863,13 +864,13 @@ where
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
         match args {
-            ChannelInitializationParameter::AcceptChannel(
-                my_funding_amount,
-                my_reserve_ckb_amount,
+            ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
+                funding_amount: my_funding_amount,
+                reserve_ckb_amount: my_reserve_ckb_amount,
                 seed,
                 open_channel,
-                oneshot_channel,
-            ) => {
+                channel_id_sender,
+            }) => {
                 let peer_id = self.peer_id.clone();
                 debug!(
                     "Accepting channel {:?} to peer {:?}",
@@ -964,19 +965,19 @@ where
                 state.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::INIT_SENT,
                 ));
-                if let Some(sender) = oneshot_channel {
+                if let Some(sender) = channel_id_sender {
                     sender.send(state.get_id()).expect("Receive not dropped");
                 }
                 Ok(state)
             }
-            ChannelInitializationParameter::OpenChannel(
+            ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
                 funding_udt_type_script,
-                tx,
+                channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
-            ) => {
+            }) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
@@ -995,7 +996,7 @@ where
                 };
                 if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "The foundin amount of the channel should be greater than the reserve amount, expect {} >= {}",
+                        "The funding amount should be greater than the reserved amount, expect {} >= {}",
                         funding_amount, reserve_ckb_amount
                     ))));
                 }
@@ -1097,7 +1098,9 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                tx.send(channel.get_id()).expect("Receive not dropped");
+                channel_id_sender
+                    .send(channel.get_id())
+                    .expect("Receive not dropped");
                 Ok(channel)
             }
             ChannelInitializationParameter::ReestablishChannel(channel_id) => {

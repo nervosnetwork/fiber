@@ -32,8 +32,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
-    ProcessingChannelError, ProcessingChannelResult,
+    AcceptChannelParameter, ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId,
+    ChannelEvent, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -795,14 +795,14 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::OpenChannel(
+            ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
                 funding_udt_type_script,
-                tx,
+                channel_id_sender: tx,
                 commitment_fee_rate,
                 funding_fee_rate,
-            ),
+            }),
             network.clone().get_cell(),
         )
         .await?
@@ -859,13 +859,13 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::AcceptChannel(
+            ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserve_ckb_amount,
                 seed,
                 open_channel,
-                Some(tx),
-            ),
+                channel_id_sender: Some(tx),
+            }),
             network.clone().get_cell(),
         )
         .await?
