@@ -4,7 +4,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack, PackVec},
 };
 use log::debug;
-
+use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 
 use crate::ckb::{config::CkbNetwork, types::Hash256};
@@ -16,6 +16,8 @@ use ckb_types::bytes::Bytes;
 use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
 #[cfg(test)]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use super::config::UdtScriptInfo;
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -97,6 +99,7 @@ impl MockContext {
             contracts_context: Arc::new(ContractsInfo {
                 contract_default_scripts: map,
                 script_cell_deps,
+                udt_whitelist: vec![],
             }),
         };
         debug!("Created mock context to test transactions.");
@@ -126,6 +129,7 @@ pub enum Contract {
 struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
     script_cell_deps: HashMap<Contract, CellDepVec>,
+    udt_whitelist: Vec<UdtScriptInfo>,
 }
 
 #[derive(Clone)]
@@ -214,7 +218,7 @@ impl From<MockContext> for ContractsContext {
 }
 
 impl ContractsContext {
-    pub fn new(network: CkbNetwork) -> Self {
+    pub fn new(network: CkbNetwork, udt_whitelist: Vec<UdtScriptInfo>) -> Self {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
@@ -306,6 +310,7 @@ impl ContractsContext {
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     script_cell_deps,
+                    udt_whitelist,
                 }))
             }
             CkbNetwork::Testnet => {
@@ -379,6 +384,7 @@ impl ContractsContext {
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
                     script_cell_deps,
+                    udt_whitelist,
                 }))
             }
             _ => panic!("Unsupported network type {:?}", network),
@@ -392,6 +398,7 @@ impl ContractsContext {
             Self::Real(real) => &real.contract_default_scripts,
         }
     }
+
     pub(crate) fn get_cell_deps(&self, contracts: Vec<Contract>) -> CellDepVec {
         let (script_cell_deps, contracts) = match self {
             #[cfg(test)]
@@ -422,6 +429,14 @@ impl ContractsContext {
         res.build()
     }
 
+    fn get_udt_whitelist(&self) -> &Vec<UdtScriptInfo> {
+        match self {
+            #[cfg(test)]
+            Self::Mock(mock) => &mock.contracts_context.udt_whitelist,
+            Self::Real(real) => &real.udt_whitelist,
+        }
+    }
+
     pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
@@ -431,11 +446,34 @@ impl ContractsContext {
             .args(args.pack())
             .build()
     }
+
+    pub(crate) fn get_udt_cell_deps(&self, udt_script: &Script) -> Option<CellDepVec> {
+        for (_name, script, arg_pattern, cell_deps) in self.get_udt_whitelist().iter() {
+            if script.code_hash() == udt_script.code_hash()
+                && script.hash_type() == udt_script.hash_type()
+            {
+                let args = format!("0x{:x}", udt_script.args().raw_data());
+                let pattern = Regex::new(arg_pattern).expect("invalid expressio");
+                if pattern.is_match(&args) {
+                    return Some(cell_deps.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
-pub fn init_contracts_context(network: Option<CkbNetwork>) -> &'static ContractsContext {
+pub fn init_contracts_context(
+    network: Option<CkbNetwork>,
+    udt_whitelist: Option<Vec<UdtScriptInfo>>,
+) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
-    INSTANCE.get_or_init(|| ContractsContext::new(network.unwrap_or(DEFAULT_CONTRACT_NETWORK)));
+    INSTANCE.get_or_init(|| {
+        ContractsContext::new(
+            network.unwrap_or(DEFAULT_CONTRACT_NETWORK),
+            udt_whitelist.unwrap_or(vec![]),
+        )
+    });
     INSTANCE.get().unwrap()
 }
 
@@ -445,11 +483,35 @@ const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Mocknet;
 const DEFAULT_CONTRACT_NETWORK: CkbNetwork = CkbNetwork::Dev;
 
 pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
-    init_contracts_context(None).get_script(contract, args)
+    init_contracts_context(None, None).get_script(contract, args)
 }
 
 pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
-    init_contracts_context(None).get_cell_deps(contracts)
+    init_contracts_context(None, None).get_cell_deps(contracts)
+}
+
+pub fn check_udt_script(script: &Script) -> bool {
+    init_contracts_context(None, None)
+        .get_udt_cell_deps(script)
+        .is_some()
+}
+
+pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
+    init_contracts_context(None, None).get_udt_cell_deps(script)
+}
+
+pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> CellDepVec {
+    let cell_deps = get_cell_deps_by_contracts(contracts);
+    if let Some(udt_script) = udt_script {
+        if let Some(udt_cell_deps) = get_udt_cell_deps(udt_script) {
+            let res = cell_deps
+                .into_iter()
+                .chain(udt_cell_deps.into_iter())
+                .collect::<Vec<CellDep>>();
+            return res.pack();
+        }
+    }
+    cell_deps
 }
 
 #[cfg(test)]

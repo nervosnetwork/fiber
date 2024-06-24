@@ -162,6 +162,7 @@ impl Config {
         } else {
             args.services
         };
+
         if services.is_empty() {
             error!("Must run at least one service. Specifying services to run by command line or config file.");
             print_help_and_exit(1)

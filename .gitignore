@@ -6,3 +6,4 @@
 
 /tests/nodes/*/ckb/store
 /tests/deploy/udt-init/target
+/tests/nodes/*/config.yml

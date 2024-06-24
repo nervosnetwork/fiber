@@ -74,3 +74,4 @@ create_dotenv_for_contract always_success
 create_dotenv_for_contract funding-lock
 create_dotenv_for_contract commitment-lock
 create_dotenv_for_contract simple-udt
+create_dotenv_for_contract xudt

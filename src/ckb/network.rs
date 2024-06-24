@@ -46,6 +46,7 @@ use super::{
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
+use crate::ckb_chain::contracts::check_udt_script;
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error};
 
@@ -782,6 +783,13 @@ impl NetworkActorState {
             commitment_fee_rate,
             funding_fee_rate,
         } = open_channel;
+        if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
+            if !check_udt_script(udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Invalid UDT type script".to_string(),
+                ));
+            }
+        }
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -986,6 +994,15 @@ impl NetworkActorState {
                 "Funding amount too low: {}",
                 open_channel.funding_amount
             )));
+        }
+
+        if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
+            if !check_udt_script(&udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Invalid UDT type script: {:?}",
+                    udt_type_script
+                )));
+            }
         }
 
         let id = open_channel.channel_id;
