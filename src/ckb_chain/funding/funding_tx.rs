@@ -65,7 +65,7 @@ pub struct FundingRequest {
     /// Assets amount to be provided by the local party
     pub local_amount: u64,
     /// Fee to be provided by the local party
-    pub local_fee_rate: u64,
+    pub funding_fee_rate: u64,
     /// Assets amount to be provided by the remote party
     pub remote_amount: u64,
     /// CKB amount to be provided by the local party.
@@ -132,11 +132,17 @@ impl TxBuilder for FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
 
+        // set a placeholder_witness for calculating transaction fee according to transaction size
+        let placeholder_witness = packed::WitnessArgs::new_builder()
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .build();
+
         let tx_builder = builder
             .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
-            .set_cell_deps(cell_deps.into_iter().collect());
+            .set_cell_deps(cell_deps.into_iter().collect())
+            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
         warn!("tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
         Ok(tx)
@@ -290,10 +296,18 @@ impl FundingTxBuilder {
         let sender = self.context.funding_source_lock_script.clone();
         // Build CapacityBalancer
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 65])).pack())
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
-        let balancer =
-            CapacityBalancer::new_simple(sender, placeholder_witness, self.request.local_fee_rate);
+
+        warn!(
+            "request.funding_fee_rate: {}",
+            self.request.funding_fee_rate
+        );
+        let balancer = CapacityBalancer::new_simple(
+            sender,
+            placeholder_witness,
+            self.request.funding_fee_rate,
+        );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = {

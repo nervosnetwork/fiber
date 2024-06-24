@@ -108,7 +108,8 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub funding_udt_type_script: Option<Script>,
-    pub min_fee_rate: Option<u64>,
+    pub commitment_fee_rate: Option<u64>,
+    pub funding_fee_rate: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -177,6 +178,7 @@ pub enum NetworkActorEvent {
         u128,
         Script,
         Option<Script>,
+        u64,
         u64,
         u64,
     ),
@@ -373,6 +375,7 @@ where
                 funding_script,
                 local_reserve_ckb_amount,
                 remote_reserve_ckb_amount,
+                funding_fee_rate,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
@@ -396,7 +399,7 @@ where
                                         script,
                                         udt_type_script: funding_script.clone(),
                                         local_amount: local as u64,
-                                        local_fee_rate: 0,
+                                        funding_fee_rate: funding_fee_rate,
                                         remote_amount: remote as u64,
                                         local_reserve_ckb_amount: local_reserve_ckb_amount as u64,
                                         remote_reserve_ckb_amount: remote_reserve_ckb_amount as u64,
@@ -776,7 +779,8 @@ impl NetworkActorState {
             peer_id,
             funding_amount,
             funding_udt_type_script,
-            min_fee_rate,
+            commitment_fee_rate,
+            funding_fee_rate,
         } = open_channel;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -788,7 +792,8 @@ impl NetworkActorState {
                 seed,
                 funding_udt_type_script,
                 tx,
-                min_fee_rate,
+                commitment_fee_rate,
+                funding_fee_rate,
             ),
             network.clone().get_cell(),
         )

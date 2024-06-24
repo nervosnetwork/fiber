@@ -129,7 +129,7 @@ pub struct ChannelCommandWithId {
     pub command: ChannelCommand,
 }
 
-pub const DEFAULT_FEE_RATE: u64 = 0;
+pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = u64::MAX;
@@ -153,6 +153,7 @@ pub enum ChannelInitializationParameter {
         [u8; 32],
         Option<Script>,
         oneshot::Sender<Hash256>,
+        Option<u64>,
         Option<u64>,
     ),
     /// To accept a new channel from another peer, the funding amount,
@@ -211,6 +212,7 @@ impl<S> ChannelActor<S> {
                             state.funding_udt_type_script.clone(),
                             state.local_reserve_ckb_amount,
                             state.remote_reserve_ckb_amount,
+                            state.funding_fee_rate,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -879,6 +881,7 @@ where
                     channel_id,
                     chain_hash,
                     commitment_fee_rate,
+                    funding_fee_rate,
                     funding_udt_type_script,
                     funding_amount,
                     reserve_ckb_amount,
@@ -901,6 +904,7 @@ where
                     my_funding_amount,
                     my_reserve_ckb_amount,
                     *commitment_fee_rate,
+                    *funding_fee_rate,
                     funding_udt_type_script.clone(),
                     &seed,
                     peer_id.clone(),
@@ -970,12 +974,14 @@ where
                 seed,
                 funding_udt_type_script,
                 tx,
-                min_fee_rate,
+                commitment_fee_rate,
+                funding_fee_rate,
             ) => {
                 let peer_id = self.peer_id.clone();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
-                let commitment_fee_rate = min_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
+                let commitment_fee_rate =
+                    commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
                 if commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
                         "The commitment fee rate is too low, expect {} >= {}",
@@ -1004,6 +1010,7 @@ where
                     funding_amount,
                     reserve_ckb_amount,
                     commitment_fee_rate,
+                    funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE),
                     funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
@@ -1015,7 +1022,7 @@ where
                     funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
                     reserve_ckb_amount: channel.local_reserve_ckb_amount,
-                    funding_fee_rate: DEFAULT_FEE_RATE,
+                    funding_fee_rate: funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE),
                     commitment_fee_rate,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
@@ -1332,6 +1339,10 @@ pub struct ChannelActorState {
     // the other side may choose to pay less fee rate if the current fee is enough.
     pub commitment_fee_rate: u64,
 
+    // The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
+    // if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate
+    pub funding_fee_rate: u64,
+
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
 
@@ -1548,6 +1559,7 @@ impl ChannelActorState {
         local_value: u128,
         local_reserve_ckb_amount: u64,
         commitment_fee_rate: u64,
+        funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         seed: &[u8],
         peer_id: PeerId,
@@ -1581,6 +1593,7 @@ impl ChannelActorState {
             to_local_amount: local_value,
             to_remote_amount: remote_value,
             commitment_fee_rate,
+            funding_fee_rate,
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
@@ -1616,6 +1629,7 @@ impl ChannelActorState {
         value: u128,
         local_reserve_ckb_amount: u64,
         commitment_fee_rate: u64,
+        funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         to_local_delay: LockTime,
     ) -> Self {
@@ -1632,6 +1646,7 @@ impl ChannelActorState {
             to_local_amount: value,
             to_remote_amount: 0,
             commitment_fee_rate,
+            funding_fee_rate,
             id: temp_channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
@@ -2049,12 +2064,12 @@ impl ChannelActorState {
         get_script_by_contract(Contract::FundingLock, args.as_slice())
     }
 
-    pub fn get_funding_request(&self, fee_rate: u64) -> FundingRequest {
+    pub fn get_funding_request(&self) -> FundingRequest {
         FundingRequest {
             script: self.get_funding_lock_script(),
             udt_type_script: self.funding_udt_type_script.clone(),
             local_amount: self.to_local_amount as u64,
-            local_fee_rate: fee_rate,
+            funding_fee_rate: self.funding_fee_rate,
             remote_amount: self.to_remote_amount as u64,
             local_reserve_ckb_amount: self.local_reserve_ckb_amount,
             remote_reserve_ckb_amount: self.remote_reserve_ckb_amount,
@@ -2685,8 +2700,7 @@ impl ChannelActorState {
                             NetworkActorCommand::UpdateChannelFunding(
                                 self.get_id(),
                                 msg.tx.clone(),
-                                // TODO: use fee rate set by the user.
-                                self.get_funding_request(20000),
+                                self.get_funding_request(),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4173,7 +4187,8 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
-                    min_fee_rate: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -4207,7 +4222,8 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
-                    min_fee_rate: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -4257,7 +4273,8 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
-                    min_fee_rate: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
                 },
                 rpc_reply,
             ))
@@ -4374,7 +4391,8 @@ mod tests {
                     peer_id: node_b.peer_id.clone(),
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
-                    min_fee_rate: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
                 },
                 rpc_reply,
             ))
