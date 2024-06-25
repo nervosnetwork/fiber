@@ -537,7 +537,7 @@ impl<S> ChannelActor<S> {
         state: &mut ChannelActorState,
         command: AddTlcCommand,
     ) -> Result<u64, ProcessingChannelError> {
-        warn!("handle add tlc command : {:?}", &command);
+        debug!("handle add tlc command : {:?}", &command);
         state.check_state_for_tlc_update()?;
         let tlc = state.create_outbounding_tlc(command);
         state.insert_tlc(tlc)?;
@@ -852,23 +852,20 @@ impl<S> ChannelActor<S> {
         funding_amount: u128,
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
-        let reserve_ckb_amount = if udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-        if udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserve_ckb_amount
-            )));
+        match udt_type_script {
+            Some(_) => Ok((funding_amount, DEFAULT_UDT_MINIMAL_CKB_AMOUNT)),
+            _ => {
+                let reserve_ckb_amount = DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
+                if funding_amount < reserve_ckb_amount.into() {
+                    return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "The value of the channel should be greater than the reserve amount: {}",
+                        reserve_ckb_amount
+                    )));
+                }
+                let funding_amount = funding_amount - reserve_ckb_amount as u128;
+                Ok((funding_amount, reserve_ckb_amount))
+            }
         }
-        let funding_amount = if udt_type_script.is_some() {
-            funding_amount
-        } else {
-            funding_amount - reserve_ckb_amount as u128
-        };
-        Ok((funding_amount, reserve_ckb_amount))
     }
 }
 
@@ -1934,9 +1931,10 @@ impl ChannelActorState {
             }
         };
         if tlc.amount == 0 {
-            return Err(ProcessingChannelError::InvalidParameter(
-                "Expect the amount of tlc is larger than zero".to_string(),
-            ));
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Expect the amount of tlc with id {:?} is larger than zero",
+                tlc.id
+            )));
         }
         if tlc.is_offered() {
             let sent_tlc_value = self.get_sent_tlc_balance();
