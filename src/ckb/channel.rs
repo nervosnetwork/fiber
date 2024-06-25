@@ -3080,7 +3080,8 @@ impl ChannelActorState {
             ))?;
 
         if first_output.lock() != self.get_funding_lock_script() {
-            error!("Checking if transaction final failed as tx's first output's script is not funding lock: tx: {:?}, first output lock script: {:?}, funding lock script: {:?}", &tx, first_output.lock(), self.get_funding_lock_script());
+            error!("Checking if transaction final failed as tx's first output's script is not funding lock: tx: {:?}, first output lock script: {:?}, funding lock script: {:?}",
+                 &tx, first_output.lock(), self.get_funding_lock_script());
             // TODO: return an error here. We panic because we want to move fast.
             panic!("Invalid funding transation")
         }
@@ -3091,29 +3092,24 @@ impl ChannelActorState {
                     .ok_or(ProcessingChannelError::InvalidParameter(
                         "Funding transaction should have at least one output".to_string(),
                     ))?;
-            if data.as_ref().len() >= 16 {
-                let mut amount_bytes = [0u8; 16];
-                amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
-                let udt_amount = u128::from_le_bytes(amount_bytes);
-                debug!(
-                    "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
-                    udt_amount, self.to_remote_amount, self.to_local_amount
-                );
-                return Ok(udt_amount == self.to_remote_amount + self.to_local_amount);
-            }
+            assert!(data.as_ref().len() >= 16);
+            let mut amount_bytes = [0u8; 16];
+            amount_bytes.copy_from_slice(&data.as_ref()[0..16]);
+            let udt_amount = u128::from_le_bytes(amount_bytes);
             debug!(
-                "is_tx_final: output data length {} is less than 16",
-                data.as_ref().len()
+                "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
+                udt_amount, self.to_remote_amount, self.to_local_amount
             );
-            return Ok(false);
+            return Ok(udt_amount == self.to_remote_amount + self.to_local_amount);
+        } else {
+            let current_capacity: u64 = first_output.capacity().unpack();
+            let is_complete = current_capacity
+                == (self.to_local_amount
+                    + self.to_remote_amount
+                    + self.local_reserved_ckb_amount as u128
+                    + self.remote_reserved_ckb_amount as u128) as u64;
+            Ok(is_complete)
         }
-        let current_capacity: u64 = first_output.capacity().unpack();
-        let is_complete = current_capacity
-            == (self.to_local_amount
-                + self.to_remote_amount
-                + self.local_reserved_ckb_amount as u128
-                + self.remote_reserved_ckb_amount as u128) as u64;
-        Ok(is_complete)
     }
 
     pub fn maybe_complete_tx_collaboration(
