@@ -847,7 +847,7 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
-    fn check_amount_valid(
+    fn get_funding_and_reserved_amount(
         &self,
         funding_amount: u128,
         udt_type_script: &Option<Script>,
@@ -942,6 +942,8 @@ where
                     *second_per_commitment_point,
                 );
 
+                state.check_reserve_amount(my_reserve_ckb_amount, *reserve_ckb_amount)?;
+
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
 
                 let accept_channel = AcceptChannel {
@@ -1014,8 +1016,16 @@ where
                     ))));
                 }
 
+                let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
+                if funding_fee_rate < DEFAULT_FEE_RATE {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
+                        "The funding fee rate is too low, expect {} >= {}",
+                        funding_fee_rate, DEFAULT_FEE_RATE
+                    ))));
+                }
+
                 let (funding_amount, reserve_ckb_amount) =
-                    self.check_amount_valid(funding_amount, &funding_udt_type_script)?;
+                    self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     &seed,
@@ -1023,7 +1033,7 @@ where
                     funding_amount,
                     reserve_ckb_amount,
                     commitment_fee_rate,
-                    funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE),
+                    funding_fee_rate,
                     funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
@@ -1035,7 +1045,7 @@ where
                     funding_udt_type_script,
                     funding_amount: channel.to_local_amount,
                     reserve_ckb_amount: channel.local_reserve_ckb_amount,
-                    funding_fee_rate: funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE),
+                    funding_fee_rate,
                     commitment_fee_rate,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
@@ -1686,6 +1696,28 @@ impl ChannelActorState {
             #[cfg(debug_assertions)]
             total_amount: value,
         }
+    }
+
+    /// This function will be only called when the channel is accepted
+    fn check_reserve_amount(
+        &self,
+        local_reserved_amount: u64,
+        remote_reserved_amount: u64,
+    ) -> Result<(), ProcessingChannelError> {
+        let udt_type_script = &self.funding_udt_type_script;
+        let reserve_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+        if local_reserved_amount < reserve_ckb_amount || remote_reserved_amount < reserve_ckb_amount
+        {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The reserve amount should be greater than the minimal reserve amount: {}",
+                reserve_ckb_amount
+            )));
+        }
+        Ok(())
     }
 
     pub fn get_local_balance(&self) -> u128 {
@@ -2616,11 +2648,18 @@ impl ChannelActorState {
             )));
         }
 
+        self.check_reserve_amount(
+            accept_channel.reserve_ckb_amount,
+            self.local_reserve_ckb_amount,
+        )?;
+
         self.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::INIT_SENT,
         ));
+
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_reserve_ckb_amount = accept_channel.reserve_ckb_amount;
+
         #[cfg(debug_assertions)]
         {
             self.total_amount = self.to_local_amount + self.to_remote_amount;
@@ -3528,7 +3567,7 @@ impl ChannelActorState {
         let time_locked_value = time_locked_value + received_tlc_value;
         let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
 
-        eprintln!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
+        debug!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
         let immediate_payment_key = {
             let (commitment_point, base_payment_key) = if local {
                 (
@@ -4228,6 +4267,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_and_accept_channel() {
+        use crate::ckb::channel::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
+
         let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
@@ -4264,7 +4305,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: 6200000000,
+                    funding_amount: DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT as u128,
                 },
                 rpc_reply,
             ))

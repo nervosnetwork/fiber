@@ -35,6 +35,8 @@ pub enum Error {
     CkbInvoiceError(#[from] InvoiceError),
     #[error("Funding error: {0}")]
     FundingError(#[from] FundingError),
+    #[error("InvalidParameter: {0}")]
+    InvalidParameter(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
