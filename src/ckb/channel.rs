@@ -1670,6 +1670,38 @@ impl ChannelActorState {
         self.state = new_state;
     }
 
+    // Send RevokeAndAck message to the counterparty, and update the
+    // channel state accordingly.
+    fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        // Now we should revoke previous transation by revealing preimage.
+        let old_number = self.get_remote_commitment_number();
+        let secret = self.signer.get_commitment_secret(old_number);
+
+        self.update_state_on_raa_msg(false);
+
+        let new_number = self.get_remote_commitment_number();
+        let point = self.get_local_commitment_point(new_number);
+
+        debug!(
+            "Revealing revocation preimage #{}: {:?}",
+            old_number, &secret
+        );
+        debug!("Sending new commitment point #{}: {:?}", new_number, &point);
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: CFNMessage::RevokeAndAck(RevokeAndAck {
+                        channel_id: self.get_id(),
+                        per_commitment_secret: secret.into(),
+                        next_per_commitment_point: point,
+                    }),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
     // After sending or receiving a RevokeAndAck message, all messages before
     // are considered confirmed by both parties. These messages include
     // AddTlc and RemoveTlc to operate on TLCs.
@@ -1801,6 +1833,14 @@ impl ChannelActorState {
 
     pub fn get_remote_commitment_number(&self) -> u64 {
         self.commitment_numbers.get_remote()
+    }
+
+    fn set_remote_commitment_number(&mut self, number: u64) {
+        debug!(
+            "Setting remote commitment number from {} to {}",
+            self.commitment_numbers.remote, number
+        );
+        self.commitment_numbers.remote = number;
     }
 
     pub fn increment_local_commitment_number(&mut self) {
@@ -2771,33 +2811,7 @@ impl ChannelActorState {
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
-                // Now we should revoke previous transation by revealing preimage.
-                let old_number = self.get_remote_commitment_number();
-                let secret = self.signer.get_commitment_secret(old_number);
-
-                self.update_state_on_raa_msg(false);
-
-                let new_number = self.get_remote_commitment_number();
-                let point = self.get_local_commitment_point(new_number);
-
-                debug!(
-                    "Revealing revocation preimage #{}: {:?}",
-                    old_number, &secret
-                );
-                debug!("Sending new commitment point #{}: {:?}", new_number, &point);
-
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                            peer_id: self.peer_id.clone(),
-                            message: CFNMessage::RevokeAndAck(RevokeAndAck {
-                                channel_id: self.get_id(),
-                                per_commitment_secret: secret.into(),
-                                next_per_commitment_point: point,
-                            }),
-                        }),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                self.send_revoke_and_ack_message(network);
                 match flags {
                     CommitmentSignedFlags::ChannelReady() => {}
                     CommitmentSignedFlags::PendingShutdown(_) => {
@@ -3059,23 +3073,10 @@ impl ChannelActorState {
                         acutal_remote_commitment_number + 1,
                         "Remote commitment number should only be behind by 1"
                     );
-                    let current_secret = self
-                        .signer
-                        .get_commitment_secret(acutal_remote_commitment_number);
-                    let next_point =
-                        self.get_local_commitment_point(acutal_remote_commitment_number + 1);
-                    network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                                peer_id: self.peer_id.clone(),
-                                message: CFNMessage::RevokeAndAck(RevokeAndAck {
-                                    channel_id: self.get_id(),
-                                    per_commitment_secret: current_secret.into(),
-                                    next_per_commitment_point: next_point,
-                                }),
-                            }),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    // Resetting our remote commitment number to the actual remote commitment number
+                    // and resend the RevokeAndAck message.
+                    self.set_remote_commitment_number(acutal_remote_commitment_number);
+                    self.send_revoke_and_ack_message(network);
                 } else {
                     debug_assert!(
                         false,
