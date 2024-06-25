@@ -379,15 +379,15 @@ where
                 remote,
                 script,
                 udt_funding_script,
-                local_reserve_ckb_amount,
-                remote_reserve_ckb_amount,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
                 funding_fee_rate,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     self.check_accept_channel_ckb_parameters(
-                        local_reserve_ckb_amount,
-                        remote_reserve_ckb_amount,
+                        local_reserved_ckb_amount,
+                        remote_reserved_ckb_amount,
                         funding_fee_rate,
                         &udt_funding_script,
                     )?;
@@ -413,8 +413,9 @@ where
                                         local_amount: local as u64,
                                         funding_fee_rate: funding_fee_rate,
                                         remote_amount: remote as u64,
-                                        local_reserve_ckb_amount: local_reserve_ckb_amount as u64,
-                                        remote_reserve_ckb_amount: remote_reserve_ckb_amount as u64,
+                                        local_reserved_ckb_amount: local_reserved_ckb_amount as u64,
+                                        remote_reserved_ckb_amount: remote_reserved_ckb_amount
+                                            as u64,
                                     },
                                 ),
                             ))
@@ -748,18 +749,18 @@ where
         funding_fee_rate: u64,
         udt_type_script: &Option<Script>,
     ) -> crate::Result<()> {
-        let reserve_ckb_amount = if udt_type_script.is_some() {
+        let reserved_ckb_amount = if udt_type_script.is_some() {
             DEFAULT_UDT_MINIMAL_CKB_AMOUNT
         } else {
             DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
         };
 
-        if remote_reserved_ckb_amount < reserve_ckb_amount
-            || local_reserved_ckb_amount < reserve_ckb_amount
+        if remote_reserved_ckb_amount < reserved_ckb_amount
+            || local_reserved_ckb_amount < reserved_ckb_amount
         {
             return Err(Error::InvalidParameter(format!(
                 "Reserved CKB amount is less than the minimal amount: {}",
-                reserve_ckb_amount
+                reserved_ckb_amount
             )));
         }
 
@@ -832,7 +833,7 @@ impl NetworkActorState {
             }
         }
         // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
-        let (_funding_amount, _reserve_ckb_amount) =
+        let (_funding_amount, _reserved_ckb_amount) =
             self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -873,7 +874,7 @@ impl NetworkActorState {
                 &temp_channel_id
             )))?;
 
-        let (funding_amount, reserve_ckb_amount) = self.get_funding_and_reserved_amount(
+        let (funding_amount, reserved_ckb_amount) = self.get_funding_and_reserved_amount(
             funding_amount,
             &open_channel.funding_udt_type_script,
         )?;
@@ -892,7 +893,7 @@ impl NetworkActorState {
             ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
-                reserve_ckb_amount,
+                reserved_ckb_amount,
                 seed,
                 open_channel,
                 channel_id_sender: Some(tx),
@@ -914,30 +915,30 @@ impl NetworkActorState {
         funding_amount: u128,
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
-        let reserve_ckb_amount = if udt_type_script.is_some() {
+        let reserved_ckb_amount = if udt_type_script.is_some() {
             DEFAULT_UDT_MINIMAL_CKB_AMOUNT
         } else {
             DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
         };
-        if udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
+        if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "The value of the channel should be greater than the reserve amount: {}",
-                reserve_ckb_amount
+                reserved_ckb_amount
             )));
         }
         let funding_amount = if udt_type_script.is_some() {
             funding_amount
         } else {
-            funding_amount - reserve_ckb_amount as u128
+            funding_amount - reserved_ckb_amount as u128
         };
-        Ok((funding_amount, reserve_ckb_amount))
+        Ok((funding_amount, reserved_ckb_amount))
     }
 
     fn check_open_ckb_parameters(
         &self,
         open_channel: &OpenChannel,
     ) -> Result<(), ProcessingChannelError> {
-        let reserved_ckb_amount = open_channel.reserve_ckb_amount;
+        let reserved_ckb_amount = open_channel.reserved_ckb_amount;
         let udt_type_script = &open_channel.funding_udt_type_script;
 
         let minimal_reserved_ckb_amount = if udt_type_script.is_some() {

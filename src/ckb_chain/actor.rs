@@ -317,7 +317,7 @@ mod test_utils {
                             }
                             let current_capacity: u64 = output.capacity().unpack();
                             let capacity = request.local_amount
-                                + request.local_reserve_ckb_amount
+                                + request.local_reserved_ckb_amount
                                 + current_capacity;
                             let mut outputs_builder = outputs.as_builder();
 
@@ -327,7 +327,7 @@ mod test_utils {
                         }
                         None => [CellOutput::new_builder()
                             .capacity(
-                                (request.local_amount + request.local_reserve_ckb_amount).pack(),
+                                (request.local_amount + request.local_reserved_ckb_amount).pack(),
                             )
                             .lock(request.script.clone())
                             .build()]

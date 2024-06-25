@@ -3221,8 +3221,8 @@ impl ::core::fmt::Display for OpenChannel {
         write!(
             f,
             ", {}: {}",
-            "reserve_ckb_amount",
-            self.reserve_ckb_amount()
+            "reserved_ckb_amount",
+            self.reserved_ckb_amount()
         )?;
         write!(f, ", {}: {}", "funding_fee_rate", self.funding_fee_rate())?;
         write!(
@@ -3345,7 +3345,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn reserve_ckb_amount(&self) -> Uint64 {
+    pub fn reserved_ckb_amount(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3476,7 +3476,7 @@ impl molecule::prelude::Entity for OpenChannel {
             .channel_id(self.channel_id())
             .funding_udt_type_script(self.funding_udt_type_script())
             .funding_amount(self.funding_amount())
-            .reserve_ckb_amount(self.reserve_ckb_amount())
+            .reserved_ckb_amount(self.reserved_ckb_amount())
             .funding_fee_rate(self.funding_fee_rate())
             .commitment_fee_rate(self.commitment_fee_rate())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
@@ -3525,8 +3525,8 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "reserve_ckb_amount",
-            self.reserve_ckb_amount()
+            "reserved_ckb_amount",
+            self.reserved_ckb_amount()
         )?;
         write!(f, ", {}: {}", "funding_fee_rate", self.funding_fee_rate())?;
         write!(
@@ -3622,7 +3622,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[20..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn reserve_ckb_amount(&self) -> Uint64Reader<'r> {
+    pub fn reserved_ckb_amount(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
@@ -3798,7 +3798,7 @@ pub struct OpenChannelBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_udt_type_script: ScriptOpt,
     pub(crate) funding_amount: Uint128,
-    pub(crate) reserve_ckb_amount: Uint64,
+    pub(crate) reserved_ckb_amount: Uint64,
     pub(crate) funding_fee_rate: Uint64,
     pub(crate) commitment_fee_rate: Uint64,
     pub(crate) max_tlc_value_in_flight: Uint128,
@@ -3833,8 +3833,8 @@ impl OpenChannelBuilder {
         self.funding_amount = v;
         self
     }
-    pub fn reserve_ckb_amount(mut self, v: Uint64) -> Self {
-        self.reserve_ckb_amount = v;
+    pub fn reserved_ckb_amount(mut self, v: Uint64) -> Self {
+        self.reserved_ckb_amount = v;
         self
     }
     pub fn funding_fee_rate(mut self, v: Uint64) -> Self {
@@ -3907,7 +3907,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.channel_id.as_slice().len()
             + self.funding_udt_type_script.as_slice().len()
             + self.funding_amount.as_slice().len()
-            + self.reserve_ckb_amount.as_slice().len()
+            + self.reserved_ckb_amount.as_slice().len()
             + self.funding_fee_rate.as_slice().len()
             + self.commitment_fee_rate.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
@@ -3936,7 +3936,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
         offsets.push(total_size);
-        total_size += self.reserve_ckb_amount.as_slice().len();
+        total_size += self.reserved_ckb_amount.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_fee_rate.as_slice().len();
         offsets.push(total_size);
@@ -3975,7 +3975,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_udt_type_script.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
-        writer.write_all(self.reserve_ckb_amount.as_slice())?;
+        writer.write_all(self.reserved_ckb_amount.as_slice())?;
         writer.write_all(self.funding_fee_rate.as_slice())?;
         writer.write_all(self.commitment_fee_rate.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
@@ -4024,8 +4024,8 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(
             f,
             ", {}: {}",
-            "reserve_ckb_amount",
-            self.reserve_ckb_amount()
+            "reserved_ckb_amount",
+            self.reserved_ckb_amount()
         )?;
         write!(
             f,
@@ -4125,7 +4125,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn reserve_ckb_amount(&self) -> Uint64 {
+    pub fn reserved_ckb_amount(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -4236,7 +4236,7 @@ impl molecule::prelude::Entity for AcceptChannel {
         Self::new_builder()
             .channel_id(self.channel_id())
             .funding_amount(self.funding_amount())
-            .reserve_ckb_amount(self.reserve_ckb_amount())
+            .reserved_ckb_amount(self.reserved_ckb_amount())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_accept_tlcs(self.max_accept_tlcs())
             .min_tlc_value(self.min_tlc_value())
@@ -4275,8 +4275,8 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "reserve_ckb_amount",
-            self.reserve_ckb_amount()
+            "reserved_ckb_amount",
+            self.reserved_ckb_amount()
         )?;
         write!(
             f,
@@ -4352,7 +4352,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn reserve_ckb_amount(&self) -> Uint64Reader<'r> {
+    pub fn reserved_ckb_amount(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -4503,7 +4503,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
 pub struct AcceptChannelBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_amount: Uint128,
-    pub(crate) reserve_ckb_amount: Uint64,
+    pub(crate) reserved_ckb_amount: Uint64,
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_accept_tlcs: Uint64,
     pub(crate) min_tlc_value: Uint128,
@@ -4527,8 +4527,8 @@ impl AcceptChannelBuilder {
         self.funding_amount = v;
         self
     }
-    pub fn reserve_ckb_amount(mut self, v: Uint64) -> Self {
-        self.reserve_ckb_amount = v;
+    pub fn reserved_ckb_amount(mut self, v: Uint64) -> Self {
+        self.reserved_ckb_amount = v;
         self
     }
     pub fn max_tlc_value_in_flight(mut self, v: Uint128) -> Self {
@@ -4587,7 +4587,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
             + self.funding_amount.as_slice().len()
-            + self.reserve_ckb_amount.as_slice().len()
+            + self.reserved_ckb_amount.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_accept_tlcs.as_slice().len()
             + self.min_tlc_value.as_slice().len()
@@ -4609,7 +4609,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
         offsets.push(total_size);
-        total_size += self.reserve_ckb_amount.as_slice().len();
+        total_size += self.reserved_ckb_amount.as_slice().len();
         offsets.push(total_size);
         total_size += self.max_tlc_value_in_flight.as_slice().len();
         offsets.push(total_size);
@@ -4640,7 +4640,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
-        writer.write_all(self.reserve_ckb_amount.as_slice())?;
+        writer.write_all(self.reserved_ckb_amount.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_accept_tlcs.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;

@@ -66,9 +66,9 @@ pub struct FundingRequest {
     /// Assets amount to be provided by the remote party
     pub remote_amount: u64,
     /// CKB amount to be provided by the local party.
-    pub local_reserve_ckb_amount: u64,
+    pub local_reserved_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
-    pub remote_reserve_ckb_amount: u64,
+    pub remote_reserved_ckb_amount: u64,
 }
 
 // TODO: trace locked cells
@@ -159,14 +159,14 @@ impl FundingTxBuilder {
         match self.request.udt_type_script {
             Some(ref udt_type_script) => {
                 let mut udt_amount = self.request.local_amount as u128;
-                let mut ckb_amount = self.request.local_reserve_ckb_amount;
+                let mut ckb_amount = self.request.local_reserved_ckb_amount;
 
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
                     udt_amount += self.request.remote_amount as u128;
                     ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_reserve_ckb_amount)
+                        .checked_add(self.request.remote_reserved_ckb_amount)
                         .ok_or(FundingError::InvalidChannel)?;
                 }
 
@@ -183,11 +183,11 @@ impl FundingTxBuilder {
             }
             None => {
                 let mut ckb_amount =
-                    self.request.local_amount + self.request.local_reserve_ckb_amount;
+                    self.request.local_amount + self.request.local_reserved_ckb_amount;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
-                            self.request.remote_amount + self.request.remote_reserve_ckb_amount,
+                            self.request.remote_amount + self.request.remote_reserved_ckb_amount,
                         )
                         .ok_or(FundingError::InvalidChannel)?;
                 }
