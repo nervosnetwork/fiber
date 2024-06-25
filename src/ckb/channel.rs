@@ -472,6 +472,11 @@ impl<S> ChannelActor<S> {
             version, &tx, &signature
         );
 
+        debug!(
+            "Sending next local nonce {:?} (previous nonce {:?})",
+            state.get_next_local_nonce(),
+            state.get_local_nonce().borrow()
+        );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             partial_signature: signature,
@@ -504,10 +509,6 @@ impl<S> ChannelActor<S> {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                // Normally commitment number will be incremented after received a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not receive RevokeAndAck message.
-                // We increment the commitment number here instead.
-                state.increment_local_commitment_number();
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
@@ -1509,10 +1510,10 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_base_pubkeys = signer.get_base_public_keys();
 
         let channel_id = derive_channel_id_from_revocation_keys(
-            &local_pubkeys.revocation_base_key,
+            &local_base_pubkeys.revocation_base_key,
             &remote_pubkeys.revocation_base_key,
         );
 
@@ -1534,7 +1535,7 @@ impl ChannelActorState {
             to_remote_amount: remote_value,
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
-                pubkeys: local_pubkeys,
+                pubkeys: local_base_pubkeys,
                 selected_contest_delay: remote_delay,
             },
             signer,
@@ -1566,7 +1567,7 @@ impl ChannelActorState {
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id =
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
@@ -1726,8 +1727,13 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn get_local_secnonce(&self) -> SecNonce {
+        self.signer
+            .derive_musig2_nonce(self.get_local_commitment_number())
+    }
+
     pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
-        self.get_next_local_secnonce().public_nonce()
+        self.get_local_secnonce().public_nonce()
     }
 
     pub fn get_next_local_secnonce(&self) -> SecNonce {
@@ -1736,9 +1742,7 @@ impl ChannelActorState {
     }
 
     pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_next_commitment_number(true))
-            .public_nonce()
+        self.get_next_local_secnonce().public_nonce().clone()
     }
 
     pub fn get_remote_nonce(&self) -> &PubNonce {
@@ -1758,10 +1762,20 @@ impl ChannelActorState {
     }
 
     pub fn increment_local_commitment_number(&mut self) {
+        debug!(
+            "Incrementing local commitment number from {} to {}",
+            self.get_local_commitment_number(),
+            self.get_local_commitment_number() + 1
+        );
         self.commitment_numbers.increment_local();
     }
 
     pub fn increment_remote_commitment_number(&mut self) {
+        debug!(
+            "Incrementing remote commitment number from {} to {}",
+            self.get_remote_commitment_number(),
+            self.get_remote_commitment_number() + 1
+        );
         self.commitment_numbers.increment_remote();
     }
 
@@ -2023,6 +2037,12 @@ impl ChannelActorState {
         let local_nonce = local_nonce.borrow();
         let remote_nonce = self.get_remote_nonce();
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
+        debug!(
+            "Got agg nonces {:?} from peer {:?}: {:?}",
+            AggNonce::sum(nonces),
+            &self.peer_id,
+            nonces
+        );
         AggNonce::sum(nonces)
     }
 
@@ -2296,19 +2316,6 @@ impl ChannelActorState {
             lock_time: message.expiry,
             payment_preimage: None,
         })
-    }
-}
-
-impl From<&ChannelActorState> for Musig2Context {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2Context {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            local_seckey: value.signer.funding_key,
-            local_secnonce: value.get_local_musig2_secnonce(),
-            remote_pubkey: *value.get_remote_funding_pubkey(),
-            remote_pubnonce: value.get_remote_nonce().clone(),
-        }
     }
 }
 
@@ -2709,14 +2716,14 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        debug!("Updating peer next local nonce");
+        debug!(
+            "Updating peer next remote nonce from {:?} to {:?}",
+            self.get_remote_nonce(),
+            &commitment_signed.next_local_nonce
+        );
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
-                // Normally commitment number will be incremented after sent a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not send RevokeAndAck message.
-                // We increment the commitment number here instead.
-                self.increment_remote_commitment_number();
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
@@ -2862,6 +2869,8 @@ impl ChannelActorState {
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
+        self.increment_local_commitment_number();
+        self.increment_remote_commitment_number();
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -3301,6 +3310,11 @@ impl ChannelActorState {
             )
         };
 
+        debug!(
+            "Parameters for witnesses: epoch {:?}, payment key: {:?}, revocation key: {:?}",
+            delayed_epoch, delayed_payment_key, revocation_key
+        );
+
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
@@ -3566,42 +3580,6 @@ pub fn create_witness_for_funding_cell(
         .expect("Witness length should be correct")
 }
 
-pub struct Musig2Context {
-    pub key_agg_ctx: KeyAggContext,
-    pub agg_nonce: AggNonce,
-    pub local_seckey: Privkey,
-    pub local_secnonce: SecNonce,
-    pub remote_pubkey: Pubkey,
-    pub remote_pubnonce: PubNonce,
-}
-
-impl Musig2Context {
-    pub fn split(self) -> (Musig2SignContext, Musig2VerifyContext) {
-        let Musig2Context {
-            key_agg_ctx,
-            agg_nonce,
-            local_seckey,
-            local_secnonce,
-            remote_pubkey,
-            remote_pubnonce,
-        } = self;
-        (
-            Musig2SignContext {
-                key_agg_ctx: key_agg_ctx.clone(),
-                agg_nonce: agg_nonce.clone(),
-                seckey: local_seckey,
-                secnonce: local_secnonce,
-            },
-            Musig2VerifyContext {
-                key_agg_ctx,
-                agg_nonce,
-                pubkey: remote_pubkey,
-                pubnonce: remote_pubnonce,
-            },
-        )
-    }
-}
-
 pub struct Musig2VerifyContext {
     pub key_agg_ctx: KeyAggContext,
     pub agg_nonce: AggNonce,
@@ -3622,14 +3600,23 @@ impl From<Musig2SignContext> for Musig2VerifyContext {
 
 impl Musig2VerifyContext {
     pub fn verify(&self, signature: PartialSignature, message: &[u8]) -> ProcessingChannelResult {
-        Ok(verify_partial(
+        let result = verify_partial(
             &self.key_agg_ctx,
             signature,
             &self.agg_nonce,
             self.pubkey,
             &self.pubnonce,
             message,
-        )?)
+        );
+        debug!(
+            "Verifying partial signature {:?} with message {:?}, nonce {:?}, agg nonce {:?}, result {:?}",
+            &signature,
+            hex::encode(message),
+            &self.pubnonce,
+            &self.agg_nonce,
+            result
+        );
+        Ok(result?)
     }
 }
 
@@ -3643,7 +3630,13 @@ pub struct Musig2SignContext {
 
 impl Musig2SignContext {
     pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
-        debug!("Musig2 signing partial message {:?}", hex::encode(&message));
+        debug!(
+            "Musig2 signing partial message {:?} with nonce {:?} (public nonce: {:?}), agg nonce {:?}",
+            hex::encode(&message),
+            self.secnonce,
+            self.secnonce.public_nonce(),
+            &self.agg_nonce
+        );
         Ok(sign_partial(
             &self.key_agg_ctx,
             self.seckey,
@@ -3846,10 +3839,36 @@ impl DetailedTLCInfo {
     }
 }
 
-pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
-    // TODO: Currently we only copy the input secret. We need to actually derive new private keys
-    // from the per_commitment_point.
-    *secret
+pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(&commitment_point.serialize());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
+    secret.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
 }
 
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
@@ -3871,25 +3890,9 @@ pub struct InMemorySigner {
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
     // TODO: use rust's ownership to make sure musig_nonce is used once.
-    pub musig2_base_nonce: SecNonce,
+    pub musig2_base_nonce: Privkey,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
-}
-
-pub fn derive_revocation_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_tlc_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
 }
 
 impl InMemorySigner {
@@ -3916,8 +3919,7 @@ impl InMemorySigner {
         let delayed_payment_base_key =
             key_derive(payment_key.as_ref(), b"delayed payment base key");
         let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
-        let misig_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
-        let musig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
+        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
         Self {
             funding_key,
@@ -3925,18 +3927,18 @@ impl InMemorySigner {
             payment_key,
             delayed_payment_base_key,
             tlc_base_key,
-            musig2_base_nonce: musig_nonce,
+            musig2_base_nonce,
             commitment_seed,
         }
     }
 
-    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelBasePublicKeys {
+    fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_base_key: self.derive_revocation_key(commitment_number).pubkey(),
-            payment_base_key: self.derive_payment_key(commitment_number).pubkey(),
-            delayed_payment_base_key: self.derive_delayed_payment_key(commitment_number).pubkey(),
-            tlc_base_key: self.derive_tlc_key(commitment_number).pubkey(),
+            revocation_base_key: self.revocation_base_key.pubkey(),
+            payment_base_key: self.payment_key.pubkey(),
+            delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
+            tlc_base_key: self.tlc_base_key.pubkey(),
         }
     }
 
@@ -3974,18 +3976,20 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_musig2_nonce(&self, _new_commitment_number: u64) -> SecNonce {
-        // TODO: generate new musig nonce here
-        self.musig2_base_nonce.clone()
+    // TODO: Verify that this is a secure way to derive the nonce.
+    pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
+        let commitment_point = self.get_commitment_point(commitment_number);
+        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
+        debug!(
+            "Deriving Musig2 nonce: commitment number: {}, commitment point: {:?}",
+            commitment_number, commitment_point
+        );
+        SecNonce::build(seckey.as_ref()).build()
     }
 }
 
 #[cfg(test)]
 mod tests {
-
-    use ckb_jsonrpc_types::Status;
-    use ractor::call;
-
     use crate::{
         ckb::{
             network::{AcceptChannelCommand, OpenChannelCommand},
@@ -3994,6 +3998,9 @@ mod tests {
         },
         NetworkServiceEvent,
     };
+
+    use ckb_jsonrpc_types::Status;
+    use ractor::call;
 
     use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey, InMemorySigner};
 

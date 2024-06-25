@@ -148,6 +148,18 @@ impl From<&Privkey> for Scalar {
     }
 }
 
+impl From<[u8; 32]> for Privkey {
+    fn from(k: [u8; 32]) -> Self {
+        Privkey(SecretKey::from_slice(&k).expect("Invalid secret key"))
+    }
+}
+
+impl From<Scalar> for Privkey {
+    fn from(scalar: Scalar) -> Self {
+        scalar.serialize().into()
+    }
+}
+
 impl From<Hash256> for Privkey {
     fn from(hash: Hash256) -> Self {
         let mut bytes = [0u8; 32];
@@ -285,6 +297,14 @@ impl Privkey {
     pub fn pubkey(&self) -> Pubkey {
         Pubkey::from(self.0.public_key(secp256k1_instance()))
     }
+
+    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar)
+            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        let sk = Scalar::from(self);
+        (scalar + sk).unwrap().into()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -329,6 +349,14 @@ impl From<Point> for Pubkey {
 impl Pubkey {
     pub fn serialize(&self) -> [u8; 33] {
         PublicKey::from(self).serialize()
+    }
+
+    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar)
+            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        let result = Point::from(self) + scalar.base_point_mul();
+        PublicKey::from(result.unwrap()).into()
     }
 }
 
