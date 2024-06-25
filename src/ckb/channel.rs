@@ -3053,24 +3053,34 @@ impl ChannelActorState {
                 if expected_remote_commitment_number == acutal_remote_commitment_number {
                     // synced with remote, do nothing
                 } else if expected_remote_commitment_number > acutal_remote_commitment_number {
-                    debug!("Resend RevokeAndAck message");
-                    let secret = self
+                    debug!("Resend RevokeAndAck message becasue remote is behind: their commitment number {}, our expected commitment number {}", acutal_remote_commitment_number, expected_remote_commitment_number);
+                    debug_assert_eq!(
+                        expected_remote_commitment_number,
+                        acutal_remote_commitment_number + 1,
+                        "Remote commitment number should only be behind by 1"
+                    );
+                    let current_secret = self
                         .signer
                         .get_commitment_secret(acutal_remote_commitment_number);
-                    let point = self.get_local_commitment_point(acutal_remote_commitment_number);
+                    let next_point =
+                        self.get_local_commitment_point(acutal_remote_commitment_number + 1);
                     network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                                 peer_id: self.peer_id.clone(),
                                 message: CFNMessage::RevokeAndAck(RevokeAndAck {
                                     channel_id: self.get_id(),
-                                    per_commitment_secret: secret.into(),
-                                    next_per_commitment_point: point,
+                                    per_commitment_secret: current_secret.into(),
+                                    next_per_commitment_point: next_point,
                                 }),
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 } else {
+                    debug_assert!(
+                        false,
+                        "Remote commitment number should not be ahead of ours"
+                    );
                     // unreachable state, just log an error for potential bugs
                     error!(
                         "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
@@ -3471,7 +3481,12 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
-            debug!("Got base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, delayed_payment_base_key, revocation_base_key);
+            debug!(
+                "Got base witness parameters: delayed_time: {:?}, delayed_payment_key: {:?}, delayed_commitment_point {:?}, revocation_key: {:?}, revocation_commitment point: {:?}",
+                delay, delayed_payment_base_key,
+                delayed_payment_commitment_point,
+                revocation_base_key, revocation_commitment_point
+            );
             (
                 delay,
                 derive_delayed_payment_pubkey(
