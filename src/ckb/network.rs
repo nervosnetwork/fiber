@@ -794,6 +794,9 @@ impl NetworkActorState {
                 ));
             }
         }
+        // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
+        let (_funding_amount, _reserve_ckb_amount) =
+            self.check_amount_valid(funding_amount, &funding_udt_type_script)?;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -833,23 +836,8 @@ impl NetworkActorState {
                 &temp_channel_id
             )))?;
 
-        let funding_udt_type_script = open_channel.funding_udt_type_script.clone();
-        let reserve_ckb_amount = if funding_udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-        if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserve_ckb_amount
-            )));
-        }
-        let funding_amount = if funding_udt_type_script.is_some() {
-            funding_amount
-        } else {
-            funding_amount - reserve_ckb_amount as u128
-        };
+        let (funding_amount, reserve_ckb_amount) =
+            self.check_amount_valid(funding_amount, &open_channel.funding_udt_type_script)?;
 
         let network = self.network.clone();
         let id = open_channel.channel_id;
@@ -880,6 +868,30 @@ impl NetworkActorState {
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).cloned()
+    }
+
+    fn check_amount_valid(
+        &self,
+        funding_amount: u128,
+        udt_type_script: &Option<Script>,
+    ) -> Result<(u128, u64), ProcessingChannelError> {
+        let reserve_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+        if udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The value of the channel should be greater than the reserve amount: {}",
+                reserve_ckb_amount
+            )));
+        }
+        let funding_amount = if udt_type_script.is_some() {
+            funding_amount
+        } else {
+            funding_amount - reserve_ckb_amount as u128
+        };
+        Ok((funding_amount, reserve_ckb_amount))
     }
 
     async fn send_message_to_session(

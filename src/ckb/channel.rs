@@ -846,6 +846,30 @@ impl<S> ChannelActor<S> {
         }
         Ok(())
     }
+
+    fn check_amount_valid(
+        &self,
+        funding_amount: u128,
+        udt_type_script: &Option<Script>,
+    ) -> Result<(u128, u64), ProcessingChannelError> {
+        let reserve_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+        if udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The value of the channel should be greater than the reserve amount: {}",
+                reserve_ckb_amount
+            )));
+        }
+        let funding_amount = if udt_type_script.is_some() {
+            funding_amount
+        } else {
+            funding_amount - reserve_ckb_amount as u128
+        };
+        Ok((funding_amount, reserve_ckb_amount))
+    }
 }
 
 #[rasync_trait]
@@ -989,22 +1013,10 @@ where
                         commitment_fee_rate, DEFAULT_COMMITMENT_FEE_RATE
                     ))));
                 }
-                let reserve_ckb_amount = if funding_udt_type_script.is_some() {
-                    DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-                } else {
-                    DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-                };
-                if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "The funding amount should be greater than the reserved amount, expect {} >= {}",
-                        funding_amount, reserve_ckb_amount
-                    ))));
-                }
-                let funding_amount = if funding_udt_type_script.is_some() {
-                    funding_amount
-                } else {
-                    funding_amount - reserve_ckb_amount as u128
-                };
+
+                let (funding_amount, reserve_ckb_amount) =
+                    self.check_amount_valid(funding_amount, &funding_udt_type_script)?;
+
                 let mut channel = ChannelActorState::new_outbound_channel(
                     &seed,
                     self.peer_id.clone(),
