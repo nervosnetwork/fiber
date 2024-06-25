@@ -2369,9 +2369,9 @@ impl ChannelActorState {
             )));
         }
 
-        let (shutdown_tx, _) = self.build_shutdown_tx(false).expect("Valid shutdown tx");
-        let tx_size = shutdown_tx.data().serialized_size_in_block() as u64;
-        let fee = fee_rate.fee(tx_size).as_u64();
+        let fee = self.calculate_shutdown_fee(fee_rate);
+        debug!("shutdown fee: {:?}", fee);
+
         let available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
@@ -2583,7 +2583,7 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let (shutdown_tx, message) = self.build_shutdown_tx(true)?;
+        let (shutdown_tx, message) = self.build_shutdown_tx()?;
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
@@ -3231,72 +3231,84 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    // `apply` = true means we are building the shutdown transaction to be broadcasted
-    // `apply` = false means we want to mock the shutdown transaction and only for calculating the fee
-    pub fn build_shutdown_tx(
-        &self,
-        apply: bool,
-    ) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
+    fn calculate_shutdown_fee(&self, fee_rate: FeeRate) -> u64 {
+        let dummy_script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+
+        let (outputs, outputs_data) = if let Some(type_script) = &self.funding_udt_type_script {
+            let dummy_output = CellOutput::new_builder()
+                .lock(dummy_script.clone())
+                .type_(Some(type_script.clone()).pack())
+                .capacity(0.pack())
+                .build();
+            let dummy_output_data = self.to_local_amount.to_le_bytes().pack();
+
+            let outputs = [dummy_output.clone(), dummy_output];
+            let outputs_data = [dummy_output_data.clone(), dummy_output_data];
+            (outputs, outputs_data.to_vec())
+        } else {
+            let dummy_output = CellOutput::new_builder()
+                .capacity(0.pack())
+                .lock(dummy_script.clone())
+                .build();
+            let outputs = [dummy_output.clone(), dummy_output];
+            (outputs, vec![Default::default(), Default::default()])
+        };
+
+        let mock_shutdown_tx = TransactionBuilder::default()
+            .cell_deps(cell_deps)
+            .input(
+                CellInput::new_builder()
+                    .previous_output(self.get_funding_transaction_outpoint())
+                    .build(),
+            )
+            .set_outputs(outputs.to_vec())
+            .set_outputs_data(outputs_data.to_vec())
+            .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
+            .build();
+        let tx_size = mock_shutdown_tx.data().serialized_size_in_block() as u64;
+        fee_rate.fee(tx_size).as_u64()
+    }
+
+    pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
+        // Don't use get_local_shutdown_script and get_remote_shutdown_script here
+        // as they will panic if the scripts are not present.
+        // This function may be called in a state where these scripts are not present.
         let (
             local_shutdown_script,
             remote_shutdown_script,
             local_shutdown_fee,
             remote_shutdown_fee,
-        ) = if apply {
-            // Don't use get_local_shutdown_script and get_remote_shutdown_script here
-            // as they will panic if the scripts are not present.
-            // This function may be called in a state where these scripts are not present.
-            let (
+        ) = match (
+            self.local_shutdown_script.clone(),
+            self.remote_shutdown_script.clone(),
+            self.local_shutdown_fee_rate,
+            self.remote_shutdown_fee_rate,
+        ) {
+            (
+                Some(local_shutdown_script),
+                Some(remote_shutdown_script),
+                Some(local_shutdown_fee_rate),
+                Some(remote_shutdown_fee_rate),
+            ) => (
                 local_shutdown_script,
                 remote_shutdown_script,
-                local_shutdown_fee_rate,
-                remote_shutdown_fee_rate,
-            ) = match (
-                self.local_shutdown_script.clone(),
-                self.remote_shutdown_script.clone(),
-                self.local_shutdown_fee_rate,
-                self.remote_shutdown_fee_rate,
-            ) {
-                (
-                    Some(local_shutdown_script),
-                    Some(remote_shutdown_script),
-                    Some(local_shutdown_fee_rate),
-                    Some(remote_shutdown_fee_rate),
-                ) => (
-                    local_shutdown_script,
-                    remote_shutdown_script,
-                    local_shutdown_fee_rate,
-                    remote_shutdown_fee_rate,
-                ),
-                _ => {
-                    return Err(ProcessingChannelError::InvalidState(format!(
+                self.calculate_shutdown_fee(FeeRate::from_u64(local_shutdown_fee_rate)),
+                self.calculate_shutdown_fee(FeeRate::from_u64(remote_shutdown_fee_rate)),
+            ),
+            _ => {
+                return Err(ProcessingChannelError::InvalidState(format!(
                     "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee_rate {:?}, remote_shutdown_fee_rate {:?}",
                     &self.local_shutdown_script, &self.remote_shutdown_script,
                     &self.local_shutdown_fee_rate, &self.remote_shutdown_fee_rate
                 )));
-                }
-            };
-
-            let tx_size = self
-                .build_shutdown_tx(false)
-                .expect("build shutdown tx failed")
-                .0
-                .data()
-                .serialized_size_in_block() as u64;
-            (
-                local_shutdown_script,
-                remote_shutdown_script,
-                FeeRate::from_u64(local_shutdown_fee_rate)
-                    .fee(tx_size)
-                    .as_u64(),
-                FeeRate::from_u64(remote_shutdown_fee_rate)
-                    .fee(tx_size)
-                    .as_u64(),
-            )
-        } else {
-            let script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
-            (script.clone(), script.clone(), 0, 0)
+            }
         };
+
+        debug!(
+            "build_shutdown_tx local_shutdown_fee: local {}, remote {}",
+            local_shutdown_fee, remote_shutdown_fee
+        );
 
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
