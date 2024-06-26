@@ -41,6 +41,10 @@ assert {
 }
 
 script:post-response {
-  console.log("Node1 open a invalid channel to Node3:", res.body);
-  await new Promise(r => setTimeout(r, 1000));
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  // will get error message since channel is closed in previous step
+  await new Promise(r => setTimeout(r, 100));
+  if (!(res.body.error.message === "Invalid parameter: Invalid UDT type script")) {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }
