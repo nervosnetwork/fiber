@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66, SignatureVec};
+use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66};
 use super::serde_utils::SliceHex;
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
@@ -149,6 +149,18 @@ impl From<&Privkey> for Scalar {
     }
 }
 
+impl From<[u8; 32]> for Privkey {
+    fn from(k: [u8; 32]) -> Self {
+        Privkey(SecretKey::from_slice(&k).expect("Invalid secret key"))
+    }
+}
+
+impl From<Scalar> for Privkey {
+    fn from(scalar: Scalar) -> Self {
+        scalar.serialize().into()
+    }
+}
+
 impl From<Hash256> for Privkey {
     fn from(hash: Hash256) -> Self {
         let mut bytes = [0u8; 32];
@@ -286,6 +298,14 @@ impl Privkey {
     pub fn pubkey(&self) -> Pubkey {
         Pubkey::from(self.0.public_key(secp256k1_instance()))
     }
+
+    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar)
+            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        let sk = Scalar::from(self);
+        (scalar + sk).unwrap().into()
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -330,6 +350,14 @@ impl From<Point> for Pubkey {
 impl Pubkey {
     pub fn serialize(&self) -> [u8; 33] {
         PublicKey::from(self).serialize()
+    }
+
+    pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
+        let scalar = scalar.into();
+        let scalar = Scalar::from_slice(&scalar)
+            .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
+        let result = Point::from(self) + scalar.base_point_mul();
+        PublicKey::from(result.unwrap()).into()
     }
 }
 
@@ -928,49 +956,6 @@ impl TryFrom<molecule_cfn::AddTlc> for AddTlc {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TlcsSigned {
-    pub channel_id: Hash256,
-    pub signature: Signature,
-    pub tlc_signatures: Vec<Signature>,
-}
-
-impl From<TlcsSigned> for molecule_cfn::TlcsSigned {
-    fn from(tlcs_signed: TlcsSigned) -> Self {
-        molecule_cfn::TlcsSigned::new_builder()
-            .channel_id(tlcs_signed.channel_id.into())
-            .signature(tlcs_signed.signature.into())
-            .tlc_signatures(
-                SignatureVec::new_builder()
-                    .set(
-                        tlcs_signed
-                            .tlc_signatures
-                            .into_iter()
-                            .map(|tlc_signature| tlc_signature.into())
-                            .collect(),
-                    )
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_cfn::TlcsSigned> for TlcsSigned {
-    type Error = Error;
-
-    fn try_from(tlcs_signed: molecule_cfn::TlcsSigned) -> Result<Self, Self::Error> {
-        Ok(TlcsSigned {
-            channel_id: tlcs_signed.channel_id().into(),
-            signature: tlcs_signed.signature().try_into()?,
-            tlc_signatures: tlcs_signed
-                .tlc_signatures()
-                .into_iter()
-                .map(|tlc_signature| tlc_signature.try_into())
-                .collect::<Result<Vec<Signature>, Error>>()?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
     pub per_commitment_secret: Hash256,
@@ -1121,6 +1106,37 @@ impl TryFrom<molecule_cfn::RemoveTlc> for RemoveTlc {
 }
 
 #[derive(Debug, Clone)]
+pub struct ReestablishChannel {
+    pub channel_id: Hash256,
+    pub local_commitment_number: u64,
+    pub remote_commitment_number: u64,
+}
+
+impl From<ReestablishChannel> for molecule_cfn::ReestablishChannel {
+    fn from(reestablish_channel: ReestablishChannel) -> Self {
+        molecule_cfn::ReestablishChannel::new_builder()
+            .channel_id(reestablish_channel.channel_id.into())
+            .local_commitment_number(reestablish_channel.local_commitment_number.pack())
+            .remote_commitment_number(reestablish_channel.remote_commitment_number.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_cfn::ReestablishChannel> for ReestablishChannel {
+    type Error = Error;
+
+    fn try_from(
+        reestablish_channel: molecule_cfn::ReestablishChannel,
+    ) -> Result<Self, Self::Error> {
+        Ok(ReestablishChannel {
+            channel_id: reestablish_channel.channel_id().into(),
+            local_commitment_number: reestablish_channel.local_commitment_number().unpack(),
+            remote_commitment_number: reestablish_channel.remote_commitment_number().unpack(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum CFNMessage {
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
@@ -1135,9 +1151,9 @@ pub enum CFNMessage {
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
     AddTlc(AddTlc),
-    TlcsSigned(TlcsSigned),
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
+    ReestablishChannel(ReestablishChannel),
 }
 
 impl CFNMessage {
@@ -1156,9 +1172,9 @@ impl CFNMessage {
             CFNMessage::Shutdown(shutdown) => shutdown.channel_id,
             CFNMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
             CFNMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            CFNMessage::TlcsSigned(tlcs_signed) => tlcs_signed.channel_id,
             CFNMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             CFNMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+            CFNMessage::ReestablishChannel(reestablish_channel) => reestablish_channel.channel_id,
         }
     }
 }
@@ -1209,8 +1225,8 @@ impl From<CFNMessage> for molecule_cfn::CFNMessageUnion {
             CFNMessage::RevokeAndAck(revoke_and_ack) => {
                 molecule_cfn::CFNMessageUnion::RevokeAndAck(revoke_and_ack.into())
             }
-            CFNMessage::TlcsSigned(tlcs_signed) => {
-                molecule_cfn::CFNMessageUnion::TlcsSigned(tlcs_signed.into())
+            CFNMessage::ReestablishChannel(reestablish_channel) => {
+                molecule_cfn::CFNMessageUnion::ReestablishChannel(reestablish_channel.into())
             }
         }
     }
@@ -1271,11 +1287,11 @@ impl TryFrom<molecule_cfn::CFNMessage> for CFNMessage {
             molecule_cfn::CFNMessageUnion::RemoveTlc(remove_tlc) => {
                 CFNMessage::RemoveTlc(remove_tlc.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TlcsSigned(tlcs_signed) => {
-                CFNMessage::TlcsSigned(tlcs_signed.try_into()?)
-            }
             molecule_cfn::CFNMessageUnion::RevokeAndAck(revoke_and_ack) => {
                 CFNMessage::RevokeAndAck(revoke_and_ack.try_into()?)
+            }
+            molecule_cfn::CFNMessageUnion::ReestablishChannel(reestablish_channel) => {
+                CFNMessage::ReestablishChannel(reestablish_channel.try_into()?)
             }
         })
     }
@@ -1299,22 +1315,6 @@ macro_rules! impl_traits {
     };
 }
 
-impl_traits!(OpenChannel);
-impl_traits!(AcceptChannel);
-impl_traits!(CommitmentSigned);
-impl_traits!(TxSignatures);
-impl_traits!(ChannelReady);
-impl_traits!(TxUpdate);
-impl_traits!(TxComplete);
-impl_traits!(TxAbort);
-impl_traits!(TxInitRBF);
-impl_traits!(TxAckRBF);
-impl_traits!(Shutdown);
-impl_traits!(ClosingSigned);
-impl_traits!(AddTlc);
-impl_traits!(TlcsSigned);
-impl_traits!(RevokeAndAck);
-impl_traits!(RemoveTlc);
 impl_traits!(CFNMessage);
 
 #[cfg(test)]

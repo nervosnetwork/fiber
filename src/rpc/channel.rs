@@ -284,7 +284,6 @@ where
                 },
             ))
         };
-
         handle_actor_call!(self.actor, message, params).map(|response| AddTlcResult {
             tlc_id: response.tlc_id,
         })

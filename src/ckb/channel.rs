@@ -46,8 +46,8 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, CFNMessage, ChannelReady, ClosingSigned, CommitmentSigned, Hash256,
-        LockTime, OpenChannel, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcReason,
+        RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -289,8 +289,9 @@ impl<S> ChannelActor<S> {
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                    state.state =
-                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    state.update_state(ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::empty(),
+                    ));
                     return Ok(());
                 };
 
@@ -403,8 +404,11 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-
-            _ => {
+            CFNMessage::ReestablishChannel(reestablish_channel) => {
+                state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                Ok(())
+            }
+            CFNMessage::TxAbort(_) | CFNMessage::TxInitRBF(_) | CFNMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
             }
@@ -485,6 +489,11 @@ impl<S> ChannelActor<S> {
             version, &tx, &signature
         );
 
+        debug!(
+            "Sending next local nonce {:?} (previous nonce {:?})",
+            state.get_next_local_nonce(),
+            state.get_local_nonce().borrow()
+        );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             partial_signature: signature,
@@ -517,10 +526,6 @@ impl<S> ChannelActor<S> {
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
-                // Normally commitment number will be incremented after received a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not receive RevokeAndAck message.
-                // We increment the commitment number here instead.
-                state.increment_local_commitment_number();
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
@@ -1090,8 +1095,9 @@ where
                 // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
                 // It is even possible that the peer_id is bogus, and we can't send a message to it.
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
-                channel.state =
-                    ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
+                channel.update_state(ChannelState::NegotiatingFunding(
+                    NegotiatingFundingFlags::OUR_INIT_SENT,
+                ));
                 debug!(
                     "Channel to peer {:?} with id {:?} created: {:?}",
                     &self.peer_id,
@@ -1123,10 +1129,28 @@ where
                 Ok(channel)
             }
             ChannelInitializationParameter::ReestablishChannel(channel_id) => {
-                let channel = self
+                let mut channel = self
                     .store
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
+                channel.reestablishing = true;
+
+                let reestablish_channel = ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: channel.get_current_commitment_number(true),
+                    remote_commitment_number: channel.get_current_commitment_number(false),
+                };
+
+                let command = CFNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: CFNMessage::ReestablishChannel(reestablish_channel),
+                };
+
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendCFNMessage(command),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 self.network
                     .send_message(NetworkActorMessage::new_event(
@@ -1150,8 +1174,22 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(state, message) {
-                    error!("Error while processing channel message: {:?}", error);
+                if state.reestablishing {
+                    match message {
+                        CFNMessage::ReestablishChannel(reestablish_channel) => {
+                            state.handle_reestablish_channel_message(
+                                reestablish_channel,
+                                &self.network,
+                            )?;
+                        }
+                        _ => {
+                            debug!("Ignoring message while reestablishing: {:?}", message);
+                        }
+                    }
+                } else {
+                    if let Err(error) = self.handle_peer_message(state, message) {
+                        error!("Error while processing channel message: {:?}", error);
+                    }
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -1404,6 +1442,10 @@ pub struct ChannelActorState {
     pub local_shutdown_fee_rate: Option<u64>,
     pub remote_shutdown_fee_rate: Option<u64>,
     pub remote_shutdown_signature: Option<PartialSignature>,
+
+    // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
+    pub reestablishing: bool,
+
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
@@ -1594,10 +1636,10 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_base_pubkeys = signer.get_base_public_keys();
 
         let channel_id = derive_channel_id_from_revocation_keys(
-            &local_pubkeys.revocation_base_key,
+            &local_base_pubkeys.revocation_base_key,
             &remote_pubkeys.revocation_base_key,
         );
 
@@ -1621,7 +1663,7 @@ impl ChannelActorState {
             tlcs: Default::default(),
             local_shutdown_script: None,
             local_channel_parameters: ChannelParametersOneParty {
-                pubkeys: local_pubkeys,
+                pubkeys: local_base_pubkeys,
                 selected_contest_delay: remote_delay,
             },
             signer,
@@ -1640,6 +1682,7 @@ impl ChannelActorState {
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
         }
@@ -1656,7 +1699,7 @@ impl ChannelActorState {
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
-        let local_pubkeys = signer.to_channel_public_keys(INITIAL_COMMITMENT_NUMBER);
+        let local_pubkeys = signer.get_base_public_keys();
         let temp_channel_id =
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
@@ -1690,6 +1733,7 @@ impl ChannelActorState {
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: value,
         }
@@ -1740,6 +1784,38 @@ impl ChannelActorState {
             &self.state, &new_state
         );
         self.state = new_state;
+    }
+
+    // Send RevokeAndAck message to the counterparty, and update the
+    // channel state accordingly.
+    fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        // Now we should revoke previous transation by revealing preimage.
+        let old_number = self.get_remote_commitment_number();
+        let secret = self.signer.get_commitment_secret(old_number);
+
+        self.update_state_on_raa_msg(false);
+
+        let new_number = self.get_remote_commitment_number();
+        let point = self.get_local_commitment_point(new_number);
+
+        debug!(
+            "Revealing revocation preimage #{}: {:?}",
+            old_number, &secret
+        );
+        debug!("Sending new commitment point #{}: {:?}", new_number, &point);
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: CFNMessage::RevokeAndAck(RevokeAndAck {
+                        channel_id: self.get_id(),
+                        per_commitment_secret: secret.into(),
+                        next_per_commitment_point: point,
+                    }),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     // After sending or receiving a RevokeAndAck message, all messages before
@@ -1841,8 +1917,13 @@ impl ChannelActorState {
         self.id
     }
 
+    pub fn get_local_secnonce(&self) -> SecNonce {
+        self.signer
+            .derive_musig2_nonce(self.get_local_commitment_number())
+    }
+
     pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
-        self.get_next_local_secnonce().public_nonce()
+        self.get_local_secnonce().public_nonce()
     }
 
     pub fn get_next_local_secnonce(&self) -> SecNonce {
@@ -1851,9 +1932,7 @@ impl ChannelActorState {
     }
 
     pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.signer
-            .derive_musig2_nonce(self.get_next_commitment_number(true))
-            .public_nonce()
+        self.get_next_local_secnonce().public_nonce().clone()
     }
 
     pub fn get_remote_nonce(&self) -> &PubNonce {
@@ -1872,11 +1951,29 @@ impl ChannelActorState {
         self.commitment_numbers.get_remote()
     }
 
+    fn set_remote_commitment_number(&mut self, number: u64) {
+        debug!(
+            "Setting remote commitment number from {} to {}",
+            self.commitment_numbers.remote, number
+        );
+        self.commitment_numbers.remote = number;
+    }
+
     pub fn increment_local_commitment_number(&mut self) {
+        debug!(
+            "Incrementing local commitment number from {} to {}",
+            self.get_local_commitment_number(),
+            self.get_local_commitment_number() + 1
+        );
         self.commitment_numbers.increment_local();
     }
 
     pub fn increment_remote_commitment_number(&mut self) {
+        debug!(
+            "Incrementing remote commitment number from {} to {}",
+            self.get_remote_commitment_number(),
+            self.get_remote_commitment_number() + 1
+        );
         self.commitment_numbers.increment_remote();
     }
 
@@ -2147,6 +2244,12 @@ impl ChannelActorState {
         let local_nonce = local_nonce.borrow();
         let remote_nonce = self.get_remote_nonce();
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
+        debug!(
+            "Got agg nonces {:?} from peer {:?}: {:?}",
+            AggNonce::sum(nonces),
+            &self.peer_id,
+            nonces
+        );
         AggNonce::sum(nonces)
     }
 
@@ -2449,19 +2552,6 @@ impl ChannelActorState {
             lock_time: message.expiry,
             payment_preimage: None,
         })
-    }
-}
-
-impl From<&ChannelActorState> for Musig2Context {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2Context {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            local_seckey: value.signer.funding_key,
-            local_secnonce: value.get_local_musig2_secnonce(),
-            remote_pubkey: *value.get_remote_funding_pubkey(),
-            remote_pubnonce: value.get_remote_nonce().clone(),
-        }
     }
 }
 
@@ -2869,46 +2959,20 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        debug!("Updating peer next local nonce");
+        debug!(
+            "Updating peer next remote nonce from {:?} to {:?}",
+            self.get_remote_nonce(),
+            &commitment_signed.next_local_nonce
+        );
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
-                // Normally commitment number will be incremented after sent a RevokeAndAck message.
-                // But here channel has not been etablished yet, so we will not send RevokeAndAck message.
-                // We increment the commitment number here instead.
-                self.increment_remote_commitment_number();
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
-                // Now we should revoke previous transation by revealing preimage.
-                let old_number = self.get_remote_commitment_number();
-                let secret = self.signer.get_commitment_secret(old_number);
-
-                self.update_state_on_raa_msg(false);
-
-                let new_number = self.get_remote_commitment_number();
-                let point = self.get_local_commitment_point(new_number);
-
-                debug!(
-                    "Revealing revocation preimage #{}: {:?}",
-                    old_number, &secret
-                );
-                debug!("Sending new commitment point #{}: {:?}", new_number, &point);
-
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                            peer_id: self.peer_id.clone(),
-                            message: CFNMessage::RevokeAndAck(RevokeAndAck {
-                                channel_id: self.get_id(),
-                                per_commitment_secret: secret.into(),
-                                next_per_commitment_point: point,
-                            }),
-                        }),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                self.send_revoke_and_ack_message(network);
                 match flags {
                     CommitmentSignedFlags::ChannelReady() => {}
                     CommitmentSignedFlags::PendingShutdown(_) => {
@@ -3022,6 +3086,8 @@ impl ChannelActorState {
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
+        self.increment_local_commitment_number();
+        self.increment_remote_commitment_number();
         network
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
@@ -3065,6 +3131,123 @@ impl ChannelActorState {
         }
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+        Ok(())
+    }
+
+    fn handle_reestablish_channel_message(
+        &mut self,
+        reestablish_channel: ReestablishChannel,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        debug!(
+            "Handling reestablish channel message: {:?}, our commitment_numbers {:?}",
+            reestablish_channel, self.commitment_numbers,
+        );
+        self.reestablishing = false;
+        match self.state {
+            ChannelState::NegotiatingFunding(_flags) => {
+                // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
+                // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
+            }
+            ChannelState::ChannelReady() => {
+                let expected_local_commitment_number = self.get_local_commitment_number();
+                let acutal_local_commitment_number = reestablish_channel.remote_commitment_number;
+                if acutal_local_commitment_number == expected_local_commitment_number {
+                    // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
+                    let mut need_resend_commitment_signed = false;
+                    for info in self.tlcs.values() {
+                        if info.is_offered() {
+                            if info.created_at.get_local() >= acutal_local_commitment_number
+                                && info.creation_confirmed_at.is_none()
+                            {
+                                // resend AddTlc message
+                                network
+                                    .send_message(NetworkActorMessage::new_command(
+                                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                                            peer_id: self.peer_id.clone(),
+                                            message: CFNMessage::AddTlc(AddTlc {
+                                                channel_id: self.get_id(),
+                                                tlc_id: info.tlc.get_id(),
+                                                amount: info.tlc.amount,
+                                                payment_hash: info.tlc.payment_hash,
+                                                expiry: info.tlc.lock_time,
+                                            }),
+                                        }),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                                need_resend_commitment_signed = true;
+                            }
+                        } else {
+                            if let Some((commitment_number, remove_reason)) = info.removed_at {
+                                if commitment_number.get_local() >= acutal_local_commitment_number {
+                                    // resend RemoveTlc message
+                                    network
+                                        .send_message(NetworkActorMessage::new_command(
+                                            NetworkActorCommand::SendCFNMessage(
+                                                CFNMessageWithPeerId {
+                                                    peer_id: self.peer_id.clone(),
+                                                    message: CFNMessage::RemoveTlc(RemoveTlc {
+                                                        channel_id: self.get_id(),
+                                                        tlc_id: info.tlc.get_id(),
+                                                        reason: remove_reason,
+                                                    }),
+                                                },
+                                            ),
+                                        ))
+                                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                                    need_resend_commitment_signed = true;
+                                }
+                            }
+                        }
+                    }
+                    if need_resend_commitment_signed {
+                        debug!("Resend CommitmentSigned message");
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                } else if acutal_local_commitment_number == expected_local_commitment_number + 1 {
+                    // wait for remote to resend the RevokeAndAck message, do nothing here
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
+                        expected_local_commitment_number, acutal_local_commitment_number
+                    );
+                }
+
+                let expected_remote_commitment_number = self.get_remote_commitment_number();
+                let acutal_remote_commitment_number = reestablish_channel.local_commitment_number;
+                if expected_remote_commitment_number == acutal_remote_commitment_number {
+                    // synced with remote, do nothing
+                } else if expected_remote_commitment_number == acutal_remote_commitment_number + 1 {
+                    // Resetting our remote commitment number to the actual remote commitment number
+                    // and resend the RevokeAndAck message.
+                    self.set_remote_commitment_number(acutal_remote_commitment_number);
+                    self.send_revoke_and_ack_message(network);
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid remote commitment number: expected {}, actual {}",
+                        expected_remote_commitment_number, acutal_remote_commitment_number
+                    );
+                }
+            }
+            _ => {
+                // TODO: @quake we need to handle other states.
+                warn!(
+                    "Unhandled reestablish channel message in state {:?}",
+                    &self.state
+                );
+            }
+        }
         Ok(())
     }
 
@@ -3499,7 +3682,12 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
-            debug!("Got base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, delayed_payment_base_key, revocation_base_key);
+            debug!(
+                "Got base witness parameters: delayed_time: {:?}, delayed_payment_key: {:?}, delayed_commitment_point {:?}, revocation_key: {:?}, revocation_commitment point: {:?}",
+                delay, delayed_payment_base_key,
+                delayed_payment_commitment_point,
+                revocation_base_key, revocation_commitment_point
+            );
             (
                 delay,
                 derive_delayed_payment_pubkey(
@@ -3509,6 +3697,11 @@ impl ChannelActorState {
                 derive_revocation_pubkey(revocation_base_key, &revocation_commitment_point),
             )
         };
+
+        debug!(
+            "Parameters for witnesses: epoch {:?}, payment key: {:?}, revocation key: {:?}",
+            delayed_epoch, delayed_payment_key, revocation_key
+        );
 
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
@@ -3788,42 +3981,6 @@ pub fn create_witness_for_funding_cell(
         .expect("Witness length should be correct")
 }
 
-pub struct Musig2Context {
-    pub key_agg_ctx: KeyAggContext,
-    pub agg_nonce: AggNonce,
-    pub local_seckey: Privkey,
-    pub local_secnonce: SecNonce,
-    pub remote_pubkey: Pubkey,
-    pub remote_pubnonce: PubNonce,
-}
-
-impl Musig2Context {
-    pub fn split(self) -> (Musig2SignContext, Musig2VerifyContext) {
-        let Musig2Context {
-            key_agg_ctx,
-            agg_nonce,
-            local_seckey,
-            local_secnonce,
-            remote_pubkey,
-            remote_pubnonce,
-        } = self;
-        (
-            Musig2SignContext {
-                key_agg_ctx: key_agg_ctx.clone(),
-                agg_nonce: agg_nonce.clone(),
-                seckey: local_seckey,
-                secnonce: local_secnonce,
-            },
-            Musig2VerifyContext {
-                key_agg_ctx,
-                agg_nonce,
-                pubkey: remote_pubkey,
-                pubnonce: remote_pubnonce,
-            },
-        )
-    }
-}
-
 pub struct Musig2VerifyContext {
     pub key_agg_ctx: KeyAggContext,
     pub agg_nonce: AggNonce,
@@ -3844,14 +4001,23 @@ impl From<Musig2SignContext> for Musig2VerifyContext {
 
 impl Musig2VerifyContext {
     pub fn verify(&self, signature: PartialSignature, message: &[u8]) -> ProcessingChannelResult {
-        Ok(verify_partial(
+        let result = verify_partial(
             &self.key_agg_ctx,
             signature,
             &self.agg_nonce,
             self.pubkey,
             &self.pubnonce,
             message,
-        )?)
+        );
+        debug!(
+            "Verifying partial signature {:?} with message {:?}, nonce {:?}, agg nonce {:?}, result {:?}",
+            &signature,
+            hex::encode(message),
+            &self.pubnonce,
+            &self.agg_nonce,
+            result
+        );
+        Ok(result?)
     }
 }
 
@@ -3865,7 +4031,13 @@ pub struct Musig2SignContext {
 
 impl Musig2SignContext {
     pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
-        debug!("Musig2 signing partial message {:?}", hex::encode(&message));
+        debug!(
+            "Musig2 signing partial message {:?} with nonce {:?} (public nonce: {:?}), agg nonce {:?}",
+            hex::encode(&message),
+            self.secnonce,
+            self.secnonce.public_nonce(),
+            &self.agg_nonce
+        );
         Ok(sign_partial(
             &self.key_agg_ctx,
             self.seckey,
@@ -4017,6 +4189,13 @@ impl TLC {
     fn get_hash(&self) -> ShortHash {
         self.payment_hash.as_ref()[..20].try_into().unwrap()
     }
+
+    fn get_id(&self) -> u64 {
+        match self.id {
+            TLCId::Offered(id) => id,
+            TLCId::Received(id) => id,
+        }
+    }
 }
 
 /// A tlc output in a commitment transaction, including both the tlc output
@@ -4068,10 +4247,36 @@ impl DetailedTLCInfo {
     }
 }
 
-pub fn derive_private_key(secret: &Privkey, _per_commitment_point: &Pubkey) -> Privkey {
-    // TODO: Currently we only copy the input secret. We need to actually derive new private keys
-    // from the per_commitment_point.
-    *secret
+pub fn get_tweak_by_commitment_point(commitment_point: &Pubkey) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(&commitment_point.serialize());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+fn derive_private_key(secret: &Privkey, commitment_point: &Pubkey) -> Privkey {
+    secret.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    base_key.tweak(get_tweak_by_commitment_point(commitment_point))
+}
+
+pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
+}
+
+pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
+    derive_public_key(base_key, commitment_point)
 }
 
 /// A simple implementation of [`WriteableEcdsaChannelSigner`] that just keeps the private keys in memory.
@@ -4093,25 +4298,9 @@ pub struct InMemorySigner {
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
     // TODO: use rust's ownership to make sure musig_nonce is used once.
-    pub musig2_base_nonce: SecNonce,
+    pub musig2_base_nonce: Privkey,
     /// Seed to derive above keys (per commitment).
     pub commitment_seed: [u8; 32],
-}
-
-pub fn derive_revocation_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_delayed_payment_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
-}
-
-pub fn derive_tlc_pubkey(base_key: &Pubkey, _commitment_point: &Pubkey) -> Pubkey {
-    *base_key
 }
 
 impl InMemorySigner {
@@ -4138,8 +4327,7 @@ impl InMemorySigner {
         let delayed_payment_base_key =
             key_derive(payment_key.as_ref(), b"delayed payment base key");
         let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
-        let misig_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
-        let musig_nonce = SecNonce::build(misig_nonce.as_ref()).build();
+        let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
         Self {
             funding_key,
@@ -4147,18 +4335,18 @@ impl InMemorySigner {
             payment_key,
             delayed_payment_base_key,
             tlc_base_key,
-            musig2_base_nonce: musig_nonce,
+            musig2_base_nonce,
             commitment_seed,
         }
     }
 
-    fn to_channel_public_keys(&self, commitment_number: u64) -> ChannelBasePublicKeys {
+    fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_base_key: self.derive_revocation_key(commitment_number).pubkey(),
-            payment_base_key: self.derive_payment_key(commitment_number).pubkey(),
-            delayed_payment_base_key: self.derive_delayed_payment_key(commitment_number).pubkey(),
-            tlc_base_key: self.derive_tlc_key(commitment_number).pubkey(),
+            revocation_base_key: self.revocation_base_key.pubkey(),
+            payment_base_key: self.payment_key.pubkey(),
+            delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
+            tlc_base_key: self.tlc_base_key.pubkey(),
         }
     }
 
@@ -4196,18 +4384,20 @@ impl InMemorySigner {
         derive_private_key(&self.tlc_base_key, &per_commitment_point)
     }
 
-    pub fn derive_musig2_nonce(&self, _new_commitment_number: u64) -> SecNonce {
-        // TODO: generate new musig nonce here
-        self.musig2_base_nonce.clone()
+    // TODO: Verify that this is a secure way to derive the nonce.
+    pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
+        let commitment_point = self.get_commitment_point(commitment_number);
+        let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
+        debug!(
+            "Deriving Musig2 nonce: commitment number: {}, commitment point: {:?}",
+            commitment_number, commitment_point
+        );
+        SecNonce::build(seckey.as_ref()).build()
     }
 }
 
 #[cfg(test)]
 mod tests {
-
-    use ckb_jsonrpc_types::Status;
-    use ractor::call;
-
     use crate::{
         ckb::{
             network::{AcceptChannelCommand, OpenChannelCommand},
@@ -4216,6 +4406,9 @@ mod tests {
         },
         NetworkServiceEvent,
     };
+
+    use ckb_jsonrpc_types::Status;
+    use ractor::call;
 
     use super::{super::types::Privkey, derive_private_key, derive_tlc_pubkey, InMemorySigner};
 

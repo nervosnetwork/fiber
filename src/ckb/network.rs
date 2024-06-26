@@ -457,14 +457,21 @@ where
                     "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
                     channel_id, peer_id, tx
                 );
-                call_t!(
+                match call_t!(
                     self.chain_actor,
                     CkbChainMessage::SendTx,
                     DEFAULT_CHAIN_ACTOR_TIMEOUT,
                     tx.clone()
                 )
                 .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                .expect("valid closing tx");
+                {
+                    Ok(_) => {
+                        info!("Closing transaction sent to the network: {:?}", tx);
+                    }
+                    Err(err) => {
+                        error!("Failed to send closing transaction to the network: {}", err);
+                    }
+                }
 
                 // Notify outside observers.
                 myself
