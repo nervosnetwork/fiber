@@ -1771,11 +1771,15 @@ impl ChannelActorState {
     }
 
     pub fn get_sent_tlc_balance(&self) -> u128 {
-        self.get_tlc_value_sent_by_local(true)
+        self.get_active_offered_tlcs(true)
+            .map(|tlc| tlc.tlc.amount)
+            .sum::<u128>()
     }
 
     pub fn get_received_tlc_balance(&self) -> u128 {
-        self.get_tlc_value_received_from_remote(false)
+        self.get_active_received_tlcs(false)
+            .map(|tlc| tlc.tlc.amount)
+            .sum::<u128>()
     }
 
     fn update_state(&mut self, new_state: ChannelState) {
@@ -2035,8 +2039,12 @@ impl ChannelActorState {
             )));
         }
         if tlc.is_offered() {
+            // TODO: We should actually also consider all our fulfilled tlcs here.
+            // Because this is also the amount that we can actually spend.
             let sent_tlc_value = self.get_sent_tlc_balance();
+            debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
+            // TODO: handle transaction fee here.
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
@@ -2046,8 +2054,12 @@ impl ChannelActorState {
                 )));
             }
         } else {
+            // TODO: We should actually also consider all their fulfilled tlcs here.
+            // Because this is also the amount that we can actually spend.
             let received_tlc_value = self.get_received_tlc_balance();
+            debug!("Value of remote received tlcs: {}", received_tlc_value);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
+            // TODO: handle transaction fee here.
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds remote balance {}",
@@ -2325,18 +2337,6 @@ impl ChannelActorState {
             Self::should_tlc_be_included_in_commitment_tx(info, local_commitment)
                 && info.is_offered()
         })
-    }
-
-    fn get_tlc_value_sent_by_local(&self, local_commitment: bool) -> u128 {
-        if local_commitment {
-            self.get_active_offered_tlcs(local_commitment)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        } else {
-            self.get_active_received_tlcs(local_commitment)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        }
     }
 
     // The parameter local indicates whether we are interested in the value sent by the local party.
