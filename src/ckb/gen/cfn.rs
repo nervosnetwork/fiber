@@ -2914,283 +2914,6 @@ impl<'a> From<&'a PubkeyReader<'a>> for &'a [u8; 33usize] {
     }
 }
 #[derive(Clone)]
-pub struct SignatureVec(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for SignatureVec {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for SignatureVec {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for SignatureVec {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} [", Self::NAME)?;
-        for i in 0..self.len() {
-            if i == 0 {
-                write!(f, "{}", self.get_unchecked(i))?;
-            } else {
-                write!(f, ", {}", self.get_unchecked(i))?;
-            }
-        }
-        write!(f, "]")
-    }
-}
-impl ::core::default::Default for SignatureVec {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        SignatureVec::new_unchecked(v)
-    }
-}
-impl SignatureVec {
-    const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
-    pub const ITEM_SIZE: usize = 64;
-    pub fn total_size(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
-    }
-    pub fn item_count(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn len(&self) -> usize {
-        self.item_count()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn get(&self, idx: usize) -> Option<Signature> {
-        if idx >= self.len() {
-            None
-        } else {
-            Some(self.get_unchecked(idx))
-        }
-    }
-    pub fn get_unchecked(&self, idx: usize) -> Signature {
-        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
-        let end = start + Self::ITEM_SIZE;
-        Signature::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn as_reader<'r>(&'r self) -> SignatureVecReader<'r> {
-        SignatureVecReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for SignatureVec {
-    type Builder = SignatureVecBuilder;
-    const NAME: &'static str = "SignatureVec";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        SignatureVec(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SignatureVecReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SignatureVecReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().extend(self.into_iter())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct SignatureVecReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for SignatureVecReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for SignatureVecReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for SignatureVecReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} [", Self::NAME)?;
-        for i in 0..self.len() {
-            if i == 0 {
-                write!(f, "{}", self.get_unchecked(i))?;
-            } else {
-                write!(f, ", {}", self.get_unchecked(i))?;
-            }
-        }
-        write!(f, "]")
-    }
-}
-impl<'r> SignatureVecReader<'r> {
-    pub const ITEM_SIZE: usize = 64;
-    pub fn total_size(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
-    }
-    pub fn item_count(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn len(&self) -> usize {
-        self.item_count()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    pub fn get(&self, idx: usize) -> Option<SignatureReader<'r>> {
-        if idx >= self.len() {
-            None
-        } else {
-            Some(self.get_unchecked(idx))
-        }
-    }
-    pub fn get_unchecked(&self, idx: usize) -> SignatureReader<'r> {
-        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
-        let end = start + Self::ITEM_SIZE;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for SignatureVecReader<'r> {
-    type Entity = SignatureVec;
-    const NAME: &'static str = "SignatureVecReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        SignatureVecReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
-        }
-        let item_count = molecule::unpack_number(slice) as usize;
-        if item_count == 0 {
-            if slice_len != molecule::NUMBER_SIZE {
-                return ve!(Self, TotalSizeNotMatch, molecule::NUMBER_SIZE, slice_len);
-            }
-            return Ok(());
-        }
-        let total_size = molecule::NUMBER_SIZE + Self::ITEM_SIZE * item_count;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct SignatureVecBuilder(pub(crate) Vec<Signature>);
-impl SignatureVecBuilder {
-    pub const ITEM_SIZE: usize = 64;
-    pub fn set(mut self, v: Vec<Signature>) -> Self {
-        self.0 = v;
-        self
-    }
-    pub fn push(mut self, v: Signature) -> Self {
-        self.0.push(v);
-        self
-    }
-    pub fn extend<T: ::core::iter::IntoIterator<Item = Signature>>(mut self, iter: T) -> Self {
-        for elem in iter {
-            self.0.push(elem);
-        }
-        self
-    }
-    pub fn replace(&mut self, index: usize, v: Signature) -> Option<Signature> {
-        self.0
-            .get_mut(index)
-            .map(|item| ::core::mem::replace(item, v))
-    }
-}
-impl molecule::prelude::Builder for SignatureVecBuilder {
-    type Entity = SignatureVec;
-    const NAME: &'static str = "SignatureVecBuilder";
-    fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.0.len()
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(&molecule::pack_number(self.0.len() as molecule::Number))?;
-        for inner in &self.0[..] {
-            writer.write_all(inner.as_slice())?;
-        }
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        SignatureVec::new_unchecked(inner.into())
-    }
-}
-pub struct SignatureVecIterator(SignatureVec, usize, usize);
-impl ::core::iter::Iterator for SignatureVecIterator {
-    type Item = Signature;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.1 >= self.2 {
-            None
-        } else {
-            let ret = self.0.get_unchecked(self.1);
-            self.1 += 1;
-            Some(ret)
-        }
-    }
-}
-impl ::core::iter::ExactSizeIterator for SignatureVecIterator {
-    fn len(&self) -> usize {
-        self.2 - self.1
-    }
-}
-impl ::core::iter::IntoIterator for SignatureVec {
-    type Item = Signature;
-    type IntoIter = SignatureVecIterator;
-    fn into_iter(self) -> Self::IntoIter {
-        let len = self.len();
-        SignatureVecIterator(self, 0, len)
-    }
-}
-impl<'r> SignatureVecReader<'r> {
-    pub fn iter<'t>(&'t self) -> SignatureVecReaderIterator<'t, 'r> {
-        SignatureVecReaderIterator(&self, 0, self.len())
-    }
-}
-pub struct SignatureVecReaderIterator<'t, 'r>(&'t SignatureVecReader<'r>, usize, usize);
-impl<'t: 'r, 'r> ::core::iter::Iterator for SignatureVecReaderIterator<'t, 'r> {
-    type Item = SignatureReader<'t>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.1 >= self.2 {
-            None
-        } else {
-            let ret = self.0.get_unchecked(self.1);
-            self.1 += 1;
-            Some(ret)
-        }
-    }
-}
-impl<'t: 'r, 'r> ::core::iter::ExactSizeIterator for SignatureVecReaderIterator<'t, 'r> {
-    fn len(&self) -> usize {
-        self.2 - self.1
-    }
-}
-impl ::core::iter::FromIterator<Signature> for SignatureVec {
-    fn from_iter<T: IntoIterator<Item = Signature>>(iter: T) -> Self {
-        Self::new_builder().extend(iter).build()
-    }
-}
-#[derive(Clone)]
 pub struct OpenChannel(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for OpenChannel {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -7566,296 +7289,6 @@ impl molecule::prelude::Builder for AddTlcBuilder {
     }
 }
 #[derive(Clone)]
-pub struct TlcsSigned(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for TlcsSigned {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for TlcsSigned {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for TlcsSigned {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
-        write!(f, ", {}: {}", "tlc_signatures", self.tlc_signatures())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for TlcsSigned {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        TlcsSigned::new_unchecked(v)
-    }
-}
-impl TlcsSigned {
-    const DEFAULT_VALUE: [u8; 116] = [
-        116, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 112, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 3;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn channel_id(&self) -> Byte32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn signature(&self) -> Signature {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn tlc_signatures(&self) -> SignatureVec {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
-            SignatureVec::new_unchecked(self.0.slice(start..end))
-        } else {
-            SignatureVec::new_unchecked(self.0.slice(start..))
-        }
-    }
-    pub fn as_reader<'r>(&'r self) -> TlcsSignedReader<'r> {
-        TlcsSignedReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for TlcsSigned {
-    type Builder = TlcsSignedBuilder;
-    const NAME: &'static str = "TlcsSigned";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        TlcsSigned(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TlcsSignedReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        TlcsSignedReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .channel_id(self.channel_id())
-            .signature(self.signature())
-            .tlc_signatures(self.tlc_signatures())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct TlcsSignedReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for TlcsSignedReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for TlcsSignedReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for TlcsSignedReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
-        write!(f, ", {}: {}", "tlc_signatures", self.tlc_signatures())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl<'r> TlcsSignedReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn channel_id(&self) -> Byte32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn signature(&self) -> SignatureReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn tlc_signatures(&self) -> SignatureVecReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
-            SignatureVecReader::new_unchecked(&self.as_slice()[start..end])
-        } else {
-            SignatureVecReader::new_unchecked(&self.as_slice()[start..])
-        }
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for TlcsSignedReader<'r> {
-    type Entity = TlcsSigned;
-    const NAME: &'static str = "TlcsSignedReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        TlcsSignedReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
-        }
-        let total_size = molecule::unpack_number(slice) as usize;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
-        }
-        if slice_len < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
-        }
-        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
-        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        if slice_len < offset_first {
-            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
-        }
-        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
-        if field_count < Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        } else if !compatible && field_count > Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        };
-        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
-            .chunks_exact(molecule::NUMBER_SIZE)
-            .map(|x| molecule::unpack_number(x) as usize)
-            .collect();
-        offsets.push(total_size);
-        if offsets.windows(2).any(|i| i[0] > i[1]) {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        SignatureReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        SignatureVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct TlcsSignedBuilder {
-    pub(crate) channel_id: Byte32,
-    pub(crate) signature: Signature,
-    pub(crate) tlc_signatures: SignatureVec,
-}
-impl TlcsSignedBuilder {
-    pub const FIELD_COUNT: usize = 3;
-    pub fn channel_id(mut self, v: Byte32) -> Self {
-        self.channel_id = v;
-        self
-    }
-    pub fn signature(mut self, v: Signature) -> Self {
-        self.signature = v;
-        self
-    }
-    pub fn tlc_signatures(mut self, v: SignatureVec) -> Self {
-        self.tlc_signatures = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for TlcsSignedBuilder {
-    type Entity = TlcsSigned;
-    const NAME: &'static str = "TlcsSignedBuilder";
-    fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.channel_id.as_slice().len()
-            + self.signature.as_slice().len()
-            + self.tlc_signatures.as_slice().len()
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
-        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.channel_id.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.signature.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.tlc_signatures.as_slice().len();
-        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
-        for offset in offsets.into_iter() {
-            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
-        }
-        writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.signature.as_slice())?;
-        writer.write_all(self.tlc_signatures.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        TlcsSigned::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
 pub struct RevokeAndAck(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for RevokeAndAck {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -9063,6 +8496,315 @@ impl molecule::prelude::Builder for RemoveTlcBuilder {
     }
 }
 #[derive(Clone)]
+pub struct ReestablishChannel(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for ReestablishChannel {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for ReestablishChannel {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for ReestablishChannel {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "local_commitment_number",
+            self.local_commitment_number()
+        )?;
+        write!(
+            f,
+            ", {}: {}",
+            "remote_commitment_number",
+            self.remote_commitment_number()
+        )?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for ReestablishChannel {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        ReestablishChannel::new_unchecked(v)
+    }
+}
+impl ReestablishChannel {
+    const DEFAULT_VALUE: [u8; 64] = [
+        64, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
+    ];
+    pub const FIELD_COUNT: usize = 3;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn channel_id(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn local_commitment_number(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn remote_commitment_number(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            Uint64::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint64::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> ReestablishChannelReader<'r> {
+        ReestablishChannelReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for ReestablishChannel {
+    type Builder = ReestablishChannelBuilder;
+    const NAME: &'static str = "ReestablishChannel";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        ReestablishChannel(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        ReestablishChannelReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        ReestablishChannelReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .channel_id(self.channel_id())
+            .local_commitment_number(self.local_commitment_number())
+            .remote_commitment_number(self.remote_commitment_number())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct ReestablishChannelReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for ReestablishChannelReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for ReestablishChannelReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for ReestablishChannelReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "local_commitment_number",
+            self.local_commitment_number()
+        )?;
+        write!(
+            f,
+            ", {}: {}",
+            "remote_commitment_number",
+            self.remote_commitment_number()
+        )?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> ReestablishChannelReader<'r> {
+    pub const FIELD_COUNT: usize = 3;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn channel_id(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn local_commitment_number(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let end = molecule::unpack_number(&slice[12..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn remote_commitment_number(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[12..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint64Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for ReestablishChannelReader<'r> {
+    type Entity = ReestablishChannel;
+    const NAME: &'static str = "ReestablishChannelReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        ReestablishChannelReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct ReestablishChannelBuilder {
+    pub(crate) channel_id: Byte32,
+    pub(crate) local_commitment_number: Uint64,
+    pub(crate) remote_commitment_number: Uint64,
+}
+impl ReestablishChannelBuilder {
+    pub const FIELD_COUNT: usize = 3;
+    pub fn channel_id(mut self, v: Byte32) -> Self {
+        self.channel_id = v;
+        self
+    }
+    pub fn local_commitment_number(mut self, v: Uint64) -> Self {
+        self.local_commitment_number = v;
+        self
+    }
+    pub fn remote_commitment_number(mut self, v: Uint64) -> Self {
+        self.remote_commitment_number = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for ReestablishChannelBuilder {
+    type Entity = ReestablishChannel;
+    const NAME: &'static str = "ReestablishChannelBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.channel_id.as_slice().len()
+            + self.local_commitment_number.as_slice().len()
+            + self.remote_commitment_number.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.channel_id.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.local_commitment_number.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.remote_commitment_number.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.channel_id.as_slice())?;
+        writer.write_all(self.local_commitment_number.as_slice())?;
+        writer.write_all(self.remote_commitment_number.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        ReestablishChannel::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct CFNMessage(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for CFNMessage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -9121,20 +8863,20 @@ impl CFNMessage {
         match self.item_id() {
             0 => OpenChannel::new_unchecked(inner).into(),
             1 => AcceptChannel::new_unchecked(inner).into(),
-            2 => CommitmentSigned::new_unchecked(inner).into(),
-            3 => TxSignatures::new_unchecked(inner).into(),
-            4 => ChannelReady::new_unchecked(inner).into(),
-            5 => TxUpdate::new_unchecked(inner).into(),
-            6 => TxComplete::new_unchecked(inner).into(),
-            7 => TxAbort::new_unchecked(inner).into(),
-            8 => TxInitRBF::new_unchecked(inner).into(),
-            9 => TxAckRBF::new_unchecked(inner).into(),
-            10 => Shutdown::new_unchecked(inner).into(),
-            11 => ClosingSigned::new_unchecked(inner).into(),
-            12 => AddTlc::new_unchecked(inner).into(),
-            13 => TlcsSigned::new_unchecked(inner).into(),
-            14 => RevokeAndAck::new_unchecked(inner).into(),
-            15 => RemoveTlc::new_unchecked(inner).into(),
+            2 => TxSignatures::new_unchecked(inner).into(),
+            3 => TxUpdate::new_unchecked(inner).into(),
+            4 => TxComplete::new_unchecked(inner).into(),
+            5 => TxAbort::new_unchecked(inner).into(),
+            6 => TxInitRBF::new_unchecked(inner).into(),
+            7 => TxAckRBF::new_unchecked(inner).into(),
+            8 => CommitmentSigned::new_unchecked(inner).into(),
+            9 => ChannelReady::new_unchecked(inner).into(),
+            10 => AddTlc::new_unchecked(inner).into(),
+            11 => RemoveTlc::new_unchecked(inner).into(),
+            12 => RevokeAndAck::new_unchecked(inner).into(),
+            13 => Shutdown::new_unchecked(inner).into(),
+            14 => ClosingSigned::new_unchecked(inner).into(),
+            15 => ReestablishChannel::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9200,20 +8942,20 @@ impl<'r> CFNMessageReader<'r> {
         match self.item_id() {
             0 => OpenChannelReader::new_unchecked(inner).into(),
             1 => AcceptChannelReader::new_unchecked(inner).into(),
-            2 => CommitmentSignedReader::new_unchecked(inner).into(),
-            3 => TxSignaturesReader::new_unchecked(inner).into(),
-            4 => ChannelReadyReader::new_unchecked(inner).into(),
-            5 => TxUpdateReader::new_unchecked(inner).into(),
-            6 => TxCompleteReader::new_unchecked(inner).into(),
-            7 => TxAbortReader::new_unchecked(inner).into(),
-            8 => TxInitRBFReader::new_unchecked(inner).into(),
-            9 => TxAckRBFReader::new_unchecked(inner).into(),
-            10 => ShutdownReader::new_unchecked(inner).into(),
-            11 => ClosingSignedReader::new_unchecked(inner).into(),
-            12 => AddTlcReader::new_unchecked(inner).into(),
-            13 => TlcsSignedReader::new_unchecked(inner).into(),
-            14 => RevokeAndAckReader::new_unchecked(inner).into(),
-            15 => RemoveTlcReader::new_unchecked(inner).into(),
+            2 => TxSignaturesReader::new_unchecked(inner).into(),
+            3 => TxUpdateReader::new_unchecked(inner).into(),
+            4 => TxCompleteReader::new_unchecked(inner).into(),
+            5 => TxAbortReader::new_unchecked(inner).into(),
+            6 => TxInitRBFReader::new_unchecked(inner).into(),
+            7 => TxAckRBFReader::new_unchecked(inner).into(),
+            8 => CommitmentSignedReader::new_unchecked(inner).into(),
+            9 => ChannelReadyReader::new_unchecked(inner).into(),
+            10 => AddTlcReader::new_unchecked(inner).into(),
+            11 => RemoveTlcReader::new_unchecked(inner).into(),
+            12 => RevokeAndAckReader::new_unchecked(inner).into(),
+            13 => ShutdownReader::new_unchecked(inner).into(),
+            14 => ClosingSignedReader::new_unchecked(inner).into(),
+            15 => ReestablishChannelReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9241,20 +8983,20 @@ impl<'r> molecule::prelude::Reader<'r> for CFNMessageReader<'r> {
         match item_id {
             0 => OpenChannelReader::verify(inner_slice, compatible),
             1 => AcceptChannelReader::verify(inner_slice, compatible),
-            2 => CommitmentSignedReader::verify(inner_slice, compatible),
-            3 => TxSignaturesReader::verify(inner_slice, compatible),
-            4 => ChannelReadyReader::verify(inner_slice, compatible),
-            5 => TxUpdateReader::verify(inner_slice, compatible),
-            6 => TxCompleteReader::verify(inner_slice, compatible),
-            7 => TxAbortReader::verify(inner_slice, compatible),
-            8 => TxInitRBFReader::verify(inner_slice, compatible),
-            9 => TxAckRBFReader::verify(inner_slice, compatible),
-            10 => ShutdownReader::verify(inner_slice, compatible),
-            11 => ClosingSignedReader::verify(inner_slice, compatible),
-            12 => AddTlcReader::verify(inner_slice, compatible),
-            13 => TlcsSignedReader::verify(inner_slice, compatible),
-            14 => RevokeAndAckReader::verify(inner_slice, compatible),
-            15 => RemoveTlcReader::verify(inner_slice, compatible),
+            2 => TxSignaturesReader::verify(inner_slice, compatible),
+            3 => TxUpdateReader::verify(inner_slice, compatible),
+            4 => TxCompleteReader::verify(inner_slice, compatible),
+            5 => TxAbortReader::verify(inner_slice, compatible),
+            6 => TxInitRBFReader::verify(inner_slice, compatible),
+            7 => TxAckRBFReader::verify(inner_slice, compatible),
+            8 => CommitmentSignedReader::verify(inner_slice, compatible),
+            9 => ChannelReadyReader::verify(inner_slice, compatible),
+            10 => AddTlcReader::verify(inner_slice, compatible),
+            11 => RemoveTlcReader::verify(inner_slice, compatible),
+            12 => RevokeAndAckReader::verify(inner_slice, compatible),
+            13 => ShutdownReader::verify(inner_slice, compatible),
+            14 => ClosingSignedReader::verify(inner_slice, compatible),
+            15 => ReestablishChannelReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -9293,39 +9035,39 @@ impl molecule::prelude::Builder for CFNMessageBuilder {
 pub enum CFNMessageUnion {
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
-    CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
-    ChannelReady(ChannelReady),
     TxUpdate(TxUpdate),
     TxComplete(TxComplete),
     TxAbort(TxAbort),
     TxInitRBF(TxInitRBF),
     TxAckRBF(TxAckRBF),
+    CommitmentSigned(CommitmentSigned),
+    ChannelReady(ChannelReady),
+    AddTlc(AddTlc),
+    RemoveTlc(RemoveTlc),
+    RevokeAndAck(RevokeAndAck),
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
-    AddTlc(AddTlc),
-    TlcsSigned(TlcsSigned),
-    RevokeAndAck(RevokeAndAck),
-    RemoveTlc(RemoveTlc),
+    ReestablishChannel(ReestablishChannel),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum CFNMessageUnionReader<'r> {
     OpenChannel(OpenChannelReader<'r>),
     AcceptChannel(AcceptChannelReader<'r>),
-    CommitmentSigned(CommitmentSignedReader<'r>),
     TxSignatures(TxSignaturesReader<'r>),
-    ChannelReady(ChannelReadyReader<'r>),
     TxUpdate(TxUpdateReader<'r>),
     TxComplete(TxCompleteReader<'r>),
     TxAbort(TxAbortReader<'r>),
     TxInitRBF(TxInitRBFReader<'r>),
     TxAckRBF(TxAckRBFReader<'r>),
+    CommitmentSigned(CommitmentSignedReader<'r>),
+    ChannelReady(ChannelReadyReader<'r>),
+    AddTlc(AddTlcReader<'r>),
+    RemoveTlc(RemoveTlcReader<'r>),
+    RevokeAndAck(RevokeAndAckReader<'r>),
     Shutdown(ShutdownReader<'r>),
     ClosingSigned(ClosingSignedReader<'r>),
-    AddTlc(AddTlcReader<'r>),
-    TlcsSigned(TlcsSignedReader<'r>),
-    RevokeAndAck(RevokeAndAckReader<'r>),
-    RemoveTlc(RemoveTlcReader<'r>),
+    ReestablishChannel(ReestablishChannelReader<'r>),
 }
 impl ::core::default::Default for CFNMessageUnion {
     fn default() -> Self {
@@ -9341,14 +9083,8 @@ impl ::core::fmt::Display for CFNMessageUnion {
             CFNMessageUnion::AcceptChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AcceptChannel::NAME, item)
             }
-            CFNMessageUnion::CommitmentSigned(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
-            }
             CFNMessageUnion::TxSignatures(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxSignatures::NAME, item)
-            }
-            CFNMessageUnion::ChannelReady(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
             CFNMessageUnion::TxUpdate(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
@@ -9365,23 +9101,29 @@ impl ::core::fmt::Display for CFNMessageUnion {
             CFNMessageUnion::TxAckRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAckRBF::NAME, item)
             }
+            CFNMessageUnion::CommitmentSigned(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
+            }
+            CFNMessageUnion::ChannelReady(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
+            }
+            CFNMessageUnion::AddTlc(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
+            }
+            CFNMessageUnion::RemoveTlc(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
+            }
+            CFNMessageUnion::RevokeAndAck(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
+            }
             CFNMessageUnion::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
             }
             CFNMessageUnion::ClosingSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ClosingSigned::NAME, item)
             }
-            CFNMessageUnion::AddTlc(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
-            }
-            CFNMessageUnion::TlcsSigned(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TlcsSigned::NAME, item)
-            }
-            CFNMessageUnion::RevokeAndAck(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
-            }
-            CFNMessageUnion::RemoveTlc(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
+            CFNMessageUnion::ReestablishChannel(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, ReestablishChannel::NAME, item)
             }
         }
     }
@@ -9395,14 +9137,8 @@ impl<'r> ::core::fmt::Display for CFNMessageUnionReader<'r> {
             CFNMessageUnionReader::AcceptChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AcceptChannel::NAME, item)
             }
-            CFNMessageUnionReader::CommitmentSigned(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
-            }
             CFNMessageUnionReader::TxSignatures(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxSignatures::NAME, item)
-            }
-            CFNMessageUnionReader::ChannelReady(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
             CFNMessageUnionReader::TxUpdate(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
@@ -9419,23 +9155,29 @@ impl<'r> ::core::fmt::Display for CFNMessageUnionReader<'r> {
             CFNMessageUnionReader::TxAckRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAckRBF::NAME, item)
             }
+            CFNMessageUnionReader::CommitmentSigned(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
+            }
+            CFNMessageUnionReader::ChannelReady(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
+            }
+            CFNMessageUnionReader::AddTlc(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
+            }
+            CFNMessageUnionReader::RemoveTlc(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
+            }
+            CFNMessageUnionReader::RevokeAndAck(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
+            }
             CFNMessageUnionReader::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
             }
             CFNMessageUnionReader::ClosingSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ClosingSigned::NAME, item)
             }
-            CFNMessageUnionReader::AddTlc(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
-            }
-            CFNMessageUnionReader::TlcsSigned(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, TlcsSigned::NAME, item)
-            }
-            CFNMessageUnionReader::RevokeAndAck(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
-            }
-            CFNMessageUnionReader::RemoveTlc(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
+            CFNMessageUnionReader::ReestablishChannel(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, ReestablishChannel::NAME, item)
             }
         }
     }
@@ -9445,20 +9187,20 @@ impl CFNMessageUnion {
         match self {
             CFNMessageUnion::OpenChannel(ref item) => write!(f, "{}", item),
             CFNMessageUnion::AcceptChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::CommitmentSigned(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxSignatures(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::ChannelReady(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxUpdate(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxComplete(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxAbort(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxInitRBF(ref item) => write!(f, "{}", item),
             CFNMessageUnion::TxAckRBF(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::CommitmentSigned(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::ChannelReady(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::AddTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::RemoveTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::RevokeAndAck(ref item) => write!(f, "{}", item),
             CFNMessageUnion::Shutdown(ref item) => write!(f, "{}", item),
             CFNMessageUnion::ClosingSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::AddTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TlcsSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::RevokeAndAck(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::RemoveTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnion::ReestablishChannel(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -9467,20 +9209,20 @@ impl<'r> CFNMessageUnionReader<'r> {
         match self {
             CFNMessageUnionReader::OpenChannel(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::AcceptChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::CommitmentSigned(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxSignatures(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::ChannelReady(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxUpdate(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxComplete(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxAbort(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxInitRBF(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::TxAckRBF(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::CommitmentSigned(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::ChannelReady(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::AddTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::RemoveTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::RevokeAndAck(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::Shutdown(ref item) => write!(f, "{}", item),
             CFNMessageUnionReader::ClosingSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::AddTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TlcsSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::RevokeAndAck(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::RemoveTlc(ref item) => write!(f, "{}", item),
+            CFNMessageUnionReader::ReestablishChannel(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -9494,19 +9236,9 @@ impl ::core::convert::From<AcceptChannel> for CFNMessageUnion {
         CFNMessageUnion::AcceptChannel(item)
     }
 }
-impl ::core::convert::From<CommitmentSigned> for CFNMessageUnion {
-    fn from(item: CommitmentSigned) -> Self {
-        CFNMessageUnion::CommitmentSigned(item)
-    }
-}
 impl ::core::convert::From<TxSignatures> for CFNMessageUnion {
     fn from(item: TxSignatures) -> Self {
         CFNMessageUnion::TxSignatures(item)
-    }
-}
-impl ::core::convert::From<ChannelReady> for CFNMessageUnion {
-    fn from(item: ChannelReady) -> Self {
-        CFNMessageUnion::ChannelReady(item)
     }
 }
 impl ::core::convert::From<TxUpdate> for CFNMessageUnion {
@@ -9534,6 +9266,31 @@ impl ::core::convert::From<TxAckRBF> for CFNMessageUnion {
         CFNMessageUnion::TxAckRBF(item)
     }
 }
+impl ::core::convert::From<CommitmentSigned> for CFNMessageUnion {
+    fn from(item: CommitmentSigned) -> Self {
+        CFNMessageUnion::CommitmentSigned(item)
+    }
+}
+impl ::core::convert::From<ChannelReady> for CFNMessageUnion {
+    fn from(item: ChannelReady) -> Self {
+        CFNMessageUnion::ChannelReady(item)
+    }
+}
+impl ::core::convert::From<AddTlc> for CFNMessageUnion {
+    fn from(item: AddTlc) -> Self {
+        CFNMessageUnion::AddTlc(item)
+    }
+}
+impl ::core::convert::From<RemoveTlc> for CFNMessageUnion {
+    fn from(item: RemoveTlc) -> Self {
+        CFNMessageUnion::RemoveTlc(item)
+    }
+}
+impl ::core::convert::From<RevokeAndAck> for CFNMessageUnion {
+    fn from(item: RevokeAndAck) -> Self {
+        CFNMessageUnion::RevokeAndAck(item)
+    }
+}
 impl ::core::convert::From<Shutdown> for CFNMessageUnion {
     fn from(item: Shutdown) -> Self {
         CFNMessageUnion::Shutdown(item)
@@ -9544,24 +9301,9 @@ impl ::core::convert::From<ClosingSigned> for CFNMessageUnion {
         CFNMessageUnion::ClosingSigned(item)
     }
 }
-impl ::core::convert::From<AddTlc> for CFNMessageUnion {
-    fn from(item: AddTlc) -> Self {
-        CFNMessageUnion::AddTlc(item)
-    }
-}
-impl ::core::convert::From<TlcsSigned> for CFNMessageUnion {
-    fn from(item: TlcsSigned) -> Self {
-        CFNMessageUnion::TlcsSigned(item)
-    }
-}
-impl ::core::convert::From<RevokeAndAck> for CFNMessageUnion {
-    fn from(item: RevokeAndAck) -> Self {
-        CFNMessageUnion::RevokeAndAck(item)
-    }
-}
-impl ::core::convert::From<RemoveTlc> for CFNMessageUnion {
-    fn from(item: RemoveTlc) -> Self {
-        CFNMessageUnion::RemoveTlc(item)
+impl ::core::convert::From<ReestablishChannel> for CFNMessageUnion {
+    fn from(item: ReestablishChannel) -> Self {
+        CFNMessageUnion::ReestablishChannel(item)
     }
 }
 impl<'r> ::core::convert::From<OpenChannelReader<'r>> for CFNMessageUnionReader<'r> {
@@ -9574,19 +9316,9 @@ impl<'r> ::core::convert::From<AcceptChannelReader<'r>> for CFNMessageUnionReade
         CFNMessageUnionReader::AcceptChannel(item)
     }
 }
-impl<'r> ::core::convert::From<CommitmentSignedReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: CommitmentSignedReader<'r>) -> Self {
-        CFNMessageUnionReader::CommitmentSigned(item)
-    }
-}
 impl<'r> ::core::convert::From<TxSignaturesReader<'r>> for CFNMessageUnionReader<'r> {
     fn from(item: TxSignaturesReader<'r>) -> Self {
         CFNMessageUnionReader::TxSignatures(item)
-    }
-}
-impl<'r> ::core::convert::From<ChannelReadyReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: ChannelReadyReader<'r>) -> Self {
-        CFNMessageUnionReader::ChannelReady(item)
     }
 }
 impl<'r> ::core::convert::From<TxUpdateReader<'r>> for CFNMessageUnionReader<'r> {
@@ -9614,6 +9346,31 @@ impl<'r> ::core::convert::From<TxAckRBFReader<'r>> for CFNMessageUnionReader<'r>
         CFNMessageUnionReader::TxAckRBF(item)
     }
 }
+impl<'r> ::core::convert::From<CommitmentSignedReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: CommitmentSignedReader<'r>) -> Self {
+        CFNMessageUnionReader::CommitmentSigned(item)
+    }
+}
+impl<'r> ::core::convert::From<ChannelReadyReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: ChannelReadyReader<'r>) -> Self {
+        CFNMessageUnionReader::ChannelReady(item)
+    }
+}
+impl<'r> ::core::convert::From<AddTlcReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: AddTlcReader<'r>) -> Self {
+        CFNMessageUnionReader::AddTlc(item)
+    }
+}
+impl<'r> ::core::convert::From<RemoveTlcReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: RemoveTlcReader<'r>) -> Self {
+        CFNMessageUnionReader::RemoveTlc(item)
+    }
+}
+impl<'r> ::core::convert::From<RevokeAndAckReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: RevokeAndAckReader<'r>) -> Self {
+        CFNMessageUnionReader::RevokeAndAck(item)
+    }
+}
 impl<'r> ::core::convert::From<ShutdownReader<'r>> for CFNMessageUnionReader<'r> {
     fn from(item: ShutdownReader<'r>) -> Self {
         CFNMessageUnionReader::Shutdown(item)
@@ -9624,24 +9381,9 @@ impl<'r> ::core::convert::From<ClosingSignedReader<'r>> for CFNMessageUnionReade
         CFNMessageUnionReader::ClosingSigned(item)
     }
 }
-impl<'r> ::core::convert::From<AddTlcReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: AddTlcReader<'r>) -> Self {
-        CFNMessageUnionReader::AddTlc(item)
-    }
-}
-impl<'r> ::core::convert::From<TlcsSignedReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: TlcsSignedReader<'r>) -> Self {
-        CFNMessageUnionReader::TlcsSigned(item)
-    }
-}
-impl<'r> ::core::convert::From<RevokeAndAckReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: RevokeAndAckReader<'r>) -> Self {
-        CFNMessageUnionReader::RevokeAndAck(item)
-    }
-}
-impl<'r> ::core::convert::From<RemoveTlcReader<'r>> for CFNMessageUnionReader<'r> {
-    fn from(item: RemoveTlcReader<'r>) -> Self {
-        CFNMessageUnionReader::RemoveTlc(item)
+impl<'r> ::core::convert::From<ReestablishChannelReader<'r>> for CFNMessageUnionReader<'r> {
+    fn from(item: ReestablishChannelReader<'r>) -> Self {
+        CFNMessageUnionReader::ReestablishChannel(item)
     }
 }
 impl CFNMessageUnion {
@@ -9650,100 +9392,100 @@ impl CFNMessageUnion {
         match self {
             CFNMessageUnion::OpenChannel(item) => item.as_bytes(),
             CFNMessageUnion::AcceptChannel(item) => item.as_bytes(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_bytes(),
             CFNMessageUnion::TxSignatures(item) => item.as_bytes(),
-            CFNMessageUnion::ChannelReady(item) => item.as_bytes(),
             CFNMessageUnion::TxUpdate(item) => item.as_bytes(),
             CFNMessageUnion::TxComplete(item) => item.as_bytes(),
             CFNMessageUnion::TxAbort(item) => item.as_bytes(),
             CFNMessageUnion::TxInitRBF(item) => item.as_bytes(),
             CFNMessageUnion::TxAckRBF(item) => item.as_bytes(),
+            CFNMessageUnion::CommitmentSigned(item) => item.as_bytes(),
+            CFNMessageUnion::ChannelReady(item) => item.as_bytes(),
+            CFNMessageUnion::AddTlc(item) => item.as_bytes(),
+            CFNMessageUnion::RemoveTlc(item) => item.as_bytes(),
+            CFNMessageUnion::RevokeAndAck(item) => item.as_bytes(),
             CFNMessageUnion::Shutdown(item) => item.as_bytes(),
             CFNMessageUnion::ClosingSigned(item) => item.as_bytes(),
-            CFNMessageUnion::AddTlc(item) => item.as_bytes(),
-            CFNMessageUnion::TlcsSigned(item) => item.as_bytes(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_bytes(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_bytes(),
+            CFNMessageUnion::ReestablishChannel(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
             CFNMessageUnion::OpenChannel(item) => item.as_slice(),
             CFNMessageUnion::AcceptChannel(item) => item.as_slice(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_slice(),
             CFNMessageUnion::TxSignatures(item) => item.as_slice(),
-            CFNMessageUnion::ChannelReady(item) => item.as_slice(),
             CFNMessageUnion::TxUpdate(item) => item.as_slice(),
             CFNMessageUnion::TxComplete(item) => item.as_slice(),
             CFNMessageUnion::TxAbort(item) => item.as_slice(),
             CFNMessageUnion::TxInitRBF(item) => item.as_slice(),
             CFNMessageUnion::TxAckRBF(item) => item.as_slice(),
+            CFNMessageUnion::CommitmentSigned(item) => item.as_slice(),
+            CFNMessageUnion::ChannelReady(item) => item.as_slice(),
+            CFNMessageUnion::AddTlc(item) => item.as_slice(),
+            CFNMessageUnion::RemoveTlc(item) => item.as_slice(),
+            CFNMessageUnion::RevokeAndAck(item) => item.as_slice(),
             CFNMessageUnion::Shutdown(item) => item.as_slice(),
             CFNMessageUnion::ClosingSigned(item) => item.as_slice(),
-            CFNMessageUnion::AddTlc(item) => item.as_slice(),
-            CFNMessageUnion::TlcsSigned(item) => item.as_slice(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_slice(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_slice(),
+            CFNMessageUnion::ReestablishChannel(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             CFNMessageUnion::OpenChannel(_) => 0,
             CFNMessageUnion::AcceptChannel(_) => 1,
-            CFNMessageUnion::CommitmentSigned(_) => 2,
-            CFNMessageUnion::TxSignatures(_) => 3,
-            CFNMessageUnion::ChannelReady(_) => 4,
-            CFNMessageUnion::TxUpdate(_) => 5,
-            CFNMessageUnion::TxComplete(_) => 6,
-            CFNMessageUnion::TxAbort(_) => 7,
-            CFNMessageUnion::TxInitRBF(_) => 8,
-            CFNMessageUnion::TxAckRBF(_) => 9,
-            CFNMessageUnion::Shutdown(_) => 10,
-            CFNMessageUnion::ClosingSigned(_) => 11,
-            CFNMessageUnion::AddTlc(_) => 12,
-            CFNMessageUnion::TlcsSigned(_) => 13,
-            CFNMessageUnion::RevokeAndAck(_) => 14,
-            CFNMessageUnion::RemoveTlc(_) => 15,
+            CFNMessageUnion::TxSignatures(_) => 2,
+            CFNMessageUnion::TxUpdate(_) => 3,
+            CFNMessageUnion::TxComplete(_) => 4,
+            CFNMessageUnion::TxAbort(_) => 5,
+            CFNMessageUnion::TxInitRBF(_) => 6,
+            CFNMessageUnion::TxAckRBF(_) => 7,
+            CFNMessageUnion::CommitmentSigned(_) => 8,
+            CFNMessageUnion::ChannelReady(_) => 9,
+            CFNMessageUnion::AddTlc(_) => 10,
+            CFNMessageUnion::RemoveTlc(_) => 11,
+            CFNMessageUnion::RevokeAndAck(_) => 12,
+            CFNMessageUnion::Shutdown(_) => 13,
+            CFNMessageUnion::ClosingSigned(_) => 14,
+            CFNMessageUnion::ReestablishChannel(_) => 15,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             CFNMessageUnion::OpenChannel(_) => "OpenChannel",
             CFNMessageUnion::AcceptChannel(_) => "AcceptChannel",
-            CFNMessageUnion::CommitmentSigned(_) => "CommitmentSigned",
             CFNMessageUnion::TxSignatures(_) => "TxSignatures",
-            CFNMessageUnion::ChannelReady(_) => "ChannelReady",
             CFNMessageUnion::TxUpdate(_) => "TxUpdate",
             CFNMessageUnion::TxComplete(_) => "TxComplete",
             CFNMessageUnion::TxAbort(_) => "TxAbort",
             CFNMessageUnion::TxInitRBF(_) => "TxInitRBF",
             CFNMessageUnion::TxAckRBF(_) => "TxAckRBF",
+            CFNMessageUnion::CommitmentSigned(_) => "CommitmentSigned",
+            CFNMessageUnion::ChannelReady(_) => "ChannelReady",
+            CFNMessageUnion::AddTlc(_) => "AddTlc",
+            CFNMessageUnion::RemoveTlc(_) => "RemoveTlc",
+            CFNMessageUnion::RevokeAndAck(_) => "RevokeAndAck",
             CFNMessageUnion::Shutdown(_) => "Shutdown",
             CFNMessageUnion::ClosingSigned(_) => "ClosingSigned",
-            CFNMessageUnion::AddTlc(_) => "AddTlc",
-            CFNMessageUnion::TlcsSigned(_) => "TlcsSigned",
-            CFNMessageUnion::RevokeAndAck(_) => "RevokeAndAck",
-            CFNMessageUnion::RemoveTlc(_) => "RemoveTlc",
+            CFNMessageUnion::ReestablishChannel(_) => "ReestablishChannel",
         }
     }
     pub fn as_reader<'r>(&'r self) -> CFNMessageUnionReader<'r> {
         match self {
             CFNMessageUnion::OpenChannel(item) => item.as_reader().into(),
             CFNMessageUnion::AcceptChannel(item) => item.as_reader().into(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_reader().into(),
             CFNMessageUnion::TxSignatures(item) => item.as_reader().into(),
-            CFNMessageUnion::ChannelReady(item) => item.as_reader().into(),
             CFNMessageUnion::TxUpdate(item) => item.as_reader().into(),
             CFNMessageUnion::TxComplete(item) => item.as_reader().into(),
             CFNMessageUnion::TxAbort(item) => item.as_reader().into(),
             CFNMessageUnion::TxInitRBF(item) => item.as_reader().into(),
             CFNMessageUnion::TxAckRBF(item) => item.as_reader().into(),
+            CFNMessageUnion::CommitmentSigned(item) => item.as_reader().into(),
+            CFNMessageUnion::ChannelReady(item) => item.as_reader().into(),
+            CFNMessageUnion::AddTlc(item) => item.as_reader().into(),
+            CFNMessageUnion::RemoveTlc(item) => item.as_reader().into(),
+            CFNMessageUnion::RevokeAndAck(item) => item.as_reader().into(),
             CFNMessageUnion::Shutdown(item) => item.as_reader().into(),
             CFNMessageUnion::ClosingSigned(item) => item.as_reader().into(),
-            CFNMessageUnion::AddTlc(item) => item.as_reader().into(),
-            CFNMessageUnion::TlcsSigned(item) => item.as_reader().into(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_reader().into(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_reader().into(),
+            CFNMessageUnion::ReestablishChannel(item) => item.as_reader().into(),
         }
     }
 }
@@ -9753,60 +9495,60 @@ impl<'r> CFNMessageUnionReader<'r> {
         match self {
             CFNMessageUnionReader::OpenChannel(item) => item.as_slice(),
             CFNMessageUnionReader::AcceptChannel(item) => item.as_slice(),
-            CFNMessageUnionReader::CommitmentSigned(item) => item.as_slice(),
             CFNMessageUnionReader::TxSignatures(item) => item.as_slice(),
-            CFNMessageUnionReader::ChannelReady(item) => item.as_slice(),
             CFNMessageUnionReader::TxUpdate(item) => item.as_slice(),
             CFNMessageUnionReader::TxComplete(item) => item.as_slice(),
             CFNMessageUnionReader::TxAbort(item) => item.as_slice(),
             CFNMessageUnionReader::TxInitRBF(item) => item.as_slice(),
             CFNMessageUnionReader::TxAckRBF(item) => item.as_slice(),
+            CFNMessageUnionReader::CommitmentSigned(item) => item.as_slice(),
+            CFNMessageUnionReader::ChannelReady(item) => item.as_slice(),
+            CFNMessageUnionReader::AddTlc(item) => item.as_slice(),
+            CFNMessageUnionReader::RemoveTlc(item) => item.as_slice(),
+            CFNMessageUnionReader::RevokeAndAck(item) => item.as_slice(),
             CFNMessageUnionReader::Shutdown(item) => item.as_slice(),
             CFNMessageUnionReader::ClosingSigned(item) => item.as_slice(),
-            CFNMessageUnionReader::AddTlc(item) => item.as_slice(),
-            CFNMessageUnionReader::TlcsSigned(item) => item.as_slice(),
-            CFNMessageUnionReader::RevokeAndAck(item) => item.as_slice(),
-            CFNMessageUnionReader::RemoveTlc(item) => item.as_slice(),
+            CFNMessageUnionReader::ReestablishChannel(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             CFNMessageUnionReader::OpenChannel(_) => 0,
             CFNMessageUnionReader::AcceptChannel(_) => 1,
-            CFNMessageUnionReader::CommitmentSigned(_) => 2,
-            CFNMessageUnionReader::TxSignatures(_) => 3,
-            CFNMessageUnionReader::ChannelReady(_) => 4,
-            CFNMessageUnionReader::TxUpdate(_) => 5,
-            CFNMessageUnionReader::TxComplete(_) => 6,
-            CFNMessageUnionReader::TxAbort(_) => 7,
-            CFNMessageUnionReader::TxInitRBF(_) => 8,
-            CFNMessageUnionReader::TxAckRBF(_) => 9,
-            CFNMessageUnionReader::Shutdown(_) => 10,
-            CFNMessageUnionReader::ClosingSigned(_) => 11,
-            CFNMessageUnionReader::AddTlc(_) => 12,
-            CFNMessageUnionReader::TlcsSigned(_) => 13,
-            CFNMessageUnionReader::RevokeAndAck(_) => 14,
-            CFNMessageUnionReader::RemoveTlc(_) => 15,
+            CFNMessageUnionReader::TxSignatures(_) => 2,
+            CFNMessageUnionReader::TxUpdate(_) => 3,
+            CFNMessageUnionReader::TxComplete(_) => 4,
+            CFNMessageUnionReader::TxAbort(_) => 5,
+            CFNMessageUnionReader::TxInitRBF(_) => 6,
+            CFNMessageUnionReader::TxAckRBF(_) => 7,
+            CFNMessageUnionReader::CommitmentSigned(_) => 8,
+            CFNMessageUnionReader::ChannelReady(_) => 9,
+            CFNMessageUnionReader::AddTlc(_) => 10,
+            CFNMessageUnionReader::RemoveTlc(_) => 11,
+            CFNMessageUnionReader::RevokeAndAck(_) => 12,
+            CFNMessageUnionReader::Shutdown(_) => 13,
+            CFNMessageUnionReader::ClosingSigned(_) => 14,
+            CFNMessageUnionReader::ReestablishChannel(_) => 15,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             CFNMessageUnionReader::OpenChannel(_) => "OpenChannel",
             CFNMessageUnionReader::AcceptChannel(_) => "AcceptChannel",
-            CFNMessageUnionReader::CommitmentSigned(_) => "CommitmentSigned",
             CFNMessageUnionReader::TxSignatures(_) => "TxSignatures",
-            CFNMessageUnionReader::ChannelReady(_) => "ChannelReady",
             CFNMessageUnionReader::TxUpdate(_) => "TxUpdate",
             CFNMessageUnionReader::TxComplete(_) => "TxComplete",
             CFNMessageUnionReader::TxAbort(_) => "TxAbort",
             CFNMessageUnionReader::TxInitRBF(_) => "TxInitRBF",
             CFNMessageUnionReader::TxAckRBF(_) => "TxAckRBF",
+            CFNMessageUnionReader::CommitmentSigned(_) => "CommitmentSigned",
+            CFNMessageUnionReader::ChannelReady(_) => "ChannelReady",
+            CFNMessageUnionReader::AddTlc(_) => "AddTlc",
+            CFNMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
+            CFNMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
             CFNMessageUnionReader::Shutdown(_) => "Shutdown",
             CFNMessageUnionReader::ClosingSigned(_) => "ClosingSigned",
-            CFNMessageUnionReader::AddTlc(_) => "AddTlc",
-            CFNMessageUnionReader::TlcsSigned(_) => "TlcsSigned",
-            CFNMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
-            CFNMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
+            CFNMessageUnionReader::ReestablishChannel(_) => "ReestablishChannel",
         }
     }
 }
@@ -9820,18 +9562,8 @@ impl From<AcceptChannel> for CFNMessage {
         Self::new_builder().set(value).build()
     }
 }
-impl From<CommitmentSigned> for CFNMessage {
-    fn from(value: CommitmentSigned) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
 impl From<TxSignatures> for CFNMessage {
     fn from(value: TxSignatures) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<ChannelReady> for CFNMessage {
-    fn from(value: ChannelReady) -> Self {
         Self::new_builder().set(value).build()
     }
 }
@@ -9860,6 +9592,31 @@ impl From<TxAckRBF> for CFNMessage {
         Self::new_builder().set(value).build()
     }
 }
+impl From<CommitmentSigned> for CFNMessage {
+    fn from(value: CommitmentSigned) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<ChannelReady> for CFNMessage {
+    fn from(value: ChannelReady) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<AddTlc> for CFNMessage {
+    fn from(value: AddTlc) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<RemoveTlc> for CFNMessage {
+    fn from(value: RemoveTlc) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<RevokeAndAck> for CFNMessage {
+    fn from(value: RevokeAndAck) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
 impl From<Shutdown> for CFNMessage {
     fn from(value: Shutdown) -> Self {
         Self::new_builder().set(value).build()
@@ -9870,23 +9627,8 @@ impl From<ClosingSigned> for CFNMessage {
         Self::new_builder().set(value).build()
     }
 }
-impl From<AddTlc> for CFNMessage {
-    fn from(value: AddTlc) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<TlcsSigned> for CFNMessage {
-    fn from(value: TlcsSigned) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<RevokeAndAck> for CFNMessage {
-    fn from(value: RevokeAndAck) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<RemoveTlc> for CFNMessage {
-    fn from(value: RemoveTlc) -> Self {
+impl From<ReestablishChannel> for CFNMessage {
+    fn from(value: ReestablishChannel) -> Self {
         Self::new_builder().set(value).build()
     }
 }

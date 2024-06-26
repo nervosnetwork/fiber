@@ -42,8 +42,8 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, CFNMessage, ChannelReady, ClosingSigned, CommitmentSigned, Hash256,
-        LockTime, OpenChannel, Privkey, Pubkey, RemoveTlc, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcReason,
+        RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -276,8 +276,9 @@ impl<S> ChannelActor<S> {
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                    state.state =
-                        ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::empty());
+                    state.update_state(ChannelState::AwaitingChannelReady(
+                        AwaitingChannelReadyFlags::empty(),
+                    ));
                     return Ok(());
                 };
 
@@ -390,8 +391,11 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-
-            _ => {
+            CFNMessage::ReestablishChannel(reestablish_channel) => {
+                state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                Ok(())
+            }
+            CFNMessage::TxAbort(_) | CFNMessage::TxInitRBF(_) | CFNMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
             }
@@ -1018,8 +1022,9 @@ where
                 // TODO: note that we can't actually guarantee that this OpenChannel message is sent here.
                 // It is even possible that the peer_id is bogus, and we can't send a message to it.
                 // We need some book-keeping service to remove all the OUR_INIT_SENT channels.
-                channel.state =
-                    ChannelState::NegotiatingFunding(NegotiatingFundingFlags::OUR_INIT_SENT);
+                channel.update_state(ChannelState::NegotiatingFunding(
+                    NegotiatingFundingFlags::OUR_INIT_SENT,
+                ));
                 debug!(
                     "Channel to peer {:?} with id {:?} created: {:?}",
                     &self.peer_id,
@@ -1049,10 +1054,28 @@ where
                 Ok(channel)
             }
             ChannelInitializationParameter::ReestablishChannel(channel_id) => {
-                let channel = self
+                let mut channel = self
                     .store
                     .get_channel_actor_state(&channel_id)
                     .expect("channel should exist");
+                channel.reestablishing = true;
+
+                let reestablish_channel = ReestablishChannel {
+                    channel_id,
+                    local_commitment_number: channel.get_current_commitment_number(true),
+                    remote_commitment_number: channel.get_current_commitment_number(false),
+                };
+
+                let command = CFNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: CFNMessage::ReestablishChannel(reestablish_channel),
+                };
+
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendCFNMessage(command),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                 self.network
                     .send_message(NetworkActorMessage::new_event(
@@ -1076,8 +1099,22 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(state, message) {
-                    error!("Error while processing channel message: {:?}", error);
+                if state.reestablishing {
+                    match message {
+                        CFNMessage::ReestablishChannel(reestablish_channel) => {
+                            state.handle_reestablish_channel_message(
+                                reestablish_channel,
+                                &self.network,
+                            )?;
+                        }
+                        _ => {
+                            debug!("Ignoring message while reestablishing: {:?}", message);
+                        }
+                    }
+                } else {
+                    if let Err(error) = self.handle_peer_message(state, message) {
+                        error!("Error while processing channel message: {:?}", error);
+                    }
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -1324,6 +1361,9 @@ pub struct ChannelActorState {
     pub remote_shutdown_signature: Option<PartialSignature>,
     pub remote_shutdown_fee: Option<u128>,
 
+    // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
+    pub reestablishing: bool,
+
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
@@ -1554,6 +1594,7 @@ impl ChannelActorState {
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
         }
@@ -1599,6 +1640,7 @@ impl ChannelActorState {
             local_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
             remote_ckb_amount: DEFAULT_UDT_MINIMAL_CKB_AMOUNT,
 
+            reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: value,
         }
@@ -1626,6 +1668,38 @@ impl ChannelActorState {
             &self.state, &new_state
         );
         self.state = new_state;
+    }
+
+    // Send RevokeAndAck message to the counterparty, and update the
+    // channel state accordingly.
+    fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        // Now we should revoke previous transation by revealing preimage.
+        let old_number = self.get_remote_commitment_number();
+        let secret = self.signer.get_commitment_secret(old_number);
+
+        self.update_state_on_raa_msg(false);
+
+        let new_number = self.get_remote_commitment_number();
+        let point = self.get_local_commitment_point(new_number);
+
+        debug!(
+            "Revealing revocation preimage #{}: {:?}",
+            old_number, &secret
+        );
+        debug!("Sending new commitment point #{}: {:?}", new_number, &point);
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                    peer_id: self.peer_id.clone(),
+                    message: CFNMessage::RevokeAndAck(RevokeAndAck {
+                        channel_id: self.get_id(),
+                        per_commitment_secret: secret.into(),
+                        next_per_commitment_point: point,
+                    }),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     // After sending or receiving a RevokeAndAck message, all messages before
@@ -1759,6 +1833,14 @@ impl ChannelActorState {
 
     pub fn get_remote_commitment_number(&self) -> u64 {
         self.commitment_numbers.get_remote()
+    }
+
+    fn set_remote_commitment_number(&mut self, number: u64) {
+        debug!(
+            "Setting remote commitment number from {} to {}",
+            self.commitment_numbers.remote, number
+        );
+        self.commitment_numbers.remote = number;
     }
 
     pub fn increment_local_commitment_number(&mut self) {
@@ -2729,33 +2811,7 @@ impl ChannelActorState {
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
             CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
-                // Now we should revoke previous transation by revealing preimage.
-                let old_number = self.get_remote_commitment_number();
-                let secret = self.signer.get_commitment_secret(old_number);
-
-                self.update_state_on_raa_msg(false);
-
-                let new_number = self.get_remote_commitment_number();
-                let point = self.get_local_commitment_point(new_number);
-
-                debug!(
-                    "Revealing revocation preimage #{}: {:?}",
-                    old_number, &secret
-                );
-                debug!("Sending new commitment point #{}: {:?}", new_number, &point);
-
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                            peer_id: self.peer_id.clone(),
-                            message: CFNMessage::RevokeAndAck(RevokeAndAck {
-                                channel_id: self.get_id(),
-                                per_commitment_secret: secret.into(),
-                                next_per_commitment_point: point,
-                            }),
-                        }),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                self.send_revoke_and_ack_message(network);
                 match flags {
                     CommitmentSignedFlags::ChannelReady() => {}
                     CommitmentSignedFlags::PendingShutdown(_) => {
@@ -2914,6 +2970,123 @@ impl ChannelActorState {
         }
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+        Ok(())
+    }
+
+    fn handle_reestablish_channel_message(
+        &mut self,
+        reestablish_channel: ReestablishChannel,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
+        debug!(
+            "Handling reestablish channel message: {:?}, our commitment_numbers {:?}",
+            reestablish_channel, self.commitment_numbers,
+        );
+        self.reestablishing = false;
+        match self.state {
+            ChannelState::NegotiatingFunding(_flags) => {
+                // TODO: in current implementation, we don't store the channel when we are in NegotiatingFunding state.
+                // This is an unreachable state for reestablish channel message. we may need to handle this case in the future.
+            }
+            ChannelState::ChannelReady() => {
+                let expected_local_commitment_number = self.get_local_commitment_number();
+                let acutal_local_commitment_number = reestablish_channel.remote_commitment_number;
+                if acutal_local_commitment_number == expected_local_commitment_number {
+                    // resend AddTlc, RemoveTlc and CommitmentSigned messages if needed
+                    let mut need_resend_commitment_signed = false;
+                    for info in self.tlcs.values() {
+                        if info.is_offered() {
+                            if info.created_at.get_local() >= acutal_local_commitment_number
+                                && info.creation_confirmed_at.is_none()
+                            {
+                                // resend AddTlc message
+                                network
+                                    .send_message(NetworkActorMessage::new_command(
+                                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                                            peer_id: self.peer_id.clone(),
+                                            message: CFNMessage::AddTlc(AddTlc {
+                                                channel_id: self.get_id(),
+                                                tlc_id: info.tlc.get_id(),
+                                                amount: info.tlc.amount,
+                                                payment_hash: info.tlc.payment_hash,
+                                                expiry: info.tlc.lock_time,
+                                            }),
+                                        }),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                                need_resend_commitment_signed = true;
+                            }
+                        } else {
+                            if let Some((commitment_number, remove_reason)) = info.removed_at {
+                                if commitment_number.get_local() >= acutal_local_commitment_number {
+                                    // resend RemoveTlc message
+                                    network
+                                        .send_message(NetworkActorMessage::new_command(
+                                            NetworkActorCommand::SendCFNMessage(
+                                                CFNMessageWithPeerId {
+                                                    peer_id: self.peer_id.clone(),
+                                                    message: CFNMessage::RemoveTlc(RemoveTlc {
+                                                        channel_id: self.get_id(),
+                                                        tlc_id: info.tlc.get_id(),
+                                                        reason: remove_reason,
+                                                    }),
+                                                },
+                                            ),
+                                        ))
+                                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                                    need_resend_commitment_signed = true;
+                                }
+                            }
+                        }
+                    }
+                    if need_resend_commitment_signed {
+                        debug!("Resend CommitmentSigned message");
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
+                } else if acutal_local_commitment_number == expected_local_commitment_number + 1 {
+                    // wait for remote to resend the RevokeAndAck message, do nothing here
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
+                        expected_local_commitment_number, acutal_local_commitment_number
+                    );
+                }
+
+                let expected_remote_commitment_number = self.get_remote_commitment_number();
+                let acutal_remote_commitment_number = reestablish_channel.local_commitment_number;
+                if expected_remote_commitment_number == acutal_remote_commitment_number {
+                    // synced with remote, do nothing
+                } else if expected_remote_commitment_number == acutal_remote_commitment_number + 1 {
+                    // Resetting our remote commitment number to the actual remote commitment number
+                    // and resend the RevokeAndAck message.
+                    self.set_remote_commitment_number(acutal_remote_commitment_number);
+                    self.send_revoke_and_ack_message(network);
+                } else {
+                    // unreachable state, just log an error for potential bugs
+                    error!(
+                        "Reestablish channel message with invalid remote commitment number: expected {}, actual {}",
+                        expected_remote_commitment_number, acutal_remote_commitment_number
+                    );
+                }
+            }
+            _ => {
+                // TODO: @quake we need to handle other states.
+                warn!(
+                    "Unhandled reestablish channel message in state {:?}",
+                    &self.state
+                );
+            }
+        }
         Ok(())
     }
 
@@ -3299,7 +3472,12 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             };
-            debug!("Got base witness parameters: delayed time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}", delay, delayed_payment_base_key, revocation_base_key);
+            debug!(
+                "Got base witness parameters: delayed_time: {:?}, delayed_payment_key: {:?}, delayed_commitment_point {:?}, revocation_key: {:?}, revocation_commitment point: {:?}",
+                delay, delayed_payment_base_key,
+                delayed_payment_commitment_point,
+                revocation_base_key, revocation_commitment_point
+            );
             (
                 delay,
                 derive_delayed_payment_pubkey(
@@ -3787,6 +3965,13 @@ impl TLC {
 
     fn get_hash(&self) -> ShortHash {
         self.payment_hash.as_ref()[..20].try_into().unwrap()
+    }
+
+    fn get_id(&self) -> u64 {
+        match self.id {
+            TLCId::Offered(id) => id,
+            TLCId::Received(id) => id,
+        }
     }
 }
 
