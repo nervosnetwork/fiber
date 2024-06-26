@@ -1,6 +1,7 @@
+use ckb_types::prelude::PackVec;
 use clap_serde_derive::ClapSerde;
-
 use secp256k1::SecretKey;
+use serde_with::serde_as;
 use std::{
     io::{ErrorKind, Read},
     path::PathBuf,
@@ -9,14 +10,13 @@ use std::{
 use std::str::FromStr;
 
 use ckb_types::prelude::Builder;
+use ckb_types::prelude::Pack;
 use ckb_types::H256;
 use ckb_types::{
     core::DepType,
     packed::{CellDep, OutPoint},
 };
 use ckb_types::{core::ScriptHashType, packed::CellDepVec};
-use ckb_types::{packed::Script, prelude::Pack};
-use clap::ValueEnum;
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
 use serde::Deserialize;
@@ -48,10 +48,9 @@ pub struct CkbChainConfig {
         name = "CKB_UDT_WHITELIST",
         long = "ckb-udt-whitelist",
         env,
-        value_parser,
         help = "a list of supported UDT scripts"
     )]
-    udt_whitelist: Option<UdtInfos>,
+    pub udt_whitelist: Option<UdtCfgInfos>,
 }
 
 impl CkbChainConfig {
@@ -104,40 +103,32 @@ impl CkbChainConfig {
             std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
         })
     }
+}
 
-    pub fn udt_whitelist(&self) -> Vec<UdtScriptInfo> {
-        let mut udt_whitelist: Vec<UdtScriptInfo> = vec![];
-        if let Some(udt_infos) = &self.udt_whitelist {
-            for udt_info in udt_infos.0.iter() {
-                let cell_deps: Vec<CellDep> = udt_info
-                    .cell_deps
-                    .iter()
-                    .map(|dep| CellDep::from(dep))
-                    .collect();
-                let cell_deps = CellDepVec::new_builder().set(cell_deps).build();
-                let script: Script = (&udt_info.script).into();
-                let arg_pattern = udt_info.script.args.clone();
-                udt_whitelist.push((udt_info.name.clone(), script, arg_pattern, cell_deps));
-            }
-        }
-        return udt_whitelist;
+serde_with::serde_conv!(
+    ScriptHashTypeWrapper,
+    ScriptHashType,
+    |_: &ScriptHashType| { panic!("no support to serialize") },
+    |s: String| {
+        let v = match s.to_lowercase().as_str() {
+            "type" => ScriptHashType::Type,
+            "data" => ScriptHashType::Data,
+            "data1" => ScriptHashType::Data1,
+            "data2" => ScriptHashType::Data2,
+            _ => return Err("invalid hash type"),
+        };
+        Ok(v)
     }
-}
+);
 
-#[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
-enum UdtScriptHashType {
-    Type,
-    Data,
-    Data1,
-    Data2,
-}
-
+#[serde_as]
 #[derive(Deserialize, Debug, Clone)]
-struct UdtScript {
-    code_hash: H256,
-    hash_type: UdtScriptHashType,
+pub struct UdtScript {
+    pub code_hash: H256,
+    #[serde_as(as = "ScriptHashTypeWrapper")]
+    pub hash_type: ScriptHashType,
     /// args may be used in pattern matching
-    args: String,
+    pub args: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -147,43 +138,40 @@ struct UdtCellDep {
     index: u32,
 }
 
+serde_with::serde_conv!(
+    CellDepVecWrapper,
+    CellDepVec,
+    |_: &CellDepVec| { panic!("no support to serialize") },
+    |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
+        let cell_deps: Vec<CellDep> = s.iter().map(|dep| CellDep::from(dep)).collect();
+        Ok(cell_deps.pack())
+    }
+);
+
+#[serde_as]
 #[derive(Deserialize, Clone, Debug)]
-struct UdtInfo {
-    name: String,
-    script: UdtScript,
-    cell_deps: Vec<UdtCellDep>,
+pub struct UdtArgInfo {
+    pub name: String,
+    pub script: UdtScript,
+    pub auto_accept_amount: Option<u128>,
+    #[serde_as(as = "CellDepVecWrapper")]
+    pub cell_deps: CellDepVec,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-struct UdtInfos(Vec<UdtInfo>);
+pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 
-pub type UdtScriptInfo = (String, Script, String, CellDepVec);
+impl Default for UdtCfgInfos {
+    fn default() -> Self {
+        UdtCfgInfos(Vec::new())
+    }
+}
 
-impl FromStr for UdtInfos {
+impl FromStr for UdtCfgInfos {
     type Err = serde_json::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         serde_json::from_str(s)
-    }
-}
-
-impl From<&UdtScript> for Script {
-    fn from(script: &UdtScript) -> Self {
-        let _type = match script.hash_type {
-            UdtScriptHashType::Data => ScriptHashType::Data,
-            UdtScriptHashType::Data1 => ScriptHashType::Data1,
-            UdtScriptHashType::Data2 => ScriptHashType::Data2,
-            UdtScriptHashType::Type => ScriptHashType::Type,
-        };
-        let mut builder = Script::new_builder()
-            .code_hash(script.code_hash.pack())
-            .hash_type(_type.into());
-
-        let arg = script.args.strip_prefix("0x").unwrap_or(&script.args);
-        if let Ok(packed_args) = H256::from_str(arg) {
-            builder = builder.args(packed_args.as_bytes().pack());
-        }
-        builder.build()
     }
 }
 

@@ -17,7 +17,10 @@ use ckb_testtool::{ckb_types::bytes::Bytes, context::Context};
 #[cfg(test)]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use super::config::UdtScriptInfo;
+use super::{
+    config::{UdtArgInfo, UdtCfgInfos},
+    CkbChainConfig,
+};
 
 #[cfg(test)]
 #[derive(Clone, Debug)]
@@ -99,7 +102,7 @@ impl MockContext {
             contracts_context: Arc::new(ContractsInfo {
                 contract_default_scripts: map,
                 script_cell_deps,
-                udt_whitelist: vec![],
+                udt_whitelist: UdtCfgInfos::default(),
             }),
         };
         debug!("Created mock context to test transactions.");
@@ -129,7 +132,7 @@ pub enum Contract {
 struct ContractsInfo {
     contract_default_scripts: HashMap<Contract, Script>,
     script_cell_deps: HashMap<Contract, CellDepVec>,
-    udt_whitelist: Vec<UdtScriptInfo>,
+    udt_whitelist: UdtCfgInfos,
 }
 
 #[derive(Clone)]
@@ -218,7 +221,7 @@ impl From<MockContext> for ContractsContext {
 }
 
 impl ContractsContext {
-    pub fn new(network: CkbNetwork, udt_whitelist: Vec<UdtScriptInfo>) -> Self {
+    pub fn new(network: CkbNetwork, udt_whitelist: UdtCfgInfos) -> Self {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
@@ -429,7 +432,7 @@ impl ContractsContext {
         res.build()
     }
 
-    fn get_udt_whitelist(&self) -> &Vec<UdtScriptInfo> {
+    fn get_udt_whitelist(&self) -> &UdtCfgInfos {
         match self {
             #[cfg(test)]
             Self::Mock(mock) => &mock.contracts_context.udt_whitelist,
@@ -447,15 +450,16 @@ impl ContractsContext {
             .build()
     }
 
-    pub(crate) fn get_udt_cell_deps(&self, udt_script: &Script) -> Option<CellDepVec> {
-        for (_name, script, arg_pattern, cell_deps) in self.get_udt_whitelist().iter() {
-            if script.code_hash() == udt_script.code_hash()
-                && script.hash_type() == udt_script.hash_type()
+    pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
+        for udt in &self.get_udt_whitelist().0 {
+            let _type: ScriptHashType = udt_script.hash_type().try_into().expect("valid hash type");
+            if udt.script.code_hash.pack() == udt_script.code_hash()
+                && udt.script.hash_type == _type
             {
                 let args = format!("0x{:x}", udt_script.args().raw_data());
-                let pattern = Regex::new(arg_pattern).expect("invalid expressio");
+                let pattern = Regex::new(&udt.script.args).expect("invalid expressio");
                 if pattern.is_match(&args) {
-                    return Some(cell_deps.clone());
+                    return Some(&udt);
                 }
             }
         }
@@ -465,13 +469,16 @@ impl ContractsContext {
 
 pub fn init_contracts_context(
     network: Option<CkbNetwork>,
-    udt_whitelist: Option<Vec<UdtScriptInfo>>,
+    ckb_chain_config: Option<&CkbChainConfig>,
 ) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
+    let udt_whitelist = ckb_chain_config
+        .map(|config| config.udt_whitelist.clone())
+        .unwrap_or_default();
     INSTANCE.get_or_init(|| {
         ContractsContext::new(
             network.unwrap_or(DEFAULT_CONTRACT_NETWORK),
-            udt_whitelist.unwrap_or(vec![]),
+            udt_whitelist.unwrap_or_default(),
         )
     });
     INSTANCE.get().unwrap()
@@ -490,14 +497,25 @@ pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
     init_contracts_context(None, None).get_cell_deps(contracts)
 }
 
+fn get_udt_info(script: &Script) -> Option<&UdtArgInfo> {
+    init_contracts_context(None, None).get_udt_info(script)
+}
+
 pub fn check_udt_script(script: &Script) -> bool {
-    init_contracts_context(None, None)
-        .get_udt_cell_deps(script)
-        .is_some()
+    get_udt_info(script).is_some()
 }
 
 pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
-    init_contracts_context(None, None).get_udt_cell_deps(script)
+    get_udt_info(script).map(|udt| udt.cell_deps.clone())
+}
+
+pub fn is_udt_type_auto_accept(script: &Script, amount: u128) -> bool {
+    if let Some(udt_info) = get_udt_info(script) {
+        if let Some(auto_accept_amount) = udt_info.auto_accept_amount {
+            return amount >= auto_accept_amount;
+        }
+    }
+    false
 }
 
 pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> CellDepVec {

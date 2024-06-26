@@ -4,6 +4,7 @@ use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66};
 use super::serde_utils::SliceHex;
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
+use ckb_types::core::FeeRate;
 use ckb_types::packed::Uint64;
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
@@ -457,6 +458,7 @@ pub struct OpenChannel {
     pub channel_id: Hash256,
     pub funding_udt_type_script: Option<Script>,
     pub funding_amount: u128,
+    pub reserved_ckb_amount: u64,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
     pub max_tlc_value_in_flight: u128,
@@ -474,6 +476,16 @@ pub struct OpenChannel {
     pub channel_flags: u8,
 }
 
+impl OpenChannel {
+    pub fn all_ckb_amount(&self) -> u64 {
+        if self.funding_udt_type_script.is_none() {
+            self.funding_amount as u64 + self.reserved_ckb_amount
+        } else {
+            self.reserved_ckb_amount
+        }
+    }
+}
+
 impl From<OpenChannel> for molecule_cfn::OpenChannel {
     fn from(open_channel: OpenChannel) -> Self {
         molecule_cfn::OpenChannel::new_builder()
@@ -481,6 +493,7 @@ impl From<OpenChannel> for molecule_cfn::OpenChannel {
             .channel_id(open_channel.channel_id.into())
             .funding_udt_type_script(open_channel.funding_udt_type_script.pack())
             .funding_amount(open_channel.funding_amount.pack())
+            .reserved_ckb_amount(open_channel.reserved_ckb_amount.pack())
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
@@ -509,6 +522,7 @@ impl TryFrom<molecule_cfn::OpenChannel> for OpenChannel {
             channel_id: open_channel.channel_id().into(),
             funding_udt_type_script: open_channel.funding_udt_type_script().to_opt(),
             funding_amount: open_channel.funding_amount().unpack(),
+            reserved_ckb_amount: open_channel.reserved_ckb_amount().unpack(),
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
@@ -535,6 +549,7 @@ impl TryFrom<molecule_cfn::OpenChannel> for OpenChannel {
 pub struct AcceptChannel {
     pub channel_id: Hash256,
     pub funding_amount: u128,
+    pub reserved_ckb_amount: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_accept_tlcs: u64,
     pub min_tlc_value: u128,
@@ -554,6 +569,7 @@ impl From<AcceptChannel> for molecule_cfn::AcceptChannel {
         molecule_cfn::AcceptChannel::new_builder()
             .channel_id(accept_channel.channel_id.into())
             .funding_amount(accept_channel.funding_amount.pack())
+            .reserved_ckb_amount(accept_channel.reserved_ckb_amount.pack())
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_accept_tlcs(accept_channel.max_accept_tlcs.pack())
             .min_tlc_value(accept_channel.min_tlc_value.pack())
@@ -577,6 +593,7 @@ impl TryFrom<molecule_cfn::AcceptChannel> for AcceptChannel {
         Ok(AcceptChannel {
             channel_id: accept_channel.channel_id().into(),
             funding_amount: accept_channel.funding_amount().unpack(),
+            reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_accept_tlcs: accept_channel.max_accept_tlcs().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
@@ -847,7 +864,7 @@ impl TryFrom<molecule_cfn::TxAckRBF> for TxAckRBF {
 pub struct Shutdown {
     pub channel_id: Hash256,
     pub close_script: Script,
-    pub fee: u128,
+    pub fee_rate: FeeRate,
 }
 
 impl From<Shutdown> for molecule_cfn::Shutdown {
@@ -855,7 +872,7 @@ impl From<Shutdown> for molecule_cfn::Shutdown {
         molecule_cfn::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
-            .fee(shutdown.fee.pack())
+            .fee_rate(shutdown.fee_rate.as_u64().pack())
             .build()
     }
 }
@@ -867,7 +884,7 @@ impl TryFrom<molecule_cfn::Shutdown> for Shutdown {
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
-            fee: shutdown.fee().unpack(),
+            fee_rate: FeeRate::from_u64(shutdown.fee_rate().unpack()),
         })
     }
 }

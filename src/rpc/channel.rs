@@ -10,6 +10,7 @@ use crate::ckb::{
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
+use ckb_types::core::FeeRate;
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -29,6 +30,10 @@ pub struct OpenChannelParams {
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
     pub funding_udt_type_script: Option<Script>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub commitment_fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub funding_fee_rate: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -124,8 +129,8 @@ pub enum RemoveTlcReason {
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
-    #[serde_as(as = "U128Hex")]
-    pub fee: u128,
+    #[serde_as(as = "U64Hex")]
+    pub fee_rate: u64,
 }
 
 #[rpc(server)]
@@ -194,6 +199,8 @@ where
                         .funding_udt_type_script
                         .clone()
                         .map(|s| s.into()),
+                    commitment_fee_rate: params.commitment_fee_rate,
+                    funding_fee_rate: params.funding_fee_rate,
                 },
                 rpc_reply,
             ))
@@ -322,8 +329,8 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
-                            close_script: params.clone().close_script.into(),
-                            fee: params.fee,
+                            close_script: params.close_script.clone().into(),
+                            fee_rate: FeeRate::from_u64(params.fee_rate),
                         },
                         rpc_reply,
                     ),

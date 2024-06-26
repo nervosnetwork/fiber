@@ -1,7 +1,7 @@
 meta {
-  name: remove tlc from NODE1
+  name: add tlc from NODE1
   type: http
-  seq: 19
+  seq: 10
 }
 
 post {
@@ -19,14 +19,13 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "add_tlc",
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": "{{TLC_ID5}}",
-        "reason": {
-          "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000042"
-        }
+        "amount": "0xbebc200",
+        "payment_hash": "0xcb7bce98a778f130d34da522623d7e56705bddfe0dc4781bd2331211134a19a5",
+        "expiry": 40
       }
     ]
   }
@@ -38,7 +37,7 @@ assert {
 }
 
 script:post-response {
+  console.log("step 10 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log(res.body);
 }

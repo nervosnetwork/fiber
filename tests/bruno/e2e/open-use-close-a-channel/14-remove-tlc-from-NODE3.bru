@@ -33,11 +33,12 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
+  console.log("step 14: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
 }

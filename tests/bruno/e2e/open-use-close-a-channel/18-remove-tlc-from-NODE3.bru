@@ -23,7 +23,7 @@ body:json {
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "tlc_id": "{{TLC_ID4}}",
+        "tlc_id": "{{TLC_ID3}}",
         "reason": {
           "error_code": "0x2a"
         }
@@ -33,11 +33,13 @@ body:json {
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
+    console.log("step 18: ", res.body);
+  // This request is remove a TLC which already removed in previous step.
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
 }

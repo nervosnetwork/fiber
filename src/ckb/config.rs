@@ -8,6 +8,28 @@ use clap_serde_derive::{
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
+pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
+pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
+pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
+pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
+
+/// 62 CKB minimal channel amount, at any time a partner should keep at least
+/// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,
+/// to make sure he can build a valid shutdown transaction and pay proper fee.
+pub const DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT: u64 =
+    MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+
+/// 143 CKB for minimal UDT amount
+pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
+    MIN_UDT_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+
+/// 162 CKB to open a channel which maybe automatically acceptted.
+/// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity, 1 CKB for shutdown fee
+/// The other party may auto accept the channel if the amount is greater than this.
+pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
+    DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
@@ -45,22 +67,22 @@ pub struct CkbConfig {
     #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]
     pub network: Option<CkbNetwork>,
 
-    /// minimum ckb funding amount for open channel requests, unit: shannons [default: 16100000000 shannons]
+    /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
     #[arg(
-        name = "CKB_OPEN_CHANNEL_MIN_CKB_FUNDING_AMOUNT",
-        long = "ckb-open-channel-min-ckb-funding-amount",
+        name = "CKB_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
+        long = "ckb-open-channel-auto-accept-min-ckb-funding-amount",
         env,
-        help = "minimum ckb funding amount for open channel requests, unit: shannons [default: 16100000000 shannons]"
+        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 16200000000 shannons]"
     )]
-    pub open_channel_min_ckb_funding_amount: Option<u128>,
-    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept
+    pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
+    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
     #[arg(
         name = "CKB_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
         long = "ckb-auto-accept-channel-ckb-funding-amount",
         env,
-        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6100000000 shannons], if this is set to zero, it means to disable auto accept"
+        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
-    pub auto_accept_channel_ckb_funding_amount: Option<u128>,
+    pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 }
 
 impl CkbConfig {
@@ -89,14 +111,14 @@ impl CkbConfig {
         path
     }
 
-    pub fn open_channel_min_ckb_funding_amount(&self) -> u128 {
-        self.open_channel_min_ckb_funding_amount
-            .unwrap_or(16100000000)
+    pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
+        self.open_channel_auto_accept_min_ckb_funding_amount
+            .unwrap_or(DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT)
     }
 
-    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u128 {
+    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
-            .unwrap_or(6100000000)
+            .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
     }
 }
 

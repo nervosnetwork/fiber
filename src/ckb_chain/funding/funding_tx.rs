@@ -51,47 +51,24 @@ impl From<Transaction> for FundingTx {
     }
 }
 
-#[allow(dead_code)]
-#[serde_as]
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct FundingUdtInfo {
-    /// The UDT type script
-    #[serde_as(as = "EntityHex")]
-    pub type_script: packed::Script,
-    /// CKB amount to be provided by the local party.
-    pub local_ckb_amount: u64,
-    /// CKB amount to be provided by the remote party.
-    pub remote_ckb_amount: u64,
-}
-
-impl FundingUdtInfo {
-    pub fn new(
-        type_script: &packed::Script,
-        local_ckb_amount: u64,
-        remote_ckb_amount: u64,
-    ) -> Self {
-        Self {
-            type_script: type_script.clone(),
-            local_ckb_amount,
-            remote_ckb_amount,
-        }
-    }
-}
-
 #[serde_as]
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FundingRequest {
-    /// UDT channel info
-    pub udt_info: Option<FundingUdtInfo>,
     /// The funding cell lock script args
     #[serde_as(as = "EntityHex")]
     pub script: Script,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<packed::Script>,
     /// Assets amount to be provided by the local party
     pub local_amount: u64,
     /// Fee to be provided by the local party
-    pub local_fee_rate: u64,
+    pub funding_fee_rate: u64,
     /// Assets amount to be provided by the remote party
     pub remote_amount: u64,
+    /// CKB amount to be provided by the local party.
+    pub local_reserved_ckb_amount: u64,
+    /// CKB amount to be provided by the remote party.
+    pub remote_reserved_ckb_amount: u64,
 }
 
 // TODO: trace locked cells
@@ -152,11 +129,17 @@ impl TxBuilder for FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
 
+        // set a placeholder_witness for calculating transaction fee according to transaction size
+        let placeholder_witness = packed::WitnessArgs::new_builder()
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .build();
+
         let tx_builder = builder
             .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
-            .set_cell_deps(cell_deps.into_iter().collect());
+            .set_cell_deps(cell_deps.into_iter().collect())
+            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
         warn!("tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
         Ok(tx)
@@ -173,23 +156,23 @@ impl FundingTxBuilder {
             .map(|tx| !tx.outputs().is_empty())
             .unwrap_or(false);
 
-        match self.request.udt_info {
-            Some(ref udt_info) => {
+        match self.request.udt_type_script {
+            Some(ref udt_type_script) => {
                 let mut udt_amount = self.request.local_amount as u128;
-                let mut ckb_amount = udt_info.local_ckb_amount;
+                let mut ckb_amount = self.request.local_reserved_ckb_amount;
 
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
                     udt_amount += self.request.remote_amount as u128;
                     ckb_amount = ckb_amount
-                        .checked_add(udt_info.remote_ckb_amount)
+                        .checked_add(self.request.remote_reserved_ckb_amount)
                         .ok_or(FundingError::InvalidChannel)?;
                 }
 
                 let udt_output = packed::CellOutput::new_builder()
                     .capacity(Capacity::shannons(ckb_amount).pack())
-                    .type_(Some(udt_info.type_script.clone()).pack())
+                    .type_(Some(udt_type_script.clone()).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
                 let mut data = BytesMut::with_capacity(16);
@@ -199,10 +182,13 @@ impl FundingTxBuilder {
                 Ok((udt_output, data.freeze().pack()))
             }
             None => {
-                let mut ckb_amount = self.request.local_amount;
+                let mut ckb_amount =
+                    self.request.local_amount + self.request.local_reserved_ckb_amount;
                 if remote_funded {
                     ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_amount)
+                        .checked_add(
+                            self.request.remote_amount + self.request.remote_reserved_ckb_amount,
+                        )
                         .ok_or(FundingError::InvalidChannel)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
@@ -224,12 +210,12 @@ impl FundingTxBuilder {
         cell_deps: &mut HashSet<packed::CellDep>,
     ) -> Result<(), TxBuilderError> {
         let udt_amount = self.request.local_amount as u128;
-        let udt_info = match &self.request.udt_info {
-            Some(ref udt_info) if self.request.local_amount > 0 => udt_info,
-            _ => return Ok(()),
-        };
+        // return early if we don't need to build UDT cell
+        if self.request.udt_type_script.is_none() || udt_amount == 0 {
+            return Ok(());
+        }
 
-        let udt_type_script = udt_info.type_script.clone();
+        let udt_type_script = self.request.udt_type_script.clone().unwrap();
         let owner = self.context.funding_source_lock_script.clone();
         let mut found_udt_amount = 0;
 
@@ -306,10 +292,18 @@ impl FundingTxBuilder {
         let sender = self.context.funding_source_lock_script.clone();
         // Build CapacityBalancer
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 65])).pack())
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
-        let balancer =
-            CapacityBalancer::new_simple(sender, placeholder_witness, self.request.local_fee_rate);
+
+        warn!(
+            "request.funding_fee_rate: {}",
+            self.request.funding_fee_rate
+        );
+        let balancer = CapacityBalancer::new_simple(
+            sender,
+            placeholder_witness,
+            self.request.funding_fee_rate,
+        );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = {

@@ -1,11 +1,11 @@
 meta {
-  name: remove tlc from NODE2
+  name: add tlc from NODE1
   type: http
-  seq: 7
+  seq: 10
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,25 +19,25 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "add_tlc",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "tlc_id": "{{N1N2_TLC_ID1}}",
-        "reason": {
-          "payment_preimage": "{{payment_preimage}}"
-        }
+        "channel_id": "{{CHANNEL_ID}}",
+        "amount": "0x0",
+        "payment_hash": "0xcb7bce98a778f130d34da522623d7e56705bddfe0dc4781bd2331211134a19a5",
+        "expiry": 40
       }
     ]
   }
 }
 
 assert {
-  res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.error: isDefined
+  res.body.result: isUndefined
 }
 
 script:post-response {
+  console.log("step 10 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
 }
