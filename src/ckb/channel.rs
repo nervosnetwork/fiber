@@ -3052,12 +3052,12 @@ impl ChannelActorState {
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
-                } else if acutal_local_commitment_number > expected_local_commitment_number {
+                } else if acutal_local_commitment_number == expected_local_commitment_number + 1 {
                     // wait for remote to resend the RevokeAndAck message, do nothing here
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(
-                        "Reestablish channel message with invalid remote commitment number: expected {}, actual {}",
+                        "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
                         expected_local_commitment_number, acutal_local_commitment_number
                     );
                 }
@@ -3066,25 +3066,15 @@ impl ChannelActorState {
                 let acutal_remote_commitment_number = reestablish_channel.local_commitment_number;
                 if expected_remote_commitment_number == acutal_remote_commitment_number {
                     // synced with remote, do nothing
-                } else if expected_remote_commitment_number > acutal_remote_commitment_number {
-                    debug!("Resend RevokeAndAck message becasue remote is behind: their commitment number {}, our expected commitment number {}", acutal_remote_commitment_number, expected_remote_commitment_number);
-                    debug_assert_eq!(
-                        expected_remote_commitment_number,
-                        acutal_remote_commitment_number + 1,
-                        "Remote commitment number should only be behind by 1"
-                    );
+                } else if expected_remote_commitment_number == acutal_remote_commitment_number + 1 {
                     // Resetting our remote commitment number to the actual remote commitment number
                     // and resend the RevokeAndAck message.
                     self.set_remote_commitment_number(acutal_remote_commitment_number);
                     self.send_revoke_and_ack_message(network);
                 } else {
-                    debug_assert!(
-                        false,
-                        "Remote commitment number should not be ahead of ours"
-                    );
                     // unreachable state, just log an error for potential bugs
                     error!(
-                        "Reestablish channel message with invalid local commitment number: expected {}, actual {}",
+                        "Reestablish channel message with invalid remote commitment number: expected {}, actual {}",
                         expected_remote_commitment_number, acutal_remote_commitment_number
                     );
                 }
