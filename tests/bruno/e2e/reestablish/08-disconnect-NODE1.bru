@@ -1,11 +1,11 @@
 meta {
-  name: remove tlc from NODE2
+  name: disconnect NODE3 from NODE1
   type: http
-  seq: 7
+  seq: 8
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,25 +19,19 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "remove_tlc",
+    "method": "disconnect_peer",
     "params": [
-      {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
-        "tlc_id": "{{N1N2_TLC_ID1}}",
-        "reason": {
-          "payment_preimage": "{{payment_preimage}}"
-        }
-      }
+      {"peer_id": "{{NODE3_PEERID}}"}
     ]
   }
 }
 
 assert {
   res.body.error: isUndefined
-  res.body.result: isNull
+  res.body.result: isDefined
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 1000));
 }

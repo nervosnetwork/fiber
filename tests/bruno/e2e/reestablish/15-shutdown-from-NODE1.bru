@@ -1,11 +1,11 @@
 meta {
-  name: Node2 send shutdown channel1, error shutdowno
+  name: send shutdown from NODE1
   type: http
-  seq: 9
+  seq: 15
 }
 
 post {
-  url: {{NODE2_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -22,24 +22,24 @@ body:json {
     "method": "shutdown_channel",
     "params": [
       {
-        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "channel_id": "{{CHANNEL_ID}}",
         "close_script": {
           "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
           "hash_type": "data",
           "args": "0x0101010101010101010101010101010101010101"
         },
-        "fee": "0xbebc200"
+        "fee_rate": "0x3FC"
       }
     ]
   }
 }
 
 assert {
-  res.body.error: isDefined
-  res.body.result: isUndefined
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {
-  // Channel is already shutdown in previous step, will return proper error
+  // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
 }

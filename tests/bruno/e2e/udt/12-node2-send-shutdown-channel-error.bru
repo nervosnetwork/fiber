@@ -1,0 +1,49 @@
+meta {
+  name: Node2 send shutdown channel1
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "shutdown_channel",
+    "params": [
+      {
+        "channel_id": "{{N1N2_CHANNEL_ID}}",
+        "close_script": {
+          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "hash_type": "data",
+          "args": "0x0101010101010101010101010101010101010101"
+        },
+        "fee_rate": "0x3FC"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+  res.body.result: isUndefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  // will get error message since channel is closed in previous step
+  await new Promise(r => setTimeout(r, 100));
+  if (!(res.body.error.message === "Messaging failed because channel is closed")) {
+    throw new Error("Assertion failed: error message is not right");
+  }
+}

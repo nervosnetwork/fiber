@@ -54,7 +54,6 @@ impl Actor for CkbChainActor {
         config: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let secret_key = config.read_secret_key()?;
-
         let secp = secp256k1::Secp256k1::new();
         let pub_key = secret_key.public_key(&secp);
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
@@ -318,7 +317,7 @@ mod test_utils {
                             }
                             let current_capacity: u64 = output.capacity().unpack();
                             let capacity = request.local_amount
-                                + request.local_reserve_ckb_amount
+                                + request.local_reserved_ckb_amount
                                 + current_capacity;
                             let mut outputs_builder = outputs.as_builder();
 
@@ -328,7 +327,7 @@ mod test_utils {
                         }
                         None => [CellOutput::new_builder()
                             .capacity(
-                                (request.local_amount + request.local_reserve_ckb_amount).pack(),
+                                (request.local_amount + request.local_reserved_ckb_amount).pack(),
                             )
                             .lock(request.script.clone())
                             .build()]

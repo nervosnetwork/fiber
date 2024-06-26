@@ -32,6 +32,8 @@ pub struct OpenChannelParams {
     pub funding_udt_type_script: Option<Script>,
     #[serde_as(as = "Option<U64Hex>")]
     pub commitment_fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub funding_fee_rate: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -197,7 +199,8 @@ where
                         .funding_udt_type_script
                         .clone()
                         .map(|s| s.into()),
-                    min_fee_rate: params.commitment_fee_rate,
+                    commitment_fee_rate: params.commitment_fee_rate,
+                    funding_fee_rate: params.funding_fee_rate,
                 },
                 rpc_reply,
             ))
@@ -281,7 +284,6 @@ where
                 },
             ))
         };
-
         handle_actor_call!(self.actor, message, params).map(|response| AddTlcResult {
             tlc_id: response.tlc_id,
         })

@@ -1,7 +1,7 @@
 meta {
-  name: generate a few blocks for channel 2
+  name: generate a few blocks
   type: http
-  seq: 4
+  seq: 6
 }
 
 post {
@@ -36,7 +36,7 @@ script:pre-request {
   // Script taken from https://github.com/usebruno/bruno/discussions/385#discussioncomment-8015350
   // This does not seem to work.
   if(bru.getVar("iteration") === undefined){
-    console.log("Started generating blocks for channel 2...");
+    console.log("Started generating blocks...");
     bru.setVar("iteration", 0);
   }
 }
@@ -45,8 +45,9 @@ script:post-response {
   if(bru.getVar("iteration") < bru.getVar("max_iterations") -1){
     bru.setVar("iteration", bru.getVar("iteration") + 1);
     // This is the name of this bruno file, set this to continue generating blocks.
-    bru.setNextRequest("generate a few blocks for channel 2");
+    bru.setNextRequest("generate a few blocks");
   } else {
+    console.log("Stopping generating blocks");
     // Don't know why it takes so long for funding transaction to be confirmed.
     await new Promise(r => setTimeout(r, 5000));
   }

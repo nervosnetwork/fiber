@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::FundingError;
-use crate::{
-    ckb::serde_utils::EntityHex,
-    ckb_chain::contracts::{get_cell_deps_by_contracts, Contract},
-};
+use crate::{ckb::serde_utils::EntityHex, ckb_chain::contracts::get_udt_cell_deps};
 
 use anyhow::anyhow;
 use ckb_sdk::{
@@ -24,7 +21,7 @@ use ckb_types::{
     packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
-use log::warn;
+use log::{debug, warn};
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
@@ -65,13 +62,13 @@ pub struct FundingRequest {
     /// Assets amount to be provided by the local party
     pub local_amount: u64,
     /// Fee to be provided by the local party
-    pub local_fee_rate: u64,
+    pub funding_fee_rate: u64,
     /// Assets amount to be provided by the remote party
     pub remote_amount: u64,
     /// CKB amount to be provided by the local party.
-    pub local_reserve_ckb_amount: u64,
+    pub local_reserved_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
-    pub remote_reserve_ckb_amount: u64,
+    pub remote_reserved_ckb_amount: u64,
 }
 
 // TODO: trace locked cells
@@ -132,11 +129,17 @@ impl TxBuilder for FundingTxBuilder {
             None => packed::Transaction::default().as_advanced_builder(),
         };
 
+        // set a placeholder_witness for calculating transaction fee according to transaction size
+        let placeholder_witness = packed::WitnessArgs::new_builder()
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
+            .build();
+
         let tx_builder = builder
             .set_inputs(inputs)
             .set_outputs(outputs)
             .set_outputs_data(outputs_data)
-            .set_cell_deps(cell_deps.into_iter().collect());
+            .set_cell_deps(cell_deps.into_iter().collect())
+            .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
         warn!("tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
         Ok(tx)
@@ -156,14 +159,14 @@ impl FundingTxBuilder {
         match self.request.udt_type_script {
             Some(ref udt_type_script) => {
                 let mut udt_amount = self.request.local_amount as u128;
-                let mut ckb_amount = self.request.local_reserve_ckb_amount;
+                let mut ckb_amount = self.request.local_reserved_ckb_amount;
 
                 // To make tx building easier, do not include the amount not funded yet in the
                 // funding cell.
                 if remote_funded {
                     udt_amount += self.request.remote_amount as u128;
                     ckb_amount = ckb_amount
-                        .checked_add(self.request.remote_reserve_ckb_amount)
+                        .checked_add(self.request.remote_reserved_ckb_amount)
                         .ok_or(FundingError::InvalidChannel)?;
                 }
 
@@ -180,11 +183,11 @@ impl FundingTxBuilder {
             }
             None => {
                 let mut ckb_amount =
-                    self.request.local_amount + self.request.local_reserve_ckb_amount;
+                    self.request.local_amount + self.request.local_reserved_ckb_amount;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
-                            self.request.remote_amount + self.request.remote_reserve_ckb_amount,
+                            self.request.remote_amount + self.request.remote_reserved_ckb_amount,
                         )
                         .ok_or(FundingError::InvalidChannel)?;
                 }
@@ -259,11 +262,10 @@ impl FundingTxBuilder {
                     outputs.push(change_output);
                     outputs_data.push(change_output_data);
 
-                    warn!("find proper UDT owner cells: {:?}", inputs);
-
-                    // TODO(yukang): `get_cell_deps_by_contracts` currently return all cell deps for all contracts_context
+                    debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps = get_cell_deps_by_contracts(vec![Contract::SimpleUDT]);
+                    let udt_cell_deps =
+                        get_udt_cell_deps(&udt_type_script).expect("get_udt_cell_deps failed");
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
                     }
@@ -290,12 +292,17 @@ impl FundingTxBuilder {
         let sender = self.context.funding_source_lock_script.clone();
         // Build CapacityBalancer
         let placeholder_witness = packed::WitnessArgs::new_builder()
-            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 65])).pack())
+            .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
+
+        warn!(
+            "request.funding_fee_rate: {}",
+            self.request.funding_fee_rate
+        );
         let balancer = CapacityBalancer::new_simple(
             sender.clone(),
             placeholder_witness,
-            self.request.local_fee_rate,
+            self.request.funding_fee_rate,
         );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);

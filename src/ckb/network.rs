@@ -32,8 +32,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 
 use super::channel::{
-    ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId, ChannelEvent,
-    ProcessingChannelError, ProcessingChannelResult,
+    AcceptChannelParameter, ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId,
+    ChannelEvent, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
@@ -46,6 +47,7 @@ use super::{
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
+use crate::ckb_chain::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::{unwrap_or_return, Error};
 
@@ -108,7 +110,8 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub funding_udt_type_script: Option<Script>,
-    pub min_fee_rate: Option<u64>,
+    pub commitment_fee_rate: Option<u64>,
+    pub funding_fee_rate: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -177,6 +180,7 @@ pub enum NetworkActorEvent {
         u128,
         Script,
         Option<Script>,
+        u64,
         u64,
         u64,
     ),
@@ -287,19 +291,23 @@ where
                     .await
                 {
                     Ok(()) => {
-                        if (state.auto_accept_channel_ckb_funding_amount > 0
-                            && open_channel.all_ckb_amount()
-                                >= state.open_channel_auto_accept_min_ckb_funding_amount)
-                            || open_channel.funding_udt_type_script.is_some()
-                        // TODO: UDT auto accept?
+                        let auto_accept = if let Some(udt_type_script) =
+                            open_channel.funding_udt_type_script
                         {
-                            let open_channel = AcceptChannelCommand {
+                            is_udt_type_auto_accept(&udt_type_script, open_channel.funding_amount)
+                        } else {
+                            state.auto_accept_channel_ckb_funding_amount > 0
+                                && open_channel.all_ckb_amount()
+                                    >= state.open_channel_auto_accept_min_ckb_funding_amount
+                        };
+                        if auto_accept {
+                            let accept_channel = AcceptChannelCommand {
                                 temp_channel_id,
                                 funding_amount: state.auto_accept_channel_ckb_funding_amount
                                     as u128,
                             };
                             state
-                                .create_inbound_channel(open_channel, self.store.clone())
+                                .create_inbound_channel(accept_channel, self.store.clone())
                                 .await?;
                         }
                     }
@@ -370,12 +378,19 @@ where
                 local,
                 remote,
                 script,
-                funding_script,
-                local_reserve_ckb_amount,
-                remote_reserve_ckb_amount,
+                udt_funding_script,
+                local_reserved_ckb_amount,
+                remote_reserved_ckb_amount,
+                funding_fee_rate,
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
+                    self.check_accept_channel_ckb_parameters(
+                        local_reserved_ckb_amount,
+                        remote_reserved_ckb_amount,
+                        funding_fee_rate,
+                        &udt_funding_script,
+                    )?;
                     if let Some(channel) = state.channels.remove(&old) {
                         debug!("Channel accepted: {:?} -> {:?}", old, new);
                         state.channels.insert(new, channel);
@@ -394,12 +409,13 @@ where
                                     Default::default(),
                                     FundingRequest {
                                         script,
-                                        udt_type_script: funding_script.clone(),
+                                        udt_type_script: udt_funding_script.clone(),
                                         local_amount: local as u64,
-                                        local_fee_rate: 0,
+                                        funding_fee_rate: funding_fee_rate,
                                         remote_amount: remote as u64,
-                                        local_reserve_ckb_amount: local_reserve_ckb_amount as u64,
-                                        remote_reserve_ckb_amount: remote_reserve_ckb_amount as u64,
+                                        local_reserved_ckb_amount: local_reserved_ckb_amount as u64,
+                                        remote_reserved_ckb_amount: remote_reserved_ckb_amount
+                                            as u64,
                                     },
                                 ),
                             ))
@@ -441,14 +457,21 @@ where
                     "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
                     channel_id, peer_id, tx
                 );
-                call_t!(
+                match call_t!(
                     self.chain_actor,
                     CkbChainMessage::SendTx,
                     DEFAULT_CHAIN_ACTOR_TIMEOUT,
                     tx.clone()
                 )
                 .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                .expect("valid closing tx");
+                {
+                    Ok(_) => {
+                        info!("Closing transaction sent to the network: {:?}", tx);
+                    }
+                    Err(err) => {
+                        error!("Failed to send closing transaction to the network: {}", err);
+                    }
+                }
 
                 // Notify outside observers.
                 myself
@@ -726,6 +749,36 @@ where
         };
         Ok(())
     }
+
+    fn check_accept_channel_ckb_parameters(
+        &self,
+        remote_reserved_ckb_amount: u64,
+        local_reserved_ckb_amount: u64,
+        funding_fee_rate: u64,
+        udt_type_script: &Option<Script>,
+    ) -> crate::Result<()> {
+        let reserved_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+
+        if remote_reserved_ckb_amount < reserved_ckb_amount
+            || local_reserved_ckb_amount < reserved_ckb_amount
+        {
+            return Err(Error::InvalidParameter(format!(
+                "Reserved CKB amount is less than the minimal amount: {}",
+                reserved_ckb_amount
+            )));
+        }
+
+        if funding_fee_rate < DEFAULT_FEE_RATE {
+            return Err(Error::InvalidParameter(
+                "Funding fee rate is less than 1".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct NetworkActorState {
@@ -777,20 +830,32 @@ impl NetworkActorState {
             peer_id,
             funding_amount,
             funding_udt_type_script,
-            min_fee_rate,
+            commitment_fee_rate,
+            funding_fee_rate,
         } = open_channel;
+        if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
+            if !check_udt_script(udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Invalid UDT type script".to_string(),
+                ));
+            }
+        }
+        // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
+        let (_funding_amount, _reserved_ckb_amount) =
+            self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::OpenChannel(
+            ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
                 funding_udt_type_script,
-                tx,
-                min_fee_rate,
-            ),
+                channel_id_sender: tx,
+                commitment_fee_rate,
+                funding_fee_rate,
+            }),
             network.clone().get_cell(),
         )
         .await?
@@ -817,23 +882,10 @@ impl NetworkActorState {
                 &temp_channel_id
             )))?;
 
-        let funding_udt_type_script = open_channel.funding_udt_type_script.clone();
-        let reserve_ckb_amount = if funding_udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-        if funding_udt_type_script.is_none() && funding_amount < reserve_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserve_ckb_amount
-            )));
-        }
-        let funding_amount = if funding_udt_type_script.is_some() {
-            funding_amount
-        } else {
-            funding_amount - reserve_ckb_amount as u128
-        };
+        let (funding_amount, reserved_ckb_amount) = self.get_funding_and_reserved_amount(
+            funding_amount,
+            &open_channel.funding_udt_type_script,
+        )?;
 
         let network = self.network.clone();
         let id = open_channel.channel_id;
@@ -847,13 +899,13 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             None,
             ChannelActor::new(peer_id.clone(), network.clone(), store),
-            ChannelInitializationParameter::AcceptChannel(
+            ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
-                reserve_ckb_amount,
+                reserved_ckb_amount,
                 seed,
                 open_channel,
-                Some(tx),
-            ),
+                channel_id_sender: Some(tx),
+            }),
             network.clone().get_cell(),
         )
         .await?
@@ -864,6 +916,66 @@ impl NetworkActorState {
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).cloned()
+    }
+
+    fn get_funding_and_reserved_amount(
+        &self,
+        funding_amount: u128,
+        udt_type_script: &Option<Script>,
+    ) -> Result<(u128, u64), ProcessingChannelError> {
+        let reserved_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+        if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The value of the channel should be greater than the reserve amount: {}",
+                reserved_ckb_amount
+            )));
+        }
+        let funding_amount = if udt_type_script.is_some() {
+            funding_amount
+        } else {
+            funding_amount - reserved_ckb_amount as u128
+        };
+        Ok((funding_amount, reserved_ckb_amount))
+    }
+
+    fn check_open_ckb_parameters(
+        &self,
+        open_channel: &OpenChannel,
+    ) -> Result<(), ProcessingChannelError> {
+        let reserved_ckb_amount = open_channel.reserved_ckb_amount;
+        let udt_type_script = &open_channel.funding_udt_type_script;
+
+        let minimal_reserved_ckb_amount = if udt_type_script.is_some() {
+            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
+        } else {
+            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
+        };
+
+        if reserved_ckb_amount < minimal_reserved_ckb_amount {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Remote reserved CKB amount {} is less than the minimal amount: {}",
+                reserved_ckb_amount, minimal_reserved_ckb_amount,
+            )));
+        }
+
+        if open_channel.funding_fee_rate < DEFAULT_FEE_RATE {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Funding fee rate is less than {}",
+                DEFAULT_FEE_RATE,
+            )));
+        }
+
+        if open_channel.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee rate is less than {}",
+                DEFAULT_COMMITMENT_FEE_RATE,
+            )));
+        }
+        Ok(())
     }
 
     async fn send_message_to_session(
@@ -971,17 +1083,15 @@ impl NetworkActorState {
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        // check CKB amount is in valid range
-        if (open_channel.funding_udt_type_script.is_none()
-            && open_channel.funding_amount as u64 + open_channel.reserve_ckb_amount
-                < DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
-            || (open_channel.funding_udt_type_script.is_some()
-                && open_channel.reserve_ckb_amount < DEFAULT_UDT_MINIMAL_CKB_AMOUNT)
-        {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Funding amount too low: {}",
-                open_channel.funding_amount
-            )));
+        self.check_open_ckb_parameters(&open_channel)?;
+
+        if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
+            if !check_udt_script(&udt_type_script) {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "Invalid UDT type script: {:?}",
+                    udt_type_script
+                )));
+            }
         }
 
         let id = open_channel.channel_id;

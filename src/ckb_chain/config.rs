@@ -1,10 +1,25 @@
+use ckb_types::prelude::PackVec;
 use clap_serde_derive::ClapSerde;
-
 use secp256k1::SecretKey;
+use serde_with::serde_as;
 use std::{
     io::{ErrorKind, Read},
     path::PathBuf,
 };
+
+use std::str::FromStr;
+
+use ckb_types::prelude::Builder;
+use ckb_types::prelude::Pack;
+use ckb_types::H256;
+use ckb_types::{
+    core::DepType,
+    packed::{CellDep, OutPoint},
+};
+use ckb_types::{core::ScriptHashType, packed::CellDepVec};
+use clap_serde_derive::clap::{self};
+use molecule::prelude::Entity;
+use serde::Deserialize;
 
 pub const DEFAULT_CKB_CHAIN_BASE_DIR_NAME: &str = "ckb-chain";
 const DEFAULT_CKB_CHAIN_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -28,6 +43,14 @@ pub struct CkbChainConfig {
         help = "rpc url to connect the ckb node [default: http://127.0.0.1:8114]"
     )]
     pub rpc_url: String,
+
+    #[arg(
+        name = "CKB_UDT_WHITELIST",
+        long = "ckb-udt-whitelist",
+        env,
+        help = "a list of supported UDT scripts"
+    )]
+    pub udt_whitelist: Option<UdtCfgInfos>,
 }
 
 impl CkbChainConfig {
@@ -79,5 +102,94 @@ impl CkbChainConfig {
         SecretKey::from_slice(&key_bin).map_err(|_| {
             std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
         })
+    }
+}
+
+serde_with::serde_conv!(
+    ScriptHashTypeWrapper,
+    ScriptHashType,
+    |_: &ScriptHashType| { panic!("no support to serialize") },
+    |s: String| {
+        let v = match s.to_lowercase().as_str() {
+            "type" => ScriptHashType::Type,
+            "data" => ScriptHashType::Data,
+            "data1" => ScriptHashType::Data1,
+            "data2" => ScriptHashType::Data2,
+            _ => return Err("invalid hash type"),
+        };
+        Ok(v)
+    }
+);
+
+#[serde_as]
+#[derive(Deserialize, Debug, Clone)]
+pub struct UdtScript {
+    pub code_hash: H256,
+    #[serde_as(as = "ScriptHashTypeWrapper")]
+    pub hash_type: ScriptHashType,
+    /// args may be used in pattern matching
+    pub args: String,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct UdtCellDep {
+    dep_type: String,
+    tx_hash: H256,
+    index: u32,
+}
+
+serde_with::serde_conv!(
+    CellDepVecWrapper,
+    CellDepVec,
+    |_: &CellDepVec| { panic!("no support to serialize") },
+    |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
+        let cell_deps: Vec<CellDep> = s.iter().map(|dep| CellDep::from(dep)).collect();
+        Ok(cell_deps.pack())
+    }
+);
+
+#[serde_as]
+#[derive(Deserialize, Clone, Debug)]
+pub struct UdtArgInfo {
+    pub name: String,
+    pub script: UdtScript,
+    pub auto_accept_amount: Option<u128>,
+    #[serde_as(as = "CellDepVecWrapper")]
+    pub cell_deps: CellDepVec,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+
+impl Default for UdtCfgInfos {
+    fn default() -> Self {
+        UdtCfgInfos(Vec::new())
+    }
+}
+
+impl FromStr for UdtCfgInfos {
+    type Err = serde_json::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_str(s)
+    }
+}
+
+impl From<&UdtCellDep> for CellDep {
+    fn from(cell_dep: &UdtCellDep) -> Self {
+        let dep_type = match cell_dep.dep_type.as_str() {
+            "code" => DepType::Code,
+            "dep_group" => DepType::DepGroup,
+            _ => panic!("invalid dep type"),
+        };
+        CellDep::new_builder()
+            .dep_type(dep_type.into())
+            .out_point(
+                OutPoint::new_builder()
+                    .tx_hash(cell_dep.tx_hash.pack())
+                    .index(cell_dep.index.pack())
+                    .build(),
+            )
+            .build()
     }
 }

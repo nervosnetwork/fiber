@@ -55,6 +55,14 @@ else
     done
 fi
 
-# -n means we will exit when any of the background processes exits.
-# https://www.gnu.org/software/bash/manual/bash.html#index-wait
-wait -n
+# we will exit when any of the background processes exits.
+# we don't use `wait -n` because of compatibility issues between bash and zsh
+initial_jobs=$(jobs -p | wc -l)
+while true; do
+    current_jobs=$(jobs -p | wc -l)
+    if [ "$current_jobs" -lt "$initial_jobs" ]; then
+        echo "A background job has exited, exiting ..."
+        exit 1
+    fi
+    sleep 1
+done

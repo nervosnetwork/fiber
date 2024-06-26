@@ -47,9 +47,10 @@ pub async fn main() {
         Some(ckb_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
+            let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. \
+            Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
 
-            let _ = init_contracts_context(ckb_config.network);
+            let _ = init_contracts_context(ckb_config.network, Some(&ckb_chain_config));
 
             let ckb_chain_actor = Actor::spawn_linked(
                 Some("ckb-chain".to_string()),
