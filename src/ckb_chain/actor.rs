@@ -1,7 +1,7 @@
 use ckb_sdk::{CkbRpcClient, RpcError};
 use ckb_types::{
     core::TransactionView,
-    packed::{self},
+    packed::{self, Script},
     prelude::*,
 };
 use ractor::{
@@ -35,7 +35,7 @@ pub enum CkbChainMessage {
     Fund(
         FundingTx,
         FundingRequest,
-        RpcReplyPort<Result<FundingTx, FundingError>>,
+        RpcReplyPort<Result<(FundingTx, Script), FundingError>>,
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
@@ -363,7 +363,10 @@ mod test_utils {
                         request, &tx, &fulfilled_tx
                     );
 
-                    if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
+                    let funding_source_lock_script = request.script.clone();
+
+                    if let Err(e) = reply_port.send(Ok((fulfilled_tx, funding_source_lock_script)))
+                    {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),

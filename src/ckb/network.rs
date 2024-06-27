@@ -608,15 +608,15 @@ where
                 );
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
-                let tx = match call_t!(
+                let (tx, funding_source_lock_script) = match call_t!(
                     self.chain_actor.clone(),
                     CkbChainMessage::Fund,
                     DEFAULT_CHAIN_ACTOR_TIMEOUT,
                     tx,
                     request
                 ) {
-                    Ok(Ok(tx)) => match tx.into_inner() {
-                        Some(tx) => tx,
+                    Ok(Ok((tx, script))) => match tx.into_inner() {
+                        Some(tx) => (tx, script),
                         _ => {
                             error!("Obtained empty funding tx");
                             return Ok(());
@@ -639,6 +639,7 @@ where
                         ChannelCommand::TxCollaborationCommand(TxCollaborationCommand::TxUpdate(
                             TxUpdateCommand {
                                 transaction: tx.data(),
+                                funding_source_lock_script,
                             },
                         )),
                     )
