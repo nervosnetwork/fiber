@@ -1239,23 +1239,6 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct FundingTxInput(Transaction);
-
-impl Eq for FundingTxInput {}
-
-impl PartialEq for FundingTxInput {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_bytes() == other.0.as_bytes()
-    }
-}
-
-impl From<Transaction> for FundingTxInput {
-    fn from(tx: Transaction) -> Self {
-        Self(tx)
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitmentNumbers {
     pub local: u64,
