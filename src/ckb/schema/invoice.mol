@@ -9,20 +9,20 @@ option AmountOpt (Uint128);
 
 option FeatureOpt (Uint32);
 
-table Duration {
+struct Duration {
     seconds: Uint64,
     nanos: Uint64,
 }
 
-table FinalHtlcTimeout {
+struct FinalHtlcTimeout {
     value: Uint64,
 }
 
-table FinalHtlcMinimumCltvExpiry {
+struct FinalHtlcMinimumCltvExpiry {
     value: Uint64,
 }
 
-table ExpiryTime {
+struct ExpiryTime {
     value: Duration,
 }
 
@@ -34,7 +34,7 @@ table FallbackAddr {
     value: Bytes,
 }
 
-table Feature {
+struct Feature {
     value: Uint64,
 }
 
