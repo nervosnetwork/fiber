@@ -660,663 +660,6 @@ impl<'a> From<&'a PaymentHashReader<'a>> for &'a [u8; 32usize] {
     }
 }
 #[derive(Clone)]
-pub struct Preimage(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Preimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for Preimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for Preimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        let raw_data = hex_string(&self.raw_data());
-        write!(f, "{}(0x{})", Self::NAME, raw_data)
-    }
-}
-impl ::core::default::Default for Preimage {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Preimage::new_unchecked(v)
-    }
-}
-impl Preimage {
-    const DEFAULT_VALUE: [u8; 32] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0,
-    ];
-    pub const TOTAL_SIZE: usize = 32;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 32;
-    pub fn nth0(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(0..1))
-    }
-    pub fn nth1(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(1..2))
-    }
-    pub fn nth2(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(2..3))
-    }
-    pub fn nth3(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(3..4))
-    }
-    pub fn nth4(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(4..5))
-    }
-    pub fn nth5(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(5..6))
-    }
-    pub fn nth6(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(6..7))
-    }
-    pub fn nth7(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(7..8))
-    }
-    pub fn nth8(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(8..9))
-    }
-    pub fn nth9(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(9..10))
-    }
-    pub fn nth10(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(10..11))
-    }
-    pub fn nth11(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(11..12))
-    }
-    pub fn nth12(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(12..13))
-    }
-    pub fn nth13(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(13..14))
-    }
-    pub fn nth14(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(14..15))
-    }
-    pub fn nth15(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(15..16))
-    }
-    pub fn nth16(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(16..17))
-    }
-    pub fn nth17(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(17..18))
-    }
-    pub fn nth18(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(18..19))
-    }
-    pub fn nth19(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(19..20))
-    }
-    pub fn nth20(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(20..21))
-    }
-    pub fn nth21(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(21..22))
-    }
-    pub fn nth22(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(22..23))
-    }
-    pub fn nth23(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(23..24))
-    }
-    pub fn nth24(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(24..25))
-    }
-    pub fn nth25(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(25..26))
-    }
-    pub fn nth26(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(26..27))
-    }
-    pub fn nth27(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(27..28))
-    }
-    pub fn nth28(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(28..29))
-    }
-    pub fn nth29(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(29..30))
-    }
-    pub fn nth30(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(30..31))
-    }
-    pub fn nth31(&self) -> Byte {
-        Byte::new_unchecked(self.0.slice(31..32))
-    }
-    pub fn raw_data(&self) -> molecule::bytes::Bytes {
-        self.as_bytes()
-    }
-    pub fn as_reader<'r>(&'r self) -> PreimageReader<'r> {
-        PreimageReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for Preimage {
-    type Builder = PreimageBuilder;
-    const NAME: &'static str = "Preimage";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Preimage(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PreimageReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PreimageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().set([
-            self.nth0(),
-            self.nth1(),
-            self.nth2(),
-            self.nth3(),
-            self.nth4(),
-            self.nth5(),
-            self.nth6(),
-            self.nth7(),
-            self.nth8(),
-            self.nth9(),
-            self.nth10(),
-            self.nth11(),
-            self.nth12(),
-            self.nth13(),
-            self.nth14(),
-            self.nth15(),
-            self.nth16(),
-            self.nth17(),
-            self.nth18(),
-            self.nth19(),
-            self.nth20(),
-            self.nth21(),
-            self.nth22(),
-            self.nth23(),
-            self.nth24(),
-            self.nth25(),
-            self.nth26(),
-            self.nth27(),
-            self.nth28(),
-            self.nth29(),
-            self.nth30(),
-            self.nth31(),
-        ])
-    }
-}
-#[derive(Clone, Copy)]
-pub struct PreimageReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for PreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for PreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for PreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        let raw_data = hex_string(&self.raw_data());
-        write!(f, "{}(0x{})", Self::NAME, raw_data)
-    }
-}
-impl<'r> PreimageReader<'r> {
-    pub const TOTAL_SIZE: usize = 32;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 32;
-    pub fn nth0(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[0..1])
-    }
-    pub fn nth1(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[1..2])
-    }
-    pub fn nth2(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[2..3])
-    }
-    pub fn nth3(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[3..4])
-    }
-    pub fn nth4(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[4..5])
-    }
-    pub fn nth5(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[5..6])
-    }
-    pub fn nth6(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[6..7])
-    }
-    pub fn nth7(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[7..8])
-    }
-    pub fn nth8(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[8..9])
-    }
-    pub fn nth9(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[9..10])
-    }
-    pub fn nth10(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[10..11])
-    }
-    pub fn nth11(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[11..12])
-    }
-    pub fn nth12(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[12..13])
-    }
-    pub fn nth13(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[13..14])
-    }
-    pub fn nth14(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[14..15])
-    }
-    pub fn nth15(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[15..16])
-    }
-    pub fn nth16(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[16..17])
-    }
-    pub fn nth17(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[17..18])
-    }
-    pub fn nth18(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[18..19])
-    }
-    pub fn nth19(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[19..20])
-    }
-    pub fn nth20(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[20..21])
-    }
-    pub fn nth21(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[21..22])
-    }
-    pub fn nth22(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[22..23])
-    }
-    pub fn nth23(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[23..24])
-    }
-    pub fn nth24(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[24..25])
-    }
-    pub fn nth25(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[25..26])
-    }
-    pub fn nth26(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[26..27])
-    }
-    pub fn nth27(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[27..28])
-    }
-    pub fn nth28(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[28..29])
-    }
-    pub fn nth29(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[29..30])
-    }
-    pub fn nth30(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[30..31])
-    }
-    pub fn nth31(&self) -> ByteReader<'r> {
-        ByteReader::new_unchecked(&self.as_slice()[31..32])
-    }
-    pub fn raw_data(&self) -> &'r [u8] {
-        self.as_slice()
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for PreimageReader<'r> {
-    type Entity = Preimage;
-    const NAME: &'static str = "PreimageReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        PreimageReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
-        }
-        Ok(())
-    }
-}
-#[derive(Clone)]
-pub struct PreimageBuilder(pub(crate) [Byte; 32]);
-impl ::core::fmt::Debug for PreimageBuilder {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:?})", Self::NAME, &self.0[..])
-    }
-}
-impl ::core::default::Default for PreimageBuilder {
-    fn default() -> Self {
-        PreimageBuilder([
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-            Byte::default(),
-        ])
-    }
-}
-impl PreimageBuilder {
-    pub const TOTAL_SIZE: usize = 32;
-    pub const ITEM_SIZE: usize = 1;
-    pub const ITEM_COUNT: usize = 32;
-    pub fn set(mut self, v: [Byte; 32]) -> Self {
-        self.0 = v;
-        self
-    }
-    pub fn nth0(mut self, v: Byte) -> Self {
-        self.0[0] = v;
-        self
-    }
-    pub fn nth1(mut self, v: Byte) -> Self {
-        self.0[1] = v;
-        self
-    }
-    pub fn nth2(mut self, v: Byte) -> Self {
-        self.0[2] = v;
-        self
-    }
-    pub fn nth3(mut self, v: Byte) -> Self {
-        self.0[3] = v;
-        self
-    }
-    pub fn nth4(mut self, v: Byte) -> Self {
-        self.0[4] = v;
-        self
-    }
-    pub fn nth5(mut self, v: Byte) -> Self {
-        self.0[5] = v;
-        self
-    }
-    pub fn nth6(mut self, v: Byte) -> Self {
-        self.0[6] = v;
-        self
-    }
-    pub fn nth7(mut self, v: Byte) -> Self {
-        self.0[7] = v;
-        self
-    }
-    pub fn nth8(mut self, v: Byte) -> Self {
-        self.0[8] = v;
-        self
-    }
-    pub fn nth9(mut self, v: Byte) -> Self {
-        self.0[9] = v;
-        self
-    }
-    pub fn nth10(mut self, v: Byte) -> Self {
-        self.0[10] = v;
-        self
-    }
-    pub fn nth11(mut self, v: Byte) -> Self {
-        self.0[11] = v;
-        self
-    }
-    pub fn nth12(mut self, v: Byte) -> Self {
-        self.0[12] = v;
-        self
-    }
-    pub fn nth13(mut self, v: Byte) -> Self {
-        self.0[13] = v;
-        self
-    }
-    pub fn nth14(mut self, v: Byte) -> Self {
-        self.0[14] = v;
-        self
-    }
-    pub fn nth15(mut self, v: Byte) -> Self {
-        self.0[15] = v;
-        self
-    }
-    pub fn nth16(mut self, v: Byte) -> Self {
-        self.0[16] = v;
-        self
-    }
-    pub fn nth17(mut self, v: Byte) -> Self {
-        self.0[17] = v;
-        self
-    }
-    pub fn nth18(mut self, v: Byte) -> Self {
-        self.0[18] = v;
-        self
-    }
-    pub fn nth19(mut self, v: Byte) -> Self {
-        self.0[19] = v;
-        self
-    }
-    pub fn nth20(mut self, v: Byte) -> Self {
-        self.0[20] = v;
-        self
-    }
-    pub fn nth21(mut self, v: Byte) -> Self {
-        self.0[21] = v;
-        self
-    }
-    pub fn nth22(mut self, v: Byte) -> Self {
-        self.0[22] = v;
-        self
-    }
-    pub fn nth23(mut self, v: Byte) -> Self {
-        self.0[23] = v;
-        self
-    }
-    pub fn nth24(mut self, v: Byte) -> Self {
-        self.0[24] = v;
-        self
-    }
-    pub fn nth25(mut self, v: Byte) -> Self {
-        self.0[25] = v;
-        self
-    }
-    pub fn nth26(mut self, v: Byte) -> Self {
-        self.0[26] = v;
-        self
-    }
-    pub fn nth27(mut self, v: Byte) -> Self {
-        self.0[27] = v;
-        self
-    }
-    pub fn nth28(mut self, v: Byte) -> Self {
-        self.0[28] = v;
-        self
-    }
-    pub fn nth29(mut self, v: Byte) -> Self {
-        self.0[29] = v;
-        self
-    }
-    pub fn nth30(mut self, v: Byte) -> Self {
-        self.0[30] = v;
-        self
-    }
-    pub fn nth31(mut self, v: Byte) -> Self {
-        self.0[31] = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for PreimageBuilder {
-    type Entity = Preimage;
-    const NAME: &'static str = "PreimageBuilder";
-    fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.0[0].as_slice())?;
-        writer.write_all(self.0[1].as_slice())?;
-        writer.write_all(self.0[2].as_slice())?;
-        writer.write_all(self.0[3].as_slice())?;
-        writer.write_all(self.0[4].as_slice())?;
-        writer.write_all(self.0[5].as_slice())?;
-        writer.write_all(self.0[6].as_slice())?;
-        writer.write_all(self.0[7].as_slice())?;
-        writer.write_all(self.0[8].as_slice())?;
-        writer.write_all(self.0[9].as_slice())?;
-        writer.write_all(self.0[10].as_slice())?;
-        writer.write_all(self.0[11].as_slice())?;
-        writer.write_all(self.0[12].as_slice())?;
-        writer.write_all(self.0[13].as_slice())?;
-        writer.write_all(self.0[14].as_slice())?;
-        writer.write_all(self.0[15].as_slice())?;
-        writer.write_all(self.0[16].as_slice())?;
-        writer.write_all(self.0[17].as_slice())?;
-        writer.write_all(self.0[18].as_slice())?;
-        writer.write_all(self.0[19].as_slice())?;
-        writer.write_all(self.0[20].as_slice())?;
-        writer.write_all(self.0[21].as_slice())?;
-        writer.write_all(self.0[22].as_slice())?;
-        writer.write_all(self.0[23].as_slice())?;
-        writer.write_all(self.0[24].as_slice())?;
-        writer.write_all(self.0[25].as_slice())?;
-        writer.write_all(self.0[26].as_slice())?;
-        writer.write_all(self.0[27].as_slice())?;
-        writer.write_all(self.0[28].as_slice())?;
-        writer.write_all(self.0[29].as_slice())?;
-        writer.write_all(self.0[30].as_slice())?;
-        writer.write_all(self.0[31].as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Preimage::new_unchecked(inner.into())
-    }
-}
-impl From<[Byte; 32usize]> for Preimage {
-    fn from(value: [Byte; 32usize]) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl ::core::convert::TryFrom<&[Byte]> for Preimage {
-    type Error = ::core::array::TryFromSliceError;
-    fn try_from(value: &[Byte]) -> Result<Self, ::core::array::TryFromSliceError> {
-        Ok(Self::new_builder()
-            .set(<&[Byte; 32usize]>::try_from(value)?.clone())
-            .build())
-    }
-}
-impl From<Preimage> for [Byte; 32usize] {
-    #[track_caller]
-    fn from(value: Preimage) -> Self {
-        [
-            value.nth0(),
-            value.nth1(),
-            value.nth2(),
-            value.nth3(),
-            value.nth4(),
-            value.nth5(),
-            value.nth6(),
-            value.nth7(),
-            value.nth8(),
-            value.nth9(),
-            value.nth10(),
-            value.nth11(),
-            value.nth12(),
-            value.nth13(),
-            value.nth14(),
-            value.nth15(),
-            value.nth16(),
-            value.nth17(),
-            value.nth18(),
-            value.nth19(),
-            value.nth20(),
-            value.nth21(),
-            value.nth22(),
-            value.nth23(),
-            value.nth24(),
-            value.nth25(),
-            value.nth26(),
-            value.nth27(),
-            value.nth28(),
-            value.nth29(),
-            value.nth30(),
-            value.nth31(),
-        ]
-    }
-}
-impl From<[u8; 32usize]> for Preimage {
-    fn from(value: [u8; 32usize]) -> Self {
-        PreimageReader::new_unchecked(&value).to_entity()
-    }
-}
-impl ::core::convert::TryFrom<&[u8]> for Preimage {
-    type Error = ::core::array::TryFromSliceError;
-    fn try_from(value: &[u8]) -> Result<Self, ::core::array::TryFromSliceError> {
-        Ok(<[u8; 32usize]>::try_from(value)?.into())
-    }
-}
-impl From<Preimage> for [u8; 32usize] {
-    #[track_caller]
-    fn from(value: Preimage) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-impl<'a> From<PreimageReader<'a>> for &'a [u8; 32usize] {
-    #[track_caller]
-    fn from(value: PreimageReader<'a>) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-impl<'a> From<&'a PreimageReader<'a>> for &'a [u8; 32usize] {
-    #[track_caller]
-    fn from(value: &'a PreimageReader<'a>) -> Self {
-        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
-    }
-}
-#[derive(Clone)]
 pub struct Signature(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for Signature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -5794,242 +5137,6 @@ impl molecule::prelude::Builder for PayeePublicKeyBuilder {
     }
 }
 #[derive(Clone)]
-pub struct PaymentPreimage(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for PaymentPreimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl ::core::fmt::Debug for PaymentPreimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl ::core::fmt::Display for PaymentPreimage {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "value", self.value())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl ::core::default::Default for PaymentPreimage {
-    fn default() -> Self {
-        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        PaymentPreimage::new_unchecked(v)
-    }
-}
-impl PaymentPreimage {
-    const DEFAULT_VALUE: [u8; 40] = [
-        40, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 1;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn value(&self) -> Preimage {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[8..]) as usize;
-            Preimage::new_unchecked(self.0.slice(start..end))
-        } else {
-            Preimage::new_unchecked(self.0.slice(start..))
-        }
-    }
-    pub fn as_reader<'r>(&'r self) -> PaymentPreimageReader<'r> {
-        PaymentPreimageReader::new_unchecked(self.as_slice())
-    }
-}
-impl molecule::prelude::Entity for PaymentPreimage {
-    type Builder = PaymentPreimageBuilder;
-    const NAME: &'static str = "PaymentPreimage";
-    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        PaymentPreimage(data)
-    }
-    fn as_bytes(&self) -> molecule::bytes::Bytes {
-        self.0.clone()
-    }
-    fn as_slice(&self) -> &[u8] {
-        &self.0[..]
-    }
-    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PaymentPreimageReader::from_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        PaymentPreimageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
-    }
-    fn new_builder() -> Self::Builder {
-        ::core::default::Default::default()
-    }
-    fn as_builder(self) -> Self::Builder {
-        Self::new_builder().value(self.value())
-    }
-}
-#[derive(Clone, Copy)]
-pub struct PaymentPreimageReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for PaymentPreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        use molecule::hex_string;
-        if f.alternate() {
-            write!(f, "0x")?;
-        }
-        write!(f, "{}", hex_string(self.as_slice()))
-    }
-}
-impl<'r> ::core::fmt::Debug for PaymentPreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{}({:#x})", Self::NAME, self)
-    }
-}
-impl<'r> ::core::fmt::Display for PaymentPreimageReader<'r> {
-    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "value", self.value())?;
-        let extra_count = self.count_extra_fields();
-        if extra_count != 0 {
-            write!(f, ", .. ({} fields)", extra_count)?;
-        }
-        write!(f, " }}")
-    }
-}
-impl<'r> PaymentPreimageReader<'r> {
-    pub const FIELD_COUNT: usize = 1;
-    pub fn total_size(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
-    }
-    pub fn field_count(&self) -> usize {
-        if self.total_size() == molecule::NUMBER_SIZE {
-            0
-        } else {
-            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
-        }
-    }
-    pub fn count_extra_fields(&self) -> usize {
-        self.field_count() - Self::FIELD_COUNT
-    }
-    pub fn has_extra_fields(&self) -> bool {
-        Self::FIELD_COUNT != self.field_count()
-    }
-    pub fn value(&self) -> PreimageReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[8..]) as usize;
-            PreimageReader::new_unchecked(&self.as_slice()[start..end])
-        } else {
-            PreimageReader::new_unchecked(&self.as_slice()[start..])
-        }
-    }
-}
-impl<'r> molecule::prelude::Reader<'r> for PaymentPreimageReader<'r> {
-    type Entity = PaymentPreimage;
-    const NAME: &'static str = "PaymentPreimageReader";
-    fn to_entity(&self) -> Self::Entity {
-        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
-    }
-    fn new_unchecked(slice: &'r [u8]) -> Self {
-        PaymentPreimageReader(slice)
-    }
-    fn as_slice(&self) -> &'r [u8] {
-        self.0
-    }
-    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
-        use molecule::verification_error as ve;
-        let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
-        }
-        let total_size = molecule::unpack_number(slice) as usize;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
-        }
-        if slice_len < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
-        }
-        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
-        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        if slice_len < offset_first {
-            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
-        }
-        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
-        if field_count < Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        } else if !compatible && field_count > Self::FIELD_COUNT {
-            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
-        };
-        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
-            .chunks_exact(molecule::NUMBER_SIZE)
-            .map(|x| molecule::unpack_number(x) as usize)
-            .collect();
-        offsets.push(total_size);
-        if offsets.windows(2).any(|i| i[0] > i[1]) {
-            return ve!(Self, OffsetsNotMatch);
-        }
-        PreimageReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Ok(())
-    }
-}
-#[derive(Clone, Debug, Default)]
-pub struct PaymentPreimageBuilder {
-    pub(crate) value: Preimage,
-}
-impl PaymentPreimageBuilder {
-    pub const FIELD_COUNT: usize = 1;
-    pub fn value(mut self, v: Preimage) -> Self {
-        self.value = v;
-        self
-    }
-}
-impl molecule::prelude::Builder for PaymentPreimageBuilder {
-    type Entity = PaymentPreimage;
-    const NAME: &'static str = "PaymentPreimageBuilder";
-    fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
-    }
-    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
-        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.value.as_slice().len();
-        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
-        for offset in offsets.into_iter() {
-            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
-        }
-        writer.write_all(self.value.as_slice())?;
-        Ok(())
-    }
-    fn build(&self) -> Self::Entity {
-        let mut inner = Vec::with_capacity(self.expected_length());
-        self.write(&mut inner)
-            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        PaymentPreimage::new_unchecked(inner.into())
-    }
-}
-#[derive(Clone)]
 pub struct InvoiceAttr(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for InvoiceAttr {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -6063,7 +5170,7 @@ impl InvoiceAttr {
         0, 0, 0, 0, 36, 0, 0, 0, 8, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 9;
+    pub const ITEMS_COUNT: usize = 8;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -6078,7 +5185,6 @@ impl InvoiceAttr {
             5 => Feature::new_unchecked(inner).into(),
             6 => UdtScript::new_unchecked(inner).into(),
             7 => PayeePublicKey::new_unchecked(inner).into(),
-            8 => PaymentPreimage::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -6135,7 +5241,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 9;
+    pub const ITEMS_COUNT: usize = 8;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -6150,7 +5256,6 @@ impl<'r> InvoiceAttrReader<'r> {
             5 => FeatureReader::new_unchecked(inner).into(),
             6 => UdtScriptReader::new_unchecked(inner).into(),
             7 => PayeePublicKeyReader::new_unchecked(inner).into(),
-            8 => PaymentPreimageReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -6184,7 +5289,6 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             5 => FeatureReader::verify(inner_slice, compatible),
             6 => UdtScriptReader::verify(inner_slice, compatible),
             7 => PayeePublicKeyReader::verify(inner_slice, compatible),
-            8 => PaymentPreimageReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -6193,7 +5297,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 9;
+    pub const ITEMS_COUNT: usize = 8;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -6229,7 +5333,6 @@ pub enum InvoiceAttrUnion {
     Feature(Feature),
     UdtScript(UdtScript),
     PayeePublicKey(PayeePublicKey),
-    PaymentPreimage(PaymentPreimage),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InvoiceAttrUnionReader<'r> {
@@ -6241,7 +5344,6 @@ pub enum InvoiceAttrUnionReader<'r> {
     Feature(FeatureReader<'r>),
     UdtScript(UdtScriptReader<'r>),
     PayeePublicKey(PayeePublicKeyReader<'r>),
-    PaymentPreimage(PaymentPreimageReader<'r>),
 }
 impl ::core::default::Default for InvoiceAttrUnion {
     fn default() -> Self {
@@ -6281,9 +5383,6 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
-            InvoiceAttrUnion::PaymentPreimage(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, PaymentPreimage::NAME, item)
-            }
         }
     }
 }
@@ -6320,9 +5419,6 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
-            InvoiceAttrUnionReader::PaymentPreimage(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, PaymentPreimage::NAME, item)
-            }
         }
     }
 }
@@ -6337,7 +5433,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::PayeePublicKey(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnion::PaymentPreimage(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -6352,7 +5447,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnionReader::PaymentPreimage(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -6394,11 +5488,6 @@ impl ::core::convert::From<UdtScript> for InvoiceAttrUnion {
 impl ::core::convert::From<PayeePublicKey> for InvoiceAttrUnion {
     fn from(item: PayeePublicKey) -> Self {
         InvoiceAttrUnion::PayeePublicKey(item)
-    }
-}
-impl ::core::convert::From<PaymentPreimage> for InvoiceAttrUnion {
-    fn from(item: PaymentPreimage) -> Self {
-        InvoiceAttrUnion::PaymentPreimage(item)
     }
 }
 impl<'r> ::core::convert::From<ExpiryTimeReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -6443,11 +5532,6 @@ impl<'r> ::core::convert::From<PayeePublicKeyReader<'r>> for InvoiceAttrUnionRea
         InvoiceAttrUnionReader::PayeePublicKey(item)
     }
 }
-impl<'r> ::core::convert::From<PaymentPreimageReader<'r>> for InvoiceAttrUnionReader<'r> {
-    fn from(item: PaymentPreimageReader<'r>) -> Self {
-        InvoiceAttrUnionReader::PaymentPreimage(item)
-    }
-}
 impl InvoiceAttrUnion {
     pub const NAME: &'static str = "InvoiceAttrUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -6460,7 +5544,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_bytes(),
             InvoiceAttrUnion::UdtScript(item) => item.as_bytes(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_bytes(),
-            InvoiceAttrUnion::PaymentPreimage(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -6473,7 +5556,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_slice(),
             InvoiceAttrUnion::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_slice(),
-            InvoiceAttrUnion::PaymentPreimage(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -6486,7 +5568,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => 5,
             InvoiceAttrUnion::UdtScript(_) => 6,
             InvoiceAttrUnion::PayeePublicKey(_) => 7,
-            InvoiceAttrUnion::PaymentPreimage(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -6499,7 +5580,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => "Feature",
             InvoiceAttrUnion::UdtScript(_) => "UdtScript",
             InvoiceAttrUnion::PayeePublicKey(_) => "PayeePublicKey",
-            InvoiceAttrUnion::PaymentPreimage(_) => "PaymentPreimage",
         }
     }
     pub fn as_reader<'r>(&'r self) -> InvoiceAttrUnionReader<'r> {
@@ -6512,7 +5592,6 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_reader().into(),
             InvoiceAttrUnion::UdtScript(item) => item.as_reader().into(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_reader().into(),
-            InvoiceAttrUnion::PaymentPreimage(item) => item.as_reader().into(),
         }
     }
 }
@@ -6528,7 +5607,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(item) => item.as_slice(),
             InvoiceAttrUnionReader::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnionReader::PayeePublicKey(item) => item.as_slice(),
-            InvoiceAttrUnionReader::PaymentPreimage(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -6541,7 +5619,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => 5,
             InvoiceAttrUnionReader::UdtScript(_) => 6,
             InvoiceAttrUnionReader::PayeePublicKey(_) => 7,
-            InvoiceAttrUnionReader::PaymentPreimage(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -6554,7 +5631,6 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => "Feature",
             InvoiceAttrUnionReader::UdtScript(_) => "UdtScript",
             InvoiceAttrUnionReader::PayeePublicKey(_) => "PayeePublicKey",
-            InvoiceAttrUnionReader::PaymentPreimage(_) => "PaymentPreimage",
         }
     }
 }
@@ -6595,11 +5671,6 @@ impl From<UdtScript> for InvoiceAttr {
 }
 impl From<PayeePublicKey> for InvoiceAttr {
     fn from(value: PayeePublicKey) -> Self {
-        Self::new_builder().set(value).build()
-    }
-}
-impl From<PaymentPreimage> for InvoiceAttr {
-    fn from(value: PaymentPreimage) -> Self {
         Self::new_builder().set(value).build()
     }
 }

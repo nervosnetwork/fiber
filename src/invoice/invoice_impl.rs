@@ -87,7 +87,6 @@ pub enum Attribute {
     FallbackAddr(String),
     UdtScript(CkbScript),
     PayeePublicKey(PublicKey),
-    PaymentPreimage(Hash256),
     Feature(u64),
 }
 
@@ -270,7 +269,6 @@ impl CkbInvoice {
         FinalHtlcMinimumCltvExpiry,
         u64
     );
-    attr_getter!(payment_preimage, PaymentPreimage, Hash256);
     attr_getter!(fallback_address, FallbackAddr, String);
 }
 
@@ -454,15 +452,6 @@ impl From<Attribute> for InvoiceAttr {
                     .value(pubkey.serialize().pack())
                     .build(),
             ),
-            Attribute::PaymentPreimage(preimage) => InvoiceAttrUnion::PaymentPreimage(
-                PaymentPreimage::new_builder()
-                    .value(
-                        Preimage::new_builder()
-                            .set(u8_slice_to_bytes(preimage.as_ref()).unwrap())
-                            .build(),
-                    )
-                    .build(),
-            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -498,12 +487,6 @@ impl From<InvoiceAttr> for Attribute {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
             }
-            InvoiceAttrUnion::PaymentPreimage(x) => {
-                let value = x.value().as_bytes();
-                let mut preimage = [0u8; 32];
-                preimage.copy_from_slice(&value);
-                Attribute::PaymentPreimage(preimage.into())
-            }
         }
     }
 }
@@ -512,6 +495,7 @@ pub struct InvoiceBuilder {
     currency: Currency,
     amount: Option<u128>,
     payment_hash: Option<Hash256>,
+    payment_preimage: Option<Hash256>,
     attrs: Vec<Attribute>,
 }
 
@@ -535,6 +519,7 @@ impl InvoiceBuilder {
             currency,
             amount: None,
             payment_hash: None,
+            payment_preimage: None,
             attrs: Vec::new(),
         }
     }
@@ -559,11 +544,15 @@ impl InvoiceBuilder {
         self
     }
 
+    pub fn payment_preimage(mut self, payment_preimage: Hash256) -> Self {
+        self.payment_preimage = Some(payment_preimage);
+        self
+    }
+
     pub fn udt_type_script(self, script: Script) -> Self {
         self.add_attr(Attribute::UdtScript(CkbScript(script)))
     }
 
-    attr_setter!(payment_preimage, PaymentPreimage, Hash256);
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
@@ -571,14 +560,8 @@ impl InvoiceBuilder {
     attr_setter!(final_cltv, FinalHtlcMinimumCltvExpiry, u64);
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
-        let preimage = self
-            .attrs
-            .iter()
-            .filter_map(|attr| match attr {
-                Attribute::PaymentPreimage(preimage) => Some(*preimage),
-                _ => None,
-            })
-            .next();
+        let preimage = self.payment_preimage;
+
         if self.payment_hash.is_some() && preimage.is_some() {
             return Err(InvoiceError::BothPaymenthashAndPreimage);
         }
@@ -925,7 +908,6 @@ mod tests {
         assert_eq!(invoice.currency, Currency::Fibb);
         assert_eq!(invoice.amount, Some(1280));
         assert_eq!(invoice.payment_hash(), &gen_payment_hash);
-        assert_eq!(invoice.payment_preimage(), None);
         assert_eq!(invoice.data.attrs.len(), 7);
     }
 
@@ -998,7 +980,6 @@ mod tests {
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
         let clone_invoice = invoice.clone();
-        assert_eq!(invoice.payment_preimage(), Some(&preimage));
         assert_eq!(hex::encode(&invoice.payment_hash()).len(), 64);
 
         let raw_invoice: RawCkbInvoice = invoice.into();
@@ -1055,13 +1036,13 @@ mod tests {
     #[test]
     fn test_invoice_gen_payment_hash() {
         let private_key = gen_rand_private_key();
+        let payment_preimage = rand_sha256_hash();
         let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .payment_preimage(rand_sha256_hash())
+            .payment_preimage(payment_preimage)
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
         let payment_hash = invoice.payment_hash();
-        let payment_preimage = invoice.payment_preimage().unwrap();
         let expected_hash: Hash256 = blake2b_256(payment_preimage.as_ref()).into();
         assert_eq!(expected_hash, *payment_hash);
     }
@@ -1071,10 +1052,8 @@ mod tests {
         let private_key = gen_rand_private_key();
         let invoice = InvoiceBuilder::new(Currency::Fibb)
             .amount(Some(1280))
-            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
-            .unwrap();
-        let payment_preimage = invoice.payment_preimage();
-        assert!(payment_preimage.is_none());
+            .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+        assert!(invoice.is_ok());
     }
 
     #[test]

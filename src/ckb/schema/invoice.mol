@@ -1,7 +1,6 @@
 import blockchain;
 
 array PaymentHash [byte; 32];
-array Preimage [byte; 32];
 array Signature [byte; 104];
 option ExpiryTimeOpt (Duration);
 option SignatureOpt (Signature);
@@ -47,10 +46,6 @@ table PayeePublicKey {
     value: Bytes,
 }
 
-table PaymentPreimage {
-    value: Preimage,
-}
-
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -60,7 +55,6 @@ union InvoiceAttr {
     Feature,
     UdtScript,
     PayeePublicKey,
-    PaymentPreimage,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;
