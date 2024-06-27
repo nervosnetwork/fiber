@@ -363,9 +363,10 @@ mod test_utils {
                         request, &tx, &fulfilled_tx
                     );
 
-                    let dummy_lock = request.script.clone();
+                    let funding_source_lock_script = request.script.clone();
 
-                    if let Err(e) = reply_port.send(Ok((fulfilled_tx, dummy_lock))) {
+                    if let Err(e) = reply_port.send(Ok((fulfilled_tx, funding_source_lock_script)))
+                    {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
