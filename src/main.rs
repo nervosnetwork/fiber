@@ -1,6 +1,6 @@
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -93,11 +93,11 @@ pub async fn main() {
                         event = event_receiver.recv() => {
                             match event {
                                 None => {
-                                    debug!("Event receiver completed, stopping event processing service");
+                                    trace!("Event receiver completed, stopping event processing service");
                                     break;
                                 }
                                 Some(event) => {
-                                    debug!("Received event from ckb service: {:?}", event);
+                                    trace!("Received event from ckb service: {:?}", event);
                                 }
                             }
                         }
