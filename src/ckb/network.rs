@@ -162,7 +162,7 @@ pub enum NetworkActorEvent {
     /// Network eventss to be processed by this actor.
     PeerConnected(PeerId, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
-    PeerMessage(PeerId, SessionContext, CFNMessage),
+    PeerMessage(PeerId, CFNMessage),
 
     /// Channel related events.
 
@@ -273,14 +273,8 @@ where
         &self,
         state: &mut NetworkActorState,
         peer_id: PeerId,
-        session: SessionContext,
         message: CFNMessage,
     ) -> crate::Result<()> {
-        debug!(
-            "Received message from peer {:?} on session {:?}: {:?}",
-            &peer_id, &session.id, &message
-        );
-
         match message {
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -331,6 +325,7 @@ where
         state: &mut NetworkActorState,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
+        debug!("Handling event: {:?}", event);
         match event {
             NetworkActorEvent::NetworkServiceEvent(e) => {
                 self.on_service_event(e).await;
@@ -350,7 +345,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::PeerDisconnected(id, session) => {
-                state.on_peer_disconnected(&id, &session);
+                state.on_peer_disconnected(&id);
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -424,10 +419,6 @@ where
                 }
             }
             NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
-                info!(
-                    "Channel ({:?}) to peer {:?} is now ready",
-                    channel_id, peer_id
-                );
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -438,10 +429,6 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
-                info!(
-                    "Channel ({:?}) to peer {:?} is being shutdown.",
-                    channel_id, peer_id
-                );
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -453,10 +440,6 @@ where
             }
             NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
                 state.on_channel_closed(&channel_id, &peer_id);
-                info!(
-                    "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
-                    channel_id, peer_id, tx
-                );
                 match call_t!(
                     self.chain_actor,
                     CkbChainMessage::SendTx,
@@ -482,15 +465,10 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
-            NetworkActorEvent::PeerMessage(peer_id, session, message) => {
-                self.handle_peer_message(state, peer_id, session, message)
-                    .await?
+            NetworkActorEvent::PeerMessage(peer_id, message) => {
+                self.handle_peer_message(state, peer_id, message).await?
             }
             NetworkActorEvent::FundingTransactionPending(transaction, outpoint, channel_id) => {
-                debug!(
-                    "Funding transaction pending for channel {:?}: {:?}",
-                    channel_id, outpoint
-                );
                 state
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
@@ -530,12 +508,9 @@ where
         state: &mut NetworkActorState,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
+        debug!("Handling command: {:?}", command);
         match command {
             NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId { peer_id, message }) => {
-                debug!(
-                    "SendCFNMessage command received: sending message to peer {:?}",
-                    &peer_id
-                );
                 state.send_message_to_peer(&peer_id, message).await?;
             }
 
@@ -543,7 +518,6 @@ where
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
                 // TODO: If we are already connected to the peer, skip connecting.
-                debug!("ConnectPeer command received, dialing {}", &addr);
                 state
                     .control
                     .dial(addr.clone(), TargetProtocol::All)
@@ -554,10 +528,6 @@ where
             }
 
             NetworkActorCommand::DisconnectPeer(peer_id) => {
-                debug!(
-                    "DisconnectPeer command received, disconnecting peer {:?}",
-                    &peer_id
-                );
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     state.control.disconnect(session).await?;
                 }
@@ -602,10 +572,6 @@ where
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
-                debug!(
-                    "Updating channel funding for channel {:?}, current tx: {:?}",
-                    &channel_id, old_tx
-                );
                 let mut tx = FundingTx::new();
                 tx.update_for_self(old_tx)?;
                 let tx = match call_t!(
@@ -1019,7 +985,6 @@ impl NetworkActorState {
         session: &SessionContext,
         store: S,
     ) {
-        debug!("Peer connected: {:?}, session id: {}", &peer_id, session.id);
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
         for channel_id in store.get_channel_ids_by_peer(&peer_id) {
@@ -1037,8 +1002,7 @@ impl NetworkActorState {
         }
     }
 
-    fn on_peer_disconnected(&mut self, id: &PeerId, session: &SessionContext) {
-        debug!("Peer disconnected: {:?}, session id: {}", &id, session.id);
+    fn on_peer_disconnected(&mut self, id: &PeerId) {
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -1058,7 +1022,6 @@ impl NetworkActorState {
         peer_id: &PeerId,
         actor: ActorRef<ChannelActorMessage>,
     ) {
-        debug!("Channel to peer {:?} created: {:?}", &peer_id, &id);
         if let Some(session) = self.get_peer_session(peer_id) {
             self.channels.insert(id, actor);
             self.session_channels_map
@@ -1322,8 +1285,6 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("Network actor processing message {:?}", message);
-
         match message {
             NetworkActorMessage::Event(event) => {
                 if let Err(err) = self.handle_event(myself, state, event).await {
@@ -1431,36 +1392,31 @@ impl ServiceProtocol for Handle {
             context.proto_id, context.session.id
         );
 
-        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
-            self.send_actor_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::PeerDisconnected(peer_id, context.session.clone()),
-            ));
-        } else {
-            warn!(
-                "Peer disconnected without remote pubkey {:?}",
-                context.session
-            );
+        match context.session.remote_pubkey.as_ref() {
+            Some(pubkey) => {
+                let peer_id = PeerId::from_public_key(pubkey);
+                self.send_actor_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerDisconnected(peer_id, context.session.clone()),
+                ));
+            }
+            None => {
+                unreachable!("Received message without remote pubkey");
+            }
         }
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        info!(
-            "received from [{}]: proto [{}] data {:?}",
-            context.session.id,
-            context.proto_id,
-            hex::encode(data.as_ref()),
-        );
-
         let msg = unwrap_or_return!(CFNMessage::from_molecule_slice(&data), "parse message");
-        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
-            self.send_actor_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::PeerMessage(peer_id, context.session.clone(), msg),
-            ));
-        } else {
-            warn!(
-                "Received message from a peer without remote pubkey {:?}",
-                context.session
-            );
+        match context.session.remote_pubkey.as_ref() {
+            Some(pubkey) => {
+                let peer_id = PeerId::from_public_key(pubkey);
+                self.send_actor_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::PeerMessage(peer_id, msg),
+                ));
+            }
+            None => {
+                unreachable!("Received message without remote pubkey");
+            }
         }
     }
 
