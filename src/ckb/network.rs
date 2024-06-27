@@ -419,6 +419,10 @@ where
                 }
             }
             NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
+                info!(
+                    "Channel ({:?}) to peer {:?} is now ready",
+                    channel_id, peer_id
+                );
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -429,6 +433,10 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
+                info!(
+                    "Channel ({:?}) to peer {:?} is being shutdown.",
+                    channel_id, peer_id
+                );
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -440,6 +448,10 @@ where
             }
             NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
                 state.on_channel_closed(&channel_id, &peer_id);
+                info!(
+                    "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
+                    channel_id, peer_id, tx
+                );
                 match call_t!(
                     self.chain_actor,
                     CkbChainMessage::SendTx,
