@@ -7042,6 +7042,7 @@ impl ::core::fmt::Display for AddTlc {
         write!(f, ", {}: {}", "amount", self.amount())?;
         write!(f, ", {}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "expiry", self.expiry())?;
+        write!(f, ", {}: {}", "hash_algorithm", self.hash_algorithm())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -7056,14 +7057,14 @@ impl ::core::default::Default for AddTlc {
     }
 }
 impl AddTlc {
-    const DEFAULT_VALUE: [u8; 120] = [
-        120, 0, 0, 0, 24, 0, 0, 0, 56, 0, 0, 0, 64, 0, 0, 0, 80, 0, 0, 0, 112, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 125] = [
+        125, 0, 0, 0, 28, 0, 0, 0, 60, 0, 0, 0, 68, 0, 0, 0, 84, 0, 0, 0, 116, 0, 0, 0, 124, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 6;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7107,11 +7108,17 @@ impl AddTlc {
     pub fn expiry(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn hash_algorithm(&self) -> Byte {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[24..]) as usize;
-            Uint64::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[28..]) as usize;
+            Byte::new_unchecked(self.0.slice(start..end))
         } else {
-            Uint64::new_unchecked(self.0.slice(start..))
+            Byte::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> AddTlcReader<'r> {
@@ -7146,6 +7153,7 @@ impl molecule::prelude::Entity for AddTlc {
             .amount(self.amount())
             .payment_hash(self.payment_hash())
             .expiry(self.expiry())
+            .hash_algorithm(self.hash_algorithm())
     }
 }
 #[derive(Clone, Copy)]
@@ -7172,6 +7180,7 @@ impl<'r> ::core::fmt::Display for AddTlcReader<'r> {
         write!(f, ", {}: {}", "amount", self.amount())?;
         write!(f, ", {}: {}", "payment_hash", self.payment_hash())?;
         write!(f, ", {}: {}", "expiry", self.expiry())?;
+        write!(f, ", {}: {}", "hash_algorithm", self.hash_algorithm())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -7180,7 +7189,7 @@ impl<'r> ::core::fmt::Display for AddTlcReader<'r> {
     }
 }
 impl<'r> AddTlcReader<'r> {
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 6;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -7224,11 +7233,17 @@ impl<'r> AddTlcReader<'r> {
     pub fn expiry(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
+        let end = molecule::unpack_number(&slice[24..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn hash_algorithm(&self) -> ByteReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[24..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[24..]) as usize;
-            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[28..]) as usize;
+            ByteReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Uint64Reader::new_unchecked(&self.as_slice()[start..])
+            ByteReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -7283,6 +7298,7 @@ impl<'r> molecule::prelude::Reader<'r> for AddTlcReader<'r> {
         Uint128Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Byte32Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Uint64Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        ByteReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         Ok(())
     }
 }
@@ -7293,9 +7309,10 @@ pub struct AddTlcBuilder {
     pub(crate) amount: Uint128,
     pub(crate) payment_hash: Byte32,
     pub(crate) expiry: Uint64,
+    pub(crate) hash_algorithm: Byte,
 }
 impl AddTlcBuilder {
-    pub const FIELD_COUNT: usize = 5;
+    pub const FIELD_COUNT: usize = 6;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
@@ -7316,6 +7333,10 @@ impl AddTlcBuilder {
         self.expiry = v;
         self
     }
+    pub fn hash_algorithm(mut self, v: Byte) -> Self {
+        self.hash_algorithm = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for AddTlcBuilder {
     type Entity = AddTlc;
@@ -7327,6 +7348,7 @@ impl molecule::prelude::Builder for AddTlcBuilder {
             + self.amount.as_slice().len()
             + self.payment_hash.as_slice().len()
             + self.expiry.as_slice().len()
+            + self.hash_algorithm.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -7341,6 +7363,8 @@ impl molecule::prelude::Builder for AddTlcBuilder {
         total_size += self.payment_hash.as_slice().len();
         offsets.push(total_size);
         total_size += self.expiry.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.hash_algorithm.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -7350,6 +7374,7 @@ impl molecule::prelude::Builder for AddTlcBuilder {
         writer.write_all(self.amount.as_slice())?;
         writer.write_all(self.payment_hash.as_slice())?;
         writer.write_all(self.expiry.as_slice())?;
+        writer.write_all(self.hash_algorithm.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

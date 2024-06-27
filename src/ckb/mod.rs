@@ -16,6 +16,8 @@ pub mod channel;
 
 pub mod types;
 
+pub mod hash_algorithm;
+
 pub mod serde_utils;
 
 #[cfg(test)]

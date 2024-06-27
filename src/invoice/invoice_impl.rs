@@ -1,6 +1,7 @@
 use super::errors::VerificationError;
 use super::utils::*;
 use crate::ckb::gen::invoice::{self as gen_invoice, *};
+use crate::ckb::hash_algorithm::HashAlgorithm;
 use crate::ckb::serde_utils::EntityHex;
 use crate::ckb::serde_utils::U128Hex;
 use crate::ckb::types::Hash256;
@@ -16,7 +17,6 @@ use bitcoin::{
         Message, PublicKey,
     },
 };
-use ckb_hash::blake2b_256;
 use ckb_types::{
     packed::{Byte, Script},
     prelude::{Pack, Unpack},
@@ -87,6 +87,7 @@ pub enum Attribute {
     FallbackAddr(String),
     UdtScript(CkbScript),
     PayeePublicKey(PublicKey),
+    HashAlgorithm(HashAlgorithm),
     Feature(u64),
 }
 
@@ -452,6 +453,11 @@ impl From<Attribute> for InvoiceAttr {
                     .value(pubkey.serialize().pack())
                     .build(),
             ),
+            Attribute::HashAlgorithm(hash_algorithm) => InvoiceAttrUnion::HashAlgorithm(
+                gen_invoice::HashAlgorithm::new_builder()
+                    .value(Byte::new(hash_algorithm as u8))
+                    .build(),
+            ),
         };
         InvoiceAttr::new_builder().set(a).build()
     }
@@ -486,6 +492,12 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
                 Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
+            }
+            InvoiceAttrUnion::HashAlgorithm(x) => {
+                let value = x.value();
+                // Consider unknown algorithm as the default one.
+                let hash_algorithm = value.try_into().unwrap_or_default();
+                Attribute::HashAlgorithm(hash_algorithm)
             }
         }
     }
@@ -553,6 +565,10 @@ impl InvoiceBuilder {
         self.add_attr(Attribute::UdtScript(CkbScript(script)))
     }
 
+    pub fn hash_algorithm(self, algorithm: HashAlgorithm) -> Self {
+        self.add_attr(Attribute::HashAlgorithm(algorithm))
+    }
+
     attr_setter!(description, Description, String);
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
@@ -566,7 +582,16 @@ impl InvoiceBuilder {
             return Err(InvoiceError::BothPaymenthashAndPreimage);
         }
         let payment_hash: Hash256 = if let Some(preimage) = preimage {
-            blake2b_256(preimage.as_ref()).into()
+            let algo = self
+                .attrs
+                .iter()
+                .find_map(|attr| match attr {
+                    Attribute::HashAlgorithm(algo) => Some(algo),
+                    _ => None,
+                })
+                .copied()
+                .unwrap_or_default();
+            algo.hash(preimage.as_ref()).into()
         } else if let Some(payment_hash) = self.payment_hash {
             payment_hash
         } else {
@@ -708,6 +733,7 @@ mod tests {
         key::{KeyPair, Secp256k1},
         secp256k1::SecretKey,
     };
+    use ckb_hash::blake2b_256;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn gen_rand_public_key() -> PublicKey {

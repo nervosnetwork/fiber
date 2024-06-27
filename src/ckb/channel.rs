@@ -41,6 +41,7 @@ use crate::{
 
 use super::{
     config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_UDT_OCCUPIED_CAPACITY},
+    hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
     serde_utils::EntityHex,
@@ -103,6 +104,7 @@ pub struct AddTlcCommand {
     pub preimage: Option<Hash256>,
     pub payment_hash: Option<Hash256>,
     pub expiry: LockTime,
+    pub hash_algorithm: HashAlgorithm,
 }
 
 #[derive(Debug)]
@@ -585,6 +587,7 @@ impl<S> ChannelActor<S> {
                 amount: tlc.amount,
                 payment_hash: tlc.payment_hash,
                 expiry: tlc.lock_time,
+                hash_algorithm: tlc.hash_algorithm,
             }),
         };
         debug!("Sending AddTlc message: {:?}", &msg);
@@ -2158,8 +2161,11 @@ impl ChannelActorState {
                             reason, removed_at, current
                         );
                         if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
-                            let filled_payment_hash: Hash256 =
-                                blake2b_256(fulfill.payment_preimage).into();
+                            let filled_payment_hash: Hash256 = current
+                                .tlc
+                                .hash_algorithm
+                                .hash(fulfill.payment_preimage)
+                                .into();
                             if current.tlc.payment_hash != filled_payment_hash {
                                 return Err(ProcessingChannelError::InvalidParameter(format!(
                                     "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
@@ -2464,7 +2470,7 @@ impl ChannelActorState {
         tlcs.iter()
             .map(|(tlc, local, remote)| {
                 [
-                    (if tlc.tlc.is_offered() { [0] } else { [1] }).to_vec(),
+                    vec![tlc.tlc.get_htlc_type()],
                     tlc.tlc.amount.to_le_bytes().to_vec(),
                     tlc.tlc.get_hash().to_vec(),
                     local.serialize().to_vec(),
@@ -2564,7 +2570,7 @@ impl ChannelActorState {
         let preimage = command.preimage.unwrap_or(get_random_preimage());
         let payment_hash = command
             .payment_hash
-            .unwrap_or(blake2b_256(&preimage).into());
+            .unwrap_or_else(|| command.hash_algorithm.hash(&preimage).into());
 
         TLC {
             id: TLCId::Offered(id),
@@ -2572,6 +2578,7 @@ impl ChannelActorState {
             payment_hash,
             lock_time: command.expiry,
             payment_preimage: Some(preimage),
+            hash_algorithm: command.hash_algorithm,
         }
     }
 
@@ -2595,6 +2602,7 @@ impl ChannelActorState {
             payment_hash: message.payment_hash,
             lock_time: message.expiry,
             payment_preimage: None,
+            hash_algorithm: message.hash_algorithm,
         })
     }
 }
@@ -3215,6 +3223,7 @@ impl ChannelActorState {
                                                 amount: info.tlc.amount,
                                                 payment_hash: info.tlc.payment_hash,
                                                 expiry: info.tlc.lock_time,
+                                                hash_algorithm: info.tlc.hash_algorithm,
                                             }),
                                         }),
                                     ))
@@ -4214,6 +4223,8 @@ pub struct TLC {
     pub payment_hash: Hash256,
     /// The preimage of the hash to be sent to the counterparty.
     pub payment_preimage: Option<Hash256>,
+    /// Which hash algorithm is applied on the preimage
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl TLC {
@@ -4228,6 +4239,16 @@ impl TLC {
     // Change this tlc to the opposite side.
     pub fn flip_mut(&mut self) {
         self.id.flip_mut()
+    }
+
+    /// Get the value for the field `htlc_type` in commitment lock witness.
+    /// - Lowest 1 bit: 0 if the tlc is offered by the remote party, 1 otherwise.
+    /// - High 7 bits:
+    ///     - 0: ckb hash
+    ///     - 1: sha256
+    pub fn get_htlc_type(&self) -> u8 {
+        let offered_flag = if self.is_offered() { 0u8 } else { 1u8 };
+        ((self.hash_algorithm as u8) << 1) + offered_flag
     }
 
     fn get_hash(&self) -> ShortHash {

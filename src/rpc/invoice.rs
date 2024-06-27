@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::ckb::hash_algorithm::HashAlgorithm;
 use crate::ckb::serde_utils::{U128Hex, U64Hex};
 use crate::ckb::types::Hash256;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
@@ -25,6 +26,7 @@ pub struct NewInvoiceParams {
     #[serde_as(as = "Option<U64Hex>")]
     pub final_htlc_timeout: Option<u64>,
     pub udt_type_script: Option<Script>,
+    pub hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -95,6 +97,9 @@ where
         };
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
+        };
+        if let Some(hash_algorithm) = params.hash_algorithm {
+            invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
         };
 
         match invoice_builder.build() {
