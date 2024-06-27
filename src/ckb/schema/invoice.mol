@@ -1,7 +1,6 @@
 import blockchain;
 
 array PaymentHash [byte; 32];
-array Preimage [byte; 32];
 array Signature [byte; 104];
 option ExpiryTimeOpt (Duration);
 option SignatureOpt (Signature);
@@ -10,54 +9,41 @@ option AmountOpt (Uint128);
 
 option FeatureOpt (Uint32);
 
-table Duration {
+struct Duration {
     seconds: Uint64,
     nanos: Uint64,
 }
 
-table FinalHtlcTimeout {
-    attr_id: byte,
+struct FinalHtlcTimeout {
     value: Uint64,
 }
 
-table FinalHtlcMinimumCltvExpiry {
-    attr_id: byte,
+struct FinalHtlcMinimumCltvExpiry {
     value: Uint64,
 }
 
-table ExpiryTime {
-    attr_id: byte,
+struct ExpiryTime {
     value: Duration,
 }
 
 table Description {
-    attr_id: byte,
     value: Bytes,
 }
 
 table FallbackAddr {
-    attr_id: byte,
     value: Bytes,
 }
 
-table Feature {
-    attr_id: byte,
+struct Feature {
     value: Uint64,
 }
 
 table UdtScript {
-    attr_id: byte,
     value: Script,
 }
 
 table PayeePublicKey {
-    attr_id: byte,
     value: Bytes,
-}
-
-table PaymentPreimage {
-    attr_id: byte,
-    value: Preimage,
 }
 
 union InvoiceAttr {
@@ -69,7 +55,6 @@ union InvoiceAttr {
     Feature,
     UdtScript,
     PayeePublicKey,
-    PaymentPreimage,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;
