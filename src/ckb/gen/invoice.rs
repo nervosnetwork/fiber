@@ -3940,8 +3940,7 @@ impl ::core::fmt::Debug for FinalHtlcTimeout {
 impl ::core::fmt::Display for FinalHtlcTimeout {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -3956,10 +3955,8 @@ impl ::core::default::Default for FinalHtlcTimeout {
     }
 }
 impl FinalHtlcTimeout {
-    const DEFAULT_VALUE: [u8; 21] = [
-        21, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 16] = [16, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -3976,17 +3973,11 @@ impl FinalHtlcTimeout {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64::new_unchecked(self.0.slice(start..end))
         } else {
             Uint64::new_unchecked(self.0.slice(start..))
@@ -4018,9 +4009,7 @@ impl molecule::prelude::Entity for FinalHtlcTimeout {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -4042,8 +4031,7 @@ impl<'r> ::core::fmt::Debug for FinalHtlcTimeoutReader<'r> {
 impl<'r> ::core::fmt::Display for FinalHtlcTimeoutReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4052,7 +4040,7 @@ impl<'r> ::core::fmt::Display for FinalHtlcTimeoutReader<'r> {
     }
 }
 impl<'r> FinalHtlcTimeoutReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4069,17 +4057,11 @@ impl<'r> FinalHtlcTimeoutReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Uint64Reader::new_unchecked(&self.as_slice()[start..])
@@ -4132,22 +4114,16 @@ impl<'r> molecule::prelude::Reader<'r> for FinalHtlcTimeoutReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct FinalHtlcTimeoutBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Uint64,
 }
 impl FinalHtlcTimeoutBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Uint64) -> Self {
         self.value = v;
         self
@@ -4157,22 +4133,17 @@ impl molecule::prelude::Builder for FinalHtlcTimeoutBuilder {
     type Entity = FinalHtlcTimeout;
     const NAME: &'static str = "FinalHtlcTimeoutBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -4202,8 +4173,7 @@ impl ::core::fmt::Debug for FinalHtlcMinimumCltvExpiry {
 impl ::core::fmt::Display for FinalHtlcMinimumCltvExpiry {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4218,10 +4188,8 @@ impl ::core::default::Default for FinalHtlcMinimumCltvExpiry {
     }
 }
 impl FinalHtlcMinimumCltvExpiry {
-    const DEFAULT_VALUE: [u8; 21] = [
-        21, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 16] = [16, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4238,17 +4206,11 @@ impl FinalHtlcMinimumCltvExpiry {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64::new_unchecked(self.0.slice(start..end))
         } else {
             Uint64::new_unchecked(self.0.slice(start..))
@@ -4281,9 +4243,7 @@ impl molecule::prelude::Entity for FinalHtlcMinimumCltvExpiry {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -4305,8 +4265,7 @@ impl<'r> ::core::fmt::Debug for FinalHtlcMinimumCltvExpiryReader<'r> {
 impl<'r> ::core::fmt::Display for FinalHtlcMinimumCltvExpiryReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4315,7 +4274,7 @@ impl<'r> ::core::fmt::Display for FinalHtlcMinimumCltvExpiryReader<'r> {
     }
 }
 impl<'r> FinalHtlcMinimumCltvExpiryReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4332,17 +4291,11 @@ impl<'r> FinalHtlcMinimumCltvExpiryReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Uint64Reader::new_unchecked(&self.as_slice()[start..])
@@ -4395,22 +4348,16 @@ impl<'r> molecule::prelude::Reader<'r> for FinalHtlcMinimumCltvExpiryReader<'r> 
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct FinalHtlcMinimumCltvExpiryBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Uint64,
 }
 impl FinalHtlcMinimumCltvExpiryBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Uint64) -> Self {
         self.value = v;
         self
@@ -4420,22 +4367,17 @@ impl molecule::prelude::Builder for FinalHtlcMinimumCltvExpiryBuilder {
     type Entity = FinalHtlcMinimumCltvExpiry;
     const NAME: &'static str = "FinalHtlcMinimumCltvExpiryBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -4465,8 +4407,7 @@ impl ::core::fmt::Debug for ExpiryTime {
 impl ::core::fmt::Display for ExpiryTime {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4481,11 +4422,11 @@ impl ::core::default::Default for ExpiryTime {
     }
 }
 impl ExpiryTime {
-    const DEFAULT_VALUE: [u8; 41] = [
-        41, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 36] = [
+        36, 0, 0, 0, 8, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4502,17 +4443,11 @@ impl ExpiryTime {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Duration {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Duration::new_unchecked(self.0.slice(start..end))
         } else {
             Duration::new_unchecked(self.0.slice(start..))
@@ -4544,9 +4479,7 @@ impl molecule::prelude::Entity for ExpiryTime {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -4568,8 +4501,7 @@ impl<'r> ::core::fmt::Debug for ExpiryTimeReader<'r> {
 impl<'r> ::core::fmt::Display for ExpiryTimeReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4578,7 +4510,7 @@ impl<'r> ::core::fmt::Display for ExpiryTimeReader<'r> {
     }
 }
 impl<'r> ExpiryTimeReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4595,17 +4527,11 @@ impl<'r> ExpiryTimeReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> DurationReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             DurationReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             DurationReader::new_unchecked(&self.as_slice()[start..])
@@ -4658,22 +4584,16 @@ impl<'r> molecule::prelude::Reader<'r> for ExpiryTimeReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        DurationReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        DurationReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct ExpiryTimeBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Duration,
 }
 impl ExpiryTimeBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Duration) -> Self {
         self.value = v;
         self
@@ -4683,22 +4603,17 @@ impl molecule::prelude::Builder for ExpiryTimeBuilder {
     type Entity = ExpiryTime;
     const NAME: &'static str = "ExpiryTimeBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -4728,8 +4643,7 @@ impl ::core::fmt::Debug for Description {
 impl ::core::fmt::Display for Description {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4744,8 +4658,8 @@ impl ::core::default::Default for Description {
     }
 }
 impl Description {
-    const DEFAULT_VALUE: [u8; 17] = [17, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4762,17 +4676,11 @@ impl Description {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Bytes {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Bytes::new_unchecked(self.0.slice(start..end))
         } else {
             Bytes::new_unchecked(self.0.slice(start..))
@@ -4804,9 +4712,7 @@ impl molecule::prelude::Entity for Description {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -4828,8 +4734,7 @@ impl<'r> ::core::fmt::Debug for DescriptionReader<'r> {
 impl<'r> ::core::fmt::Display for DescriptionReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -4838,7 +4743,7 @@ impl<'r> ::core::fmt::Display for DescriptionReader<'r> {
     }
 }
 impl<'r> DescriptionReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4855,17 +4760,11 @@ impl<'r> DescriptionReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             BytesReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             BytesReader::new_unchecked(&self.as_slice()[start..])
@@ -4918,22 +4817,16 @@ impl<'r> molecule::prelude::Reader<'r> for DescriptionReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct DescriptionBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Bytes,
 }
 impl DescriptionBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Bytes) -> Self {
         self.value = v;
         self
@@ -4943,22 +4836,17 @@ impl molecule::prelude::Builder for DescriptionBuilder {
     type Entity = Description;
     const NAME: &'static str = "DescriptionBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -4988,8 +4876,7 @@ impl ::core::fmt::Debug for FallbackAddr {
 impl ::core::fmt::Display for FallbackAddr {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5004,8 +4891,8 @@ impl ::core::default::Default for FallbackAddr {
     }
 }
 impl FallbackAddr {
-    const DEFAULT_VALUE: [u8; 17] = [17, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5022,17 +4909,11 @@ impl FallbackAddr {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Bytes {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Bytes::new_unchecked(self.0.slice(start..end))
         } else {
             Bytes::new_unchecked(self.0.slice(start..))
@@ -5064,9 +4945,7 @@ impl molecule::prelude::Entity for FallbackAddr {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -5088,8 +4967,7 @@ impl<'r> ::core::fmt::Debug for FallbackAddrReader<'r> {
 impl<'r> ::core::fmt::Display for FallbackAddrReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5098,7 +4976,7 @@ impl<'r> ::core::fmt::Display for FallbackAddrReader<'r> {
     }
 }
 impl<'r> FallbackAddrReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5115,17 +4993,11 @@ impl<'r> FallbackAddrReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             BytesReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             BytesReader::new_unchecked(&self.as_slice()[start..])
@@ -5178,22 +5050,16 @@ impl<'r> molecule::prelude::Reader<'r> for FallbackAddrReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct FallbackAddrBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Bytes,
 }
 impl FallbackAddrBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Bytes) -> Self {
         self.value = v;
         self
@@ -5203,22 +5069,17 @@ impl molecule::prelude::Builder for FallbackAddrBuilder {
     type Entity = FallbackAddr;
     const NAME: &'static str = "FallbackAddrBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -5248,8 +5109,7 @@ impl ::core::fmt::Debug for Feature {
 impl ::core::fmt::Display for Feature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5264,10 +5124,8 @@ impl ::core::default::Default for Feature {
     }
 }
 impl Feature {
-    const DEFAULT_VALUE: [u8; 21] = [
-        21, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 16] = [16, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5284,17 +5142,11 @@ impl Feature {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Uint64 {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64::new_unchecked(self.0.slice(start..end))
         } else {
             Uint64::new_unchecked(self.0.slice(start..))
@@ -5326,9 +5178,7 @@ impl molecule::prelude::Entity for Feature {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -5350,8 +5200,7 @@ impl<'r> ::core::fmt::Debug for FeatureReader<'r> {
 impl<'r> ::core::fmt::Display for FeatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5360,7 +5209,7 @@ impl<'r> ::core::fmt::Display for FeatureReader<'r> {
     }
 }
 impl<'r> FeatureReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5377,17 +5226,11 @@ impl<'r> FeatureReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Uint64Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Uint64Reader::new_unchecked(&self.as_slice()[start..])
@@ -5440,22 +5283,16 @@ impl<'r> molecule::prelude::Reader<'r> for FeatureReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct FeatureBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Uint64,
 }
 impl FeatureBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Uint64) -> Self {
         self.value = v;
         self
@@ -5465,22 +5302,17 @@ impl molecule::prelude::Builder for FeatureBuilder {
     type Entity = Feature;
     const NAME: &'static str = "FeatureBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -5510,8 +5342,7 @@ impl ::core::fmt::Debug for UdtScript {
 impl ::core::fmt::Display for UdtScript {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5526,12 +5357,12 @@ impl ::core::default::Default for UdtScript {
     }
 }
 impl UdtScript {
-    const DEFAULT_VALUE: [u8; 66] = [
-        66, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0,
+    const DEFAULT_VALUE: [u8; 61] = [
+        61, 0, 0, 0, 8, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5548,17 +5379,11 @@ impl UdtScript {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Script {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Script::new_unchecked(self.0.slice(start..end))
         } else {
             Script::new_unchecked(self.0.slice(start..))
@@ -5590,9 +5415,7 @@ impl molecule::prelude::Entity for UdtScript {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -5614,8 +5437,7 @@ impl<'r> ::core::fmt::Debug for UdtScriptReader<'r> {
 impl<'r> ::core::fmt::Display for UdtScriptReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5624,7 +5446,7 @@ impl<'r> ::core::fmt::Display for UdtScriptReader<'r> {
     }
 }
 impl<'r> UdtScriptReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5641,17 +5463,11 @@ impl<'r> UdtScriptReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> ScriptReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             ScriptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             ScriptReader::new_unchecked(&self.as_slice()[start..])
@@ -5704,22 +5520,16 @@ impl<'r> molecule::prelude::Reader<'r> for UdtScriptReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        ScriptReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        ScriptReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct UdtScriptBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Script,
 }
 impl UdtScriptBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Script) -> Self {
         self.value = v;
         self
@@ -5729,22 +5539,17 @@ impl molecule::prelude::Builder for UdtScriptBuilder {
     type Entity = UdtScript;
     const NAME: &'static str = "UdtScriptBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -5774,8 +5579,7 @@ impl ::core::fmt::Debug for PayeePublicKey {
 impl ::core::fmt::Display for PayeePublicKey {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5790,8 +5594,8 @@ impl ::core::default::Default for PayeePublicKey {
     }
 }
 impl PayeePublicKey {
-    const DEFAULT_VALUE: [u8; 17] = [17, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5808,17 +5612,11 @@ impl PayeePublicKey {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Bytes {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Bytes::new_unchecked(self.0.slice(start..end))
         } else {
             Bytes::new_unchecked(self.0.slice(start..))
@@ -5850,9 +5648,7 @@ impl molecule::prelude::Entity for PayeePublicKey {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -5874,8 +5670,7 @@ impl<'r> ::core::fmt::Debug for PayeePublicKeyReader<'r> {
 impl<'r> ::core::fmt::Display for PayeePublicKeyReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -5884,7 +5679,7 @@ impl<'r> ::core::fmt::Display for PayeePublicKeyReader<'r> {
     }
 }
 impl<'r> PayeePublicKeyReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5901,17 +5696,11 @@ impl<'r> PayeePublicKeyReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             BytesReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             BytesReader::new_unchecked(&self.as_slice()[start..])
@@ -5964,22 +5753,16 @@ impl<'r> molecule::prelude::Reader<'r> for PayeePublicKeyReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct PayeePublicKeyBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Bytes,
 }
 impl PayeePublicKeyBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Bytes) -> Self {
         self.value = v;
         self
@@ -5989,22 +5772,17 @@ impl molecule::prelude::Builder for PayeePublicKeyBuilder {
     type Entity = PayeePublicKey;
     const NAME: &'static str = "PayeePublicKeyBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -6034,8 +5812,7 @@ impl ::core::fmt::Debug for PaymentPreimage {
 impl ::core::fmt::Display for PaymentPreimage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -6050,11 +5827,11 @@ impl ::core::default::Default for PaymentPreimage {
     }
 }
 impl PaymentPreimage {
-    const DEFAULT_VALUE: [u8; 45] = [
-        45, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 40] = [
+        40, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6071,17 +5848,11 @@ impl PaymentPreimage {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Byte::new_unchecked(self.0.slice(start..end))
-    }
     pub fn value(&self) -> Preimage {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Preimage::new_unchecked(self.0.slice(start..end))
         } else {
             Preimage::new_unchecked(self.0.slice(start..))
@@ -6113,9 +5884,7 @@ impl molecule::prelude::Entity for PaymentPreimage {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .attr_id(self.attr_id())
-            .value(self.value())
+        Self::new_builder().value(self.value())
     }
 }
 #[derive(Clone, Copy)]
@@ -6137,8 +5906,7 @@ impl<'r> ::core::fmt::Debug for PaymentPreimageReader<'r> {
 impl<'r> ::core::fmt::Display for PaymentPreimageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "attr_id", self.attr_id())?;
-        write!(f, ", {}: {}", "value", self.value())?;
+        write!(f, "{}: {}", "value", self.value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -6147,7 +5915,7 @@ impl<'r> ::core::fmt::Display for PaymentPreimageReader<'r> {
     }
 }
 impl<'r> PaymentPreimageReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6164,17 +5932,11 @@ impl<'r> PaymentPreimageReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn attr_id(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn value(&self) -> PreimageReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
+        let start = molecule::unpack_number(&slice[4..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             PreimageReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             PreimageReader::new_unchecked(&self.as_slice()[start..])
@@ -6227,22 +5989,16 @@ impl<'r> molecule::prelude::Reader<'r> for PaymentPreimageReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        ByteReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        PreimageReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        PreimageReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct PaymentPreimageBuilder {
-    pub(crate) attr_id: Byte,
     pub(crate) value: Preimage,
 }
 impl PaymentPreimageBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn attr_id(mut self, v: Byte) -> Self {
-        self.attr_id = v;
-        self
-    }
+    pub const FIELD_COUNT: usize = 1;
     pub fn value(mut self, v: Preimage) -> Self {
         self.value = v;
         self
@@ -6252,22 +6008,17 @@ impl molecule::prelude::Builder for PaymentPreimageBuilder {
     type Entity = PaymentPreimage;
     const NAME: &'static str = "PaymentPreimageBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.attr_id.as_slice().len()
-            + self.value.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
-        offsets.push(total_size);
-        total_size += self.attr_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.attr_id.as_slice())?;
         writer.write_all(self.value.as_slice())?;
         Ok(())
     }
@@ -6308,9 +6059,9 @@ impl ::core::default::Default for InvoiceAttr {
     }
 }
 impl InvoiceAttr {
-    const DEFAULT_VALUE: [u8; 45] = [
-        0, 0, 0, 0, 41, 0, 0, 0, 12, 0, 0, 0, 13, 0, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 40] = [
+        0, 0, 0, 0, 36, 0, 0, 0, 8, 0, 0, 0, 28, 0, 0, 0, 12, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {

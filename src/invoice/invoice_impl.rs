@@ -352,7 +352,7 @@ impl InvoiceSignature {
 }
 
 impl ToString for CkbInvoice {
-    ///   hrp: ln{currency}{amount}{prefix}
+    ///   hrp: fib{currency}{amount}{prefix}
     ///   data: compressed(InvoiceData) + signature
     ///   signature: 64 bytes + 1 byte recovery id = Vec<u8>
     ///     if signature is present: bech32m(hrp, 1 + data + signature)

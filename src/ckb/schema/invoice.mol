@@ -16,47 +16,38 @@ table Duration {
 }
 
 table FinalHtlcTimeout {
-    attr_id: byte,
     value: Uint64,
 }
 
 table FinalHtlcMinimumCltvExpiry {
-    attr_id: byte,
     value: Uint64,
 }
 
 table ExpiryTime {
-    attr_id: byte,
     value: Duration,
 }
 
 table Description {
-    attr_id: byte,
     value: Bytes,
 }
 
 table FallbackAddr {
-    attr_id: byte,
     value: Bytes,
 }
 
 table Feature {
-    attr_id: byte,
     value: Uint64,
 }
 
 table UdtScript {
-    attr_id: byte,
     value: Script,
 }
 
 table PayeePublicKey {
-    attr_id: byte,
     value: Bytes,
 }
 
 table PaymentPreimage {
-    attr_id: byte,
     value: Preimage,
 }
 
