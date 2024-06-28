@@ -66,9 +66,9 @@ impl AsRef<[u8]> for KeyPair {
     }
 }
 
-impl Into<SecioKeyPair> for KeyPair {
-    fn into(self) -> SecioKeyPair {
-        SecioKeyPair::secp256k1_raw_key(self.0).expect("key must have been validated")
+impl From<KeyPair> for SecioKeyPair {
+    fn from(val: KeyPair) -> Self {
+        SecioKeyPair::secp256k1_raw_key(val.0).expect("key must have been validated")
     }
 }
 
@@ -84,7 +84,7 @@ impl TryFrom<&[u8]> for KeyPair {
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(value);
-        if SecioKeyPair::secp256k1_raw_key(&key).is_err() {
+        if SecioKeyPair::secp256k1_raw_key(key).is_err() {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "invalid secret key data",
