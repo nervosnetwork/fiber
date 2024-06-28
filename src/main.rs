@@ -20,12 +20,9 @@ use cfn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 #[tokio::main]
 pub async fn main() {
     let mut builder = env_logger::builder();
-    match std::env::var("LOG_SURFFIX") {
-        Ok(log_surffix) => {
-            info!("Setting log surffix to: {}", &log_surffix);
-            builder.format_suffix(log_surffix.leak());
-        }
-        Err(_) => {}
+    if let Ok(log_surffix) = std::env::var("LOG_SURFFIX") {
+        info!("Setting log surffix to: {}", &log_surffix);
+        builder.format_suffix(log_surffix.leak());
     }
     builder.init();
 

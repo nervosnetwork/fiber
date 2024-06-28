@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub mod config;
 pub use config::CkbConfig;
 

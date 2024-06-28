@@ -541,7 +541,7 @@ impl<S> ChannelActor<S> {
                     state.peer_id.clone(),
                     state.get_id(),
                     version,
-                    tx.clone(),
+                    tx,
                     witnesses,
                 )),
             ))
@@ -757,10 +757,7 @@ impl<S> ChannelActor<S> {
                 ));
                 state.funding_tx = Some(tx_update.transaction.clone());
                 state.funding_source_lock_script = Some(tx_update.funding_source_lock_script);
-                state.maybe_complete_tx_collaboration(
-                    tx_update.transaction.clone(),
-                    &self.network,
-                )?;
+                state.maybe_complete_tx_collaboration(tx_update.transaction, &self.network)?;
             }
             TxCollaborationCommand::TxComplete() => {
                 state.check_tx_complete_preconditions()?;
@@ -1950,7 +1947,7 @@ impl ChannelActorState {
     }
 
     pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.get_next_local_secnonce().public_nonce().clone()
+        self.get_next_local_secnonce().public_nonce()
     }
 
     pub fn get_remote_nonce(&self) -> &PubNonce {
@@ -2715,7 +2712,7 @@ impl ChannelActorState {
         let local_shutdown_signature = match self.local_shutdown_signature {
             Some(signature) => signature,
             None => {
-                let signature = sign_ctx.clone().sign(message.as_slice())?;
+                let signature = sign_ctx.sign(message.as_slice())?;
                 self.local_shutdown_signature = Some(signature);
                 debug!(
                     "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
@@ -2877,7 +2874,7 @@ impl ChannelActorState {
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::UpdateChannelFunding(
                                 self.get_id(),
-                                msg.tx.clone(),
+                                msg.tx,
                                 self.get_funding_request(),
                             ),
                         ))
@@ -2988,7 +2985,7 @@ impl ChannelActorState {
                         self.peer_id.clone(),
                         self.get_id(),
                         num,
-                        tx.clone(),
+                        tx,
                     ),
                 ),
             ))
@@ -3456,7 +3453,7 @@ impl ChannelActorState {
 
         let (outputs, outputs_data) = if let Some(type_script) = &self.funding_udt_type_script {
             let dummy_output = CellOutput::new_builder()
-                .lock(dummy_script.clone())
+                .lock(dummy_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(0.pack())
                 .build();
@@ -3468,7 +3465,7 @@ impl ChannelActorState {
         } else {
             let dummy_output = CellOutput::new_builder()
                 .capacity(0.pack())
-                .lock(dummy_script.clone())
+                .lock(dummy_script)
                 .build();
             let outputs = [dummy_output.clone(), dummy_output];
             (outputs, vec![Default::default(), Default::default()])
@@ -3548,7 +3545,7 @@ impl ChannelActorState {
                 self.local_reserved_ckb_amount, local_shutdown_fee, local_capacity
             );
             let local_output = CellOutput::new_builder()
-                .lock(local_shutdown_script.clone())
+                .lock(local_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(local_capacity.pack())
                 .build();
@@ -3560,7 +3557,7 @@ impl ChannelActorState {
                 self.remote_reserved_ckb_amount, remote_shutdown_fee, remote_capacity
             );
             let remote_output = CellOutput::new_builder()
-                .lock(remote_shutdown_script.clone())
+                .lock(remote_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(remote_capacity.pack())
                 .build();
@@ -3848,14 +3845,14 @@ impl ChannelActorState {
 
             let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
             let immediate_output = CellOutput::new_builder()
-                .lock(immediate_secp256k1_lock_script.clone())
+                .lock(immediate_secp256k1_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(immediately_spendable_ckb_amount.pack())
                 .build();
 
             let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
             let commitment_lock_output = CellOutput::new_builder()
-                .lock(commitment_lock_script.clone())
+                .lock(commitment_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(time_locked_ckb_amount.pack())
                 .build();

@@ -404,7 +404,7 @@ where
                                     Default::default(),
                                     FundingRequest {
                                         script,
-                                        udt_type_script: udt_funding_script.clone(),
+                                        udt_type_script: udt_funding_script,
                                         local_amount: local as u64,
                                         funding_fee_rate: funding_fee_rate,
                                         remote_amount: remote as u64,
