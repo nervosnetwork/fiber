@@ -1,6 +1,6 @@
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use tracing::{debug, error};
+use crate::{debug, error};
 
 /// A root actor that listens for cancellation token and stops all sub actors (those who started by spawn_linked).
 pub struct RootActor;

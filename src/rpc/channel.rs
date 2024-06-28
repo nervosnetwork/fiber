@@ -21,7 +21,7 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
-use tracing::error;
+use crate::error;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]

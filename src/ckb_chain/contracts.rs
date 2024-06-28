@@ -5,7 +5,7 @@ use ckb_types::{
 };
 use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
-use tracing::debug;
+use crate::debug;
 
 use crate::ckb::{config::CkbNetwork, types::Hash256};
 
@@ -225,7 +225,7 @@ impl ContractsContext {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
-                tracing::warn!("Initializing mock context for testing.");
+                crate::warn!("Initializing mock context for testing.");
                 MockContext::new().into()
             }
             CkbNetwork::Dev => {

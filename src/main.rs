@@ -1,10 +1,10 @@
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
+use cfn_node::{debug, error, info, trace};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
 use tokio::{select, signal};
-use tracing::{debug, error, info, trace};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use std::str::FromStr;

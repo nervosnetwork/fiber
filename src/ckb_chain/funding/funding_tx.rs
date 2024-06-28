@@ -27,7 +27,7 @@ use molecule::{
 };
 use serde::Deserialize;
 use serde_with::serde_as;
-use tracing::{debug, warn};
+use crate::{debug, warn};
 
 /// Funding transaction wrapper.
 ///

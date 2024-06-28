@@ -8,7 +8,7 @@ use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
-use tracing::error;
+use crate::error;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConnectPeerParams {

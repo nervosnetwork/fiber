@@ -7,7 +7,7 @@ use clap_serde_derive::{
 };
 use home::home_dir;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use crate::error;
 
 use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 
