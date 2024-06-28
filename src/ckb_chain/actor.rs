@@ -226,7 +226,7 @@ impl CkbChainState {
 }
 
 #[cfg(test)]
-pub use test_utils::{submit_tx, trace_tx, MockChainActor};
+pub use test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor};
 
 #[cfg(test)]
 mod test_utils {
@@ -512,8 +512,14 @@ mod test_utils {
         mock_actor: ActorRef<CkbChainMessage>,
         tx: TransactionView,
     ) -> ckb_jsonrpc_types::Status {
+        trace_tx_hash(mock_actor, tx.hash()).await
+    }
+
+    pub async fn trace_tx_hash(
+        mock_actor: ActorRef<CkbChainMessage>,
+        tx_hash: Byte32,
+    ) -> ckb_jsonrpc_types::Status {
         pub const TIMEOUT: u64 = 1000;
-        let tx_hash = tx.hash();
         let request = TraceTxRequest {
             tx_hash,
             confirmations: 1,

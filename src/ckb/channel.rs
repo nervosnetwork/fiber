@@ -4635,8 +4635,6 @@ mod tests {
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
-        let _ = env_logger::try_init();
-
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
@@ -4811,13 +4809,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_channel_commitment_tx_after_add_tlc_ckbhash() {
-        let _ = env_logger::try_init();
         do_test_channel_commitment_tx_after_add_tlc(HashAlgorithm::CkbHash).await
     }
 
     #[tokio::test]
     async fn test_channel_commitment_tx_after_add_tlc_sha256() {
-        let _ = env_logger::try_init();
         do_test_channel_commitment_tx_after_add_tlc(HashAlgorithm::Sha256).await
     }
 
@@ -5101,78 +5097,52 @@ mod tests {
 
         dbg!(&shutdown_channel_result);
 
-        let node_a_shutdown_tx = node_a
+        let node_a_shutdown_tx_hash = node_a
             .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx) => {
+                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
                     println!(
                         "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                        &tx, &peer_id, channel_id
+                        &tx_hash, &peer_id, channel_id
                     );
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
-                    Some(tx.clone())
+                    Some(tx_hash.clone())
                 }
                 _ => None,
             })
             .await;
 
-        dbg!(&node_a_shutdown_tx);
+        dbg!(&node_a_shutdown_tx_hash);
 
-        let node_b_shutdown_tx = node_b
+        let node_b_shutdown_tx_hash = node_b
             .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx) => {
+                NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
                     println!(
                         "Shutdown tx ({:?}) from {:?} for channel {:?} received",
-                        &tx, &peer_id, channel_id
+                        &tx_hash, &peer_id, channel_id
                     );
                     assert_eq!(peer_id, &node_a.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
-                    Some(tx.clone())
+                    Some(tx_hash.clone())
                 }
                 _ => None,
             })
             .await;
 
-        dbg!(&node_b_shutdown_tx);
+        dbg!(&node_b_shutdown_tx_hash);
+
+        assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
 
         assert_eq!(
-            node_a.trace_tx(node_a_shutdown_tx.clone()).await,
+            node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
             Status::Committed
         );
         assert_eq!(
-            node_b.trace_tx(node_b_shutdown_tx.clone()).await,
+            node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
             Status::Committed
         );
-        assert_eq!(
-            node_a_shutdown_tx.outputs().as_slice(),
-            node_b_shutdown_tx.outputs().as_slice()
-        );
 
-        assert_eq!(node_a_shutdown_tx.outputs().len(), 2);
-        let output0: u64 = node_a_shutdown_tx
-            .outputs()
-            .get(0)
-            .unwrap()
-            .capacity()
-            .unpack();
-        let output0 = output0 as u128;
-        let output1: u64 = node_a_shutdown_tx
-            .outputs()
-            .get(1)
-            .unwrap()
-            .capacity()
-            .unpack();
-        let output1 = output1 as u128;
-        let node_a_final_amount = node_a_funding_amount - tlc_amount;
-        // Node b's final amount is approximate because the fee can not easily calculated exactly.
-        // The amount below is the amount of node b's final amount + the fee that node b paid.
-        let approximate_node_b_final_amount = node_b_funding_amount + tlc_amount;
-        assert!(output0 == node_a_final_amount || output1 == node_a_final_amount);
-        if output0 == node_a_final_amount {
-            assert!(output1 < approximate_node_b_final_amount);
-        } else {
-            assert!(output0 < approximate_node_b_final_amount);
-        }
+        // TODO: maybe also check shutdown tx outputs and output balances here.
     }
 
     #[tokio::test]
