@@ -1239,23 +1239,6 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct FundingTxInput(Transaction);
-
-impl Eq for FundingTxInput {}
-
-impl PartialEq for FundingTxInput {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_bytes() == other.0.as_bytes()
-    }
-}
-
-impl From<Transaction> for FundingTxInput {
-    fn from(tx: Transaction) -> Self {
-        Self(tx)
-    }
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommitmentNumbers {
     pub local: u64,
@@ -3750,24 +3733,14 @@ impl ChannelActorState {
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-        let witnesses: Vec<u8> = [
+        [
             empty_witness_args.to_vec(),
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
             self.get_witness_args_for_active_tlcs(local),
         ]
-        .map(|x| {
-            debug!(
-                "Extending {} commitment transaction #{}'s witness with {:?}",
-                if local { "local" } else { "remote" },
-                commitment_number,
-                hex::encode(&x)
-            );
-            x
-        })
-        .concat();
-        witnesses
+        .concat()
     }
 
     // Build the parameters for the commitment transaction. The first two elements for the
