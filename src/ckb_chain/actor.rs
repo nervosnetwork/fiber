@@ -534,8 +534,6 @@ mod test {
 
     async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         use super::test_utils::MockChainActor;
-
-        
         Actor::spawn(None, MockChainActor::new(), ())
             .await
             .expect("start mock chain actor")
