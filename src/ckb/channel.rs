@@ -4526,7 +4526,7 @@ mod tests {
     use ckb_types::{
         core::FeeRate,
         packed::Script,
-        prelude::{Builder, Entity},
+        prelude::{Builder, Entity, Unpack},
     };
     use ractor::call;
 
@@ -4822,8 +4822,6 @@ mod tests {
     }
 
     async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) {
-        let _ = env_logger::try_init();
-
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
@@ -4952,6 +4950,7 @@ mod tests {
 
         dbg!(&remove_tlc_result);
 
+        let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
         let shutdown_channel_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
@@ -4959,7 +4958,7 @@ mod tests {
                     command: ChannelCommand::Shutdown(
                         ShutdownCommand {
                             close_script: Script::default().as_builder().build(),
-                            fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                            fee_rate,
                         },
                         rpc_reply,
                     ),
@@ -5013,6 +5012,36 @@ mod tests {
             node_b.trace_tx(node_b_shutdown_tx.clone()).await,
             Status::Committed
         );
+        assert_eq!(
+            node_a_shutdown_tx.outputs().as_slice(),
+            node_b_shutdown_tx.outputs().as_slice()
+        );
+
+        assert_eq!(node_a_shutdown_tx.outputs().len(), 2);
+        let output0: u64 = node_a_shutdown_tx
+            .outputs()
+            .get(0)
+            .unwrap()
+            .capacity()
+            .unpack();
+        let output0 = output0 as u128;
+        let output1: u64 = node_a_shutdown_tx
+            .outputs()
+            .get(1)
+            .unwrap()
+            .capacity()
+            .unpack();
+        let output1 = output1 as u128;
+        let node_a_final_amount = node_a_funding_amount - tlc_amount;
+        // Node b's final amount is approximate because the fee can not easily calculated exactly.
+        // The amount below is the amount of node b's final amount + the fee that node b paid.
+        let approximate_node_b_final_amount = node_b_funidng_amount + tlc_amount;
+        assert!(output0 == node_a_final_amount || output1 == node_a_final_amount);
+        if output0 == node_a_final_amount {
+            assert!(output1 < approximate_node_b_final_amount);
+        } else {
+            assert!(output0 < approximate_node_b_final_amount);
+        }
     }
 
     #[tokio::test]
