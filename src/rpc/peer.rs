@@ -4,11 +4,11 @@ use jsonrpsee::{
     core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,
     types::ErrorObjectOwned,
 };
-use log::error;
 use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tracing::error;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConnectPeerParams {

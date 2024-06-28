@@ -16,11 +16,11 @@ use jsonrpsee::{
     proc_macros::rpc,
     types::{error::CALL_EXECUTION_FAILED_CODE, ErrorObjectOwned},
 };
-use log::error;
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
+use tracing::error;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]

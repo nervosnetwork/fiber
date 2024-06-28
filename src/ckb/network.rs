@@ -2,13 +2,14 @@ use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
-use log::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RpcReplyPort, SupervisionEvent,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tentacle::secio::SecioKeyPair;
 
@@ -461,7 +462,7 @@ where
                 .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
                 {
                     Ok(_) => {
-                        info!("Closing transaction sent to the network: {:?}", tx);
+                        info!("Closing transaction sent to the network: {:x}", tx.hash());
                     }
                     Err(err) => {
                         error!("Failed to send closing transaction to the network: {}", err);
@@ -785,6 +786,18 @@ pub struct NetworkActorState {
     auto_accept_channel_ckb_funding_amount: u64,
 }
 
+static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
+
+// ractor requires that the actor name is unique, so we add a prefix to the actor name.
+fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) -> String {
+    format!(
+        "Channel-{} {} <-> {}",
+        CHANNEL_ACTOR_NAME_PREFIX.fetch_add(1, Ordering::AcqRel),
+        local_peer_id,
+        remote_peer_id
+    )
+}
+
 impl NetworkActorState {
     pub fn generate_channel_seed(&mut self) -> [u8; 32] {
         let channel_user_id = self.channels.len();
@@ -824,7 +837,7 @@ impl NetworkActorState {
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
@@ -875,7 +888,7 @@ impl NetworkActorState {
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
@@ -1001,9 +1014,9 @@ impl NetworkActorState {
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
         for channel_id in store.get_channel_ids_by_peer(&peer_id) {
-            debug!("Reestablishing channel {:?}", &channel_id);
+            debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
-                None,
+                Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
                 ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
                 ChannelInitializationParameter::ReestablishChannel(channel_id),
                 self.network.get_cell(),
@@ -1454,8 +1467,14 @@ pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static
     root_actor: ActorCell,
     store: S,
 ) -> ActorRef<NetworkActorMessage> {
+    let secio_kp: SecioKeyPair = config
+        .read_or_generate_secret_key()
+        .expect("read or generate secret key")
+        .into();
+    let my_peer_id = PeerId::from_public_key(&secio_kp.public_key());
+
     let (actor, _handle) = Actor::spawn_linked(
-        Some("network actor".to_string()),
+        Some(format!("Network {}", my_peer_id)),
         NetworkActor::new(event_sender, chain_actor, store),
         (config, tracker),
         root_actor,

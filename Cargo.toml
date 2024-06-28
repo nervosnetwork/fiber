@@ -41,9 +41,7 @@ home = "0.5.9"
 ckb-sdk = "3.1.0"
 thiserror = "1.0.58"
 anyhow = "1.0.81"
-env_logger = "0.11.3"
 tentacle = "0.6"
-log = "0.4.21"
 futures = "0.3.30"
 once_cell = "1.19.0"
 tokio-util = { version = "0.7.10", features = ["rt"] }
@@ -67,6 +65,8 @@ ractor = "0.9.7"
 arcode = "0.2.4"
 nom = "7.1.3"
 regex = "1.10.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 panic = "abort"

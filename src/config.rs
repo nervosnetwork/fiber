@@ -6,8 +6,8 @@ use clap_serde_derive::{
     ClapSerde,
 };
 use home::home_dir;
-use log::error;
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 
