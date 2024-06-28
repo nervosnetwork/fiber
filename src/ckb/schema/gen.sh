@@ -7,6 +7,7 @@ MOLC="${MOLC:-moleculec}"
 schema_dir="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 gen_dir="$(dirname "$schema_dir")/gen"
 
+
 files=("cfn.mol" "invoice.mol")
 for file in "${files[@]}"; do
     f="$schema_dir/$file"
@@ -14,7 +15,9 @@ for file in "${files[@]}"; do
     "$MOLC" --language rust --schema-file "$f" | rustfmt > "$output_file"
 
     ## ignore them in clippy
-    DIRECTIVE="#![allow(clippy::all)]"
-    echo -e "$DIRECTIVE\n$(cat "$output_file")" > "$output_file"
+    ALLOW_CLIPPY="#![allow(clippy::all)]"
+    temp_file=$(mktemp)
+    echo -e "$ALLOW_CLIPPY\n$(cat "$output_file")" > "$temp_file"
+    mv "$temp_file" "$output_file"
 
 done

@@ -1867,13 +1867,7 @@ impl ChannelActorState {
                     "Setting local_committed_at for tlc {:?} to commitment number {:?}",
                     tlc.tlc.id, commitment_numbers
                 );
-                // FIXME: need to confirm with @contrun
-                #[allow(clippy::if_same_then_else)]
-                if is_received {
-                    tlc.creation_confirmed_at = Some(commitment_numbers);
-                } else {
-                    tlc.creation_confirmed_at = Some(commitment_numbers);
-                };
+                tlc.creation_confirmed_at = Some(commitment_numbers);
             }
             match (tlc.removed_at, tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {

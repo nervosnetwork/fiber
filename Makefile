@@ -1,16 +1,12 @@
-CLIPPY_OPTIONS := -- -D warnings -D clippy::redundant_clone -D clippy::enum_glob_use \
-	-D clippy::fallible_impl_from -A clippy::mutable_key_type -A clippy::upper_case_acronyms \
-	-A clippy::needless_return -A clippy::fallible_impl_from -A clippy::expect_fun_call \
-	-A clippy::large_enum_variant
 
 .PHONY: clippy
 clippy:
-	cargo clippy ${CLIPPY_OPTIONS}
+	cargo clippy --all --all-targets --all-features
+
+.PHONY: bless
+bless:
+	cargo clippy --fix --allow-dirty --allow-staged --all --all-targets --all-features
 
 .PHONY: fmt
 fmt:
 	cargo fmt --all -- --check
-
-.PHONY: bless
-bless:
-	cargo clippy --fix --allow-dirty --allow-staged ${CLIPPY_OPTIONS}
