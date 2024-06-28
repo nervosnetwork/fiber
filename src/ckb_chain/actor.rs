@@ -226,7 +226,7 @@ impl CkbChainState {
 }
 
 #[cfg(test)]
-pub use test_utils::{submit_tx, MockChainActor};
+pub use test_utils::{submit_tx, trace_tx, MockChainActor};
 
 #[cfg(test)]
 mod test_utils {
@@ -424,6 +424,7 @@ mod test_utils {
                                     *entry.get_mut() = CellStatus::Consumed;
                                 }
                                 std::collections::hash_map::Entry::Vacant(entry) => {
+                                    debug!("Consuming cell {:?}", &input);
                                     entry.insert(CellStatus::Consumed);
                                 }
                             }
@@ -498,13 +499,21 @@ mod test_utils {
         tx: TransactionView,
     ) -> ckb_jsonrpc_types::Status {
         pub const TIMEOUT: u64 = 1000;
-        let tx_hash = tx.hash();
-        if let Err(error) =
-            call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx).expect("chain actor alive")
+        if let Err(error) = call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx.clone())
+            .expect("chain actor alive")
         {
             error!("submit tx failed: {:?}", error);
             return ckb_jsonrpc_types::Status::Rejected;
         }
+        trace_tx(mock_actor, tx).await
+    }
+
+    pub async fn trace_tx(
+        mock_actor: ActorRef<CkbChainMessage>,
+        tx: TransactionView,
+    ) -> ckb_jsonrpc_types::Status {
+        pub const TIMEOUT: u64 = 1000;
+        let tx_hash = tx.hash();
         let request = TraceTxRequest {
             tx_hash,
             confirmations: 1,
