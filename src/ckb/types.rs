@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66};
+use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::serde_utils::SliceHex;
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
@@ -920,13 +921,14 @@ impl TryFrom<molecule_cfn::ClosingSigned> for ClosingSigned {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
     pub amount: u128,
     pub payment_hash: Hash256,
     pub expiry: LockTime,
+    pub hash_algorithm: HashAlgorithm,
 }
 
 impl From<AddTlc> for molecule_cfn::AddTlc {
@@ -937,6 +939,7 @@ impl From<AddTlc> for molecule_cfn::AddTlc {
             .amount(add_tlc.amount.pack())
             .payment_hash(add_tlc.payment_hash.into())
             .expiry(add_tlc.expiry.into())
+            .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
             .build()
     }
 }
@@ -951,6 +954,10 @@ impl TryFrom<molecule_cfn::AddTlc> for AddTlc {
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
             expiry: add_tlc.expiry().try_into()?,
+            hash_algorithm: add_tlc
+                .hash_algorithm()
+                .try_into()
+                .map_err(|err: UnknownHashAlgorithmError| Error::AnyHow(err.into()))?,
         })
     }
 }
@@ -1334,5 +1341,20 @@ mod tests {
         );
         let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
         assert_eq!(pubkey, public_key)
+    }
+
+    #[test]
+    fn test_add_tlc_serialization() {
+        let add_tlc = super::AddTlc {
+            channel_id: [42; 32].into(),
+            tlc_id: 42,
+            amount: 42,
+            payment_hash: [42; 32].into(),
+            expiry: 42.into(),
+            hash_algorithm: super::HashAlgorithm::Sha256,
+        };
+        let add_tlc_mol: super::molecule_cfn::AddTlc = add_tlc.clone().into();
+        let add_tlc2 = add_tlc_mol.try_into().expect("decode");
+        assert_eq!(add_tlc, add_tlc2);
     }
 }

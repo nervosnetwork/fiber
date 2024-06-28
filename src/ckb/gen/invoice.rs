@@ -4696,6 +4696,154 @@ impl molecule::prelude::Builder for PayeePublicKeyBuilder {
     }
 }
 #[derive(Clone)]
+pub struct HashAlgorithm(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for HashAlgorithm {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for HashAlgorithm {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for HashAlgorithm {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for HashAlgorithm {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        HashAlgorithm::new_unchecked(v)
+    }
+}
+impl HashAlgorithm {
+    const DEFAULT_VALUE: [u8; 1] = [0];
+    pub const TOTAL_SIZE: usize = 1;
+    pub const FIELD_SIZES: [usize; 1] = [1];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn value(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(0..1))
+    }
+    pub fn as_reader<'r>(&'r self) -> HashAlgorithmReader<'r> {
+        HashAlgorithmReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for HashAlgorithm {
+    type Builder = HashAlgorithmBuilder;
+    const NAME: &'static str = "HashAlgorithm";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        HashAlgorithm(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        HashAlgorithmReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        HashAlgorithmReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().value(self.value())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct HashAlgorithmReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for HashAlgorithmReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for HashAlgorithmReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for HashAlgorithmReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "value", self.value())?;
+        write!(f, " }}")
+    }
+}
+impl<'r> HashAlgorithmReader<'r> {
+    pub const TOTAL_SIZE: usize = 1;
+    pub const FIELD_SIZES: [usize; 1] = [1];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn value(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[0..1])
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for HashAlgorithmReader<'r> {
+    type Entity = HashAlgorithm;
+    const NAME: &'static str = "HashAlgorithmReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        HashAlgorithmReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len != Self::TOTAL_SIZE {
+            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct HashAlgorithmBuilder {
+    pub(crate) value: Byte,
+}
+impl HashAlgorithmBuilder {
+    pub const TOTAL_SIZE: usize = 1;
+    pub const FIELD_SIZES: [usize; 1] = [1];
+    pub const FIELD_COUNT: usize = 1;
+    pub fn value(mut self, v: Byte) -> Self {
+        self.value = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for HashAlgorithmBuilder {
+    type Entity = HashAlgorithm;
+    const NAME: &'static str = "HashAlgorithmBuilder";
+    fn expected_length(&self) -> usize {
+        Self::TOTAL_SIZE
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        writer.write_all(self.value.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        HashAlgorithm::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct InvoiceAttr(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for InvoiceAttr {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -4726,7 +4874,7 @@ impl ::core::default::Default for InvoiceAttr {
 }
 impl InvoiceAttr {
     const DEFAULT_VALUE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4741,6 +4889,7 @@ impl InvoiceAttr {
             5 => Feature::new_unchecked(inner).into(),
             6 => UdtScript::new_unchecked(inner).into(),
             7 => PayeePublicKey::new_unchecked(inner).into(),
+            8 => HashAlgorithm::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4797,7 +4946,7 @@ impl<'r> ::core::fmt::Display for InvoiceAttrReader<'r> {
     }
 }
 impl<'r> InvoiceAttrReader<'r> {
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -4812,6 +4961,7 @@ impl<'r> InvoiceAttrReader<'r> {
             5 => FeatureReader::new_unchecked(inner).into(),
             6 => UdtScriptReader::new_unchecked(inner).into(),
             7 => PayeePublicKeyReader::new_unchecked(inner).into(),
+            8 => HashAlgorithmReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -4845,6 +4995,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             5 => FeatureReader::verify(inner_slice, compatible),
             6 => UdtScriptReader::verify(inner_slice, compatible),
             7 => PayeePublicKeyReader::verify(inner_slice, compatible),
+            8 => HashAlgorithmReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -4853,7 +5004,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct InvoiceAttrBuilder(pub(crate) InvoiceAttrUnion);
 impl InvoiceAttrBuilder {
-    pub const ITEMS_COUNT: usize = 8;
+    pub const ITEMS_COUNT: usize = 9;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<InvoiceAttrUnion>,
@@ -4889,6 +5040,7 @@ pub enum InvoiceAttrUnion {
     Feature(Feature),
     UdtScript(UdtScript),
     PayeePublicKey(PayeePublicKey),
+    HashAlgorithm(HashAlgorithm),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum InvoiceAttrUnionReader<'r> {
@@ -4900,6 +5052,7 @@ pub enum InvoiceAttrUnionReader<'r> {
     Feature(FeatureReader<'r>),
     UdtScript(UdtScriptReader<'r>),
     PayeePublicKey(PayeePublicKeyReader<'r>),
+    HashAlgorithm(HashAlgorithmReader<'r>),
 }
 impl ::core::default::Default for InvoiceAttrUnion {
     fn default() -> Self {
@@ -4939,6 +5092,9 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
+            InvoiceAttrUnion::HashAlgorithm(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, HashAlgorithm::NAME, item)
+            }
         }
     }
 }
@@ -4975,6 +5131,9 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, PayeePublicKey::NAME, item)
             }
+            InvoiceAttrUnionReader::HashAlgorithm(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, HashAlgorithm::NAME, item)
+            }
         }
     }
 }
@@ -4989,6 +5148,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::PayeePublicKey(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::HashAlgorithm(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -5003,6 +5163,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::UdtScript(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::PayeePublicKey(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::HashAlgorithm(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -5044,6 +5205,11 @@ impl ::core::convert::From<UdtScript> for InvoiceAttrUnion {
 impl ::core::convert::From<PayeePublicKey> for InvoiceAttrUnion {
     fn from(item: PayeePublicKey) -> Self {
         InvoiceAttrUnion::PayeePublicKey(item)
+    }
+}
+impl ::core::convert::From<HashAlgorithm> for InvoiceAttrUnion {
+    fn from(item: HashAlgorithm) -> Self {
+        InvoiceAttrUnion::HashAlgorithm(item)
     }
 }
 impl<'r> ::core::convert::From<ExpiryTimeReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -5088,6 +5254,11 @@ impl<'r> ::core::convert::From<PayeePublicKeyReader<'r>> for InvoiceAttrUnionRea
         InvoiceAttrUnionReader::PayeePublicKey(item)
     }
 }
+impl<'r> ::core::convert::From<HashAlgorithmReader<'r>> for InvoiceAttrUnionReader<'r> {
+    fn from(item: HashAlgorithmReader<'r>) -> Self {
+        InvoiceAttrUnionReader::HashAlgorithm(item)
+    }
+}
 impl InvoiceAttrUnion {
     pub const NAME: &'static str = "InvoiceAttrUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
@@ -5100,6 +5271,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_bytes(),
             InvoiceAttrUnion::UdtScript(item) => item.as_bytes(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_bytes(),
+            InvoiceAttrUnion::HashAlgorithm(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
@@ -5112,6 +5284,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_slice(),
             InvoiceAttrUnion::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_slice(),
+            InvoiceAttrUnion::HashAlgorithm(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5124,6 +5297,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => 5,
             InvoiceAttrUnion::UdtScript(_) => 6,
             InvoiceAttrUnion::PayeePublicKey(_) => 7,
+            InvoiceAttrUnion::HashAlgorithm(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5136,6 +5310,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(_) => "Feature",
             InvoiceAttrUnion::UdtScript(_) => "UdtScript",
             InvoiceAttrUnion::PayeePublicKey(_) => "PayeePublicKey",
+            InvoiceAttrUnion::HashAlgorithm(_) => "HashAlgorithm",
         }
     }
     pub fn as_reader<'r>(&'r self) -> InvoiceAttrUnionReader<'r> {
@@ -5148,6 +5323,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::Feature(item) => item.as_reader().into(),
             InvoiceAttrUnion::UdtScript(item) => item.as_reader().into(),
             InvoiceAttrUnion::PayeePublicKey(item) => item.as_reader().into(),
+            InvoiceAttrUnion::HashAlgorithm(item) => item.as_reader().into(),
         }
     }
 }
@@ -5163,6 +5339,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(item) => item.as_slice(),
             InvoiceAttrUnionReader::UdtScript(item) => item.as_slice(),
             InvoiceAttrUnionReader::PayeePublicKey(item) => item.as_slice(),
+            InvoiceAttrUnionReader::HashAlgorithm(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
@@ -5175,6 +5352,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => 5,
             InvoiceAttrUnionReader::UdtScript(_) => 6,
             InvoiceAttrUnionReader::PayeePublicKey(_) => 7,
+            InvoiceAttrUnionReader::HashAlgorithm(_) => 8,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -5187,6 +5365,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::Feature(_) => "Feature",
             InvoiceAttrUnionReader::UdtScript(_) => "UdtScript",
             InvoiceAttrUnionReader::PayeePublicKey(_) => "PayeePublicKey",
+            InvoiceAttrUnionReader::HashAlgorithm(_) => "HashAlgorithm",
         }
     }
 }
@@ -5227,6 +5406,11 @@ impl From<UdtScript> for InvoiceAttr {
 }
 impl From<PayeePublicKey> for InvoiceAttr {
     fn from(value: PayeePublicKey) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<HashAlgorithm> for InvoiceAttr {
+    fn from(value: HashAlgorithm) -> Self {
         Self::new_builder().set(value).build()
     }
 }
