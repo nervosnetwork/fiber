@@ -4515,7 +4515,7 @@ mod tests {
             hash_algorithm::HashAlgorithm,
             network::{AcceptChannelCommand, OpenChannelCommand},
             test_utils::NetworkNode,
-            types::{LockTime, RemoveTlcFulfill, RemoveTlcReason},
+            types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
@@ -4821,14 +4821,14 @@ mod tests {
         do_test_channel_commitment_tx_after_add_tlc(HashAlgorithm::Sha256).await
     }
 
-    async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) {
+    async fn create_nodes_with_established_channel(
+        node_a_funding_amount: u128,
+        node_b_funding_amount: u128,
+    ) -> (NetworkNode, NetworkNode, Hash256) {
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
             .unwrap();
-
-        let node_a_funding_amount = 100000000000;
-        let node_b_funidng_amount = 6200000000;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -4860,7 +4860,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
-                    funding_amount: node_b_funidng_amount,
+                    funding_amount: node_b_funding_amount,
                 },
                 rpc_reply,
             ))
@@ -4899,6 +4899,137 @@ mod tests {
                 _ => false,
             })
             .await;
+        (node_a, node_b, new_channel_id)
+    }
+
+    async fn do_test_remove_tlc_with_wrong_hash_algorithm(
+        correct_algorithm: HashAlgorithm,
+        wrong_algorithm: HashAlgorithm,
+    ) {
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (node_a, node_b, new_channel_id) =
+            create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount)
+                .await;
+
+        let preimage = [1; 32];
+        let digest = correct_algorithm.hash(&preimage);
+        let tlc_amount = 1000000000;
+
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: tlc_amount,
+                            hash_algorithm: correct_algorithm,
+                            payment_hash: Some(digest.into()),
+                            expiry: LockTime::new(100),
+                            preimage: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive")
+        .expect("successfully added tlc");
+
+        dbg!(&add_tlc_result);
+
+        dbg!("Sleeping for some time to wait for the AddTlc processed by both party");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: add_tlc_result.tlc_id,
+                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage.into(),
+                            }),
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive")
+        .expect("successfully removed tlc");
+
+        dbg!(&remove_tlc_result);
+
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: tlc_amount,
+                            hash_algorithm: wrong_algorithm,
+                            payment_hash: Some(digest.into()),
+                            expiry: LockTime::new(100),
+                            preimage: None,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive")
+        .expect("successfully added tlc");
+
+        dbg!(&add_tlc_result);
+
+        dbg!("Sleeping for some time to wait for the AddTlc processed by both party");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+        let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: add_tlc_result.tlc_id,
+                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage.into(),
+                            }),
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        })
+        .expect("node_b alive");
+
+        dbg!(&remove_tlc_result);
+        assert!(remove_tlc_result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_tlc_with_wrong_hash_algorithm() {
+        let supported_algorithms = HashAlgorithm::supported_algorithms();
+        for algorithm1 in &supported_algorithms {
+            for algorithm2 in &supported_algorithms {
+                if algorithm2 == algorithm1 {
+                    continue;
+                }
+                do_test_remove_tlc_with_wrong_hash_algorithm(*algorithm1, *algorithm2).await;
+            }
+        }
+    }
+
+    async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) {
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (mut node_a, mut node_b, new_channel_id) =
+            create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount)
+                .await;
 
         let preimage = [1; 32];
         let digest = algorithm.hash(&preimage);
@@ -5035,7 +5166,7 @@ mod tests {
         let node_a_final_amount = node_a_funding_amount - tlc_amount;
         // Node b's final amount is approximate because the fee can not easily calculated exactly.
         // The amount below is the amount of node b's final amount + the fee that node b paid.
-        let approximate_node_b_final_amount = node_b_funidng_amount + tlc_amount;
+        let approximate_node_b_final_amount = node_b_funding_amount + tlc_amount;
         assert!(output0 == node_a_final_amount || output1 == node_a_final_amount);
         if output0 == node_a_final_amount {
             assert!(output1 < approximate_node_b_final_amount);
