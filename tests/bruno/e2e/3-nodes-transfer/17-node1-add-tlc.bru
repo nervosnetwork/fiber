@@ -36,6 +36,15 @@ assert {
   res.body.result.tlc_id: isDefined
 }
 
+script:pre-request {
+  let hash_algorithm = bru.getEnvVar("HASH_ALGORITHM");
+  if (hash_algorithm !== null) {
+    let body = req.getBody();
+    body.params[0].hash_algorithm = hash_algorithm;
+    req.setBody(body);
+  }
+}
+
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
