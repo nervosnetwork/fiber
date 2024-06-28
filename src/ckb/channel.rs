@@ -4526,7 +4526,7 @@ mod tests {
     use ckb_types::{
         core::FeeRate,
         packed::Script,
-        prelude::{Builder, Entity, Unpack},
+        prelude::{Builder, Entity},
     };
     use ractor::call;
 
@@ -4938,7 +4938,7 @@ mod tests {
         dbg!("Sleeping for some time to wait for the AddTlc processed by both party");
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -4956,8 +4956,6 @@ mod tests {
         })
         .expect("node_b alive")
         .expect("successfully removed tlc");
-
-        dbg!(&remove_tlc_result);
 
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
@@ -5056,7 +5054,7 @@ mod tests {
         dbg!("Sleeping for some time to wait for the AddTlc processed by both party");
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -5075,10 +5073,8 @@ mod tests {
         .expect("node_b alive")
         .expect("successfully removed tlc");
 
-        dbg!(&remove_tlc_result);
-
         let fee_rate = FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE);
-        let shutdown_channel_result = call!(node_b.network_actor, |rpc_reply| {
+        call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -5094,8 +5090,6 @@ mod tests {
         })
         .expect("node_b alive")
         .expect("successfully shutdown channel");
-
-        dbg!(&shutdown_channel_result);
 
         let node_a_shutdown_tx_hash = node_a
             .expect_to_process_event(|event| match event {
@@ -5146,13 +5140,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_channel_with_simple_update_operation_ckbhash() {
-        do_test_channel_with_simple_update_operation(HashAlgorithm::CkbHash).await
-    }
-
-    #[tokio::test]
-    async fn test_channel_with_simple_update_operation_sha256() {
-        do_test_channel_with_simple_update_operation(HashAlgorithm::Sha256).await
+    async fn test_channel_with_simple_update_operation() {
+        for algorithm in HashAlgorithm::supported_algorithms() {
+            do_test_channel_with_simple_update_operation(algorithm).await
+        }
     }
 
     #[tokio::test]
