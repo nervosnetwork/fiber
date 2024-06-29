@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use chrono::{DateTime, Utc};
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
@@ -1462,6 +1463,8 @@ pub struct ChannelActorState {
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
     pub total_amount: u128,
+
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1698,6 +1701,7 @@ impl ChannelActorState {
             reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
+            created_at: Utc::now(),
         }
     }
 
@@ -1748,6 +1752,7 @@ impl ChannelActorState {
             remote_reserved_ckb_amount: 0,
 
             reestablishing: false,
+            created_at: Utc::now(),
             #[cfg(debug_assertions)]
             total_amount: value,
         }

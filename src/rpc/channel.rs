@@ -10,6 +10,7 @@ use crate::ckb::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
+use chrono::{DateTime, Utc};
 use ckb_jsonrpc_types::Script;
 use ckb_types::core::FeeRate;
 use jsonrpsee::{
@@ -84,6 +85,7 @@ pub struct Channel {
     pub sent_tlc_balance: u128,
     pub remote_balance: u128,
     pub received_tlc_balance: u128,
+    pub created_at: DateTime<Utc>,
 }
 
 #[serde_as]
@@ -235,25 +237,28 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let channels = self.store.get_channel_states(params.peer_id);
-        Ok(ListChannelsResult {
-            channels: channels
-                .into_iter()
-                .filter_map(|(peer_id, channel_id, _state)| {
-                    self.store
-                        .get_channel_actor_state(&channel_id)
-                        .map(|state| Channel {
-                            channel_id,
-                            peer_id,
-                            state: state.state,
-                            local_balance: state.get_local_balance(),
-                            remote_balance: state.get_remote_balance(),
-                            sent_tlc_balance: state.get_sent_tlc_balance(),
-                            received_tlc_balance: state.get_received_tlc_balance(),
-                        })
-                })
-                .collect(),
-        })
+        let mut channels: Vec<_> = self
+            .store
+            .get_channel_states(params.peer_id)
+            .into_iter()
+            .filter_map(|(peer_id, channel_id, _state)| {
+                self.store
+                    .get_channel_actor_state(&channel_id)
+                    .map(|state| Channel {
+                        channel_id,
+                        peer_id,
+                        state: state.state,
+                        local_balance: state.get_local_balance(),
+                        remote_balance: state.get_remote_balance(),
+                        sent_tlc_balance: state.get_sent_tlc_balance(),
+                        received_tlc_balance: state.get_received_tlc_balance(),
+                        created_at: state.created_at,
+                    })
+            })
+            .collect();
+        // Sort by created_at in descending order
+        channels.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(ListChannelsResult { channels })
     }
 
     async fn commitment_signed(
