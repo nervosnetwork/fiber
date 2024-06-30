@@ -7,7 +7,6 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
 
-use log::{debug, error, info, warn};
 use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
@@ -18,6 +17,7 @@ use musig2::{
 use ractor::{
     async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SpawnErr,
 };
+use tracing::{debug, error, info, warn};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -4556,8 +4556,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_channel() {
-        let _ = env_logger::try_init();
-
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
