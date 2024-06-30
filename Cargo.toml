@@ -67,6 +67,7 @@ nom = "7.1.3"
 regex = "1.10.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+socket2 = "0.5.7"
 
 [profile.release]
 panic = "abort"

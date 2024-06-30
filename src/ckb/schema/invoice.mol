@@ -46,6 +46,12 @@ table PayeePublicKey {
     value: Bytes,
 }
 
+// 0 - ckb hash (Default)
+// 1 - sha256
+struct HashAlgorithm {
+    value: byte,
+}
+
 union InvoiceAttr {
     ExpiryTime,
     Description,
@@ -55,6 +61,7 @@ union InvoiceAttr {
     Feature,
     UdtScript,
     PayeePublicKey,
+    HashAlgorithm,
 }
 
 vector InvoiceAttrsVec <InvoiceAttr>;

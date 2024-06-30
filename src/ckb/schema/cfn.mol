@@ -101,6 +101,7 @@ table AddTlc {
     amount:         Uint128,
     payment_hash:   Byte32,
     expiry:         Uint64,
+    hash_algorithm: byte,
 }
 
 table RevokeAndAck {

@@ -3,6 +3,7 @@ use crate::ckb::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
         RemoveTlcCommand, ShutdownCommand,
     },
+    hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand},
     serde_utils::{U128Hex, U32Hex, U64Hex},
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
@@ -93,6 +94,7 @@ pub struct AddTlcParams {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub expiry: LockTime,
+    pub hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[serde_as]
@@ -278,6 +280,7 @@ where
                             preimage: None,
                             payment_hash: Some(params.payment_hash),
                             expiry: params.expiry,
+                            hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                         },
                         rpc_reply,
                     ),
