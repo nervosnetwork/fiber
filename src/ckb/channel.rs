@@ -64,7 +64,7 @@ const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
-const ASSUME_NETWORK_ACTOR_ALIVE: &'static str = "network actor must be alive";
+const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
 
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -397,7 +397,7 @@ impl<S> ChannelActor<S> {
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     state.local_shutdown_script = Some(funding_source_lock_script.clone());
                     state.local_shutdown_fee_rate = Some(0);
-                    flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+                    flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
                     debug!("Auto accept shutdown ...");
                 }
                 state.update_state(ChannelState::ShuttingDown(flags));
@@ -541,7 +541,7 @@ impl<S> ChannelActor<S> {
                     state.peer_id.clone(),
                     state.get_id(),
                     version,
-                    tx.clone(),
+                    tx,
                     witnesses,
                 )),
             ))
@@ -687,10 +687,7 @@ impl<S> ChannelActor<S> {
         command: TxCollaborationCommand,
     ) -> Result<(), ProcessingChannelError> {
         debug!("Handling tx collaboration command: {:?}", &command);
-        let is_complete_command = match command {
-            TxCollaborationCommand::TxComplete() => true,
-            _ => false,
-        };
+        let is_complete_command = matches!(command, TxCollaborationCommand::TxComplete());
         let is_waiting_for_remote = match state.state {
             ChannelState::CollaboratingFundingTx(flags) => {
                 flags.contains(CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG)
@@ -757,10 +754,7 @@ impl<S> ChannelActor<S> {
                 ));
                 state.funding_tx = Some(tx_update.transaction.clone());
                 state.funding_source_lock_script = Some(tx_update.funding_source_lock_script);
-                state.maybe_complete_tx_collaboration(
-                    tx_update.transaction.clone(),
-                    &self.network,
-                )?;
+                state.maybe_complete_tx_collaboration(tx_update.transaction, &self.network)?;
             }
             TxCollaborationCommand::TxComplete() => {
                 state.check_tx_complete_preconditions()?;
@@ -1212,10 +1206,8 @@ where
                             debug!("Ignoring message while reestablishing: {:?}", message);
                         }
                     }
-                } else {
-                    if let Err(error) = self.handle_peer_message(state, message) {
-                        error!("Error while processing channel message: {:?}", error);
-                    }
+                } else if let Err(error) = self.handle_peer_message(state, message) {
+                    error!("Error while processing channel message: {:?}", error);
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -1340,10 +1332,7 @@ impl From<TLCId> for u64 {
 
 impl TLCId {
     pub fn is_offered(&self) -> bool {
-        match self {
-            TLCId::Offered(_) => true,
-            _ => false,
-        }
+        matches!(self, TLCId::Offered(_))
     }
 
     pub fn is_received(&self) -> bool {
@@ -1629,8 +1618,9 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 }
 
 // Constructors for the channel actor state.
+#[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
-    pub fn new_inbound_channel<'a>(
+    pub fn new_inbound_channel(
         temp_channel_id: Hash256,
         local_value: u128,
         local_reserved_ckb_amount: u64,
@@ -1701,6 +1691,7 @@ impl ChannelActorState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_outbound_channel(
         seed: &[u8],
         peer_id: PeerId,
@@ -1876,11 +1867,7 @@ impl ChannelActorState {
                     "Setting local_committed_at for tlc {:?} to commitment number {:?}",
                     tlc.tlc.id, commitment_numbers
                 );
-                if is_received {
-                    tlc.creation_confirmed_at = Some(commitment_numbers);
-                } else {
-                    tlc.creation_confirmed_at = Some(commitment_numbers);
-                };
+                tlc.creation_confirmed_at = Some(commitment_numbers);
             }
             match (tlc.removed_at, tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {
@@ -1950,7 +1937,7 @@ impl ChannelActorState {
     }
 
     pub fn get_next_local_nonce(&self) -> PubNonce {
-        self.get_next_local_secnonce().public_nonce().clone()
+        self.get_next_local_secnonce().public_nonce()
     }
 
     pub fn get_remote_nonce(&self) -> &PubNonce {
@@ -2038,7 +2025,7 @@ impl ChannelActorState {
                     "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
                     tlc.id, current,
                 );
-                return Ok(current.clone());
+                return Ok(*current);
             } else {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Trying to insert different tlcs with identical id {:?}: current tlc {:?}, new tlc {:?}",
@@ -2131,7 +2118,7 @@ impl ChannelActorState {
                         debug!(
                             "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
                         );
-                        return Ok(current.clone());
+                        return Ok(*current);
                     }
                     Some((current_remove_reason, current_removed_at)) => {
                         return Err(ProcessingChannelError::InvalidParameter(
@@ -2159,10 +2146,10 @@ impl ChannelActorState {
                     }
                 };
                 current.removed_at = Some((removed_at, reason));
-                current.clone()
+                current
             }
         };
-        Ok(tlc)
+        Ok(*tlc)
     }
 
     pub fn get_local_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -2230,7 +2217,7 @@ impl ChannelActorState {
         let args = blake2b_256(self.get_funding_lock_script_xonly());
         debug!(
             "Aggregated pubkey: {:?}, hash: {:?}",
-            hex::encode(&args),
+            hex::encode(args),
             hex::encode(&args[..20])
         );
         get_script_by_contract(Contract::FundingLock, args.as_slice())
@@ -2295,42 +2282,44 @@ impl ChannelActorState {
         info: &DetailedTLCInfo,
         local_commitment: bool,
     ) -> bool {
-        match info {
-            DetailedTLCInfo {
-                tlc,
-                creation_confirmed_at,
-                removed_at,
-                removal_confirmed_at,
-                ..
-            } => {
-                let am_i_sending_add_tlc_message = {
-                    if tlc.is_offered() {
-                        local_commitment
-                    } else {
-                        !local_commitment
-                    }
-                };
-                let am_i_sending_remove_tlc_message = !am_i_sending_add_tlc_message;
-                match (removal_confirmed_at, removed_at, creation_confirmed_at) {
-                    (Some(_), _, _) => {
-                        debug!("Not including TLC {:?} to commitment transction as it is already removed", tlc.id);
-                        return false;
-                    }
-                    (_, Some(_), Some(_)) => {
-                        debug!("Will only include TLC {:?} to commitment transaction if I am sending remove tlc message ({})", tlc.id,am_i_sending_remove_tlc_message);
-                        return am_i_sending_remove_tlc_message;
-                    }
-                    (_, Some(_), None) => {
-                        panic!("TLC {:?} is removed but not confirmed yet", info);
-                    }
-                    (_, _, Some(n)) => {
-                        debug!("Including TLC {:?} to commitment transaction because tlc confirmed at {:?}", tlc.id, n);
-                        return true;
-                    }
-                    (None, None, None) => {
-                        debug!("Will only include TLC {:?} to commitment transaction if I am sending add tlc message ({})", tlc.id, am_i_sending_add_tlc_message);
-                        am_i_sending_add_tlc_message
-                    }
+        let DetailedTLCInfo {
+            tlc,
+            creation_confirmed_at,
+            removed_at,
+            removal_confirmed_at,
+            ..
+        } = info;
+        {
+            let am_i_sending_add_tlc_message = {
+                if tlc.is_offered() {
+                    local_commitment
+                } else {
+                    !local_commitment
+                }
+            };
+            let am_i_sending_remove_tlc_message = !am_i_sending_add_tlc_message;
+            match (removal_confirmed_at, removed_at, creation_confirmed_at) {
+                (Some(_), _, _) => {
+                    debug!(
+                        "Not including TLC {:?} to commitment transction as it is already removed",
+                        tlc.id
+                    );
+                    return false;
+                }
+                (_, Some(_), Some(_)) => {
+                    debug!("Will only include TLC {:?} to commitment transaction if I am sending remove tlc message ({})", tlc.id,am_i_sending_remove_tlc_message);
+                    return am_i_sending_remove_tlc_message;
+                }
+                (_, Some(_), None) => {
+                    panic!("TLC {:?} is removed but not confirmed yet", info);
+                }
+                (_, _, Some(n)) => {
+                    debug!("Including TLC {:?} to commitment transaction because tlc confirmed at {:?}", tlc.id, n);
+                    return true;
+                }
+                (None, None, None) => {
+                    debug!("Will only include TLC {:?} to commitment transaction if I am sending add tlc message ({})", tlc.id, am_i_sending_add_tlc_message);
+                    am_i_sending_add_tlc_message
                 }
             }
         }
@@ -2408,7 +2397,7 @@ impl ChannelActorState {
     ) -> impl Iterator<Item = (&DetailedTLCInfo, Pubkey, Pubkey)> {
         self.get_active_received_tlcs(local).map(move |tlc| {
             let (k1, k2) = self.get_tlc_pubkeys(tlc, local);
-            (&(*tlc), k1, k2)
+            (tlc, k1, k2)
         })
     }
 
@@ -2428,10 +2417,10 @@ impl ChannelActorState {
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.get_active_received_tlc_with_pubkeys(local)
-                    .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
+                    .map(|(tlc, local, remote)| (*tlc, local, remote))
                     .collect::<Vec<_>>(),
                 self.get_active_offered_tlc_with_pubkeys(local)
-                    .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
+                    .map(|(tlc, local, remote)| (*tlc, local, remote))
                     .collect::<Vec<_>>(),
             );
             debug!("Received tlcs: {:?}", &received_tlcs);
@@ -2451,7 +2440,7 @@ impl ChannelActorState {
         };
         debug!("Sorted tlcs: {:?}", &tlcs);
         tlcs.iter()
-            .map(|(tlc, local, remote)| {
+            .flat_map(|(tlc, local, remote)| {
                 [
                     vec![tlc.tlc.get_htlc_type()],
                     tlc.tlc.amount.to_le_bytes().to_vec(),
@@ -2465,7 +2454,6 @@ impl ChannelActorState {
                 ]
                 .concat()
             })
-            .flatten()
             .collect()
     }
 
@@ -2553,7 +2541,7 @@ impl ChannelActorState {
         let preimage = command.preimage.unwrap_or(get_random_preimage());
         let payment_hash = command
             .payment_hash
-            .unwrap_or_else(|| command.hash_algorithm.hash(&preimage).into());
+            .unwrap_or_else(|| command.hash_algorithm.hash(preimage).into());
 
         TLC {
             id: TLCId::Offered(id),
@@ -2715,7 +2703,7 @@ impl ChannelActorState {
         let local_shutdown_signature = match self.local_shutdown_signature {
             Some(signature) => signature,
             None => {
-                let signature = sign_ctx.clone().sign(message.as_slice())?;
+                let signature = sign_ctx.sign(message.as_slice())?;
                 self.local_shutdown_signature = Some(signature);
                 debug!(
                     "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
@@ -2815,10 +2803,7 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!("Processing tx collaboration message: {:?}", &msg);
-        let is_complete_message = match msg {
-            TxCollaborationMsg::TxComplete(_) => true,
-            _ => false,
-        };
+        let is_complete_message = matches!(msg, TxCollaborationMsg::TxComplete(_));
         let is_waiting_for_remote = match self.state {
             ChannelState::CollaboratingFundingTx(flags) => {
                 flags.contains(CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG)
@@ -2877,7 +2862,7 @@ impl ChannelActorState {
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::UpdateChannelFunding(
                                 self.get_id(),
-                                msg.tx.clone(),
+                                msg.tx,
                                 self.get_funding_request(),
                             ),
                         ))
@@ -2988,7 +2973,7 @@ impl ChannelActorState {
                         self.peer_id.clone(),
                         self.get_id(),
                         num,
-                        tx.clone(),
+                        tx,
                     ),
                 ),
             ))
@@ -3013,7 +2998,7 @@ impl ChannelActorState {
                     CommitmentSignedFlags::PendingShutdown(_) => {
                         // TODO: Handle error in the below function call.
                         // We've already updated our state, we should never fail here.
-                        self.maybe_transition_to_shutdown(&network)?;
+                        self.maybe_transition_to_shutdown(network)?;
                     }
                     _ => {
                         unreachable!(
@@ -3214,27 +3199,23 @@ impl ChannelActorState {
 
                                 need_resend_commitment_signed = true;
                             }
-                        } else {
-                            if let Some((commitment_number, remove_reason)) = info.removed_at {
-                                if commitment_number.get_local() >= acutal_local_commitment_number {
-                                    // resend RemoveTlc message
-                                    network
-                                        .send_message(NetworkActorMessage::new_command(
-                                            NetworkActorCommand::SendCFNMessage(
-                                                CFNMessageWithPeerId {
-                                                    peer_id: self.peer_id.clone(),
-                                                    message: CFNMessage::RemoveTlc(RemoveTlc {
-                                                        channel_id: self.get_id(),
-                                                        tlc_id: info.tlc.get_id(),
-                                                        reason: remove_reason,
-                                                    }),
-                                                },
-                                            ),
-                                        ))
-                                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        } else if let Some((commitment_number, remove_reason)) = info.removed_at {
+                            if commitment_number.get_local() >= acutal_local_commitment_number {
+                                // resend RemoveTlc message
+                                network
+                                    .send_message(NetworkActorMessage::new_command(
+                                        NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                                            peer_id: self.peer_id.clone(),
+                                            message: CFNMessage::RemoveTlc(RemoveTlc {
+                                                channel_id: self.get_id(),
+                                                tlc_id: info.tlc.get_id(),
+                                                reason: remove_reason,
+                                            }),
+                                        }),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                                    need_resend_commitment_signed = true;
-                                }
+                                need_resend_commitment_signed = true;
                             }
                         }
                     }
@@ -3389,9 +3370,9 @@ impl ChannelActorState {
                 );
                 let check = self.is_tx_final(tx);
                 if !check.is_ok_and(|ok| ok) {
-                    return Err(ProcessingChannelError::InvalidState(format!(
-                        "Received TxComplete message, but funding tx is not final"
-                    )));
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Received TxComplete message, but funding tx is not final".to_string(),
+                    ));
                 }
             }
         }
@@ -3456,7 +3437,7 @@ impl ChannelActorState {
 
         let (outputs, outputs_data) = if let Some(type_script) = &self.funding_udt_type_script {
             let dummy_output = CellOutput::new_builder()
-                .lock(dummy_script.clone())
+                .lock(dummy_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(0.pack())
                 .build();
@@ -3468,7 +3449,7 @@ impl ChannelActorState {
         } else {
             let dummy_output = CellOutput::new_builder()
                 .capacity(0.pack())
-                .lock(dummy_script.clone())
+                .lock(dummy_script)
                 .build();
             let outputs = [dummy_output.clone(), dummy_output];
             (outputs, vec![Default::default(), Default::default()])
@@ -3542,25 +3523,25 @@ impl ChannelActorState {
                 self.to_local_amount, self.to_remote_amount
             );
 
-            let local_capacity: u64 = self.local_reserved_ckb_amount - local_shutdown_fee as u64;
+            let local_capacity: u64 = self.local_reserved_ckb_amount - local_shutdown_fee;
             debug!(
                 "shutdown_tx local_capacity: {} - {} = {}",
                 self.local_reserved_ckb_amount, local_shutdown_fee, local_capacity
             );
             let local_output = CellOutput::new_builder()
-                .lock(local_shutdown_script.clone())
+                .lock(local_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(local_capacity.pack())
                 .build();
             let local_output_data = self.to_local_amount.to_le_bytes().pack();
 
-            let remote_capacity: u64 = self.remote_reserved_ckb_amount - remote_shutdown_fee as u64;
+            let remote_capacity: u64 = self.remote_reserved_ckb_amount - remote_shutdown_fee;
             debug!(
                 "shutdown_tx remote_capacity: {} - {} = {}",
                 self.remote_reserved_ckb_amount, remote_shutdown_fee, remote_capacity
             );
             let remote_output = CellOutput::new_builder()
-                .lock(remote_shutdown_script.clone())
+                .lock(remote_shutdown_script)
                 .type_(Some(type_script.clone()).pack())
                 .capacity(remote_capacity.pack())
                 .build();
@@ -3821,7 +3802,7 @@ impl ChannelActorState {
             "Building {} commitment transaction with witnesses {:?} and hash {:?} with local commitment number {} and remote commitment number {}",
             if local { "local" } else {"remote"},
             hex::encode(&witnesses),
-            hex::encode(&script_arg),
+            hex::encode(script_arg),
             self.get_local_commitment_number(),
             self.get_remote_commitment_number()
         );
@@ -3848,14 +3829,14 @@ impl ChannelActorState {
 
             let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
             let immediate_output = CellOutput::new_builder()
-                .lock(immediate_secp256k1_lock_script.clone())
+                .lock(immediate_secp256k1_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(immediately_spendable_ckb_amount.pack())
                 .build();
 
             let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
             let commitment_lock_output = CellOutput::new_builder()
-                .lock(commitment_lock_script.clone())
+                .lock(commitment_lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(time_locked_ckb_amount.pack())
                 .build();
@@ -3890,7 +3871,7 @@ impl ChannelActorState {
             "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
             &signature,
             &tx,
-            hex::encode(&msg)
+            hex::encode(msg)
         );
         verify_ctx.verify(signature, msg.as_slice())?;
         Ok(PartiallySignedCommitmentTransaction {
@@ -3917,7 +3898,7 @@ impl ChannelActorState {
         debug!(
             "Signed commitment tx ({:?}) message {:?} with signature {:?}",
             &tx,
-            hex::encode(&msg),
+            hex::encode(msg),
             &signature,
         );
 
@@ -4059,7 +4040,7 @@ impl Musig2SignContext {
     pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
         debug!(
             "Musig2 signing partial message {:?} with nonce {:?} (public nonce: {:?}), agg nonce {:?}",
-            hex::encode(&message),
+            hex::encode(message),
             self.secnonce,
             self.secnonce.public_nonce(),
             &self.agg_nonce
@@ -4094,7 +4075,7 @@ pub fn aggregate_partial_signatures_for_msg(
 ) -> Result<CompactSignature, ProcessingChannelError> {
     debug!(
         "Message to aggregate signatures: {:?}",
-        hex::encode(&message)
+        hex::encode(message)
     );
     let signature: CompactSignature = aggregate_partial_signatures(
         &verify_ctx.key_agg_ctx,

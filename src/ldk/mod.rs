@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub mod bitcoind_client;
 mod cli;
 mod config;
@@ -173,6 +174,7 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
     Arc<FilesystemLogger>,
 >;
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_ldk_events(
     channel_manager: Arc<ChannelManager>,
     bitcoind_client: &BitcoindClient,
@@ -202,7 +204,8 @@ async fn handle_ldk_events(
                     BitcoinNetwork::Bitcoin => bitcoin_bech32::constants::Network::Bitcoin,
                     BitcoinNetwork::Regtest => bitcoin_bech32::constants::Network::Regtest,
                     BitcoinNetwork::Signet => bitcoin_bech32::constants::Network::Signet,
-                    BitcoinNetwork::Testnet | _ => bitcoin_bech32::constants::Network::Testnet,
+                    BitcoinNetwork::Testnet => bitcoin_bech32::constants::Network::Testnet,
+                    _ => unreachable!("Unknown bitcoin network"),
                 },
             )
             .expect("Lightning funding tx should always be to a SegWit output")
@@ -623,7 +626,8 @@ pub async fn start_ldk(config: LdkConfig) {
             bitcoin::Network::Bitcoin => "main",
             bitcoin::Network::Regtest => "regtest",
             bitcoin::Network::Signet => "signet",
-            bitcoin::Network::Testnet | _ => "test",
+            bitcoin::Network::Testnet => "test",
+            _ => unreachable!("Unknown bitcoin network"),
         }
     {
         println!(
@@ -956,11 +960,11 @@ pub async fn start_ldk(config: LdkConfig) {
     let recent_payments_payment_ids = channel_manager
         .list_recent_payments()
         .into_iter()
-        .filter_map(|p| match p {
-            RecentPaymentDetails::Pending { payment_id, .. } => Some(payment_id),
-            RecentPaymentDetails::Fulfilled { payment_id, .. } => Some(payment_id),
-            RecentPaymentDetails::Abandoned { payment_id, .. } => Some(payment_id),
-            RecentPaymentDetails::AwaitingInvoice { payment_id } => Some(payment_id),
+        .map(|p| match p {
+            RecentPaymentDetails::Pending { payment_id, .. } => payment_id,
+            RecentPaymentDetails::Fulfilled { payment_id, .. } => payment_id,
+            RecentPaymentDetails::Abandoned { payment_id, .. } => payment_id,
+            RecentPaymentDetails::AwaitingInvoice { payment_id } => payment_id,
         })
         .collect::<Vec<PaymentId>>();
     for (payment_id, payment_info) in outbound_payments

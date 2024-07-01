@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn test_invoice_bc32m() {
         let invoice = mock_invoice();
-        assert_eq!(invoice.is_signed(), true);
+        assert!(invoice.is_signed());
         assert_eq!(invoice.check_signature(), Ok(()));
 
         let address = invoice.to_string();
@@ -821,7 +821,7 @@ mod tests {
 
         let decoded_invoice = address.parse::<CkbInvoice>().unwrap();
         assert_eq!(decoded_invoice, invoice);
-        assert_eq!(decoded_invoice.is_signed(), true);
+        assert!(decoded_invoice.is_signed());
         assert_eq!(decoded_invoice.amount(), Some(1280));
     }
 
@@ -833,7 +833,7 @@ mod tests {
         assert!(address.starts_with("fibb1280"));
 
         let mut wrong = address.clone();
-        wrong.push_str("1");
+        wrong.push('1');
         let decoded_invoice = wrong.parse::<CkbInvoice>();
         assert_eq!(
             decoded_invoice.err(),
@@ -849,7 +849,7 @@ mod tests {
             Some(InvoiceError::Bech32Error(bech32::Error::InvalidChar('i')))
         );
 
-        let mut wrong = address.clone();
+        let mut wrong = address;
         // modify the values of wrong
         wrong.replace_range(10..12, "aa");
         let decoded_invoice = wrong.parse::<CkbInvoice>();
@@ -1006,7 +1006,7 @@ mod tests {
             .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
             .unwrap();
         let clone_invoice = invoice.clone();
-        assert_eq!(hex::encode(&invoice.payment_hash()).len(), 64);
+        assert_eq!(hex::encode(invoice.payment_hash()).len(), 64);
 
         let raw_invoice: RawCkbInvoice = invoice.into();
         let decoded_invoice: CkbInvoice = raw_invoice.try_into().unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
     fn test_invoice_serialize() {
         let invoice = mock_invoice();
         let res = serde_json::to_string(&invoice);
-        assert_eq!(res.is_ok(), true);
+        assert!(res.is_ok());
         let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
         assert_eq!(decoded, invoice);
     }
@@ -1095,7 +1095,7 @@ mod tests {
         assert_eq!(invoice.udt_type_script().unwrap(), &script);
 
         let res = serde_json::to_string(&invoice);
-        assert_eq!(res.is_ok(), true);
+        assert!(res.is_ok());
         let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
         assert_eq!(decoded, invoice);
     }

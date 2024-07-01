@@ -247,7 +247,7 @@ impl FundingTxBuilder {
                         (found_udt_amount - udt_amount).to_le_bytes().pack();
 
                     let dummy_output = CellOutput::new_builder()
-                        .lock(owner.clone())
+                        .lock(owner)
                         .type_(Some(udt_type_script.clone()).pack())
                         .build();
                     let required_capacity = dummy_output
@@ -389,7 +389,7 @@ impl FundingTx {
         let tx = self.take().ok_or(FundingError::AbsentTx)?;
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&rpc_url, 10);
 
-        let (tx, _) = unlock_tx(tx.clone(), &tx_dep_provider, &unlockers)?;
+        let (tx, _) = unlock_tx(tx, &tx_dep_provider, &unlockers)?;
         self.update_for_self(tx)?;
         Ok(self)
     }

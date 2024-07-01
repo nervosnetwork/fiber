@@ -7,6 +7,7 @@ MOLC="${MOLC:-moleculec}"
 schema_dir="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 gen_dir="$(dirname "$schema_dir")/gen"
 
+
 files=("cfn.mol" "invoice.mol")
 for file in "${files[@]}"; do
     f="$schema_dir/$file"

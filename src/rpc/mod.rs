@@ -59,7 +59,7 @@ pub async fn start_rpc<S: ChannelActorStateStore + InvoiceStore + Clone + Send +
     let mut methods = InvoiceRpcServerImpl::new(store.clone()).into_rpc();
     if let Some(ckb_network_actor) = ckb_network_actor {
         let peer = PeerRpcServerImpl::new(ckb_network_actor.clone());
-        let channel = ChannelRpcServerImpl::new(ckb_network_actor.clone(), store);
+        let channel = ChannelRpcServerImpl::new(ckb_network_actor, store);
         methods.merge(peer.into_rpc()).unwrap();
         methods.merge(channel.into_rpc()).unwrap();
     }

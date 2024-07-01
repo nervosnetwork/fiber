@@ -196,7 +196,7 @@ where
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
-                    funding_amount: params.funding_amount.clone(),
+                    funding_amount: params.funding_amount,
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()

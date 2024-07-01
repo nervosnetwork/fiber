@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HashAlgorithm {
+    #[default]
     CkbHash = 0,
     Sha256 = 1,
 }
@@ -18,12 +19,6 @@ impl HashAlgorithm {
             HashAlgorithm::CkbHash => blake2b_256(s),
             HashAlgorithm::Sha256 => sha256(s),
         }
-    }
-}
-
-impl Default for HashAlgorithm {
-    fn default() -> Self {
-        HashAlgorithm::CkbHash
     }
 }
 
