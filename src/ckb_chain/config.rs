@@ -122,7 +122,7 @@ serde_with::serde_conv!(
 );
 
 #[serde_as]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct UdtScript {
     pub code_hash: H256,
     #[serde_as(as = "ScriptHashTypeWrapper")]
@@ -143,13 +143,13 @@ serde_with::serde_conv!(
     CellDepVec,
     |_: &CellDepVec| { panic!("no support to serialize") },
     |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
-        let cell_deps: Vec<CellDep> = s.iter().map(|dep| CellDep::from(dep)).collect();
+        let cell_deps: Vec<CellDep> = s.iter().map(CellDep::from).collect();
         Ok(cell_deps.pack())
     }
 );
 
 #[serde_as]
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
@@ -158,14 +158,8 @@ pub struct UdtArgInfo {
     pub cell_deps: CellDepVec,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, Default)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
-
-impl Default for UdtCfgInfos {
-    fn default() -> Self {
-        UdtCfgInfos(Vec::new())
-    }
-}
 
 impl FromStr for UdtCfgInfos {
     type Err = serde_json::Error;

@@ -126,6 +126,7 @@ impl NetworkNode {
         .expect("start network actor")
         .0;
 
+        #[allow(clippy::never_loop)]
         let (peer_id, listening_addr) = loop {
             select! {
                 Some(NetworkServiceEvent::NetworkStarted(peer_id, multiaddr)) = event_receiver.recv() => {
@@ -239,7 +240,7 @@ impl ChannelActorStateStore for MemoryStore {
         self.channel_actor_state_map
             .write()
             .unwrap()
-            .insert(state.id.clone(), state);
+            .insert(state.id, state);
     }
 
     fn delete_channel_actor_state(&self, id: &Hash256) {
@@ -253,7 +254,7 @@ impl ChannelActorStateStore for MemoryStore {
             .values()
             .filter_map(|state| {
                 if peer_id == &state.peer_id {
-                    Some(state.id.clone())
+                    Some(state.id)
                 } else {
                     None
                 }
@@ -268,14 +269,14 @@ impl ChannelActorStateStore for MemoryStore {
             Some(peer_id) => values
                 .filter_map(|state| {
                     if peer_id == state.peer_id {
-                        Some((state.peer_id.clone(), state.id.clone(), state.state.clone()))
+                        Some((state.peer_id.clone(), state.id, state.state))
                     } else {
                         None
                     }
                 })
                 .collect(),
             None => values
-                .map(|state| (state.peer_id.clone(), state.id.clone(), state.state.clone()))
+                .map(|state| (state.peer_id.clone(), state.id, state.state))
                 .collect(),
         }
     }

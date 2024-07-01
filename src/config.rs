@@ -1,5 +1,6 @@
 use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
 
+use crate::error;
 use clap::CommandFactory;
 use clap_serde_derive::{
     clap::{self, Parser},
@@ -7,7 +8,6 @@ use clap_serde_derive::{
 };
 use home::home_dir;
 use serde::{Deserialize, Serialize};
-use crate::error;
 
 use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 
@@ -175,34 +175,33 @@ impl Config {
             base_dir.join(crate::ckb_chain::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
         ));
 
-        let (ckb, ldk, cch, rpc, ckb_chain) = match config_from_file
-            .map(|x| match x {
-                SerializedConfig {
+        let (ckb, ldk, cch, rpc, ckb_chain) = config_from_file
+            .map(|x| {
+                let SerializedConfig {
                     services: _,
                     ckb,
                     ldk,
                     cch,
                     rpc,
                     ckb_chain,
-                } => (
+                } = x;
+                (
                     // Successfully read config file, merging these options with the default ones.
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                     ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
                     cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
                     rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
                     ckb_chain.map(|c| CkbChainConfig::from(c).merge(&mut args.ckb_chain)),
-                ),
+                )
             })
-            .unwrap_or((None, None, None, None, None))
-        {
-            (ckb, ldk, cch, rpc, ckb_chain) => (
-                ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
-                ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
-                cch.unwrap_or(CchConfig::from(&mut args.cch)),
-                rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
-                ckb_chain.unwrap_or(CkbChainConfig::from(&mut args.ckb_chain)),
-            ),
-        };
+            .unwrap_or((None, None, None, None, None));
+        let (ckb, ldk, cch, rpc, ckb_chain) = (
+            ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
+            ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
+            cch.unwrap_or(CchConfig::from(&mut args.cch)),
+            rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
+            ckb_chain.unwrap_or(CkbChainConfig::from(&mut args.ckb_chain)),
+        );
 
         let ckb = services.contains(&Service::CKB).then_some(ckb);
         let ldk = services.contains(&Service::LDK).then_some(ldk);

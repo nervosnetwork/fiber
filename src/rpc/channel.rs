@@ -9,6 +9,7 @@ use crate::ckb::{
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
+use crate::error;
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::core::FeeRate;
@@ -21,7 +22,6 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
-use crate::error;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -196,7 +196,7 @@ where
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
-                    funding_amount: params.funding_amount.clone(),
+                    funding_amount: params.funding_amount,
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()

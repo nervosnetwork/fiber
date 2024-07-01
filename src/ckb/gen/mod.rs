@@ -1,3 +1,4 @@
+#[allow(clippy::all)]
 pub mod cfn;
 #[allow(clippy::all)]
 pub mod invoice;

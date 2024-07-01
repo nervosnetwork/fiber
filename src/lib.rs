@@ -24,10 +24,7 @@ pub mod tasks;
 
 fn get_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
-    INSTANCE.get_or_init(|| {
-        let node_env = std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string());
-        node_env
-    })
+    INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
 }
 
 macro_rules! define_node_log_functions {

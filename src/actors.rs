@@ -1,6 +1,6 @@
+use crate::{debug, error};
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, SupervisionEvent};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-use crate::{debug, error};
 
 /// A root actor that listens for cancellation token and stops all sub actors (those who started by spawn_linked).
 pub struct RootActor;
@@ -36,11 +36,10 @@ impl Actor for RootActor {
         myself: ActorRef<Self::Msg>,
         (tracker, token): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let cloned_myself = myself.clone();
         tracker.spawn(async move {
             token.cancelled().await;
             debug!("Shutting down root actor due to cancellation token");
-            cloned_myself.stop(Some("Cancellation token received".to_owned()));
+            myself.stop(Some("Cancellation token received".to_owned()));
         });
         Ok(())
     }

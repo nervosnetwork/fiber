@@ -78,7 +78,7 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::*;
+        use CkbChainMessage::{Fund, SendTx, Sign, TraceTx};
         match message {
             Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(&request);
@@ -93,7 +93,7 @@ impl Actor for CkbChainActor {
             }
             Sign(tx, reply_port) => {
                 if !reply_port.is_closed() {
-                    let secret_key = state.secret_key.clone();
+                    let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
                     tokio::task::block_in_place(move || {
                         let result = tx.sign(secret_key, rpc_url);
@@ -217,7 +217,7 @@ impl Actor for CkbChainActor {
 impl CkbChainState {
     fn build_funding_context(&self, request: &FundingRequest) -> FundingContext {
         FundingContext {
-            secret_key: self.secret_key.clone(),
+            secret_key: self.secret_key,
             rpc_url: self.config.rpc_url.clone(),
             funding_source_lock_script: self.funding_source_lock_script.clone(),
             funding_cell_lock_script: request.script.clone(),
@@ -244,9 +244,9 @@ mod test_utils {
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;
 
+    use crate::{debug, error};
     use ckb_types::packed::Byte32;
     use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
-    use crate::{debug, error};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CellStatus {
@@ -261,6 +261,12 @@ mod test_utils {
         cell_status: HashMap<OutPoint, CellStatus>,
     }
 
+    impl Default for MockChainActorState {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl MockChainActorState {
         pub fn new() -> Self {
             Self {
@@ -272,6 +278,12 @@ mod test_utils {
     }
 
     pub struct MockChainActor {}
+
+    impl Default for MockChainActor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 
     impl MockChainActor {
         pub fn new() -> Self {
@@ -363,7 +375,7 @@ mod test_utils {
                         request, &tx, &fulfilled_tx
                     );
 
-                    let funding_source_lock_script = request.script.clone();
+                    let funding_source_lock_script = request.script;
 
                     if let Err(e) = reply_port.send(Ok((fulfilled_tx, funding_source_lock_script)))
                     {
@@ -397,7 +409,7 @@ mod test_utils {
                     let mut context = state.ctx.write();
                     let mut f = || {
                         // Mark the inputs as consumed
-                        for input in tx.input_pts_iter().into_iter() {
+                        for input in tx.input_pts_iter() {
                             match state.cell_status.entry(input.clone()) {
                                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                                     if *entry.get() == CellStatus::Consumed {
@@ -450,7 +462,7 @@ mod test_utils {
                     };
                     let (status, result) = f();
                     state.tx_status.insert(tx.hash(), status);
-                    if let Err(e) = reply_port.send(result.into()) {
+                    if let Err(e) = reply_port.send(result) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
@@ -468,7 +480,7 @@ mod test_utils {
                         "Tracing transaction: {:?}, status: {:?}",
                         &tx.tx_hash, &status
                     );
-                    if let Err(e) = reply_port.send(status.into()) {
+                    if let Err(e) = reply_port.send(status) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
@@ -522,12 +534,10 @@ mod test {
 
     async fn create_mock_chain_actor() -> ActorRef<CkbChainMessage> {
         use super::test_utils::MockChainActor;
-
-        let chain_actor = Actor::spawn(None, MockChainActor::new(), ())
+        Actor::spawn(None, MockChainActor::new(), ())
             .await
             .expect("start mock chain actor")
-            .0;
-        chain_actor
+            .0
     }
 
     #[tokio::test]

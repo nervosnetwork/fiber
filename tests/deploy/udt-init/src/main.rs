@@ -18,7 +18,6 @@ use ckb_types::{
 use ckb_types::{packed::CellDep, prelude::Builder};
 use serde::{Deserialize, Serialize};
 
-use serde_yaml;
 use std::{error::Error as StdErr, str::FromStr};
 
 const SIMPLE_CODE_HASH: H256 =
@@ -40,7 +39,7 @@ fn get_env_hex(name: &str) -> H256 {
     let value = std::env::var(name).expect("env var");
     // strip prefix 0x
     let value = value.trim_start_matches("0x");
-    H256::from_str(&value).expect("parse hex")
+    H256::from_str(value).expect("parse hex")
 }
 
 fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
@@ -108,7 +107,7 @@ fn init_or_send_udt(
         sender.clone()
     };
 
-    let iterator = InputIterator::new_with_address(&[sender.clone()], &network_info);
+    let iterator = InputIterator::new_with_address(&[sender], &network_info);
     let owner_mode = receiver_address.is_none();
     let mut builder = SudtTransactionBuilder::new(configuration, iterator, &issuer, owner_mode)?;
     builder.set_sudt_type_script(generate_udt_type_script(udt_kind, issuer_address));
@@ -133,7 +132,7 @@ fn init_or_send_udt(
         println!(">>> tx {} sent! <<<", tx_hash);
     } else {
         let result = CkbRpcClient::new(network_info.url.as_str())
-            .test_tx_pool_accept(json_tx.inner.clone(), None)
+            .test_tx_pool_accept(json_tx.inner, None)
             .expect("accept transaction");
         println!(">>> check tx result: {:?}  <<<", result);
     }
@@ -170,7 +169,7 @@ fn get_nodes_info(node: &str) -> (String, H256) {
     let wallet =
         std::fs::read_to_string(format!("{}/ckb-chain/wallet", node_dir)).expect("read failed");
     let key = std::fs::read_to_string(format!("{}/ckb-chain/key", node_dir)).expect("read failed");
-    (wallet, H256::from_str(&key.trim()).expect("parse hex"))
+    (wallet, H256::from_str(key.trim()).expect("parse hex"))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

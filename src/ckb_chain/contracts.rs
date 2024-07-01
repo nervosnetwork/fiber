@@ -1,3 +1,4 @@
+use crate::debug;
 use ckb_types::{
     core::{DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, CellDepVecBuilder, OutPoint, Script},
@@ -5,7 +6,6 @@ use ckb_types::{
 };
 use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
-use crate::debug;
 
 use crate::ckb::{config::CkbNetwork, types::Hash256};
 
@@ -27,6 +27,13 @@ use super::{
 pub struct MockContext {
     context: Arc<RwLock<Context>>,
     contracts_context: Arc<ContractsInfo>,
+}
+
+#[cfg(test)]
+impl Default for MockContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -175,8 +182,8 @@ fn get_hash_from_environment_variable(
         .into()
 }
 
-const ENV_PREFIX: &'static str = "NEXT_PUBLIC";
-const DEFUALT_SECP256K1_TYPE_HASH: &'static str =
+const ENV_PREFIX: &str = "NEXT_PUBLIC";
+const DEFUALT_SECP256K1_TYPE_HASH: &str =
     "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
 
 fn get_environment_variable(
@@ -203,14 +210,13 @@ fn get_environment_variable(
         "_DEP_GROUP"
     };
     let env = format!("{ENV_PREFIX}_{contract_name}{maybe_dep_group}_{type_desc}");
-    std::env::var(&env).expect(
-        format!(
+    std::env::var(&env).unwrap_or_else(|_| {
+        panic!(
             "Environment variable {} for contract {:?}",
             env.as_str(),
             contract
         )
-        .as_str(),
-    )
+    })
 }
 
 #[cfg(test)]
@@ -281,7 +287,7 @@ impl ContractsContext {
                 let tx1_env_name = format!("{ENV_PREFIX}_CKB_GENESIS_TX_1");
                 let tx1 = Hash256::from_str(
                     &env::var(&tx1_env_name)
-                        .expect(&format!("environment variable {tx1_env_name}")),
+                        .unwrap_or_else(|_| panic!("environment variable {tx1_env_name}")),
                 )
                 .expect("valid hash");
 
@@ -419,9 +425,9 @@ impl ContractsContext {
             .map(|contract| {
                 script_cell_deps
                     .get(&contract)
-                    .expect(
-                        format!("Cell dep for contract {:?} does not exists", contract).as_str(),
-                    )
+                    .unwrap_or_else(|| {
+                        panic!("Cell dep for contract {:?} does not exists", contract)
+                    })
                     .clone()
             })
             .collect::<Vec<CellDepVec>>();
@@ -443,7 +449,7 @@ impl ContractsContext {
     pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
-            .expect(format!("Contract {:?} exists", contract).as_str())
+            .unwrap_or_else(|| panic!("Contract {:?} exists", contract))
             .clone()
             .as_builder()
             .args(args.pack())
@@ -459,7 +465,7 @@ impl ContractsContext {
                 let args = format!("0x{:x}", udt_script.args().raw_data());
                 let pattern = Regex::new(&udt.script.args).expect("invalid expressio");
                 if pattern.is_match(&args) {
-                    return Some(&udt);
+                    return Some(udt);
                 }
             }
         }
@@ -524,7 +530,7 @@ pub fn get_cell_deps(contracts: Vec<Contract>, udt_script: &Option<Script>) -> C
         if let Some(udt_cell_deps) = get_udt_cell_deps(udt_script) {
             let res = cell_deps
                 .into_iter()
-                .chain(udt_cell_deps.into_iter())
+                .chain(udt_cell_deps)
                 .collect::<Vec<CellDep>>();
             return res.pack();
         }
@@ -568,7 +574,7 @@ mod test {
                 .cell_deps(
                     ContractsContext::from(mock_ctx2).get_cell_deps(vec![Contract::FundingLock])
                 )
-                .output(output.clone())
+                .output(output)
                 .output_data(Default::default())
                 .build()
         );

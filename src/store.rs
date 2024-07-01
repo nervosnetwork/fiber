@@ -113,7 +113,7 @@ impl ChannelActorStateStore for Store {
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelActorState(state.id.clone(), state.clone()));
+        batch.put_kv(KeyValue::ChannelActorState(state.id, state.clone()));
         batch.put_kv(KeyValue::PeerIdChannelId(
             (state.peer_id, state.id),
             state.state,
@@ -176,14 +176,11 @@ impl InvoiceStore for Store {
 
     fn insert_invoice(&self, invoice: CkbInvoice) -> Result<(), InvoiceError> {
         let mut batch = self.batch();
-        let hash = invoice.payment_hash().clone();
-        if self.get_invoice(&hash).is_some() {
+        let hash = invoice.payment_hash();
+        if self.get_invoice(hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
         }
-        batch.put_kv(KeyValue::CkbInvoice(
-            invoice.payment_hash().clone(),
-            invoice,
-        ));
+        batch.put_kv(KeyValue::CkbInvoice(*invoice.payment_hash(), invoice));
         batch.commit();
         return Ok(());
     }

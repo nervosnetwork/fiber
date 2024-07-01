@@ -78,3 +78,11 @@ panic = "abort"
 [dev-dependencies]
 tempfile = "3.10.1"
 ckb-testtool = { git = "https://github.com/contrun/capsule.git", branch = "determinisitic-rng" }
+
+[lints.clippy]
+needless-return = "allow"
+mutable-key-type = "allow"
+upper-case-acronyms = "allow"
+fallible-impl-from = "allow"
+expect-fun-call = "allow"
+large-enum-variant = "allow"
