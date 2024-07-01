@@ -21,13 +21,13 @@ use ckb_types::{
     packed::{self, Bytes, CellInput, CellOutput, Script, Transaction},
     prelude::*,
 };
-use log::{debug, warn};
 use molecule::{
     bytes::{BufMut as _, BytesMut},
     prelude::*,
 };
 use serde::Deserialize;
 use serde_with::serde_as;
+use tracing::{debug, warn};
 
 /// Funding transaction wrapper.
 ///

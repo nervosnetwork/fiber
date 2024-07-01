@@ -1,10 +1,11 @@
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
-use log::{debug, error, info, trace};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
 use tokio::{select, signal};
+use tracing::{debug, error, info, trace};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use std::str::FromStr;
 
@@ -19,12 +20,11 @@ use cfn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 
 #[tokio::main]
 pub async fn main() {
-    let mut builder = env_logger::builder();
-    if let Ok(log_surffix) = std::env::var("LOG_SURFFIX") {
-        info!("Setting log surffix to: {}", &log_surffix);
-        builder.format_suffix(log_surffix.leak());
-    }
-    builder.init();
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .pretty()
+        .with_target(false)
+        .init();
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);

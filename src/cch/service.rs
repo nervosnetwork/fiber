@@ -37,23 +37,23 @@ impl CchService {
         loop {
             select! {
                 _ = self.token.cancelled() => {
-                    log::debug!("Cancellation received, shutting down cch service");
+                    tracing::debug!("Cancellation received, shutting down cch service");
                     break;
                 }
                 command = self.command_receiver.recv() => {
                     match command {
                         None => {
-                            log::debug!("Command receiver completed, shutting down tentacle service");
+                            tracing::debug!("Command receiver completed, shutting down tentacle service");
                             break;
                         }
                         Some(command) => {
                             let command_name = command.name();
-                            log::info!("Process cch command {}", command_name);
+                            tracing::info!("Process cch command {}", command_name);
 
                             match self.process_command(command).await {
                                 Ok(_) => {}
                                 Err(err) => {
-                                    log::error!("Error processing command {}: {:?}", command_name, err);
+                                    tracing::error!("Error processing command {}: {:?}", command_name, err);
                                 }
                             }
                         }
@@ -64,7 +64,7 @@ impl CchService {
     }
 
     async fn process_command(&mut self, command: CchCommand) -> Result<()> {
-        log::debug!("CchCommand received: {:?}", command);
+        tracing::debug!("CchCommand received: {:?}", command);
         match command {
             CchCommand::SendBTC(send_btc) => self.send_btc(send_btc).await,
         }
@@ -74,7 +74,7 @@ impl CchService {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
 
         let invoice = Bolt11Invoice::from_str(&send_btc.btc_pay_req)?;
-        log::debug!("BTC invoice: {:?}", invoice);
+        tracing::debug!("BTC invoice: {:?}", invoice);
 
         let expiry = invoice
             .expires_at()
@@ -91,7 +91,7 @@ impl CchService {
             .amount_milli_satoshis()
             .ok_or(CchError::BTCInvoiceMissingAmount)?;
 
-        log::debug!("SendBTC expiry: {:?}", expiry);
+        tracing::debug!("SendBTC expiry: {:?}", expiry);
         let (ratio_ckb_shannons, ratio_btc_msat) =
             match (self.config.ratio_ckb_shannons, self.config.ratio_btc_msat) {
                 (Some(ratio_ckb_shannons), Some(ratio_btc_msat)) => {
@@ -116,7 +116,7 @@ impl CchService {
         };
 
         // TODO: Return it as the RPC response
-        log::info!("SendBTCOrder: {}", serde_json::to_string(&order)?);
+        tracing::info!("SendBTCOrder: {}", serde_json::to_string(&order)?);
         self.orders_db.insert_send_btc_order(order).await?;
 
         Ok(())
