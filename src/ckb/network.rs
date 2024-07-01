@@ -1015,7 +1015,7 @@ impl NetworkActorState {
         for channel_id in store.get_channel_ids_by_peer(peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
-                Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
+                Some(generate_channel_actor_name(&self.peer_id, peer_id)),
                 ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
                 ChannelInitializationParameter::ReestablishChannel(channel_id),
                 self.network.get_cell(),

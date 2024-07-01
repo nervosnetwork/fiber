@@ -13,11 +13,4 @@ for file in "${files[@]}"; do
     f="$schema_dir/$file"
     output_file="$gen_dir/$(basename "${f%%.mol}.rs")"
     "$MOLC" --language rust --schema-file "$f" | rustfmt > "$output_file"
-
-    ## ignore them in clippy
-    ALLOW_CLIPPY="#![allow(clippy::all)]"
-    temp_file=$(mktemp)
-    echo -e "$ALLOW_CLIPPY\n$(cat "$output_file")" > "$temp_file"
-    mv "$temp_file" "$output_file"
-
 done
