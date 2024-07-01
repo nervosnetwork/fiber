@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use crate::ckb::{
     channel::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
@@ -10,7 +12,6 @@ use crate::ckb::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
-use chrono::{DateTime, Utc};
 use ckb_jsonrpc_types::Script;
 use ckb_types::core::FeeRate;
 use jsonrpsee::{
@@ -81,11 +82,16 @@ pub struct Channel {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub state: ChannelState,
+    #[serde_as(as = "U128Hex")]
     pub local_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub sent_tlc_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub remote_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub received_tlc_balance: u128,
-    pub created_at: DateTime<Utc>,
+    #[serde_as(as = "U64Hex")]
+    pub created_at: u64,
 }
 
 #[serde_as]
@@ -252,12 +258,12 @@ where
                         remote_balance: state.get_remote_balance(),
                         sent_tlc_balance: state.get_sent_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
-                        created_at: state.created_at,
+                        created_at: state.get_created_at_in_microseconds(),
                     })
             })
             .collect();
         // Sort by created_at in descending order
-        channels.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        channels.sort_by_key(|channel| Reverse(channel.created_at));
         Ok(ListChannelsResult { channels })
     }
 
