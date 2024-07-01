@@ -91,7 +91,8 @@ impl SendBTCOrder {
         let invoice_builder = InvoiceBuilder::new(self.currency)
             .amount(Some(self.amount_sats))
             .payment_hash(
-                Hash256::from_str(&self.payment_hash).map_err(|_| CchError::HexDecodingError)?,
+                Hash256::from_str(&self.payment_hash)
+                    .map_err(|_| CchError::HexDecodingError(self.payment_hash.clone()))?,
             )
             .expiry_time(Duration::from_secs(self.expires_after))
             .final_cltv(self.ckb_final_tlc_expiry)

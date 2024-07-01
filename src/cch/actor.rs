@@ -300,7 +300,9 @@ impl CchActor {
                     .wrapped_btc_type_script_args
                     .trim_start_matches("0x"),
             )
-            .map_err(|_| CchError::HexDecodingError)?
+            .map_err(|_| {
+                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
+            })?
             .as_ref(),
         )
         .into();
@@ -488,7 +490,7 @@ impl CchActor {
     ) -> Result<ReceiveBTCOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let hash_bin = hex::decode(&receive_btc.payment_hash.trim_start_matches("0x"))
-            .map_err(|_| CchError::HexDecodingError)?;
+            .map_err(|_| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
 
         let amount_sats = receive_btc.amount_sats as u128;
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
@@ -524,7 +526,9 @@ impl CchActor {
                     .wrapped_btc_type_script_args
                     .trim_start_matches("0x"),
             )
-            .map_err(|_| CchError::HexDecodingError)?
+            .map_err(|_| {
+                CchError::HexDecodingError(self.config.wrapped_btc_type_script_args.clone())
+            })?
             .as_ref(),
         )
         .into();

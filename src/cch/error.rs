@@ -42,8 +42,8 @@ pub enum CchError {
     SystemTimeError(#[from] SystemTimeError),
     #[error("JSON serialization error: {0}")]
     JSONSerializationError(#[from] serde_json::Error),
-    #[error("Hex decoding error")]
-    HexDecodingError,
+    #[error("Hex decoding error from string: {0}")]
+    HexDecodingError(String),
     #[error("Lnd channel error: {0}")]
     LndChannelError(#[from] lnd_grpc_tonic_client::channel::Error),
     #[error("Lnd RPC error: {0}")]
