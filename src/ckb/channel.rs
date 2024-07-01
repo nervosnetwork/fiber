@@ -3733,6 +3733,61 @@ impl ChannelActorState {
         .concat()
     }
 
+    fn calculate_commitment_tx_fee(&self) -> u64 {
+        let fee_rate = FeeRate::from_u64(self.commitment_fee_rate);
+        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+
+        let immediate_secp256k1_lock_script =
+            get_script_by_contract(Contract::Secp256k1Lock, &[0; 20]);
+        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0; 20]);
+        let (outputs, outputs_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let immediate_output_data = 0_u64.to_le_bytes().pack();
+            let immediate_output = CellOutput::new_builder()
+                .lock(immediate_secp256k1_lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(0.pack())
+                .build();
+
+            let commitment_lock_output_data = 0_u64.to_le_bytes().pack();
+            let commitment_lock_output = CellOutput::new_builder()
+                .lock(commitment_lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(0.pack())
+                .build();
+
+            let outputs = vec![immediate_output, commitment_lock_output];
+            let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
+            (outputs, outputs_data)
+        } else {
+            let outputs = vec![
+                CellOutput::new_builder()
+                    .capacity(0_u64.pack())
+                    .lock(immediate_secp256k1_lock_script)
+                    .build(),
+                CellOutput::new_builder()
+                    .capacity(0_u64.pack())
+                    .lock(commitment_lock_script)
+                    .build(),
+            ];
+            let outputs_data = vec![Bytes::default(); outputs.len()];
+            (outputs, outputs_data)
+        };
+
+        let mock_commitment_tx = TransactionBuilder::default()
+            .cell_deps(cell_deps)
+            .input(
+                CellInput::new_builder()
+                    .previous_output(self.get_funding_transaction_outpoint())
+                    .build(),
+            )
+            .set_outputs(outputs.to_vec())
+            .set_outputs_data(outputs_data.to_vec())
+            .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
+            .build();
+        let tx_size = mock_commitment_tx.data().serialized_size_in_block() as u64;
+        fee_rate.fee(tx_size).as_u64()
+    }
+
     // Build the parameters for the commitment transaction. The first two elements for the
     // returning tuple are commitment outputs and commitment outputs data.
     // The last element is the witnesses for the commitment transaction.
@@ -3771,7 +3826,7 @@ impl ChannelActorState {
             if local { "local" } else { "remote" },
             self.get_current_commitment_number(local),
             time_locked_value, received_tlc_value, immediately_spendable_value);
-        let time_locked_value = time_locked_value + received_tlc_value;
+        let mut time_locked_value = time_locked_value + received_tlc_value;
         let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
 
         debug!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
@@ -3813,9 +3868,11 @@ impl ChannelActorState {
         );
         let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, script_arg);
 
+        let commitment_tx_fee = self.calculate_commitment_tx_fee();
+        debug!("debug commitment_fee: {:?}", commitment_tx_fee);
+
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            //FIXME(yukang): we need to add logic for transaction fee here
-            let (time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
+            let (mut time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
                 (
                     self.local_reserved_ckb_amount,
                     self.remote_reserved_ckb_amount,
@@ -3826,6 +3883,10 @@ impl ChannelActorState {
                     self.local_reserved_ckb_amount,
                 )
             };
+
+            // NOTE: we have already make sure the reserved_ckb_amount will enough for commitment tx fee
+            // commitment tx fee is paid by the side who want to submit the commitment transaction
+            time_locked_ckb_amount -= commitment_tx_fee;
 
             let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
             let immediate_output = CellOutput::new_builder()
@@ -3845,6 +3906,11 @@ impl ChannelActorState {
             let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
             (outputs, outputs_data, witnesses)
         } else {
+            let commitment_tx_fee = commitment_tx_fee as u128;
+
+            // commitment tx fee is paid by the side who want to submit the commitment transaction
+            time_locked_value -= commitment_tx_fee;
+
             let outputs = vec![
                 CellOutput::new_builder()
                     .capacity((immediately_spendable_value as u64).pack())
