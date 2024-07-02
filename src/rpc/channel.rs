@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use crate::ckb::{
     channel::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
@@ -80,10 +82,16 @@ pub struct Channel {
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
     pub state: ChannelState,
+    #[serde_as(as = "U128Hex")]
     pub local_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub sent_tlc_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub remote_balance: u128,
+    #[serde_as(as = "U128Hex")]
     pub received_tlc_balance: u128,
+    #[serde_as(as = "U64Hex")]
+    pub created_at: u64,
 }
 
 #[serde_as]
@@ -235,25 +243,28 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let channels = self.store.get_channel_states(params.peer_id);
-        Ok(ListChannelsResult {
-            channels: channels
-                .into_iter()
-                .filter_map(|(peer_id, channel_id, _state)| {
-                    self.store
-                        .get_channel_actor_state(&channel_id)
-                        .map(|state| Channel {
-                            channel_id,
-                            peer_id,
-                            state: state.state,
-                            local_balance: state.get_local_balance(),
-                            remote_balance: state.get_remote_balance(),
-                            sent_tlc_balance: state.get_sent_tlc_balance(),
-                            received_tlc_balance: state.get_received_tlc_balance(),
-                        })
-                })
-                .collect(),
-        })
+        let mut channels: Vec<_> = self
+            .store
+            .get_channel_states(params.peer_id)
+            .into_iter()
+            .filter_map(|(peer_id, channel_id, _state)| {
+                self.store
+                    .get_channel_actor_state(&channel_id)
+                    .map(|state| Channel {
+                        channel_id,
+                        peer_id,
+                        state: state.state,
+                        local_balance: state.get_local_balance(),
+                        remote_balance: state.get_remote_balance(),
+                        sent_tlc_balance: state.get_sent_tlc_balance(),
+                        received_tlc_balance: state.get_received_tlc_balance(),
+                        created_at: state.get_created_at_in_microseconds(),
+                    })
+            })
+            .collect();
+        // Sort by created_at in descending order
+        channels.sort_by_key(|channel| Reverse(channel.created_at));
+        Ok(ListChannelsResult { channels })
     }
 
     async fn commitment_signed(

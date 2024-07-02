@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
@@ -25,7 +26,11 @@ use tentacle::secio::PeerId;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
-use std::{borrow::Borrow, collections::BTreeMap};
+use std::{
+    borrow::Borrow,
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     ckb::{
@@ -1451,6 +1456,8 @@ pub struct ChannelActorState {
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
     pub total_amount: u128,
+
+    pub created_at: SystemTime,
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -1688,6 +1695,7 @@ impl ChannelActorState {
             reestablishing: false,
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
+            created_at: SystemTime::now(),
         }
     }
 
@@ -1739,6 +1747,7 @@ impl ChannelActorState {
             remote_reserved_ckb_amount: 0,
 
             reestablishing: false,
+            created_at: SystemTime::now(),
             #[cfg(debug_assertions)]
             total_amount: value,
         }
@@ -1785,6 +1794,13 @@ impl ChannelActorState {
         self.get_active_received_tlcs(false)
             .map(|tlc| tlc.tlc.amount)
             .sum::<u128>()
+    }
+
+    pub fn get_created_at_in_microseconds(&self) -> u64 {
+        self.created_at
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64
     }
 
     fn update_state(&mut self, new_state: ChannelState) {
