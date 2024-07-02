@@ -37,6 +37,7 @@ use super::channel::{
     ChannelEvent, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
+use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{Hash256, OpenChannel};
 use super::{
@@ -46,7 +47,6 @@ use super::{
 };
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::ckb::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::types::TxSignatures;
 use crate::ckb_chain::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
@@ -381,7 +381,7 @@ where
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
-                    self.check_accept_channel_ckb_parameters(
+                    state.check_accept_channel_ckb_parameters(
                         local_reserved_ckb_amount,
                         remote_reserved_ckb_amount,
                         funding_fee_rate,
@@ -727,36 +727,6 @@ where
         };
         Ok(())
     }
-
-    fn check_accept_channel_ckb_parameters(
-        &self,
-        remote_reserved_ckb_amount: u64,
-        local_reserved_ckb_amount: u64,
-        funding_fee_rate: u64,
-        udt_type_script: &Option<Script>,
-    ) -> crate::Result<()> {
-        let reserved_ckb_amount = if udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-
-        if remote_reserved_ckb_amount < reserved_ckb_amount
-            || local_reserved_ckb_amount < reserved_ckb_amount
-        {
-            return Err(Error::InvalidParameter(format!(
-                "Reserved CKB amount is less than the minimal amount: {}",
-                reserved_ckb_amount
-            )));
-        }
-
-        if funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(Error::InvalidParameter(
-                "Funding fee rate is less than 1".to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 pub struct NetworkActorState {
@@ -913,11 +883,7 @@ impl NetworkActorState {
         funding_amount: u128,
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
-        let reserved_ckb_amount = if udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
+        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
         if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "The value of the channel should be greater than the reserve amount: {}",
@@ -932,6 +898,32 @@ impl NetworkActorState {
         Ok((funding_amount, reserved_ckb_amount))
     }
 
+    fn check_accept_channel_ckb_parameters(
+        &self,
+        remote_reserved_ckb_amount: u64,
+        local_reserved_ckb_amount: u64,
+        funding_fee_rate: u64,
+        udt_type_script: &Option<Script>,
+    ) -> crate::Result<()> {
+        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
+        if remote_reserved_ckb_amount < reserved_ckb_amount
+            || local_reserved_ckb_amount < reserved_ckb_amount
+        {
+            return Err(Error::InvalidParameter(format!(
+                "Reserved CKB amount is less than the minimal amount: {}",
+                reserved_ckb_amount
+            )));
+        }
+
+        if funding_fee_rate < DEFAULT_FEE_RATE {
+            return Err(Error::InvalidParameter(format!(
+                "Funding fee rate is less than {}",
+                DEFAULT_FEE_RATE
+            )));
+        }
+        Ok(())
+    }
+
     fn check_open_ckb_parameters(
         &self,
         open_channel: &OpenChannel,
@@ -939,12 +931,7 @@ impl NetworkActorState {
         let reserved_ckb_amount = open_channel.reserved_ckb_amount;
         let udt_type_script = &open_channel.funding_udt_type_script;
 
-        let minimal_reserved_ckb_amount = if udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-
+        let minimal_reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
         if reserved_ckb_amount < minimal_reserved_ckb_amount {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Remote reserved CKB amount {} is less than the minimal amount: {}",
@@ -965,6 +952,25 @@ impl NetworkActorState {
                 DEFAULT_COMMITMENT_FEE_RATE,
             )));
         }
+
+        let commitment_fee = calculate_commitment_tx_fee(
+            open_channel.commitment_fee_rate,
+            &open_channel.funding_udt_type_script,
+        );
+
+        let expected_minimal_reserved_ckb_amount = commitment_fee * 2;
+        debug!(
+            "expected_minimal_reserved_ckb_amount: {}, reserved_ckb_amount: {}",
+            expected_minimal_reserved_ckb_amount, reserved_ckb_amount
+        );
+        if reserved_ckb_amount < expected_minimal_reserved_ckb_amount {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee rate is: {}, expect more CKB amount as reserved ckb amount expected to larger than {}, \
+                or you can set a lower commitment fee rate",
+                open_channel.commitment_fee_rate, expected_minimal_reserved_ckb_amount
+            )));
+        }
+
         Ok(())
     }
 
