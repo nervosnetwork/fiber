@@ -1,0 +1,41 @@
+meta {
+  name: 05-node3-accept-channel
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 2000));
+  console.log("accept channel result: ", res.body);
+  bru.setVar("N1N3_CHANNEL_ID", res.body.result.channels[0].channel_id);
+}

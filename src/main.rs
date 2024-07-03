@@ -1,3 +1,5 @@
+use cfn_node::cch::CchMessage;
+use cfn_node::ckb::channel::ChannelSubscribers;
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
 use ractor::Actor;
@@ -11,7 +13,6 @@ use tracing_subscriber::{fmt, EnvFilter};
 use std::str::FromStr;
 
 use cfn_node::actors::RootActor;
-use cfn_node::cch::CchCommand;
 use cfn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
 use cfn_node::ckb_chain::CkbChainActor;
 use cfn_node::tasks::{
@@ -62,6 +63,7 @@ pub async fn main() {
     let root_actor = RootActor::start(tracker, token).await;
 
     let store = Store::new(config.ckb.as_ref().unwrap().store_path());
+    let subscribers = ChannelSubscribers::default();
 
     let ckb_command_sender = match config.ckb {
         Some(ckb_config) => {
@@ -95,6 +97,7 @@ pub async fn main() {
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
                 store.clone(),
+                subscribers.clone(),
             )
             .await;
 
@@ -135,19 +138,44 @@ pub async fn main() {
         None => None,
     };
 
-    let cch_command_sender = match config.cch {
+    let cch_actor = match config.cch {
         Some(cch_config) => {
-            const CHANNEL_SIZE: usize = 4000;
-            let (command_sender, command_receiver) = mpsc::channel::<CchCommand>(CHANNEL_SIZE);
             info!("Starting cch");
-            start_cch(
+            let ignore_startup_failure = cch_config.ignore_startup_failure;
+            match start_cch(
                 cch_config,
-                command_receiver,
-                new_tokio_cancellation_token(),
                 new_tokio_task_tracker(),
+                new_tokio_cancellation_token(),
+                root_actor.get_cell(),
+                ckb_command_sender.clone(),
             )
-            .await;
-            Some(command_sender)
+            .await
+            {
+                Err(err) => {
+                    error!("Cross-chain service failed to start: {}", err);
+                    if ignore_startup_failure {
+                        None
+                    } else {
+                        return;
+                    }
+                }
+                Ok(actor) => {
+                    subscribers.pending_received_tlcs_subscribers.subscribe(
+                        actor.clone(),
+                        |tlc_notification| {
+                            Some(CchMessage::PendingReceivedTlcNotification(tlc_notification))
+                        },
+                    );
+                    subscribers.settled_tlcs_subscribers.subscribe(
+                        actor.clone(),
+                        |tlc_notification| {
+                            Some(CchMessage::SettledTlcNotification(tlc_notification))
+                        },
+                    );
+
+                    Some(actor)
+                }
+            }
         }
         None => None,
     };
@@ -155,13 +183,13 @@ pub async fn main() {
     // Start rpc service
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
-            if ckb_command_sender.is_none() && cch_command_sender.is_none() {
+            if ckb_command_sender.is_none() && cch_actor.is_none() {
                 error!("Rpc service requires ckb and cch service to be started. Exiting.");
                 return;
             }
 
             info!("Starting rpc");
-            let handle = start_rpc(rpc_config, ckb_command_sender, cch_command_sender, store).await;
+            let handle = start_rpc(rpc_config, ckb_command_sender, cch_actor, store).await;
             Some(handle)
         }
         None => None,

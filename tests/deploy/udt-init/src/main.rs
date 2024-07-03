@@ -236,6 +236,15 @@ fn genrate_nodes_config() {
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
         data["ckb_chain"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
+
+        // Node 3 acts as a CCH node.
+        if i == 3 {
+            data["services"]
+                .as_sequence_mut()
+                .unwrap()
+                .push(serde_yaml::Value::String("cch".to_string()));
+        }
+
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
         let config_path = format!("{}/{}/config.yml", nodes_dir, i);
         std::fs::write(config_path, new_yaml).expect("write failed");
