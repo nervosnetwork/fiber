@@ -68,7 +68,7 @@ jobs:
             fi
           done
 
-          (cd ./tests/bruno; npm exec -- @usebruno/cli run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
+          (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
 
           # -n means we will exit when any of the background processes exits.
           # https://www.gnu.org/software/bash/manual/bash.html#index-wait
