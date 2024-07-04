@@ -702,6 +702,9 @@ impl<S> ChannelActor<S> {
                     NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            let flags = ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION;
+            state.update_state(ChannelState::ShuttingDown(flags));
             Ok(())
         } else {
             Err(ProcessingChannelError::InvalidState(
@@ -877,7 +880,8 @@ impl<S> ChannelActor<S> {
                         AwaitingChannelReadyFlags::empty()
                     }
                     _ => {
-                        panic!("Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state);
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
                 self.network
@@ -897,10 +901,13 @@ impl<S> ChannelActor<S> {
                 }
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
-                let _flags = match state.state {
-                    ChannelState::ShuttingDown(flags) => flags,
+                match state.state {
+                    ChannelState::ShuttingDown(flags)
+                        if flags == ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION => {}
                     _ => {
-                        panic!("Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state);
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
+                        ));
                     }
                 };
                 state.update_state(ChannelState::Closed);
@@ -1579,6 +1586,8 @@ bitflags! {
         const AWAITING_PENDING_TLCS = ShuttingDownFlags::OUR_SHUTDOWN_SENT.bits() | ShuttingDownFlags::THEIR_SHUTDOWN_SENT.bits();
         /// Indicates all pending HTLCs are resolved, and this channel will be dropped.
         const DROPPING_PENDING = 1 << 2;
+        /// Indicates we have submitted a commitment transaction, waiting for confirmation
+        const WAITING_COMMITMENT_CONFIRMATION = 1 << 3;
     }
 }
 

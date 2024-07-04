@@ -1304,7 +1304,7 @@ impl NetworkActorState {
     ) {
         let transaction = transaction.into_view();
         debug!(
-            "Commitment transaction confirmed: {:?}",
+            "Commitment transaction is confirmed: {:?}",
             &transaction.hash()
         );
         self.send_message_to_channel_actor(
