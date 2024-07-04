@@ -19,7 +19,7 @@ use super::channel::{
 };
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{Hash256, OpenChannel};
+use super::types::{Hash256, OpenChannel, Pubkey};
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
     types::CFNMessage,
@@ -154,6 +154,7 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
+    RevokeAndAckReceived(PeerId, Hash256, u64, Hash256, Pubkey),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -1573,6 +1574,17 @@ impl ServiceHandle for Handle {
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
         self.emit_event(NetworkServiceEvent::ServiceEvent(event));
     }
+}
+
+pub(crate) fn emit_service_event(
+    network: &ActorRef<NetworkActorMessage>,
+    event: NetworkServiceEvent,
+) {
+    network
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::NetworkServiceEvent(event),
+        ))
+        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 }
 
 pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(

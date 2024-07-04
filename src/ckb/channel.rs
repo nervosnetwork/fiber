@@ -36,6 +36,7 @@ use crate::{
     ckb::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
+        network::emit_service_event,
         types::Shutdown,
     },
     ckb_chain::{
@@ -310,7 +311,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 Ok(())
             }
             CFNMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_message(revoke_and_ack)?;
+                state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
             CFNMessage::ChannelReady(channel_ready) => {
@@ -3296,6 +3297,7 @@ impl ChannelActorState {
 
     pub fn handle_revoke_and_ack_message(
         &mut self,
+        network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
         let RevokeAndAck {
@@ -3317,6 +3319,16 @@ impl ChannelActorState {
         }
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+        emit_service_event(
+            network,
+            NetworkServiceEvent::RevokeAndAckReceived(
+                self.peer_id.clone(),
+                self.get_id(),
+                commitment_number,
+                per_commitment_secret,
+                next_per_commitment_point,
+            ),
+        );
         Ok(())
     }
 
@@ -5203,6 +5215,152 @@ mod tests {
         );
 
         // TODO: maybe also check shutdown tx outputs and output balances here.
+    }
+
+    #[tokio::test]
+    async fn test_revoke_old_commitment_transaction() {
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 100000000000,
+                    funding_udt_type_script: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
+                },
+                rpc_reply,
+            ))
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 6200000000,
+                },
+                rpc_reply,
+            ))
+        };
+        let accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
+        let new_channel_id = accept_channel_result.new_channel_id;
+
+        let node_a_commitment_tx = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+                    println!(
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        let node_b_commitment_tx = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+                    println!(
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        let _ = node_a
+            .network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::CommitmentSigned(),
+                }),
+            ))
+            .expect("node_a alive");
+
+        let node_b_commitment_secret = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RevokeAndAckReceived(
+                    peer_id,
+                    channel_id,
+                    commitment_number,
+                    commitment_secret,
+                    _commitment_point,
+                ) => {
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    assert_eq!(*commitment_number, 1u64);
+                    Some(commitment_secret.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        // We can submit the commitment txs to the chain now.
+        assert_eq!(
+            node_a.submit_tx(node_a_commitment_tx.clone()).await,
+            Status::Committed
+        );
+        assert_eq!(
+            node_b.submit_tx(node_b_commitment_tx.clone()).await,
+            Status::Committed
+        );
     }
 
     #[tokio::test]
