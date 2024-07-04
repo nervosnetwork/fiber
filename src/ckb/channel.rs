@@ -676,11 +676,12 @@ impl<S> ChannelActor<S> {
                 }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        state.local_shutdown_script = Some(command.close_script.clone());
-        state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
+
         if command.force {
-            self.handle_force_shutdown(state);
+            self.handle_force_shutdown(state)?;
         } else {
+            state.local_shutdown_script = Some(command.close_script.clone());
+            state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
             let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
             state.update_state(ChannelState::ShuttingDown(flags));
             debug!(
@@ -693,20 +694,20 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
-    fn handle_force_shutdown(&self, state: &mut ChannelActorState) {
-        // build local commitment transaction and try to submit to chain.
-        let PartiallySignedCommitmentTransaction { tx, witnesses, .. } =
-            state.build_and_sign_commitment_tx().unwrap();
-        let commitment_tx = tx
-            .as_advanced_builder()
-            .set_witnesses(vec![witnesses.pack()])
-            .build();
-        let transaction = commitment_tx.data();
-        self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+    fn handle_force_shutdown(&self, state: &mut ChannelActorState) -> ProcessingChannelResult {
+        if let Some(tx) = &state.latest_commitment_transaction {
+            let transaction = tx.clone();
+            self.network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            Ok(())
+        } else {
+            Err(ProcessingChannelError::InvalidState(
+                "Force shutdown without a valid commitment transaction".to_string(),
             ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
@@ -1471,6 +1472,10 @@ pub struct ChannelActorState {
 
     pub remote_nonce: Option<PubNonce>,
 
+    // The latest commitment transaction we're holding
+    #[serde_as(as = "Option<EntityHex>")]
+    pub latest_commitment_transaction: Option<Transaction>,
+
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<Pubkey>,
@@ -1723,6 +1728,7 @@ impl ChannelActorState {
             remote_shutdown_fee_rate: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
+            latest_commitment_transaction: None,
 
             reestablishing: false,
             #[cfg(debug_assertions)]
@@ -1777,6 +1783,7 @@ impl ChannelActorState {
             remote_shutdown_signature: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
+            latest_commitment_transaction: None,
 
             reestablishing: false,
             created_at: SystemTime::now(),
@@ -3078,7 +3085,7 @@ impl ChannelActorState {
                         self.peer_id.clone(),
                         self.get_id(),
                         num,
-                        tx,
+                        tx.clone(),
                     ),
                 ),
             ))
@@ -3090,6 +3097,7 @@ impl ChannelActorState {
             &commitment_signed.next_local_nonce
         );
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
+        self.latest_commitment_transaction = Some(tx.data());
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
