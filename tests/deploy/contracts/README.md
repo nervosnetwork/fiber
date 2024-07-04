@@ -6,6 +6,9 @@ We copied the following binaries from https://github.com/nervosnetwork/cfn-scrip
 
 - auth
 - simple_udt
+
+The following binaries are built from https://github.com/nervosnetwork/ckb-production-scripts with commit 410b16c499a8888781d9ab03160eeef93182d8e6.
+
 - xudt_rce
 
 and built the following binaries
