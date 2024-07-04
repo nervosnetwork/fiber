@@ -3975,10 +3975,9 @@ pub trait ChannelActorStateStore {
     fn get_active_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
         self.get_channel_ids_by_peer(peer_id)
             .into_iter()
-            .filter(|id| match self.get_channel_actor_state(&id) {
-                Some(state) if !state.is_closed() => true,
-                _ => false,
-            })
+            .filter(
+                |id| matches!(self.get_channel_actor_state(id), Some(state) if !state.is_closed()),
+            )
             .collect()
     }
     fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)>;

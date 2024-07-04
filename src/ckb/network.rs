@@ -507,9 +507,7 @@ where
                 // TODO: We should remove the channel from the session_channels_map.
                 state.channels.remove(&channel_id);
                 if let Some(session) = state.get_peer_session(&peer_id) {
-                    state.session_channels_map.get_mut(&session).map(|set| {
-                        set.remove(&channel_id);
-                    });
+                    if let Some(set) = state.session_channels_map.get_mut(&session) { set.remove(&channel_id); }
                 }
                 state.send_message_to_channel_actor(
                     channel_id,
@@ -968,7 +966,7 @@ impl NetworkActorState {
         // TODO: make number of confirmation to transaction configurable.
         const NUM_CONFIRMATIONS: u64 = 4;
         let request = TraceTxRequest {
-            tx_hash: tx_hash.clone().into(),
+            tx_hash: tx_hash.clone(),
             confirmations: NUM_CONFIRMATIONS,
         };
 
@@ -1093,7 +1091,7 @@ impl NetworkActorState {
     ) {
         self.peer_session_map.insert(peer_id.clone(), session.id);
 
-        for channel_id in store.get_active_channel_ids_by_peer(&peer_id) {
+        for channel_id in store.get_active_channel_ids_by_peer(peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
                 Some(generate_channel_actor_name(&self.peer_id, peer_id)),
@@ -1156,12 +1154,12 @@ impl NetworkActorState {
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(status) if status == Status::Committed => {
+                Ok(Status::Committed) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
                     NetworkActorEvent::ClosingTransactionConfirmed(
                         peer_id,
                         channel_id,
-                        tx_hash.into(),
+                        tx_hash,
                     )
                 }
                 Ok(status) => {
@@ -1169,11 +1167,11 @@ impl NetworkActorState {
                         "Closing transaction {:?} failed to be confirmed with final status {:?}",
                         &tx_hash, &status
                     );
-                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash.into())
+                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
                 }
                 Err(err) => {
                     error!("Failed to trace transaction {:?}: {:?}", &tx_hash, &err);
-                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash.into())
+                    NetworkActorEvent::ClosingTransactionFailed(peer_id, channel_id, tx_hash)
                 }
             };
             network
