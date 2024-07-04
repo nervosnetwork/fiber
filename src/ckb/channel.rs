@@ -124,6 +124,7 @@ pub struct RemoveTlcCommand {
 pub struct ShutdownCommand {
     pub close_script: Script,
     pub fee_rate: FeeRate,
+    pub force: bool,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -398,6 +399,7 @@ impl<S> ChannelActor<S> {
                                     channel_id: state.get_id(),
                                     close_script: funding_source_lock_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
+                                    force: shutdown.force,
                                 }),
                             }),
                         ))
@@ -669,21 +671,42 @@ impl<S> ChannelActor<S> {
                         channel_id: state.get_id(),
                         close_script: command.close_script.clone(),
                         fee_rate: command.fee_rate,
+                        force: command.force,
                     }),
                 }),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.local_shutdown_script = Some(command.close_script.clone());
         state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
-        let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-        state.update_state(ChannelState::ShuttingDown(flags));
-        debug!(
-            "Channel state updated to {:?} after processing shutdown command",
-            &state.state
-        );
+        if command.force {
+            self.handle_force_shutdown(state);
+        } else {
+            let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
+            state.update_state(ChannelState::ShuttingDown(flags));
+            debug!(
+                "Channel state updated to {:?} after processing shutdown command",
+                &state.state
+            );
 
-        state.maybe_transition_to_shutdown(&self.network)?;
+            state.maybe_transition_to_shutdown(&self.network)?;
+        }
         Ok(())
+    }
+
+    fn handle_force_shutdown(&self, state: &mut ChannelActorState) {
+        // build local commitment transaction and try to submit to chain.
+        let PartiallySignedCommitmentTransaction { tx, witnesses, .. } =
+            state.build_and_sign_commitment_tx().unwrap();
+        let commitment_tx = tx
+            .as_advanced_builder()
+            .set_witnesses(vec![witnesses.pack()])
+            .build();
+        let transaction = commitment_tx.data();
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
@@ -871,6 +894,15 @@ impl<S> ChannelActor<S> {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     state.on_channel_ready(&self.network);
                 }
+            }
+            ChannelEvent::CommitmentTransactionConfirmed => {
+                let _flags = match state.state {
+                    ChannelState::ShuttingDown(flags) => flags,
+                    _ => {
+                        panic!("Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state);
+                    }
+                };
+                state.update_state(ChannelState::Closed);
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
@@ -1465,6 +1497,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     FundingTransactionConfirmed,
+    CommitmentTransactionConfirmed,
     PeerDisconnected,
 }
 
