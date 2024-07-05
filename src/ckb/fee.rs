@@ -32,7 +32,7 @@ pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
             .type_(Some(type_script.clone()).pack())
             .capacity(0.pack())
             .build();
-        let dummy_output_data = 0_u64.to_le_bytes().pack();
+        let dummy_output_data = (0_u128).to_le_bytes().pack();
 
         let outputs = [dummy_output.clone(), dummy_output];
         let outputs_data = [dummy_output_data.clone(), dummy_output_data];
