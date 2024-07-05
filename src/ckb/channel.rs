@@ -30,7 +30,7 @@ use std::{borrow::Borrow, collections::BTreeMap};
 use crate::{
     ckb::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
-        fee::calculate_commitment_tx_fee,
+        fee::{calculate_commitment_tx_fee, commitment_tx_size},
         types::Shutdown,
     },
     ckb_chain::{
@@ -2777,6 +2777,11 @@ impl ChannelActorState {
                     &shutdown_tx,
                 )?;
 
+                assert_eq!(
+                    tx.data().serialized_size_in_block(),
+                    commitment_tx_size(&self.funding_udt_type_script)
+                );
+
                 network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelClosed(self.get_id(), self.peer_id.clone(), tx),
@@ -3001,6 +3006,14 @@ impl ChannelActorState {
         };
 
         let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+        // This is the commitment transaction that both parties signed,
+        // can be broadcasted to the network if necessary
+
+        assert_eq!(
+            tx.data().serialized_size_in_block(),
+            commitment_tx_size(&self.funding_udt_type_script)
+        );
+
         let num = self.get_current_commitment_number(false);
 
         debug!(

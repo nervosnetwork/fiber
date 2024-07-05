@@ -20,14 +20,7 @@ pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
     }
 }
 
-/// Note: we use this function to calculate both commitment transaction and shutdown transaction
-/// shutdown transaction is just a special commitment transaction.
-pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Option<Script>) -> u64 {
-    debug!(
-        "calculate_commitment_tx_fee: {} udt_script: {:?}",
-        fee_rate, udt_type_script
-    );
-    let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
+pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     // Note: here we must add args, otherwise the total transaction size will be different
     let dummy_script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
 
@@ -64,7 +57,19 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
         .set_outputs_data(outputs_data.to_vec())
         .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
         .build();
-    let tx_size = mock_commitment_tx.data().serialized_size_in_block() as u64;
+    mock_commitment_tx.data().serialized_size_in_block()
+}
+
+/// Note: we use this function to calculate both commitment transaction and shutdown transaction
+/// shutdown transaction is just a special commitment transaction.
+pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Option<Script>) -> u64 {
+    debug!(
+        "calculate_commitment_tx_fee: {} udt_script: {:?}",
+        fee_rate, udt_type_script
+    );
+    let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
+
+    let tx_size = commitment_tx_size(udt_type_script) as u64;
     let res = fee_rate.fee(tx_size).as_u64();
     debug!("calculate_commitment_tx_fee return: {}", res);
     res
