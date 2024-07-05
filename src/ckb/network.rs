@@ -507,7 +507,9 @@ where
                 // TODO: We should remove the channel from the session_channels_map.
                 state.channels.remove(&channel_id);
                 if let Some(session) = state.get_peer_session(&peer_id) {
-                    if let Some(set) = state.session_channels_map.get_mut(&session) { set.remove(&channel_id); }
+                    if let Some(set) = state.session_channels_map.get_mut(&session) {
+                        set.remove(&channel_id);
+                    }
                 }
                 state.send_message_to_channel_actor(
                     channel_id,
@@ -812,8 +814,6 @@ pub struct NetworkActorState {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
-    // If true, the network actor will keep closed channels in database.
-    keep_closed_channels: bool,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -868,12 +868,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                peer_id.clone(),
-                network.clone(),
-                store,
-                self.keep_closed_channels,
-            ),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
@@ -924,12 +919,7 @@ impl NetworkActorState {
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
-            ChannelActor::new(
-                peer_id.clone(),
-                network.clone(),
-                store,
-                self.keep_closed_channels,
-            ),
+            ChannelActor::new(peer_id.clone(), network.clone(), store),
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
@@ -1095,12 +1085,7 @@ impl NetworkActorState {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
                 Some(generate_channel_actor_name(&self.peer_id, peer_id)),
-                ChannelActor::new(
-                    peer_id.clone(),
-                    self.network.clone(),
-                    store.clone(),
-                    self.keep_closed_channels,
-                ),
+                ChannelActor::new(peer_id.clone(), self.network.clone(), store.clone()),
                 ChannelInitializationParameter::ReestablishChannel(channel_id),
                 self.network.get_cell(),
             )
@@ -1156,11 +1141,7 @@ impl NetworkActorState {
             let message = match result {
                 Ok(Status::Committed) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::ClosingTransactionConfirmed(
-                        peer_id,
-                        channel_id,
-                        tx_hash,
-                    )
+                    NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash)
                 }
                 Ok(status) => {
                     error!(
@@ -1385,7 +1366,6 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            keep_closed_channels: config.keep_closed_channels(),
         })
     }
 

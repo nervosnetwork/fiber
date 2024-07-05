@@ -185,21 +185,14 @@ pub struct ChannelActor<S> {
     peer_id: PeerId,
     network: ActorRef<NetworkActorMessage>,
     store: S,
-    keep_on_closed: bool,
 }
 
 impl<S: ChannelActorStateStore> ChannelActor<S> {
-    pub fn new(
-        peer_id: PeerId,
-        network: ActorRef<NetworkActorMessage>,
-        store: S,
-        keep_on_closed: bool,
-    ) -> Self {
+    pub fn new(peer_id: PeerId, network: ActorRef<NetworkActorMessage>, store: S) -> Self {
         Self {
             peer_id,
             network,
             store,
-            keep_on_closed,
         }
     }
 
@@ -882,9 +875,6 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             }
             ChannelEvent::ClosingTransactionConfirmed => {
                 myself.stop(Some("ChannelClosed".to_string()));
-                if !self.keep_on_closed {
-                    self.store.delete_channel_actor_state(&state.get_id());
-                }
             }
         }
         Ok(())
