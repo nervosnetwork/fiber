@@ -12,6 +12,19 @@ use std::time::SystemTime;
 use tentacle::secio::SecioKeyPair;
 use tracing::{debug, error, info, warn};
 
+use super::channel::{
+    AcceptChannelParameter, ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId,
+    ChannelEvent, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+};
+use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
+use super::key::blake2b_hash_with_salt;
+use super::types::{Hash256, OpenChannel};
+use super::{
+    channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
+    types::CFNMessage,
+    CkbConfig,
+};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -27,23 +40,8 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
-
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::task::TaskTracker;
-
-use super::channel::{
-    AcceptChannelParameter, ChannelActorMessage, ChannelActorStateStore, ChannelCommandWithId,
-    ChannelEvent, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-};
-use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
-use super::key::blake2b_hash_with_salt;
-use super::types::{Hash256, OpenChannel};
-use super::{
-    channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
-    types::CFNMessage,
-    CkbConfig,
-};
 
 use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::ckb::types::TxSignatures;

@@ -39,7 +39,7 @@ pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
         (outputs, outputs_data.to_vec())
     } else {
         let dummy_output = CellOutput::new_builder()
-            .capacity(0.pack())
+            .capacity((0 as u64).pack())
             .lock(dummy_script)
             .build();
         let outputs = [dummy_output.clone(), dummy_output];

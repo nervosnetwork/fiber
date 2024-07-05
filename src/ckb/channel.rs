@@ -903,7 +903,7 @@ impl<S> ChannelActor<S> {
             ChannelEvent::CommitmentTransactionConfirmed => {
                 match state.state {
                     ChannelState::ShuttingDown(flags)
-                        if flags == ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION => {}
+                        if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
                     _ => {
                         return Err(ProcessingChannelError::InvalidState(format!(
                             "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
