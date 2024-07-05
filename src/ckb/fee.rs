@@ -1,8 +1,8 @@
 use super::channel::FUNDING_CELL_WITNESS_LEN;
 use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
-use crate::ckb_chain::contracts::{get_cell_deps, Contract};
+use crate::ckb_chain::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
-use ckb_types::packed::{OutPoint, Script};
+use ckb_types::packed::{Bytes, OutPoint, Script};
 use ckb_types::prelude::Builder;
 use ckb_types::{
     core::FeeRate,
@@ -28,7 +28,9 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
         fee_rate, udt_type_script
     );
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
-    let dummy_script = Script::default();
+    // Note: here we must add args, otherwise the total transaction size will be different
+    let dummy_script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
+
     let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 
     let (outputs, outputs_data) = if let Some(type_script) = udt_type_script {
@@ -48,7 +50,7 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
             .lock(dummy_script)
             .build();
         let outputs = [dummy_output.clone(), dummy_output];
-        (outputs, vec![Default::default(), Default::default()])
+        (outputs, vec![Bytes::default(); 2])
     };
 
     let mock_commitment_tx = TransactionBuilder::default()
