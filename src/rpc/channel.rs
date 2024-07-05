@@ -11,6 +11,7 @@ use crate::ckb::{
     types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
+use crate::error;
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::Script;
 use ckb_types::core::FeeRate;
@@ -23,7 +24,6 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::secio::PeerId;
-use tracing::error;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]

@@ -1,6 +1,6 @@
+use crate::warn;
 use ckb_hash::new_blake2b;
 use std::{fs, path::Path};
-use tracing::warn;
 
 // TODO: we need to securely erase the key.
 // We wrap the key in a struct to obtain create a function to obtain secret entropy from this key.

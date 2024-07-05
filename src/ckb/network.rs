@@ -1,9 +1,8 @@
+use crate::{debug, error, info, warn};
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
-use tracing::{debug, error, info, warn};
-
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RpcReplyPort, SupervisionEvent,

@@ -1,5 +1,6 @@
 use std::{fs::File, io::BufReader, path::PathBuf, process::exit, str::FromStr};
 
+use crate::error;
 use clap::CommandFactory;
 use clap_serde_derive::{
     clap::{self, Parser},
@@ -7,7 +8,6 @@ use clap_serde_derive::{
 };
 use home::home_dir;
 use serde::{Deserialize, Serialize};
-use tracing::error;
 
 use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 

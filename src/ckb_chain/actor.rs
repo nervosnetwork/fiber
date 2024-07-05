@@ -59,7 +59,7 @@ impl Actor for CkbChainActor {
         let pub_key_hash = ckb_hash::blake2b_256(pub_key.serialize());
         let funding_source_lock_script =
             get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20]);
-        tracing::info!(
+        crate::info!(
             "[{}] funding lock args: {}",
             myself.get_name().unwrap_or_default(),
             funding_source_lock_script.args()
@@ -115,7 +115,7 @@ impl Actor for CkbChainActor {
                                 RpcError::Rpc(e)
                                     if (e.code.code() == -1107 || e.code.code() == -1111) =>
                                 {
-                                    tracing::warn!(
+                                    crate::warn!(
                                         "[{}] transaction { } already in pool",
                                         myself.get_name().unwrap_or_default(),
                                         tx.hash(),
@@ -123,7 +123,7 @@ impl Actor for CkbChainActor {
                                     Ok(())
                                 }
                                 _ => {
-                                    tracing::error!(
+                                    crate::error!(
                                         "[{}] send transaction {} failed: {:?}",
                                         myself.get_name().unwrap_or_default(),
                                         tx.hash(),
@@ -146,7 +146,7 @@ impl Actor for CkbChainActor {
                 },
                 reply_port,
             ) => {
-                tracing::info!(
+                crate::info!(
                     "[{}] trace transaction {} with {} confs",
                     myself.get_name().unwrap_or_default(),
                     tx_hash,
@@ -174,7 +174,7 @@ impl Actor for CkbChainActor {
                                                 .then_some(ckb_jsonrpc_types::Status::Committed)
                                         }
                                         Err(err) => {
-                                            tracing::error!(
+                                            crate::error!(
                                                 "[{}] get tip block number failed: {:?}",
                                                 actor_name,
                                                 err
@@ -189,7 +189,7 @@ impl Actor for CkbChainActor {
                                 _ => None,
                             },
                             Err(err) => {
-                                tracing::error!(
+                                crate::error!(
                                     "[{}] get transaction status failed: {:?}",
                                     actor_name,
                                     err
@@ -244,9 +244,9 @@ mod test_utils {
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;
 
+    use crate::{debug, error};
     use ckb_types::packed::Byte32;
     use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
-    use tracing::{debug, error};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum CellStatus {

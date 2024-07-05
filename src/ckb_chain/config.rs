@@ -74,7 +74,7 @@ impl CkbChainConfig {
 
         let warn = |m: bool, d: &str| {
             if m {
-                tracing::warn!(
+                crate::warn!(
                     "Your secret file's permission is not {}, path: {:?}. \
                 Please fix it as soon as possible",
                     d,
