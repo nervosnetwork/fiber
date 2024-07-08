@@ -137,11 +137,15 @@ pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, Multiaddr),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
+    // An incoming/outgoing channel is created.
     ChannelCreated(PeerId, Hash256),
+    // A outgoing channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
+    // The channel is ready to use (with funding transaction confirmed
+    // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256),
-    ChannelShutDown(PeerId, Hash256),
-    ClosingTransactionPending(PeerId, Hash256, TransactionView),
+    // The channel is closed (closing transaction is confirmed).
+    ChannelClosed(PeerId, Hash256),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
     // We have signed a commitment transaction and sent it to the other party.
@@ -186,8 +190,6 @@ pub enum NetworkActorEvent {
     ),
     /// A channel is ready to use.
     ChannelReady(Hash256, PeerId),
-    /// A channel is being shutting down.
-    ChannelShutdown(Hash256, PeerId),
     /// A channel is already closed.
     ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
@@ -437,20 +439,6 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
-            NetworkActorEvent::ChannelShutdown(channel_id, peer_id) => {
-                info!(
-                    "Channel ({:?}) to peer {:?} is being shutdown.",
-                    channel_id, peer_id
-                );
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::NetworkServiceEvent(
-                            NetworkServiceEvent::ChannelShutDown(peer_id, channel_id),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
             NetworkActorEvent::PeerMessage(peer_id, message) => {
                 self.handle_peer_message(state, peer_id, message).await?
             }
@@ -469,32 +457,11 @@ where
                 state
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone())
                     .await;
-
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::NetworkServiceEvent(
-                            NetworkServiceEvent::ClosingTransactionPending(
-                                peer_id.clone(),
-                                channel_id,
-                                tx.clone(),
-                            ),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, _tx_hash) => {
-                // TODO: We should remove the channel from the session_channels_map.
-                state.channels.remove(&channel_id);
-                if let Some(session) = state.get_peer_session(&peer_id) {
-                    if let Some(set) = state.session_channels_map.get_mut(&session) {
-                        set.remove(&channel_id);
-                    }
-                }
-                state.send_message_to_channel_actor(
-                    channel_id,
-                    ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
-                )
+                state
+                    .on_closing_transaction_confirmed(&peer_id, &channel_id)
+                    .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
                 error!(
@@ -1140,6 +1107,28 @@ impl NetworkActorState {
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
+    }
+
+    async fn on_closing_transaction_confirmed(&mut self, peer_id: &PeerId, channel_id: &Hash256) {
+        self.channels.remove(&channel_id);
+        if let Some(session) = self.get_peer_session(&peer_id) {
+            if let Some(set) = self.session_channels_map.get_mut(&session) {
+                set.remove(&channel_id);
+            }
+        }
+        self.send_message_to_channel_actor(
+            *channel_id,
+            ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
+        );
+        // Notify outside observers.
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelClosed(
+                    peer_id.clone(),
+                    *channel_id,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
     }
 
     pub async fn on_open_channel_msg(
