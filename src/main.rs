@@ -23,6 +23,9 @@ use tracing_subscriber::fmt::format;
 
 #[tokio::main]
 pub async fn main() {
+    // ractor will set "id" for each actor:
+    // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
+    // here we map it with the node prefix
     let node_formatter = format::debug_fn(|writer, field, value| {
         if field.name() == "id" {
             write!(

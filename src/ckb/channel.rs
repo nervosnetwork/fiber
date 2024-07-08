@@ -908,7 +908,7 @@ where
     type State = ChannelActorState;
     type Arguments = ChannelInitializationParameter;
 
-        async fn pre_start(
+    async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
         args: Self::Arguments,

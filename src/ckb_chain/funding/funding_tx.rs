@@ -1,9 +1,5 @@
-use std::collections::{HashMap, HashSet};
-
 use super::super::FundingError;
 use crate::{ckb::serde_utils::EntityHex, ckb_chain::contracts::get_udt_cell_deps};
-
-use tracing::{debug, warn};
 use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
@@ -28,6 +24,8 @@ use molecule::{
 };
 use serde::Deserialize;
 use serde_with::serde_as;
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, warn};
 
 /// Funding transaction wrapper.
 ///
