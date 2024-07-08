@@ -645,6 +645,10 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
     ) -> ProcessingChannelResult {
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
+            ChannelState::Closed => {
+                debug!("Channel already closed, ignoring shutdown command");
+                return Ok(());
+            }
             ChannelState::ChannelReady() => {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
@@ -652,9 +656,10 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             ChannelState::ShuttingDown(flags) => flags,
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
-                return Err(ProcessingChannelError::InvalidState(
-                    "Trying to send shutdown message while in invalid state".to_string(),
-                ));
+                return Err(ProcessingChannelError::InvalidState(format!(
+                    "Trying to send shutdown message while in invalid state {:?}",
+                    &state.state
+                )));
             }
         };
 
