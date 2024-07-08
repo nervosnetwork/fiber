@@ -47,12 +47,12 @@ start() {
 }
 
 if [ "$#" -ne 1 ]; then
-    LOG_PREFIX=$'[node 1] ' start -d 1 &
-    LOG_PREFIX=$'[node 2] ' start -d 2 &
-    LOG_PREFIX=$'[node 3] ' start -d 3 &
+    LOG_PREFIX=$'[node 1]' start -d 1 &
+    LOG_PREFIX=$'[node 2]' start -d 2 &
+    LOG_PREFIX=$'[node 3]' start -d 3 &
 else
     for id in "$@"; do
-        LOG_PREFIX="[$id]"$' ' start -d "$id" &
+        LOG_PREFIX="[$id]"$'' start -d "$id" &
     done
 fi
 

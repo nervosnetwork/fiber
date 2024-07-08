@@ -1,7 +1,7 @@
 #[macro_export]
 macro_rules! log_and_error {
     ($params:expr, $err:expr) => {{
-        error!("channel request params {:?} => error: {:?}", $params, $err);
+        tracing::error!("channel request params {:?} => error: {:?}", $params, $err);
         Err(ErrorObjectOwned::owned(
             CALL_EXECUTION_FAILED_CODE,
             $err,
