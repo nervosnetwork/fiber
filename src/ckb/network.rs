@@ -141,7 +141,7 @@ pub enum NetworkServiceEvent {
     ChannelPendingToBeAccepted(PeerId, Hash256),
     ChannelReady(PeerId, Hash256),
     ChannelShutDown(PeerId, Hash256),
-    ChannelClosed(PeerId, Hash256, TransactionView),
+    ClosingTransactionPending(PeerId, Hash256, TransactionView),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
     // We have signed a commitment transaction and sent it to the other party.
@@ -189,7 +189,7 @@ pub enum NetworkActorEvent {
     /// A channel is being shutting down.
     ChannelShutdown(Hash256, PeerId),
     /// A channel is already closed.
-    ChannelClosed(Hash256, PeerId, TransactionView),
+    ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
@@ -451,44 +451,6 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
-            NetworkActorEvent::ChannelClosed(channel_id, peer_id, tx) => {
-                state
-                    .on_channel_closed(channel_id, peer_id.clone(), tx.clone())
-                    .await;
-                info!(
-                    "Channel ({:?}) to peer {:?} is already closed. Closing transaction {:?} can be broacasted now.",
-                    channel_id, peer_id, tx
-                );
-                match call_t!(
-                    self.chain_actor,
-                    CkbChainMessage::SendTx,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    tx.clone()
-                )
-                .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-                {
-                    Ok(_) => {
-                        info!("Closing transaction sent to the network: {:x}", tx.hash());
-                    }
-                    Err(err) => {
-                        error!("Failed to send closing transaction to the network: {}", err);
-                    }
-                }
-
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelClosed(
-                            peer_id.clone(),
-                            channel_id,
-                            tx.clone(),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                state
-                    .on_channel_closed(channel_id, peer_id.clone(), tx.clone())
-                    .await;
-            }
             NetworkActorEvent::PeerMessage(peer_id, message) => {
                 self.handle_peer_message(state, peer_id, message).await?
             }
@@ -502,6 +464,24 @@ where
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
+            }
+            NetworkActorEvent::ClosingTransactionPending(channel_id, peer_id, tx) => {
+                state
+                    .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone())
+                    .await;
+
+                // Notify outside observers.
+                myself
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::NetworkServiceEvent(
+                            NetworkServiceEvent::ClosingTransactionPending(
+                                peer_id.clone(),
+                                channel_id,
+                                tx.clone(),
+                            ),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, _tx_hash) => {
                 // TODO: We should remove the channel from the session_channels_map.
@@ -1125,7 +1105,7 @@ impl NetworkActorState {
         }
     }
 
-    async fn on_channel_closed(
+    async fn on_closing_transaction_pending(
         &mut self,
         channel_id: Hash256,
         peer_id: PeerId,

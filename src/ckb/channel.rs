@@ -823,10 +823,12 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             ChannelCommand::Shutdown(command, reply) => {
                 match self.handle_shutdown_command(state, command) {
                     Ok(_) => {
+                        debug!("Shutdown command processed successfully");
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
                     Err(err) => {
+                        debug!("Error processing shutdown command: {:?}", &err);
                         let _ = reply.send(Err(err.to_string()));
                         Err(err)
                     }
@@ -2767,7 +2769,11 @@ impl ChannelActorState {
 
                 network
                     .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelClosed(self.get_id(), self.peer_id.clone(), tx),
+                        NetworkActorEvent::ClosingTransactionPending(
+                            self.get_id(),
+                            self.peer_id.clone(),
+                            tx,
+                        ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
