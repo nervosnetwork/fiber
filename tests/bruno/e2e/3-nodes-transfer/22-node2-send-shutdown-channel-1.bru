@@ -35,15 +35,11 @@ body:json {
 }
 
 assert {
-  res.body.error: isDefined
-  res.body.result: isUndefined
+  res.body.error: isUndefined
+  res.body.result: isNull
 }
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
-  // will get error message since channel is closed in previous step
   await new Promise(r => setTimeout(r, 100));
-  if (!(res.body.error.message === "Messaging failed because channel is closed")) {
-    throw new Error("Assertion failed: error message is not right");
-  }
 }
