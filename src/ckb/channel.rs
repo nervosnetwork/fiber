@@ -1236,16 +1236,7 @@ where
                 }
             }
         }
-        match state.state {
-            ChannelState::Closed => {
-                debug!(
-                    "The channel is closed, waiting for the closing transaction to be confirmed."
-                );
-            }
-            _ => {
-                self.store.insert_channel_actor_state(state.clone());
-            }
-        }
+        self.store.insert_channel_actor_state(state.clone());
         Ok(())
     }
 }
