@@ -3318,7 +3318,15 @@ impl ChannelActorState {
                 commitment_number, per_commitment_key, per_commitment_point
             )));
         }
-        let (_, _, witnesses) = self.build_commitment_transaction_parameters(true);
+        let witnesses = self.get_previous_local_commitment_witnesses();
+        let hash = blake2b_256(&witnesses);
+        let script_args: &[u8] = &hash[..20];
+        debug!(
+            "Get previous commitment transaction witnesses: {:?}, hash: {:?}, script_args: {:?}",
+            hex::encode(&witnesses),
+            hex::encode(&hash),
+            hex::encode(&script_args)
+        );
 
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
@@ -3794,9 +3802,12 @@ impl ChannelActorState {
         (tx, message, witnesses)
     }
 
-    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
-        let local_commitment_number = self.get_local_commitment_number();
-        let remote_commitment_number = self.get_remote_commitment_number();
+    fn build_commitment_transaction_witnesses(
+        &self,
+        local: bool,
+        local_commitment_number: u64,
+        remote_commitment_number: u64,
+    ) -> Vec<u8> {
         let commitment_number = if local {
             local_commitment_number
         } else {
@@ -3873,6 +3884,27 @@ impl ChannelActorState {
             self.get_witness_args_for_active_tlcs(local),
         ]
         .concat()
+    }
+
+    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+        let local_commitment_number = self.get_local_commitment_number();
+        let remote_commitment_number = self.get_remote_commitment_number();
+        self.build_commitment_transaction_witnesses(
+            local,
+            local_commitment_number,
+            remote_commitment_number,
+        )
+    }
+
+    fn get_local_commitment_witnesses(&self, commitment_number: u64) -> Vec<u8> {
+        debug_assert!(commitment_number < self.get_local_commitment_number());
+        // TODO: we need to persist the remote commitment number while this local commitment
+        // transaction is commited, and look it up here.
+        self.build_commitment_transaction_witnesses(true, commitment_number, 0)
+    }
+
+    fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
+        self.get_local_commitment_witnesses(self.get_local_commitment_number() - 1)
     }
 
     // Build the parameters for the commitment transaction. The first two elements for the
