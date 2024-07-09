@@ -5128,6 +5128,7 @@ mod tests {
                         ShutdownCommand {
                             close_script: Script::default().as_builder().build(),
                             fee_rate,
+                            force: false,
                         },
                         rpc_reply,
                     ),
