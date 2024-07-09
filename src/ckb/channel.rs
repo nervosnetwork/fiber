@@ -35,6 +35,7 @@ use std::{
 use crate::{
     ckb::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
+        fee::{calculate_commitment_tx_fee, commitment_tx_size},
         types::Shutdown,
     },
     ckb_chain::{
@@ -46,6 +47,7 @@ use crate::{
 
 use super::{
     config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_UDT_OCCUPIED_CAPACITY},
+    fee::default_minimal_ckb_amount,
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
@@ -62,7 +64,7 @@ use super::{
 // - `funding_out_point`: 36 bytes, out point of the funding transaction
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
-const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
+pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
 // Some part of the code liberally gets previous commitment number, which is
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
@@ -658,7 +660,7 @@ impl<S> ChannelActor<S> {
             }
         };
 
-        state.verify_shutdown_fee_rate(command.fee_rate)?;
+        state.check_shutdown_fee_rate(command.fee_rate)?;
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
@@ -888,7 +890,7 @@ impl<S> ChannelActor<S> {
                 let reserved_ckb_amount = DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
                 if funding_amount < reserved_ckb_amount.into() {
                     return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "The value of the channel should be greater than the reserve amount: {}",
+                        "The value of the channel should be greater than the reserved amount: {}",
                         reserved_ckb_amount
                     )));
                 }
@@ -969,7 +971,12 @@ where
                     *second_per_commitment_point,
                 );
 
-                state.check_reserve_amount(my_reserved_ckb_amount, *reserved_ckb_amount)?;
+                state.check_ckb_params(vec![
+                    "local_reserved_ckb_amount",
+                    "remote_reserved_ckb_amount",
+                    "commitment_fee_rate",
+                    "funding_fee_rate",
+                ])?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
 
@@ -1036,20 +1043,7 @@ where
 
                 let commitment_fee_rate =
                     commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
-                if commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "The commitment fee rate is too low, expect {} >= {}",
-                        commitment_fee_rate, DEFAULT_COMMITMENT_FEE_RATE
-                    ))));
-                }
-
                 let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
-                if funding_fee_rate < DEFAULT_FEE_RATE {
-                    return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
-                        "The funding fee rate is too low, expect {} >= {}",
-                        funding_fee_rate, DEFAULT_FEE_RATE
-                    ))));
-                }
 
                 let (funding_amount, reserved_ckb_amount) =
                     self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
@@ -1064,6 +1058,12 @@ where
                     funding_udt_type_script.clone(),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
+
+                channel.check_ckb_params(vec![
+                    "commitment_fee_rate",
+                    "funding_fee_rate",
+                    "local_reserved_ckb_amount",
+                ])?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let message = CFNMessage::OpenChannel(OpenChannel {
@@ -1401,8 +1401,7 @@ pub struct ChannelActorState {
     pub remote_reserved_ckb_amount: u64,
 
     // The commitment fee rate is used to calculate the fee for the commitment transactions.
-    // The side who starting a shutdown command need to pay at least this fee for building shutdown transaction,
-    // the other side may choose to pay less fee rate if the current fee is enough.
+    // The side who want to submit the commitment transaction will pay fee
     pub commitment_fee_rate: u64,
 
     // The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
@@ -1753,24 +1752,97 @@ impl ChannelActorState {
         }
     }
 
-    /// This function will be only called when the channel is accepted
-    fn check_reserve_amount(
+    fn check_reserved_ckb_amount(
         &self,
-        local_reserved_amount: u64,
-        remote_reserved_amount: u64,
-    ) -> Result<(), ProcessingChannelError> {
-        let udt_type_script = &self.funding_udt_type_script;
-        let reserved_ckb_amount = if udt_type_script.is_some() {
-            DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-        } else {
-            DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-        };
-        if local_reserved_amount < reserved_ckb_amount
-            || remote_reserved_amount < reserved_ckb_amount
-        {
+        field: &'static str,
+        reserved_ckb_amount: u64,
+    ) -> ProcessingChannelResult {
+        let minimal_reserved_amount =
+            default_minimal_ckb_amount(self.funding_udt_type_script.is_some());
+        if reserved_ckb_amount < minimal_reserved_amount {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The reserve amount should be greater than the minimal reserve amount: {}",
-                reserved_ckb_amount
+                "The {} should be greater than {}",
+                field, minimal_reserved_amount
+            )));
+        }
+        Ok(())
+    }
+
+    fn check_ckb_params(&self, check_fields: Vec<&'static str>) -> ProcessingChannelResult {
+        for field in check_fields {
+            match field {
+                "local_reserved_ckb_amount" => {
+                    return self.check_reserved_ckb_amount(field, self.local_reserved_ckb_amount);
+                }
+                "remote_reserved_ckb_amount" => {
+                    return self.check_reserved_ckb_amount(field, self.remote_reserved_ckb_amount);
+                }
+                "funding_fee_rate" => {
+                    if self.funding_fee_rate < DEFAULT_FEE_RATE {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Funding fee rate is less than {}",
+                            DEFAULT_FEE_RATE,
+                        )));
+                    }
+                }
+                "commitment_fee_rate" => {
+                    if self.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment fee rate is less than {}",
+                            DEFAULT_COMMITMENT_FEE_RATE,
+                        )));
+                    }
+
+                    let commitment_fee = calculate_commitment_tx_fee(
+                        self.commitment_fee_rate,
+                        &self.funding_udt_type_script,
+                    );
+
+                    let expected_minimal_reserved_ckb_amount = commitment_fee * 2;
+                    debug!(
+                        "expected_minimal_reserved_ckb_amount: {}, reserved_ckb_amount: {}",
+                        expected_minimal_reserved_ckb_amount, self.local_reserved_ckb_amount
+                    );
+                    if self.local_reserved_ckb_amount < expected_minimal_reserved_ckb_amount {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                        "Commitment fee rate is: {}, expect more CKB amount as reserved ckb amount expected to larger than {}, \
+                        or you can set a lower commitment fee rate",
+                        self.commitment_fee_rate, expected_minimal_reserved_ckb_amount
+                    )));
+                    }
+                }
+                _ => {
+                    unimplemented!("Check field {} is not implemented", field);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_shutdown_fee_rate(&self, fee_rate: FeeRate) -> ProcessingChannelResult {
+        if fee_rate.as_u64() < self.commitment_fee_rate {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Fee rate {} is less than commitment fee rate {}",
+                fee_rate, self.commitment_fee_rate
+            )));
+        }
+
+        let fee = calculate_commitment_tx_fee(fee_rate.as_u64(), &self.funding_udt_type_script);
+        debug!("shutdown fee: {:?}", fee);
+
+        let available_max_fee = if self.funding_udt_type_script.is_none() {
+            self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
+        } else {
+            self.local_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+        };
+        debug!(
+            "verify_shutdown_fee fee: {} available_max_fee: {}",
+            fee, available_max_fee,
+        );
+        if fee > available_max_fee {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Local balance is not enough to pay the fee, expect fee {} <= available_max_fee {}",
+                fee, available_max_fee
             )));
         }
         Ok(())
@@ -2485,35 +2557,6 @@ impl ChannelActorState {
         &self.get_remote_channel_parameters().pubkeys.funding_pubkey
     }
 
-    fn verify_shutdown_fee_rate(&self, fee_rate: FeeRate) -> ProcessingChannelResult {
-        if fee_rate.as_u64() < self.commitment_fee_rate {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Fee rate {} is less than commitment fee rate {}",
-                fee_rate, self.commitment_fee_rate
-            )));
-        }
-
-        let fee = self.calculate_shutdown_fee(fee_rate);
-        debug!("shutdown fee: {:?}", fee);
-
-        let available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
-        } else {
-            self.local_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
-        };
-        debug!(
-            "verify_shutdown_fee fee: {} available_max_fee: {}",
-            fee, available_max_fee,
-        );
-        if fee > available_max_fee {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Local balance is not enough to pay the fee, expect fee {} <= available_max_fee {}",
-                fee, available_max_fee
-            )));
-        }
-        Ok(())
-    }
-
     fn check_valid_to_auto_accept(&self) -> bool {
         let Some(remote_fee_rate) = self.remote_shutdown_fee_rate else {
             return false;
@@ -2521,7 +2564,7 @@ impl ChannelActorState {
         if remote_fee_rate < self.commitment_fee_rate {
             return false;
         }
-        let fee = self.calculate_shutdown_fee(FeeRate::from_u64(remote_fee_rate));
+        let fee = calculate_commitment_tx_fee(remote_fee_rate, &self.funding_udt_type_script);
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
@@ -2750,6 +2793,11 @@ impl ChannelActorState {
                     &shutdown_tx,
                 )?;
 
+                assert_eq!(
+                    tx.data().serialized_size_in_block(),
+                    commitment_tx_size(&self.funding_udt_type_script)
+                );
+
                 network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ChannelClosed(self.get_id(), self.peer_id.clone(), tx),
@@ -2776,9 +2824,9 @@ impl ChannelActorState {
             )));
         }
 
-        self.check_reserve_amount(
+        self.check_reserved_ckb_amount(
+            "remote_reserved_ckb_amount",
             accept_channel.reserved_ckb_amount,
-            self.local_reserved_ckb_amount,
         )?;
 
         self.update_state(ChannelState::NegotiatingFunding(
@@ -2974,6 +3022,14 @@ impl ChannelActorState {
         };
 
         let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+        // This is the commitment transaction that both parties signed,
+        // can be broadcasted to the network if necessary
+
+        assert_eq!(
+            tx.data().serialized_size_in_block(),
+            commitment_tx_size(&self.funding_udt_type_script)
+        );
+
         let num = self.get_current_commitment_number(false);
 
         debug!(
@@ -3447,45 +3503,6 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    fn calculate_shutdown_fee(&self, fee_rate: FeeRate) -> u64 {
-        let dummy_script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
-
-        let (outputs, outputs_data) = if let Some(type_script) = &self.funding_udt_type_script {
-            let dummy_output = CellOutput::new_builder()
-                .lock(dummy_script)
-                .type_(Some(type_script.clone()).pack())
-                .capacity(0.pack())
-                .build();
-            let dummy_output_data = self.to_local_amount.to_le_bytes().pack();
-
-            let outputs = [dummy_output.clone(), dummy_output];
-            let outputs_data = [dummy_output_data.clone(), dummy_output_data];
-            (outputs, outputs_data.to_vec())
-        } else {
-            let dummy_output = CellOutput::new_builder()
-                .capacity(0.pack())
-                .lock(dummy_script)
-                .build();
-            let outputs = [dummy_output.clone(), dummy_output];
-            (outputs, vec![Default::default(), Default::default()])
-        };
-
-        let mock_shutdown_tx = TransactionBuilder::default()
-            .cell_deps(cell_deps)
-            .input(
-                CellInput::new_builder()
-                    .previous_output(self.get_funding_transaction_outpoint())
-                    .build(),
-            )
-            .set_outputs(outputs.to_vec())
-            .set_outputs_data(outputs_data.to_vec())
-            .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
-            .build();
-        let tx_size = mock_shutdown_tx.data().serialized_size_in_block() as u64;
-        fee_rate.fee(tx_size).as_u64()
-    }
-
     pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
         // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
@@ -3509,8 +3526,11 @@ impl ChannelActorState {
             ) => (
                 local_shutdown_script,
                 remote_shutdown_script,
-                self.calculate_shutdown_fee(FeeRate::from_u64(local_shutdown_fee_rate)),
-                self.calculate_shutdown_fee(FeeRate::from_u64(remote_shutdown_fee_rate)),
+                calculate_commitment_tx_fee(local_shutdown_fee_rate, &self.funding_udt_type_script),
+                calculate_commitment_tx_fee(
+                    remote_shutdown_fee_rate,
+                    &self.funding_udt_type_script,
+                ),
             ),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -3568,7 +3588,6 @@ impl ChannelActorState {
             let tx = tx_builder
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(outputs_data.to_vec())
-                .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()]) // we need to add a dummy witness for calculating shutdown tx size
                 .build();
             let message = get_funding_cell_message_to_sign(
                 u64::MAX,
@@ -3606,7 +3625,6 @@ impl ChannelActorState {
             let tx = tx_builder
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(vec![Default::default(), Default::default()])
-                .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()]) // we need to add a dummy witness for calculating shutdown tx size
                 .build();
 
             let message = get_funding_cell_message_to_sign(
@@ -3787,7 +3805,7 @@ impl ChannelActorState {
             if local { "local" } else { "remote" },
             self.get_current_commitment_number(local),
             time_locked_value, received_tlc_value, immediately_spendable_value);
-        let time_locked_value = time_locked_value + received_tlc_value;
+        let mut time_locked_value = time_locked_value + received_tlc_value;
         let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
 
         debug!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
@@ -3829,9 +3847,12 @@ impl ChannelActorState {
         );
         let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, script_arg);
 
+        let commitment_tx_fee =
+            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        debug!("debug commitment_fee: {:?}", commitment_tx_fee);
+
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            //FIXME(yukang): we need to add logic for transaction fee here
-            let (time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
+            let (mut time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
                 (
                     self.local_reserved_ckb_amount,
                     self.remote_reserved_ckb_amount,
@@ -3842,6 +3863,10 @@ impl ChannelActorState {
                     self.local_reserved_ckb_amount,
                 )
             };
+
+            // NOTE: we have already make sure the reserved_ckb_amount will enough for commitment tx fee
+            // commitment tx fee is paid by the side who want to submit the commitment transaction
+            time_locked_ckb_amount -= commitment_tx_fee;
 
             let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
             let immediate_output = CellOutput::new_builder()
@@ -3861,6 +3886,11 @@ impl ChannelActorState {
             let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
             (outputs, outputs_data, witnesses)
         } else {
+            let commitment_tx_fee = commitment_tx_fee as u128;
+
+            // commitment tx fee is paid by the side who want to submit the commitment transaction
+            time_locked_value -= commitment_tx_fee;
+
             let outputs = vec![
                 CellOutput::new_builder()
                     .capacity((immediately_spendable_value as u64).pack())

@@ -7,6 +7,7 @@ pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
 };
 
+mod fee;
 mod key;
 pub use key::KeyPair;
 
