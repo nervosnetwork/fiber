@@ -5270,7 +5270,7 @@ mod tests {
             .expect("accept channel success");
         let new_channel_id = accept_channel_result.new_channel_id;
 
-        let node_a_commitment_tx = node_a
+        let commitment_tx = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
                     println!(
@@ -5278,21 +5278,6 @@ mod tests {
                         num, &tx, peer_id, channel_id
                     );
                     assert_eq!(peer_id, &node_b.peer_id);
-                    assert_eq!(channel_id, &new_channel_id);
-                    Some(tx.clone())
-                }
-                _ => None,
-            })
-            .await;
-
-        let node_b_commitment_tx = node_b
-            .expect_to_process_event(|event| match event {
-                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
-                    println!(
-                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                        num, &tx, peer_id, channel_id
-                    );
-                    assert_eq!(peer_id, &node_a.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
                     Some(tx.clone())
                 }
@@ -5340,7 +5325,7 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let (node_b_commitment_secret, witnesses) = node_a
+        let (commitment_secret, witnesses) = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RevokeAndAckReceived(
                     peer_id,
@@ -5360,40 +5345,29 @@ mod tests {
             .await;
 
         assert_eq!(
-            node_b.submit_tx(node_b_commitment_tx.clone()).await,
+            node_a.submit_tx(commitment_tx.clone()).await,
             Status::Committed
         );
 
-        assert_eq!(
-            node_a.submit_tx(node_b_commitment_tx.clone()).await,
-            Status::Committed
-        );
-
-        dbg!(&node_b_commitment_tx);
-
-        let outpoint_of_cell_to_revoke = node_b_commitment_tx.output_pts_iter().next().unwrap();
+        dbg!(&commitment_tx);
 
         let tx = Transaction::default()
             .as_advanced_builder()
             .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
             .input(
                 CellInput::new_builder()
-                    .previous_output(outpoint_of_cell_to_revoke)
+                    .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
                     .build(),
             )
             .outputs(vec![CellOutput::new_builder()
-                .capacity((500u64 * 100_000_000).pack())
+                .capacity((62u64 * 100_000_000).pack())
                 .lock(Script::new_builder().build())
                 .build()])
             .outputs_data(vec![Bytes::default(); 1].pack())
             .build();
 
         let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-        // TODO: The signature here is actually ckb-specific recoverable signature.
-        // We need to
-        let signature = node_b_commitment_secret
-            .sign_ecdsa(&message.into())
-            .serialize_compact();
+        let signature = commitment_secret.sign_ecdsa_recoverable(&message.into());
 
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
 
@@ -5407,7 +5381,7 @@ mod tests {
 
         let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
-        println!("tx: {:?}", revocation_tx);
+        dbg!(&revocation_tx);
         assert_eq!(
             node_a.submit_tx(revocation_tx.clone()).await,
             Status::Committed
