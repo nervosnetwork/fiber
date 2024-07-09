@@ -3807,7 +3807,7 @@ impl ChannelActorState {
         local: bool,
         local_commitment_number: u64,
         remote_commitment_number: u64,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, [u8; 20]) {
         let commitment_number = if local {
             local_commitment_number
         } else {
@@ -3876,17 +3876,29 @@ impl ChannelActorState {
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-        [
-            empty_witness_args.to_vec(),
+        let witnesses = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
             blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
             blake2b_256(revocation_key.serialize())[0..20].to_vec(),
             self.get_witness_args_for_active_tlcs(local),
         ]
-        .concat()
+        .concat();
+        let hash = blake2b_256(&witnesses)[..20].try_into().unwrap();
+        let witnesses = [empty_witness_args.to_vec(), witnesses].concat();
+        debug!(
+            "Built {} commitment transaction #{}'s witnesses: {:?}, hash: {:?}",
+            if local { "local" } else { "remote" },
+            commitment_number,
+            hex::encode(&witnesses),
+            hex::encode(&hash)
+        );
+        (witnesses, hash)
     }
 
-    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
+    fn get_current_commitment_transaction_witnesses_with_hash(
+        &self,
+        local: bool,
+    ) -> (Vec<u8>, [u8; 20]) {
         let local_commitment_number = self.get_local_commitment_number();
         let remote_commitment_number = self.get_remote_commitment_number();
         self.build_commitment_transaction_witnesses(
@@ -3901,6 +3913,7 @@ impl ChannelActorState {
         // TODO: we need to persist the remote commitment number while this local commitment
         // transaction is commited, and look it up here.
         self.build_commitment_transaction_witnesses(true, commitment_number, 0)
+            .0
     }
 
     fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
@@ -3968,24 +3981,14 @@ impl ChannelActorState {
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
 
-        let witnesses: Vec<u8> = self.build_current_commitment_transaction_witnesses(local);
-
-        let hash = blake2b_256(&witnesses);
-        let script_arg: &[u8] = &hash[..20];
-        debug!(
-            "Building {} commitment transaction with witnesses {:?} and hash {:?} with local commitment number {} and remote commitment number {}",
-            if local { "local" } else {"remote"},
-            hex::encode(&witnesses),
-            hex::encode(script_arg),
-            self.get_local_commitment_number(),
-            self.get_remote_commitment_number()
-        );
+        let (witnesses, script_args) =
+            self.get_current_commitment_transaction_witnesses_with_hash(local);
 
         let immediate_secp256k1_lock_script = get_script_by_contract(
             Contract::Secp256k1Lock,
             &blake2b_256(immediate_payment_key.serialize())[0..20],
         );
-        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, script_arg);
+        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &script_args);
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
