@@ -1,5 +1,5 @@
-use crate::{debug, error, info, warn};
 use bitflags::bitflags;
+use tracing::{debug, error, info, warn};
 
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;

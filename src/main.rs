@@ -1,10 +1,11 @@
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
-use cfn_node::{debug, error, info, trace};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
 use tokio::{select, signal};
+use tracing::{debug, error, info, info_span, trace};
+use tracing_subscriber::field::MakeExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use std::str::FromStr;
@@ -17,14 +18,36 @@ use cfn_node::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use cfn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
+use core::default::Default;
+use tracing_subscriber::fmt::format;
 
 #[tokio::main]
 pub async fn main() {
+    // ractor will set "id" for each actor:
+    // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
+    // here we map it with the node prefix
+    let node_formatter = format::debug_fn(|writer, field, value| {
+        if field.name() == "id" {
+            write!(
+                writer,
+                "{}: {:?} on {}",
+                field,
+                value,
+                cfn_node::get_node_prefix()
+            )
+        } else {
+            write!(writer, "{}: {:?}", field, value)
+        }
+    })
+    .delimited(", ");
+
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .pretty()
-        .with_target(false)
+        .fmt_fields(node_formatter)
         .init();
+
+    let _span = info_span!("node", node = cfn_node::get_node_prefix()).entered();
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);

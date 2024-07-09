@@ -1,4 +1,3 @@
-use crate::{debug, error, info, warn};
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{OutPoint, Script, Transaction};
@@ -11,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tentacle::secio::SecioKeyPair;
+use tracing::{debug, error, info, warn};
 
 use tentacle::{
     async_trait,

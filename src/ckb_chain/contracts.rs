@@ -1,4 +1,3 @@
-use crate::debug;
 use ckb_types::{
     core::{DepType, ScriptHashType},
     packed::{CellDep, CellDepVec, CellDepVecBuilder, OutPoint, Script},
@@ -6,6 +5,7 @@ use ckb_types::{
 };
 use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
+use tracing::debug;
 
 use crate::ckb::{config::CkbNetwork, types::Hash256};
 
@@ -231,7 +231,7 @@ impl ContractsContext {
         match network {
             #[cfg(test)]
             CkbNetwork::Mocknet => {
-                crate::warn!("Initializing mock context for testing.");
+                tracing::warn!("Initializing mock context for testing.");
                 MockContext::new().into()
             }
             CkbNetwork::Dev => {
