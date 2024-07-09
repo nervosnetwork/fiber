@@ -245,7 +245,7 @@ where
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
         let mut channels: Vec<_> = self
             .store
-            .get_channel_states(params.peer_id)
+            .get_active_channel_states(params.peer_id)
             .into_iter()
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store
