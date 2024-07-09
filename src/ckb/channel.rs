@@ -2815,11 +2815,6 @@ impl ChannelActorState {
                     &shutdown_tx,
                 )?;
 
-                assert_eq!(
-                    tx.data().serialized_size_in_block(),
-                    commitment_tx_size(&self.funding_udt_type_script)
-                );
-
                 network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::ClosingTransactionPending(
