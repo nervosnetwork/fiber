@@ -5307,14 +5307,14 @@ mod tests {
             .expect("accept channel success");
         let new_channel_id = accept_channel_result.new_channel_id;
 
-        let commitment_tx = node_a
+        let commitment_tx = node_b
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
                     println!(
                         "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
                         num, &tx, peer_id, channel_id
                     );
-                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
                     Some(tx.clone())
                 }
