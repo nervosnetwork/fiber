@@ -3311,21 +3311,26 @@ impl ChannelActorState {
             commitment_number
         );
         let per_commitment_point = self.get_remote_commitment_point(commitment_number);
-        if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
+        let per_commitment_key = Privkey::from(per_commitment_secret);
+        if per_commitment_point != per_commitment_key.pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
-                commitment_number, per_commitment_secret, per_commitment_point
+                commitment_number, per_commitment_key, per_commitment_point
             )));
         }
+        let (_, _, witnesses) = self.build_commitment_transaction_parameters(false);
+
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+
         emit_service_event(
             network,
             NetworkServiceEvent::RevokeAndAckReceived(
                 self.peer_id.clone(),
                 self.get_id(),
                 commitment_number,
-                per_commitment_secret,
+                per_commitment_key,
+                witnesses,
                 next_per_commitment_point,
             ),
         );
@@ -4595,6 +4600,7 @@ mod tests {
             types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
+        ckb_chain::contracts::{get_cell_deps, Contract},
         NetworkServiceEvent,
     };
 
@@ -4602,8 +4608,8 @@ mod tests {
     use ckb_jsonrpc_types::Status;
     use ckb_types::{
         core::FeeRate,
-        packed::Script,
-        prelude::{Builder, Entity},
+        packed::{Bytes, CellInput, CellOutput, Script, Transaction},
+        prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
     };
     use ractor::call;
 
@@ -5334,31 +5340,76 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let node_b_commitment_secret = node_a
+        let (node_b_commitment_secret, witnesses) = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RevokeAndAckReceived(
                     peer_id,
                     channel_id,
                     commitment_number,
                     commitment_secret,
+                    witnesses,
                     _commitment_point,
                 ) => {
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
                     assert_eq!(*commitment_number, 1u64);
-                    Some(commitment_secret.clone())
+                    Some((commitment_secret.clone(), witnesses.clone()))
                 }
                 _ => None,
             })
             .await;
 
-        // We can submit the commitment txs to the chain now.
-        assert_eq!(
-            node_a.submit_tx(node_a_commitment_tx.clone()).await,
-            Status::Committed
-        );
         assert_eq!(
             node_b.submit_tx(node_b_commitment_tx.clone()).await,
+            Status::Committed
+        );
+
+        assert_eq!(
+            node_a.submit_tx(node_b_commitment_tx.clone()).await,
+            Status::Committed
+        );
+
+        dbg!(&node_b_commitment_tx);
+
+        let outpoint_of_cell_to_revoke = node_b_commitment_tx.output_pts_iter().next().unwrap();
+
+        let tx = Transaction::default()
+            .as_advanced_builder()
+            .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
+            .input(
+                CellInput::new_builder()
+                    .previous_output(outpoint_of_cell_to_revoke)
+                    .build(),
+            )
+            .outputs(vec![CellOutput::new_builder()
+                .capacity((500u64 * 100_000_000).pack())
+                .lock(Script::new_builder().build())
+                .build()])
+            .outputs_data(vec![Bytes::default(); 1].pack())
+            .build();
+
+        let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+        // TODO: The signature here is actually ckb-specific recoverable signature.
+        // We need to
+        let signature = node_b_commitment_secret
+            .sign_ecdsa(&message.into())
+            .serialize_compact();
+
+        let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+
+        let witness = [
+            empty_witness_args.to_vec(),
+            witnesses.to_vec(),
+            vec![0xFF],
+            signature.to_vec(),
+        ]
+        .concat();
+
+        let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+        println!("tx: {:?}", revocation_tx);
+        assert_eq!(
+            node_a.submit_tx(revocation_tx.clone()).await,
             Status::Committed
         );
     }

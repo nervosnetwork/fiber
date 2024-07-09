@@ -19,7 +19,7 @@ use super::channel::{
 };
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{Hash256, OpenChannel, Pubkey};
+use super::types::{Hash256, OpenChannel, Privkey, Pubkey};
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
     types::CFNMessage,
@@ -154,7 +154,8 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
-    RevokeAndAckReceived(PeerId, Hash256, u64, Hash256, Pubkey),
+    // A RevokeAndAck is received from the peer.
+    RevokeAndAckReceived(PeerId, Hash256, u64, Privkey, Vec<u8>, Pubkey),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,

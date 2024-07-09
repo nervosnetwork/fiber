@@ -307,6 +307,10 @@ impl Privkey {
         let sk = Scalar::from(self);
         (scalar + sk).unwrap().into()
     }
+
+    pub fn sign_ecdsa(&self, message: &[u8; 32]) -> secp256k1::ecdsa::Signature {
+        secp256k1_instance().sign_ecdsa(&secp256k1::Message::from_digest(*message), &self.0)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
