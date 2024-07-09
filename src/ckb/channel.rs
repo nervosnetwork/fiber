@@ -3318,7 +3318,7 @@ impl ChannelActorState {
                 commitment_number, per_commitment_key, per_commitment_point
             )));
         }
-        let (_, _, witnesses) = self.build_commitment_transaction_parameters(false);
+        let (_, _, witnesses) = self.build_commitment_transaction_parameters(true);
 
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
@@ -5361,7 +5361,8 @@ mod tests {
             .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
             .input(
                 CellInput::new_builder()
-                    .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
+                    // The second output of the commitment tx is the output locked by the commitment lock.
+                    .previous_output(commitment_tx.output_pts().get(1).unwrap().clone())
                     .build(),
             )
             .outputs(vec![CellOutput::new_builder()
@@ -5374,15 +5375,9 @@ mod tests {
         let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
         let signature = commitment_secret.sign_ecdsa_recoverable(&message.into());
 
-        let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+        dbg!(hex::encode(&witnesses));
 
-        let witness = [
-            empty_witness_args.to_vec(),
-            witnesses.to_vec(),
-            vec![0xFF],
-            signature.to_vec(),
-        ]
-        .concat();
+        let witness = [witnesses.to_vec(), vec![0xFF], signature.to_vec()].concat();
 
         let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
