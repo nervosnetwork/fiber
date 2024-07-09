@@ -39,6 +39,7 @@ script:post-response {
   await new Promise(r => setTimeout(r, 2000));
   bru.setVar("CHANNEL_ID", res.body.result.channels.length);
   if (res.body.result.channels.length != 0) {
+    console.log("channel first: ", res.body.result.channels[0]);
     throw new Error("Assertion failed: expect thel channel is closed");
   }
 }

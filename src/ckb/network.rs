@@ -207,7 +207,11 @@ pub enum NetworkActorEvent {
     CommitmentTransactionPending(Transaction, Hash256),
 
     /// A commitment transaction is broacasted successfully.
-    CommitmentTransactionConfirmed(Transaction, Hash256),
+    CommitmentTransactionConfirmed(Hash256, Hash256),
+
+    /// A commitment transaction is failed to be broacasted.
+    CommitmentTransactionFailed(Hash256, Byte32),
+
     /// A closing transaction has been confirmed.
     ClosingTransactionConfirmed(PeerId, Hash256, Byte32),
 
@@ -458,10 +462,16 @@ where
                     .on_commitment_transaction_pending(transaction, channel_id)
                     .await;
             }
-            NetworkActorEvent::CommitmentTransactionConfirmed(transaction, channel_id) => {
+            NetworkActorEvent::CommitmentTransactionConfirmed(tx_hash, channel_id) => {
                 state
-                    .on_commitment_transaction_confirmed(transaction, channel_id)
+                    .on_commitment_transaction_confirmed(tx_hash, channel_id)
                     .await;
+            }
+            NetworkActorEvent::CommitmentTransactionFailed(tx_hash, channel_id) => {
+                error!(
+                    "Commitment transaction failed for channel {:?}, tx hash: {:?}",
+                    channel_id, tx_hash
+                );
             }
             NetworkActorEvent::FundingTransactionFailed(outpoint) => {
                 error!("Funding transaction failed: {:?}", outpoint);
@@ -865,9 +875,9 @@ impl NetworkActorState {
         Ok((channel, temp_channel_id, new_id))
     }
 
-    async fn broadcast_tx_with_callback<F, R>(&self, transaction: TransactionView, callback: F)
+    async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
-        F: Send + 'static + FnOnce(Result<Status, RactorErr<CkbChainMessage>>) -> R,
+        F: Send + 'static + FnOnce(Result<Status, RactorErr<CkbChainMessage>>),
     {
         debug!("Trying to broadcast transaction {:?}", &transaction);
         let chain = self.chain_actor.clone();
@@ -1210,7 +1220,7 @@ impl NetworkActorState {
         self.pending_channels.insert(outpoint.clone(), channel_id);
         // TODO: try to broadcast the transaction to the network.
         let transaction = transaction.into_view();
-        let tx_hash = transaction.hash();
+        let tx_hash: Byte32 = transaction.hash();
         debug!(
             "Funding transaction (outpoint {:?}) for channel {:?} is now ready. Broadcast it {:?} now.",
             &outpoint, &channel_id, &tx_hash
@@ -1249,67 +1259,39 @@ impl NetworkActorState {
         channel_id: Hash256,
     ) {
         let transaction = transaction.into_view();
+        let tx_hash: Byte32 = transaction.hash();
         debug!(
-            "Trying to broadcast commitment transaction {:?}",
-            &transaction
+            "Commitment transaction for channel {:?} is now ready. Broadcast it {:?} now.",
+            &channel_id, &tx_hash
         );
 
-        call_t!(
-            self.chain_actor,
-            CkbChainMessage::SendTx,
-            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-            transaction.clone()
-        )
-        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-        .expect("valid commitment tx");
-
-        let hash = transaction.hash();
-
-        info!("Commitment transactoin sent to the network: {}", hash);
-        const NUM_CONFIRMATIONS: u64 = 4;
-        let request = TraceTxRequest {
-            tx_hash: hash,
-            confirmations: NUM_CONFIRMATIONS,
-        };
-        let chain = self.chain_actor.clone();
         let network = self.network.clone();
-        // Spawn a new task to avoid blocking current actor message processing.
-        ractor::concurrency::tokio_primatives::spawn(async move {
-            debug!("Tracing transaction status {:?}", &request.tx_hash);
-            let message = match call_t!(
-                chain,
-                CkbChainMessage::TraceTx,
-                DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                request.clone()
-            ) {
+        self.broadcast_tx_with_callback(transaction, move |result| {
+            let message = match result {
                 Ok(Status::Committed) => {
-                    info!("Funding transaction {:?} confirmed", &request.tx_hash,);
-                    NetworkActorEvent::CommitmentTransactionConfirmed(
-                        transaction.data(),
-                        channel_id,
-                    )
+                    info!("Commitment transaction {:?} confirmed", tx_hash,);
+                    NetworkActorEvent::CommitmentTransactionConfirmed(tx_hash.into(), channel_id)
                 }
                 Ok(status) => {
                     error!(
                         "Commitment transaction {:?} failed to be confirmed with final status {:?}",
-                        &request.tx_hash, &status
+                        &tx_hash, &status
                     );
-                    unimplemented!("handling commitment transaction failed");
+                    NetworkActorEvent::CommitmentTransactionFailed(channel_id, tx_hash)
                 }
                 Err(err) => {
                     error!(
-                        "Failed to trace transaction {:?}: {:?}",
-                        &request.tx_hash, &err
+                        "Failed to trace commitment transaction {:?}: {:?}",
+                        &tx_hash, &err
                     );
-                    unimplemented!("handling commitment transaction failed");
+                    NetworkActorEvent::CommitmentTransactionFailed(channel_id, tx_hash)
                 }
             };
-
-            // Notify outside observers.
             network
                 .send_message(NetworkActorMessage::new_event(message))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        });
+        })
+        .await;
     }
 
     async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
@@ -1329,16 +1311,8 @@ impl NetworkActorState {
         );
     }
 
-    async fn on_commitment_transaction_confirmed(
-        &mut self,
-        transaction: Transaction,
-        channel_id: Hash256,
-    ) {
-        let transaction = transaction.into_view();
-        debug!(
-            "Commitment transaction is confirmed: {:?}",
-            &transaction.hash()
-        );
+    async fn on_commitment_transaction_confirmed(&mut self, tx_hash: Hash256, channel_id: Hash256) {
+        debug!("Commitment transaction is confirmed: {:?}", tx_hash);
         self.send_message_to_channel_actor(
             channel_id,
             ChannelActorMessage::Event(ChannelEvent::CommitmentTransactionConfirmed),
