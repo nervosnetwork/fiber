@@ -144,8 +144,7 @@ pub enum NetworkServiceEvent {
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256),
-    // The channel is closed (closing transaction is confirmed).
-    ChannelClosed(PeerId, Hash256),
+    ChannelClosed(PeerId, Hash256, Byte32),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
     // We have signed a commitment transaction and sent it to the other party.
@@ -458,9 +457,9 @@ where
                     .on_closing_transaction_pending(channel_id, peer_id.clone(), tx.clone())
                     .await;
             }
-            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, _tx_hash) => {
+            NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash) => {
                 state
-                    .on_closing_transaction_confirmed(&peer_id, &channel_id)
+                    .on_closing_transaction_confirmed(&peer_id, &channel_id, tx_hash)
                     .await;
             }
             NetworkActorEvent::ClosingTransactionFailed(peer_id, tx_hash, channel_id) => {
@@ -1115,7 +1114,12 @@ impl NetworkActorState {
         .await;
     }
 
-    async fn on_closing_transaction_confirmed(&mut self, peer_id: &PeerId, channel_id: &Hash256) {
+    async fn on_closing_transaction_confirmed(
+        &mut self,
+        peer_id: &PeerId,
+        channel_id: &Hash256,
+        tx_hash: Byte32,
+    ) {
         self.channels.remove(&channel_id);
         if let Some(session) = self.get_peer_session(&peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
@@ -1132,6 +1136,7 @@ impl NetworkActorState {
                 NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelClosed(
                     peer_id.clone(),
                     *channel_id,
+                    tx_hash,
                 )),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);

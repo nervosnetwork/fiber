@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use ckb_types::core::TransactionView;
+use ckb_types::{core::TransactionView, packed::Byte32};
 
 use ractor::{Actor, ActorRef};
 
@@ -22,7 +22,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb_chain::{submit_tx, CkbChainMessage, MockChainActor},
+    ckb_chain::{submit_tx, trace_tx, trace_tx_hash, CkbChainMessage, MockChainActor},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
 };
@@ -219,6 +219,14 @@ impl NetworkNode {
 
     pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
+    }
+
+    pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
+        trace_tx(self.chain_actor.clone(), tx).await
+    }
+
+    pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
+        trace_tx_hash(self.chain_actor.clone(), tx_hash).await
     }
 }
 
