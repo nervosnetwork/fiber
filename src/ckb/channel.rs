@@ -5225,6 +5225,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_old_commitment_transaction() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .pretty()
+            .init();
+
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
