@@ -4513,7 +4513,7 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
 }
 
 pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
+    derive_public_key(commitment_point, base_key)
 }
 
 pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
@@ -4608,14 +4608,15 @@ impl InMemorySigner {
     }
 
     pub fn derive_revocation_key(&self, commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(commitment_number);
-        debug!(
-            "Revocation key: {}",
-            hex::encode(
-                derive_private_key(&self.revocation_base_key, &per_commitment_point).as_ref()
-            )
-        );
-        derive_private_key(&self.revocation_base_key, &per_commitment_point)
+        let per_commitment_secret = self.get_commitment_secret(commitment_number);
+        // Note that here we don't derive private key in the same way as we ususally do.
+        // Instead we use per commitment secret as "master key" and public revocation key
+        // as derivation material. In this way when we reveal the per round "master key",
+        // the counterparty can obtain the secret key for that round.
+        derive_private_key(
+            &per_commitment_secret.into(),
+            &self.revocation_base_key.pubkey(),
+        )
     }
 
     pub fn derive_payment_key(&self, new_commitment_number: u64) -> Privkey {
@@ -4650,8 +4651,8 @@ mod tests {
     use crate::{
         ckb::{
             channel::{
-                AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
-                ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+                derive_revocation_pubkey, AddTlcCommand, ChannelCommand, ChannelCommandWithId,
+                RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
             },
             hash_algorithm::HashAlgorithm,
             network::{AcceptChannelCommand, OpenChannelCommand},
@@ -4682,11 +4683,24 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_private_and_public_keys() {
+    fn test_derive_private_and_public_tlc_keys() {
         let privkey = Privkey::from(&[1; 32]);
         let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
         let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
         let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
+        assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+    }
+
+    #[test]
+    fn test_derive_private_and_public_revocation_keys() {
+        let base_revocation_key = Privkey::from(&[1; 32]);
+        let per_commitment_secret = Privkey::from(&[2; 32]);
+        let derived_privkey =
+            derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
+        let derived_pubkey = derive_revocation_pubkey(
+            &base_revocation_key.pubkey(),
+            &per_commitment_secret.pubkey(),
+        );
         assert_eq!(derived_privkey.pubkey(), derived_pubkey);
     }
 
