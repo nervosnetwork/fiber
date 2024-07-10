@@ -673,12 +673,11 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
 
         if command.force {
-            if let Some(tx) = &state.latest_commitment_transaction {
-                let transaction = tx.clone();
+            if let Some(transaction) = &state.latest_commitment_transaction {
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::CommitmentTransactionPending(
-                            transaction,
+                            transaction.clone(),
                             state.get_id(),
                         ),
                     ))
