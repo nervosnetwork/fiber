@@ -155,7 +155,7 @@ pub enum NetworkServiceEvent {
     // to create a complete commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
     // A RevokeAndAck is received from the peer.
-    RevokeAndAckReceived(PeerId, Hash256, u64, Privkey, Vec<u8>, Pubkey),
+    RevokeAndAckReceived(PeerId, Hash256, u64, Privkey, Pubkey, Vec<u8>, Pubkey),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,

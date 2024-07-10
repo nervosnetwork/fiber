@@ -3348,6 +3348,16 @@ impl ChannelActorState {
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
 
+        debug!(
+            "Revocation base keys: local {:?}, remote {:?}",
+            self.local_channel_parameters.pubkeys.revocation_base_key,
+            self.remote_channel_parameters
+                .as_ref()
+                .unwrap()
+                .pubkeys
+                .revocation_base_key,
+        );
+
         emit_service_event(
             network,
             NetworkServiceEvent::RevokeAndAckReceived(
@@ -3355,6 +3365,11 @@ impl ChannelActorState {
                 self.get_id(),
                 commitment_number,
                 per_commitment_key,
+                self.remote_channel_parameters
+                    .as_ref()
+                    .unwrap()
+                    .pubkeys
+                    .revocation_base_key,
                 witnesses,
                 next_per_commitment_point,
             ),
@@ -3857,7 +3872,7 @@ impl ChannelActorState {
                     self.get_local_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_remote_commitment_point(local_commitment_number),
-                    self.get_local_channel_parameters().revocation_base_key(),
+                    self.get_remote_channel_parameters().revocation_base_key(),
                 )
             } else {
                 (
@@ -3866,7 +3881,7 @@ impl ChannelActorState {
                     self.get_remote_channel_parameters()
                         .delayed_payment_base_key(),
                     self.get_local_commitment_point(remote_commitment_number),
-                    self.get_remote_channel_parameters().revocation_base_key(),
+                    self.get_local_channel_parameters().revocation_base_key(),
                 )
             };
             debug!(
@@ -4513,7 +4528,12 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
 }
 
 pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(commitment_point, base_key)
+    let result = derive_public_key(commitment_point, base_key);
+    debug!(
+        "Derived revocation pub key from commitment point {:?}, base_key {:?}, result {:?}",
+        &commitment_point, &base_key, &result
+    );
+    result
 }
 
 pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
@@ -4672,6 +4692,7 @@ mod tests {
         prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
     };
     use ractor::call;
+    use tracing::debug;
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
@@ -5403,20 +5424,28 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let (commitment_secret, witnesses) = node_a
+        let (privkey, witnesses) = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RevokeAndAckReceived(
                     peer_id,
                     channel_id,
                     commitment_number,
                     commitment_secret,
+                    revocation_base_pubkey,
                     witnesses,
                     _commitment_point,
                 ) => {
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
                     assert_eq!(*commitment_number, 0u64);
-                    Some((commitment_secret.clone(), witnesses.clone()))
+                    let key = derive_private_key(&commitment_secret, &revocation_base_pubkey);
+                    debug!(
+                        "Get revocation base pubkey {:?}, commitment secret {:?}, new key {:?}",
+                        &revocation_base_pubkey,
+                        hex::encode(commitment_secret.as_ref()),
+                        hex::encode(key.as_ref())
+                    );
+                    Some((key, witnesses.clone()))
                 }
                 _ => None,
             })
@@ -5427,7 +5456,7 @@ mod tests {
             Status::Committed
         );
 
-        dbg!(hex::encode(commitment_secret.as_ref()));
+        dbg!(hex::encode(privkey.as_ref()));
         dbg!(&commitment_tx);
 
         let tx = Transaction::default()
@@ -5447,7 +5476,7 @@ mod tests {
             .build();
 
         let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-        let signature = commitment_secret.sign_ecdsa_recoverable(&message.into());
+        let signature = privkey.sign_ecdsa_recoverable(&message.into());
 
         dbg!(hex::encode(&witnesses));
 
