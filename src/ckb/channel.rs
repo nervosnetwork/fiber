@@ -1973,6 +1973,11 @@ impl ChannelActorState {
         // Now we should revoke previous transation by revealing preimage.
         let old_number = self.get_remote_commitment_number();
         let secret = self.signer.get_commitment_secret(old_number);
+        debug!(
+            "Sending commitment secret {:?} for commitment number {}",
+            hex::encode(&secret),
+            old_number
+        );
 
         self.update_state_on_raa_msg(false);
 
@@ -3306,12 +3311,14 @@ impl ChannelActorState {
             next_per_commitment_point,
         } = revoke_and_ack;
         let commitment_number = self.get_local_commitment_number();
-        debug!(
-            "Checking commitment secret and point for revocation #{}",
-            commitment_number
-        );
         let per_commitment_point = self.get_remote_commitment_point(commitment_number);
         let per_commitment_key = Privkey::from(per_commitment_secret);
+        debug!(
+            "Checking commitment secret and point for revocation #{}, point {:?}, secret {:?}",
+            commitment_number,
+            per_commitment_point,
+            hex::encode(per_commitment_key.as_ref()),
+        );
         if per_commitment_point != per_commitment_key.pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
@@ -3868,9 +3875,16 @@ impl ChannelActorState {
             )
         };
 
+        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
+        let revocation_key_hash = blake2b_256(revocation_key.serialize());
+
         debug!(
-            "Parameters for witnesses: epoch {:?}, payment key: {:?}, revocation key: {:?}",
-            delayed_epoch, delayed_payment_key, revocation_key
+            "Parameters for witnesses: epoch {:?}, payment key: {:?} (hash: {:?}), revocation key: {:?} (hash: {:?})",
+            delayed_epoch,
+            delayed_payment_key,
+            hex::encode(&delayed_payment_key_hash),
+            revocation_key,
+            hex::encode(&revocation_key_hash)
         );
 
         // for xudt compatibility issue,
@@ -3878,8 +3892,8 @@ impl ChannelActorState {
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
         let witnesses = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
-            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
-            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
+            delayed_payment_key_hash[..20].to_vec(),
+            revocation_key_hash[..20].to_vec(),
             self.get_witness_args_for_active_tlcs(local),
         ]
         .concat();
@@ -5389,6 +5403,7 @@ mod tests {
             Status::Committed
         );
 
+        dbg!(hex::encode(commitment_secret.as_ref()));
         dbg!(&commitment_tx);
 
         let tx = Transaction::default()
