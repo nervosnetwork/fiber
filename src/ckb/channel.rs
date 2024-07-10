@@ -2807,13 +2807,11 @@ impl ChannelActorState {
 
         match self.remote_shutdown_signature {
             Some(remote_shutdown_signature) => {
-                self.update_state(ChannelState::Closed);
                 let tx = self.aggregate_partial_signatures_to_consume_funding_cell(
                     [local_shutdown_signature, remote_shutdown_signature],
                     u64::MAX,
                     &shutdown_tx,
                 )?;
-
                 assert_eq!(
                     tx.data().serialized_size_in_block(),
                     commitment_tx_size(
@@ -2824,6 +2822,8 @@ impl ChannelActorState {
                         ))
                     )
                 );
+
+                self.update_state(ChannelState::Closed);
 
                 network
                     .send_message(NetworkActorMessage::new_event(
