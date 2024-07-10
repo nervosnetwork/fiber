@@ -658,8 +658,11 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 ShuttingDownFlags::empty()
             }
             ChannelState::ShuttingDown(flags) => {
-                debug!("we already in shutting down state: {:?}", &flags);
-                return Ok(());
+                if !command.force {
+                    debug!("we already in shutting down state: {:?}", &flags);
+                    return Ok(());
+                }
+                flags
             }
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
@@ -683,8 +686,9 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                let flags = ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION;
-                state.update_state(ChannelState::ShuttingDown(flags));
+                state.update_state(ChannelState::ShuttingDown(
+                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                ));
             } else {
                 return Err(ProcessingChannelError::InvalidState(
                     "Force shutdown without a valid commitment transaction".to_string(),
@@ -707,8 +711,9 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
 
             state.local_shutdown_script = Some(command.close_script.clone());
             state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
-            let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-            state.update_state(ChannelState::ShuttingDown(flags));
+            state.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+            ));
             debug!(
                 "Channel state updated to {:?} after processing shutdown command",
                 &state.state
