@@ -1,4 +1,4 @@
-use super::channel::FUNDING_CELL_WITNESS_LEN;
+use super::channel::{ChannelActorState, FUNDING_CELL_WITNESS_LEN};
 use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb_chain::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
@@ -20,29 +20,46 @@ pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
     }
 }
 
-pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
-    // Note: here we must add args, otherwise the total transaction size will be different
-    let dummy_script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
+pub(crate) fn commitment_tx_size(
+    udt_type_script: &Option<Script>,
+    shutdown_scripts: Option<(Script, Script)>,
+) -> usize {
+    let (script_a, script_b) =
+        if let Some((local_shutdown_script, remote_shutdown_script)) = shutdown_scripts {
+            (local_shutdown_script, remote_shutdown_script)
+        } else {
+            let script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
+            (script.clone(), script)
+        };
 
     let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 
     let (outputs, outputs_data) = if let Some(type_script) = udt_type_script {
-        let dummy_output = CellOutput::new_builder()
-            .lock(dummy_script)
+        let output_a = CellOutput::new_builder()
+            .lock(script_a)
+            .type_(Some(type_script.clone()).pack())
+            .capacity(0.pack())
+            .build();
+        let output_b = CellOutput::new_builder()
+            .lock(script_b)
             .type_(Some(type_script.clone()).pack())
             .capacity(0.pack())
             .build();
         let dummy_output_data = (0_u128).to_le_bytes().pack();
 
-        let outputs = [dummy_output.clone(), dummy_output];
+        let outputs = [output_a, output_b];
         let outputs_data = [dummy_output_data.clone(), dummy_output_data];
         (outputs, outputs_data.to_vec())
     } else {
-        let dummy_output = CellOutput::new_builder()
-            .capacity((0 as u64).pack())
-            .lock(dummy_script)
+        let output_a = CellOutput::new_builder()
+            .capacity(0.pack())
+            .lock(script_a)
             .build();
-        let outputs = [dummy_output.clone(), dummy_output];
+        let output_b = CellOutput::new_builder()
+            .capacity(0.pack())
+            .lock(script_b)
+            .build();
+        let outputs = [output_a, output_b];
         (outputs, vec![Bytes::default(); 2])
     };
 
@@ -60,8 +77,6 @@ pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     mock_commitment_tx.data().serialized_size_in_block()
 }
 
-/// Note: we use this function to calculate both commitment transaction and shutdown transaction
-/// shutdown transaction is just a special commitment transaction.
 pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Option<Script>) -> u64 {
     debug!(
         "calculate_commitment_tx_fee: {} udt_script: {:?}",
@@ -69,8 +84,36 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
     );
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
 
-    let tx_size = commitment_tx_size(udt_type_script) as u64;
+    let tx_size = commitment_tx_size(udt_type_script, None) as u64;
     let res = fee_rate.fee(tx_size).as_u64();
     debug!("calculate_commitment_tx_fee return: {}", res);
+    res
+}
+
+/// Note: the shutdown scripts are optional, if not provided, the default lock script will be used
+pub(crate) fn calculate_shutdown_tx_fee(fee_rate: u64, state: &ChannelActorState) -> u64 {
+    let udt_type_script = &state.funding_udt_type_script;
+    let shutdown_scripts = (
+        state.remote_shutdown_script.clone().unwrap_or(
+            state
+                .funding_source_lock_script
+                .clone()
+                .expect("no funding source lock script"),
+        ),
+        state.local_shutdown_script.clone().unwrap_or(
+            state
+                .funding_source_lock_script
+                .clone()
+                .expect("no funding source lock script"),
+        ),
+    );
+    debug!(
+        "calculate_shutdown_tx_fee: {} udt_script: {:?}",
+        fee_rate, udt_type_script
+    );
+    let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
+    let tx_size = commitment_tx_size(udt_type_script, Some(shutdown_scripts)) as u64;
+    let res = fee_rate.fee(tx_size).as_u64();
+    debug!("calculate_shutdown_tx_fee return: {}", res);
     res
 }

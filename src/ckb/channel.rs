@@ -47,7 +47,7 @@ use crate::{
 
 use super::{
     config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_UDT_OCCUPIED_CAPACITY},
-    fee::default_minimal_ckb_amount,
+    fee::{calculate_shutdown_tx_fee, default_minimal_ckb_amount},
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
     network::CFNMessageWithPeerId,
@@ -388,7 +388,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
 
                 let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
 
-                if state.check_valid_to_auto_accept() {
+                if state.check_valid_to_auto_accept_shutdown() {
                     let funding_source_lock_script =
                         state.funding_source_lock_script.as_ref().unwrap();
                     self.network
@@ -657,7 +657,10 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
             }
-            ChannelState::ShuttingDown(flags) => flags,
+            ChannelState::ShuttingDown(flags) => {
+                debug!("we already in shutting down state: {:?}", &flags);
+                return Ok(());
+            }
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -667,7 +670,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             }
         };
 
-        state.check_shutdown_fee_rate(command.fee_rate)?;
+        state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
 
         if command.force {
             if let Some(tx) = &state.latest_commitment_transaction {
@@ -1887,7 +1890,11 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn check_shutdown_fee_rate(&self, fee_rate: FeeRate) -> ProcessingChannelResult {
+    fn check_shutdown_fee_rate(
+        &self,
+        fee_rate: FeeRate,
+        close_script: &Script,
+    ) -> ProcessingChannelResult {
         if fee_rate.as_u64() < self.commitment_fee_rate {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Fee rate {} is less than commitment fee rate {}",
@@ -1895,8 +1902,9 @@ impl ChannelActorState {
             )));
         }
 
-        let fee = calculate_commitment_tx_fee(fee_rate.as_u64(), &self.funding_udt_type_script);
-        debug!("shutdown fee: {:?}", fee);
+        let mut cloned = self.clone();
+        cloned.local_shutdown_script = Some(close_script.clone());
+        let fee = calculate_shutdown_tx_fee(fee_rate.as_u64(), &cloned);
 
         let available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
@@ -2629,14 +2637,14 @@ impl ChannelActorState {
         &self.get_remote_channel_parameters().pubkeys.funding_pubkey
     }
 
-    fn check_valid_to_auto_accept(&self) -> bool {
+    fn check_valid_to_auto_accept_shutdown(&self) -> bool {
         let Some(remote_fee_rate) = self.remote_shutdown_fee_rate else {
             return false;
         };
         if remote_fee_rate < self.commitment_fee_rate {
             return false;
         }
-        let fee = calculate_commitment_tx_fee(remote_fee_rate, &self.funding_udt_type_script);
+        let fee = calculate_shutdown_tx_fee(remote_fee_rate, &self);
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
@@ -2864,6 +2872,17 @@ impl ChannelActorState {
                     u64::MAX,
                     &shutdown_tx,
                 )?;
+
+                assert_eq!(
+                    tx.data().serialized_size_in_block(),
+                    commitment_tx_size(
+                        &self.funding_udt_type_script,
+                        Some((
+                            self.local_shutdown_script.clone().unwrap(),
+                            self.remote_shutdown_script.clone().unwrap()
+                        ))
+                    )
+                );
 
                 network
                     .send_message(NetworkActorMessage::new_event(
@@ -3098,7 +3117,7 @@ impl ChannelActorState {
 
         assert_eq!(
             tx.data().serialized_size_in_block(),
-            commitment_tx_size(&self.funding_udt_type_script)
+            commitment_tx_size(&self.funding_udt_type_script, None)
         );
 
         let num = self.get_current_commitment_number(false);
@@ -3598,11 +3617,8 @@ impl ChannelActorState {
             ) => (
                 local_shutdown_script,
                 remote_shutdown_script,
-                calculate_commitment_tx_fee(local_shutdown_fee_rate, &self.funding_udt_type_script),
-                calculate_commitment_tx_fee(
-                    remote_shutdown_fee_rate,
-                    &self.funding_udt_type_script,
-                ),
+                calculate_shutdown_tx_fee(local_shutdown_fee_rate, &self),
+                calculate_shutdown_tx_fee(remote_shutdown_fee_rate, &self),
             ),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
