@@ -1971,32 +1971,25 @@ impl ChannelActorState {
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
         // Now we should revoke previous transation by revealing preimage.
-        let old_number = self.get_remote_commitment_number();
-        let secret = self.signer.get_commitment_secret(old_number);
-        debug!(
-            "Sending commitment secret {:?} for commitment number {}",
-            hex::encode(&secret),
-            old_number
-        );
-
+        let (commitment_number, commitment_secret) = self.get_previous_local_commitment_secret();
+        // Note that we must update channel state here to update commitment number,
+        // so that next step will obtain the correct commitmen point.
         self.update_state_on_raa_msg(false);
-
-        let new_number = self.get_remote_commitment_number();
-        let point = self.get_local_commitment_point(new_number);
+        let point = self.get_current_local_commitment_point();
 
         debug!(
-            "Revealing revocation preimage #{}: {:?}",
-            old_number, &secret
+            "Sending commitment secret {:?} for commitment number {} and new commitment point {:?}",
+            hex::encode(&commitment_secret),
+            commitment_number,
+            point
         );
-        debug!("Sending new commitment point #{}: {:?}", new_number, &point);
-
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
                     message: CFNMessage::RevokeAndAck(RevokeAndAck {
                         channel_id: self.get_id(),
-                        per_commitment_secret: secret.into(),
+                        per_commitment_secret: commitment_secret.into(),
                         next_per_commitment_point: point,
                     }),
                 }),
@@ -2383,6 +2376,24 @@ impl ChannelActorState {
             commitment_point
         );
         commitment_point
+    }
+
+    fn get_previous_remote_commitment_point(&self) -> (u64, Pubkey) {
+        let commitment_number = self.get_local_commitment_number() - 1;
+        (
+            commitment_number,
+            self.get_remote_commitment_point(commitment_number),
+        )
+    }
+
+    fn get_previous_local_commitment_secret(&self) -> (u64, [u8; 32]) {
+        let commitment_number = self.get_remote_commitment_number() - 1;
+        let secret = self.signer.get_commitment_secret(commitment_number);
+        (commitment_number, secret)
+    }
+
+    fn get_current_local_commitment_point(&self) -> Pubkey {
+        self.get_local_commitment_point(self.get_remote_commitment_number())
     }
 
     pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
@@ -3310,14 +3321,13 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let commitment_number = self.get_local_commitment_number();
-        let per_commitment_point = self.get_remote_commitment_point(commitment_number);
+        let (commitment_number, per_commitment_point) = self.get_previous_remote_commitment_point();
         let per_commitment_key = Privkey::from(per_commitment_secret);
         debug!(
-            "Checking commitment secret and point for revocation #{}, point {:?}, secret {:?}",
+            "Checking #{} commitment secret {:?} and point {:?} consistency",
             commitment_number,
-            per_commitment_point,
             hex::encode(per_commitment_key.as_ref()),
+            per_commitment_point,
         );
         if per_commitment_point != per_commitment_key.pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -5391,7 +5401,7 @@ mod tests {
                 ) => {
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(*commitment_number, 1u64);
+                    assert_eq!(*commitment_number, 0u64);
                     Some((commitment_secret.clone(), witnesses.clone()))
                 }
                 _ => None,
