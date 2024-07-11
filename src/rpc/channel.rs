@@ -138,6 +138,7 @@ pub enum RemoveTlcReason {
 pub struct ShutdownChannelParams {
     pub channel_id: Hash256,
     pub close_script: Script,
+    pub force: Option<bool>,
     #[serde_as(as = "U64Hex")]
     pub fee_rate: u64,
 }
@@ -344,6 +345,7 @@ where
                         ShutdownCommand {
                             close_script: params.close_script.clone().into(),
                             fee_rate: FeeRate::from_u64(params.fee_rate),
+                            force: params.force.unwrap_or(false),
                         },
                         rpc_reply,
                     ),

@@ -124,6 +124,7 @@ pub struct RemoveTlcCommand {
 pub struct ShutdownCommand {
     pub close_script: Script,
     pub fee_rate: FeeRate,
+    pub force: bool,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -398,6 +399,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                                     channel_id: state.get_id(),
                                     close_script: funding_source_lock_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
+                                    force: shutdown.force,
                                 }),
                             }),
                         ))
@@ -647,7 +649,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
     ) -> ProcessingChannelResult {
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
-            ChannelState::Closed => {
+            ChannelState::Closed(_) => {
                 debug!("Channel already closed, ignoring shutdown command");
                 return Ok(());
             }
@@ -656,8 +658,11 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 ShuttingDownFlags::empty()
             }
             ChannelState::ShuttingDown(flags) => {
-                debug!("we already in shutting down state: {:?}", &flags);
-                return Ok(());
+                if !command.force {
+                    debug!("we already in shutting down state: {:?}", &flags);
+                    return Ok(());
+                }
+                flags
             }
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
@@ -669,28 +674,53 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
         };
 
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
-                    peer_id: self.peer_id.clone(),
-                    message: CFNMessage::Shutdown(Shutdown {
-                        channel_id: state.get_id(),
-                        close_script: command.close_script.clone(),
-                        fee_rate: command.fee_rate,
-                    }),
-                }),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        state.local_shutdown_script = Some(command.close_script.clone());
-        state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
-        let flags = flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT;
-        state.update_state(ChannelState::ShuttingDown(flags));
-        debug!(
-            "Channel state updated to {:?} after processing shutdown command",
-            &state.state
-        );
 
-        state.maybe_transition_to_shutdown(&self.network)?;
+        if command.force {
+            if let Some(transaction) = &state.latest_commitment_transaction {
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::CommitmentTransactionPending(
+                            transaction.clone(),
+                            state.get_id(),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                state.update_state(ChannelState::ShuttingDown(
+                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                ));
+            } else {
+                return Err(ProcessingChannelError::InvalidState(
+                    "Force shutdown without a valid commitment transaction".to_string(),
+                ));
+            }
+        } else {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
+                        peer_id: self.peer_id.clone(),
+                        message: CFNMessage::Shutdown(Shutdown {
+                            channel_id: state.get_id(),
+                            close_script: command.close_script.clone(),
+                            fee_rate: command.fee_rate,
+                            force: command.force,
+                        }),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            state.local_shutdown_script = Some(command.close_script.clone());
+            state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
+            state.update_state(ChannelState::ShuttingDown(
+                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+            ));
+            debug!(
+                "Channel state updated to {:?} after processing shutdown command",
+                &state.state
+            );
+
+            state.maybe_transition_to_shutdown(&self.network)?;
+        }
         Ok(())
     }
 
@@ -863,7 +893,8 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                         AwaitingChannelReadyFlags::empty()
                     }
                     _ => {
-                        panic!("Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state);
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
                 self.network
@@ -881,6 +912,19 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
                     state.on_channel_ready(&self.network);
                 }
+            }
+            ChannelEvent::CommitmentTransactionConfirmed => {
+                match state.state {
+                    ChannelState::ShuttingDown(flags)
+                        if flags.contains(ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                            "Expecting commitment transaction confirmed event in state ShuttingDown, but got state {:?}", &state.state)
+                        ));
+                    }
+                };
+                state.update_state(ChannelState::Closed(CloseFlags::UNCOOPERATIVE));
+                debug!("Channel closed with uncooperative close");
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
@@ -1239,6 +1283,7 @@ where
                 }
             }
         }
+
         self.store.insert_channel_actor_state(state.clone());
         Ok(())
     }
@@ -1444,6 +1489,10 @@ pub struct ChannelActorState {
 
     pub remote_nonce: Option<PubNonce>,
 
+    // The latest commitment transaction we're holding
+    #[serde_as(as = "Option<EntityHex>")]
+    pub latest_commitment_transaction: Option<Transaction>,
+
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<Pubkey>,
@@ -1471,6 +1520,7 @@ pub struct ClosedChannel {}
 pub enum ChannelEvent {
     PeerDisconnected,
     FundingTransactionConfirmed,
+    CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
 }
 
@@ -1547,6 +1597,17 @@ bitflags! {
         const AWAITING_PENDING_TLCS = ShuttingDownFlags::OUR_SHUTDOWN_SENT.bits() | ShuttingDownFlags::THEIR_SHUTDOWN_SENT.bits();
         /// Indicates all pending HTLCs are resolved, and this channel will be dropped.
         const DROPPING_PENDING = 1 << 2;
+        /// Indicates we have submitted a commitment transaction, waiting for confirmation
+        const WAITING_COMMITMENT_CONFIRMATION = 1 << 3;
+    }
+
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct CloseFlags: u32 {
+        /// Indicates that channel is closed cooperatively.
+        const COOPERATIVE = 1;
+        /// Indicates that channel is closed uncooperatively, initiated by one party forcely.
+        const UNCOOPERATIVE = 1 << 1;
     }
 }
 
@@ -1586,12 +1647,12 @@ pub enum ChannelState {
     /// is about to drop us, but we store this anyway.
     ShuttingDown(ShuttingDownFlags),
     /// This channel is closed.
-    Closed,
+    Closed(CloseFlags),
 }
 
 impl ChannelState {
     fn is_closed(&self) -> bool {
-        matches!(self, ChannelState::Closed)
+        matches!(self, ChannelState::Closed(_))
     }
 }
 
@@ -1702,6 +1763,7 @@ impl ChannelActorState {
             remote_shutdown_fee_rate: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
+            latest_commitment_transaction: None,
 
             reestablishing: false,
             #[cfg(debug_assertions)]
@@ -1756,6 +1818,7 @@ impl ChannelActorState {
             remote_shutdown_signature: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
+            latest_commitment_transaction: None,
 
             reestablishing: false,
             created_at: SystemTime::now(),
@@ -2823,7 +2886,7 @@ impl ChannelActorState {
                     )
                 );
 
-                self.update_state(ChannelState::Closed);
+                self.update_state(ChannelState::Closed(CloseFlags::COOPERATIVE));
 
                 network
                     .send_message(NetworkActorMessage::new_event(
@@ -3076,7 +3139,7 @@ impl ChannelActorState {
                         self.peer_id.clone(),
                         self.get_id(),
                         num,
-                        tx,
+                        tx.clone(),
                     ),
                 ),
             ))
@@ -3088,6 +3151,7 @@ impl ChannelActorState {
             &commitment_signed.next_local_nonce
         );
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
+        self.latest_commitment_transaction = Some(tx.data());
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::THEIR_COMMITMENT_SIGNED_SENT;
@@ -5084,6 +5148,7 @@ mod tests {
                         ShutdownCommand {
                             close_script: Script::default().as_builder().build(),
                             fee_rate,
+                            force: false,
                         },
                         rpc_reply,
                     ),

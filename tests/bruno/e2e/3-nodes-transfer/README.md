@@ -8,7 +8,7 @@ seq node  rpc
 2   node2 connect_peer(node3)
 3   node1 open_channel(node2, 200 CKB) auto accept? channel1
 4   node2 open_channel(node3, 100 CKB) auto accept? channel2
-5   node3 生成 0.1 CKB invoice, 包含 payment_hash (rpc name??)
+5   node3 generate 0.1 CKB invoice, which includes payment_hash
 6   node1 add_tlc(channel1, tlc_id, 0.1 CKB payment_hash, expiry)
 7   node2 add_tlc(channel2, tlc_id, 0.1 CKB payment_hash, expiry)
 8   node3 remove_tlc(channel2, RemoveTlcFulfill(payment_preimage))
