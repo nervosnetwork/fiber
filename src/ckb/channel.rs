@@ -606,6 +606,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
+        self.handle_commitment_signed_command(state)?;
         Ok(tlc.id.into())
     }
 
@@ -638,7 +639,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             state.to_remote_amount
         );
         state.maybe_transition_to_shutdown(&self.network)?;
-
+        self.handle_commitment_signed_command(state)?;
         Ok(())
     }
 
@@ -837,7 +838,6 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             ChannelCommand::AddTlc(command, reply) => {
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
-                        self.handle_commitment_signed_command(state)?;
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
@@ -850,7 +850,6 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             ChannelCommand::RemoveTlc(command, reply) => {
                 match self.handle_remove_tlc_command(state, command) {
                     Ok(_) => {
-                        self.handle_commitment_signed_command(state)?;
                         let _ = reply.send(Ok(()));
                         Ok(())
                     }
