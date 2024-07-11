@@ -1471,14 +1471,6 @@ pub struct ChannelActorState {
     // This value is guaranteed to be 0 when channel is just created.
     pub commitment_numbers: CommitmentNumbers,
 
-    // We need remote commitment number to build a local commitment transaction,
-    // (required to derive payment keys and construct the list of all TLCs).
-    // This list is all the remote commitment numbers when a local commitment
-    // is committed (i.e. a RevokeAndAck message is received from remote).
-    // The nth element in this list is the remote commitment number of the nth
-    // local commitment transaction.
-    pub remote_commitment_numbers_when_committed_locally: Vec<u64>,
-
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
 
@@ -1762,7 +1754,6 @@ impl ChannelActorState {
                 selected_contest_delay: remote_delay,
             }),
             commitment_numbers: Default::default(),
-            remote_commitment_numbers_when_committed_locally: Default::default(),
             remote_shutdown_script: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
@@ -1817,7 +1808,6 @@ impl ChannelActorState {
             remote_channel_parameters: None,
             remote_nonce: None,
             commitment_numbers: Default::default(),
-            remote_commitment_numbers_when_committed_locally: Default::default(),
             remote_commitment_points: vec![],
             funding_source_lock_script: None,
             local_shutdown_script: None,
@@ -2021,8 +2011,6 @@ impl ChannelActorState {
 
         if is_received {
             self.increment_local_commitment_number();
-            self.remote_commitment_numbers_when_committed_locally
-                .push(self.get_remote_commitment_number());
         } else {
             self.increment_remote_commitment_number();
         }
@@ -3301,8 +3289,6 @@ impl ChannelActorState {
 
     pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
-        self.remote_commitment_numbers_when_committed_locally
-            .push(INITIAL_COMMITMENT_NUMBER);
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
         network
@@ -3851,20 +3837,12 @@ impl ChannelActorState {
     fn build_commitment_transaction_witnesses(
         &self,
         local: bool,
-        local_commitment_number: u64,
-        remote_commitment_number: u64,
+        commitment_number: u64,
     ) -> (Vec<u8>, [u8; 20]) {
-        let commitment_number = if local {
-            local_commitment_number
-        } else {
-            remote_commitment_number
-        };
         debug!(
-            "Building {} commitment transaction #{}'s witnesses (commitment numbers: local {}, remote {})",
+            "Building {} commitment transaction #{}'s witnesses",
             if local { "local" } else { "remote" },
             commitment_number,
-            local_commitment_number,
-            remote_commitment_number
         );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (
@@ -3879,7 +3857,7 @@ impl ChannelActorState {
             ) = if local {
                 // The remote party is the one who can broadcast this transaction.
                 (
-                    self.get_remote_commitment_point(local_commitment_number),
+                    self.get_remote_commitment_point(commitment_number),
                     self.get_remote_channel_parameters().selected_contest_delay,
                     self.get_remote_channel_parameters()
                         .delayed_payment_base_key(),
@@ -3887,7 +3865,7 @@ impl ChannelActorState {
                 )
             } else {
                 (
-                    self.get_local_commitment_point(remote_commitment_number),
+                    self.get_local_commitment_point(commitment_number),
                     self.get_local_channel_parameters().selected_contest_delay,
                     self.get_local_channel_parameters()
                         .delayed_payment_base_key(),
@@ -3945,29 +3923,18 @@ impl ChannelActorState {
         &self,
         local: bool,
     ) -> (Vec<u8>, [u8; 20]) {
-        let local_commitment_number = self.get_local_commitment_number();
-        let remote_commitment_number = self.get_remote_commitment_number();
-        self.build_commitment_transaction_witnesses(
-            local,
-            local_commitment_number,
-            remote_commitment_number,
-        )
+        let commitment_number = if local {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        };
+        self.build_commitment_transaction_witnesses(local, commitment_number)
     }
 
     fn get_local_commitment_witnesses(&self, commitment_number: u64) -> Vec<u8> {
         debug_assert!(commitment_number < self.get_local_commitment_number());
-        debug_assert_eq!(
-            self.get_local_commitment_number(),
-            self.remote_commitment_numbers_when_committed_locally.len() as u64
-        );
-        // TODO: we need to persist the remote commitment number while this local commitment
-        // transaction is commited, and look it up here.
-        self.build_commitment_transaction_witnesses(
-            true,
-            commitment_number,
-            self.remote_commitment_numbers_when_committed_locally[commitment_number as usize],
-        )
-        .0
+        self.build_commitment_transaction_witnesses(true, commitment_number)
+            .0
     }
 
     fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
