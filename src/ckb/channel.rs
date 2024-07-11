@@ -388,7 +388,14 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
 
                 let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
 
-                if state.check_valid_to_auto_accept_shutdown() {
+                // Only automatically reply shutdown if only their shutdown message is sent.
+                // If we are in a state other than only their shutdown is sent,
+                // e.g. our shutdown message is also sent, or we are trying to force shutdown,
+                // we should not reply.
+                let should_we_reply_shutdown =
+                    matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
+
+                if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
                     let funding_source_lock_script =
                         state.funding_source_lock_script.as_ref().unwrap();
                     self.network
