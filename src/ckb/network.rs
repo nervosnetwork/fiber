@@ -146,16 +146,30 @@ pub enum NetworkServiceEvent {
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
     // We have signed a commitment transaction and sent it to the other party.
-    // The last element is the witnesses for this commitment transaction.
-    // The TransactionView here is not a valid commitment transaction per se,
-    // as we need the other party's signature.
-    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
+    LocalCommitmentSigned(
+        PeerId,          /* Peer Id */
+        Hash256,         /* Channel Id */
+        u64,             /* Commitment number */
+        TransactionView, /* Commitment transaction, not valid per se (requires other party's signature) */
+        Vec<u8>,         /* Commitment transaction witness */
+    ),
+    // A RevokeAndAck is received from the peer. Other data relevant to this
+    // RevokeAndAck message are also assembled here. The watch tower may use this.
+    // TODO: We also need transaction hash from the event `LocalCommitmentSigned` above
+    // for the watch tower to watch older transactions being broadcasted.
+    RevokeAndAckReceived(
+        PeerId,  /* Peer Id */
+        Hash256, /* Channel Id */
+        u64,     /* Commitment number */
+        Privkey, /* Revocation secret */
+        Pubkey,  /* Revocation base point */
+        Vec<u8>, /* Commitment transaction witness */
+        Pubkey,  /* Next commitment point */
+    ),
     // The other party has signed a valid commitment transaction,
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
-    // A RevokeAndAck is received from the peer.
-    RevokeAndAckReceived(PeerId, Hash256, u64, Privkey, Pubkey, Vec<u8>, Pubkey),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
