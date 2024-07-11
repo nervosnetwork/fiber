@@ -36,6 +36,7 @@ use crate::{
     ckb::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
+        network::emit_service_event,
         types::Shutdown,
     },
     ckb_chain::{
@@ -310,7 +311,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                 Ok(())
             }
             CFNMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_message(revoke_and_ack)?;
+                state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
             CFNMessage::ChannelReady(channel_ready) => {
@@ -1977,27 +1978,25 @@ impl ChannelActorState {
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
         // Now we should revoke previous transation by revealing preimage.
-        let old_number = self.get_remote_commitment_number();
-        let secret = self.signer.get_commitment_secret(old_number);
-
+        let (commitment_number, commitment_secret) = self.get_previous_local_commitment_secret();
+        // Note that we must update channel state here to update commitment number,
+        // so that next step will obtain the correct commitmen point.
         self.update_state_on_raa_msg(false);
-
-        let new_number = self.get_remote_commitment_number();
-        let point = self.get_local_commitment_point(new_number);
+        let point = self.get_current_local_commitment_point();
 
         debug!(
-            "Revealing revocation preimage #{}: {:?}",
-            old_number, &secret
+            "Sending commitment secret {:?} for commitment number {} and new commitment point {:?}",
+            hex::encode(&commitment_secret),
+            commitment_number,
+            point
         );
-        debug!("Sending new commitment point #{}: {:?}", new_number, &point);
-
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
                     message: CFNMessage::RevokeAndAck(RevokeAndAck {
                         channel_id: self.get_id(),
-                        per_commitment_secret: secret.into(),
+                        per_commitment_secret: commitment_secret.into(),
                         next_per_commitment_point: point,
                     }),
                 }),
@@ -2384,6 +2383,24 @@ impl ChannelActorState {
             commitment_point
         );
         commitment_point
+    }
+
+    fn get_previous_remote_commitment_point(&self) -> (u64, Pubkey) {
+        let commitment_number = self.get_local_commitment_number() - 1;
+        (
+            commitment_number,
+            self.get_remote_commitment_point(commitment_number),
+        )
+    }
+
+    fn get_previous_local_commitment_secret(&self) -> (u64, [u8; 32]) {
+        let commitment_number = self.get_remote_commitment_number() - 1;
+        let secret = self.signer.get_commitment_secret(commitment_number);
+        (commitment_number, secret)
+    }
+
+    fn get_current_local_commitment_point(&self) -> Pubkey {
+        self.get_local_commitment_point(self.get_remote_commitment_number())
     }
 
     pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
@@ -3303,6 +3320,7 @@ impl ChannelActorState {
 
     pub fn handle_revoke_and_ack_message(
         &mut self,
+        network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
         let RevokeAndAck {
@@ -3310,20 +3328,59 @@ impl ChannelActorState {
             per_commitment_secret,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let commitment_number = self.get_local_commitment_number();
+        let (commitment_number, per_commitment_point) = self.get_previous_remote_commitment_point();
+        let per_commitment_key = Privkey::from(per_commitment_secret);
         debug!(
-            "Checking commitment secret and point for revocation #{}",
-            commitment_number
+            "Checking #{} commitment secret {:?} and point {:?} consistency",
+            commitment_number,
+            hex::encode(per_commitment_key.as_ref()),
+            per_commitment_point,
         );
-        let per_commitment_point = self.get_remote_commitment_point(commitment_number);
-        if per_commitment_point != Privkey::from(per_commitment_secret).pubkey() {
+        if per_commitment_point != per_commitment_key.pubkey() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
-                commitment_number, per_commitment_secret, per_commitment_point
+                commitment_number, per_commitment_key, per_commitment_point
             )));
         }
+        let witnesses = self.get_previous_local_commitment_witnesses();
+        let hash = blake2b_256(&witnesses);
+        let script_args: &[u8] = &hash[..20];
+        debug!(
+            "Get previous commitment transaction witnesses: {:?}, hash: {:?}, script_args: {:?}",
+            hex::encode(&witnesses),
+            hex::encode(&hash),
+            hex::encode(&script_args)
+        );
+
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
+
+        debug!(
+            "Revocation base keys: local {:?}, remote {:?}",
+            self.local_channel_parameters.pubkeys.revocation_base_key,
+            self.remote_channel_parameters
+                .as_ref()
+                .unwrap()
+                .pubkeys
+                .revocation_base_key,
+        );
+
+        emit_service_event(
+            network,
+            NetworkServiceEvent::RevokeAndAckReceived(
+                self.peer_id.clone(),
+                self.get_id(),
+                commitment_number,
+                per_commitment_key,
+                self.remote_channel_parameters
+                    .as_ref()
+                    .unwrap()
+                    .pubkeys
+                    .revocation_base_key,
+                witnesses,
+                next_per_commitment_point,
+            ),
+        );
         Ok(())
     }
 
@@ -3784,85 +3841,111 @@ impl ChannelActorState {
         (tx, message, witnesses)
     }
 
-    fn build_current_commitment_transaction_witnesses(&self, local: bool) -> Vec<u8> {
-        let local_commitment_number = self.get_local_commitment_number();
-        let remote_commitment_number = self.get_remote_commitment_number();
-        let commitment_number = if local {
-            local_commitment_number
-        } else {
-            remote_commitment_number
-        };
+    fn build_commitment_transaction_witnesses(
+        &self,
+        local: bool,
+        commitment_number: u64,
+    ) -> (Vec<u8>, [u8; 20]) {
         debug!(
-            "Building {} commitment transaction #{}'s witnesses (commitment numbers: local {}, remote {})",
+            "Building {} commitment transaction #{}'s witnesses",
             if local { "local" } else { "remote" },
             commitment_number,
-            local_commitment_number,
-            remote_commitment_number
         );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (
+                commitment_point,
+                // The two fields below are used for delay payments to the broadcaster.
+                // So if we are building "local" commitment transaction, it should be
+                // the remote commitment point.
                 delay,
-                // delayed_payment and revocation keys.
-                // The two fields below are used to derive a pubkey for the delayed payment.
-                // The delayed_payment_commitment_point is held by the broadcaster.
-                delayed_payment_commitment_point,
                 delayed_payment_base_key,
-                // The two fields below are used to derive a pubkey for the revocation.
-                // Unlike delayed_payment_commitment_point above, the revocation key is held
-                // by the counter-signatory until this commitment transaction is revoked.
-                revocation_commitment_point,
+                // The field below is used to revoke old transactions.
                 revocation_base_key,
             ) = if local {
+                // The remote party is the one who can broadcast this transaction.
                 (
-                    self.get_local_channel_parameters().selected_contest_delay,
-                    self.get_local_commitment_point(remote_commitment_number),
-                    self.get_local_channel_parameters()
+                    self.get_remote_commitment_point(commitment_number),
+                    self.get_remote_channel_parameters().selected_contest_delay,
+                    self.get_remote_channel_parameters()
                         .delayed_payment_base_key(),
-                    self.get_remote_commitment_point(local_commitment_number),
-                    self.get_local_channel_parameters().revocation_base_key(),
+                    self.get_remote_channel_parameters().revocation_base_key(),
                 )
             } else {
                 (
-                    self.get_remote_channel_parameters().selected_contest_delay,
-                    self.get_remote_commitment_point(local_commitment_number),
-                    self.get_remote_channel_parameters()
+                    self.get_local_commitment_point(commitment_number),
+                    self.get_local_channel_parameters().selected_contest_delay,
+                    self.get_local_channel_parameters()
                         .delayed_payment_base_key(),
-                    self.get_local_commitment_point(remote_commitment_number),
-                    self.get_remote_channel_parameters().revocation_base_key(),
+                    self.get_local_channel_parameters().revocation_base_key(),
                 )
             };
             debug!(
-                "Got base witness parameters: delayed_time: {:?}, delayed_payment_key: {:?}, delayed_commitment_point {:?}, revocation_key: {:?}, revocation_commitment point: {:?}",
+                "Got base witness parameters: commitment_point {:?}, delayed_time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}",
+                commitment_point,
                 delay, delayed_payment_base_key,
-                delayed_payment_commitment_point,
-                revocation_base_key, revocation_commitment_point
+                revocation_base_key
             );
             (
                 delay,
-                derive_delayed_payment_pubkey(
-                    delayed_payment_base_key,
-                    &delayed_payment_commitment_point,
-                ),
-                derive_revocation_pubkey(revocation_base_key, &revocation_commitment_point),
+                derive_delayed_payment_pubkey(delayed_payment_base_key, &commitment_point),
+                derive_revocation_pubkey(revocation_base_key, &commitment_point),
             )
         };
 
+        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
+        let revocation_key_hash = blake2b_256(revocation_key.serialize());
+
         debug!(
-            "Parameters for witnesses: epoch {:?}, payment key: {:?}, revocation key: {:?}",
-            delayed_epoch, delayed_payment_key, revocation_key
+            "Parameters for witnesses: epoch {:?}, payment key: {:?} (hash: {:?}), revocation key: {:?} (hash: {:?})",
+            delayed_epoch,
+            delayed_payment_key,
+            hex::encode(&delayed_payment_key_hash),
+            revocation_key,
+            hex::encode(&revocation_key_hash)
         );
 
         // for xudt compatibility issue,
         // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-        [
-            empty_witness_args.to_vec(),
+        let witnesses = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
-            blake2b_256(delayed_payment_key.serialize())[0..20].to_vec(),
-            blake2b_256(revocation_key.serialize())[0..20].to_vec(),
+            delayed_payment_key_hash[..20].to_vec(),
+            revocation_key_hash[..20].to_vec(),
             self.get_witness_args_for_active_tlcs(local),
         ]
-        .concat()
+        .concat();
+        let hash = blake2b_256(&witnesses)[..20].try_into().unwrap();
+        let witnesses = [empty_witness_args.to_vec(), witnesses].concat();
+        debug!(
+            "Built {} commitment transaction #{}'s witnesses: {:?}, hash: {:?}",
+            if local { "local" } else { "remote" },
+            commitment_number,
+            hex::encode(&witnesses),
+            hex::encode(&hash)
+        );
+        (witnesses, hash)
+    }
+
+    fn get_current_commitment_transaction_witnesses_with_hash(
+        &self,
+        local: bool,
+    ) -> (Vec<u8>, [u8; 20]) {
+        let commitment_number = if local {
+            self.get_local_commitment_number()
+        } else {
+            self.get_remote_commitment_number()
+        };
+        self.build_commitment_transaction_witnesses(local, commitment_number)
+    }
+
+    fn get_local_commitment_witnesses(&self, commitment_number: u64) -> Vec<u8> {
+        debug_assert!(commitment_number < self.get_local_commitment_number());
+        self.build_commitment_transaction_witnesses(true, commitment_number)
+            .0
+    }
+
+    fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
+        self.get_local_commitment_witnesses(self.get_local_commitment_number() - 1)
     }
 
     // Build the parameters for the commitment transaction. The first two elements for the
@@ -3926,24 +4009,14 @@ impl ChannelActorState {
             derive_payment_pubkey(base_payment_key, &commitment_point)
         };
 
-        let witnesses: Vec<u8> = self.build_current_commitment_transaction_witnesses(local);
-
-        let hash = blake2b_256(&witnesses);
-        let script_arg: &[u8] = &hash[..20];
-        debug!(
-            "Building {} commitment transaction with witnesses {:?} and hash {:?} with local commitment number {} and remote commitment number {}",
-            if local { "local" } else {"remote"},
-            hex::encode(&witnesses),
-            hex::encode(script_arg),
-            self.get_local_commitment_number(),
-            self.get_remote_commitment_number()
-        );
+        let (witnesses, script_args) =
+            self.get_current_commitment_transaction_witnesses_with_hash(local);
 
         let immediate_secp256k1_lock_script = get_script_by_contract(
             Contract::Secp256k1Lock,
             &blake2b_256(immediate_payment_key.serialize())[0..20],
         );
-        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, script_arg);
+        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &script_args);
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
@@ -4444,7 +4517,12 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
 }
 
 pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    derive_public_key(base_key, commitment_point)
+    let result = derive_public_key(commitment_point, base_key);
+    debug!(
+        "Derived revocation pub key from commitment point {:?}, base_key {:?}, result {:?}",
+        &commitment_point, &base_key, &result
+    );
+    result
 }
 
 pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
@@ -4539,14 +4617,15 @@ impl InMemorySigner {
     }
 
     pub fn derive_revocation_key(&self, commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(commitment_number);
-        debug!(
-            "Revocation key: {}",
-            hex::encode(
-                derive_private_key(&self.revocation_base_key, &per_commitment_point).as_ref()
-            )
-        );
-        derive_private_key(&self.revocation_base_key, &per_commitment_point)
+        let per_commitment_secret = self.get_commitment_secret(commitment_number);
+        // Note that here we don't derive private key in the same way as we ususally do.
+        // Instead we use per commitment secret as "master key" and public revocation key
+        // as derivation material. In this way when we reveal the per round "master key",
+        // the counterparty can obtain the secret key for that round.
+        derive_private_key(
+            &per_commitment_secret.into(),
+            &self.revocation_base_key.pubkey(),
+        )
     }
 
     pub fn derive_payment_key(&self, new_commitment_number: u64) -> Privkey {
@@ -4581,8 +4660,8 @@ mod tests {
     use crate::{
         ckb::{
             channel::{
-                AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand,
-                ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+                derive_revocation_pubkey, AddTlcCommand, ChannelCommand, ChannelCommandWithId,
+                RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
             },
             hash_algorithm::HashAlgorithm,
             network::{AcceptChannelCommand, OpenChannelCommand},
@@ -4590,6 +4669,7 @@ mod tests {
             types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
+        ckb_chain::contracts::{get_cell_deps, Contract},
         NetworkServiceEvent,
     };
 
@@ -4597,10 +4677,11 @@ mod tests {
     use ckb_jsonrpc_types::Status;
     use ckb_types::{
         core::FeeRate,
-        packed::Script,
-        prelude::{Builder, Entity},
+        packed::{Bytes, CellInput, CellOutput, Script, Transaction},
+        prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
     };
     use ractor::call;
+    use tracing::debug;
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
@@ -4612,11 +4693,24 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_private_and_public_keys() {
+    fn test_derive_private_and_public_tlc_keys() {
         let privkey = Privkey::from(&[1; 32]);
         let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
         let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
         let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
+        assert_eq!(derived_privkey.pubkey(), derived_pubkey);
+    }
+
+    #[test]
+    fn test_derive_private_and_public_revocation_keys() {
+        let base_revocation_key = Privkey::from(&[1; 32]);
+        let per_commitment_secret = Privkey::from(&[2; 32]);
+        let derived_privkey =
+            derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
+        let derived_pubkey = derive_revocation_pubkey(
+            &base_revocation_key.pubkey(),
+            &per_commitment_secret.pubkey(),
+        );
         assert_eq!(derived_privkey.pubkey(), derived_pubkey);
     }
 
@@ -5210,6 +5304,180 @@ mod tests {
         );
 
         // TODO: maybe also check shutdown tx outputs and output balances here.
+    }
+
+    #[tokio::test]
+    async fn test_revoke_old_commitment_transaction() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .pretty()
+            .init();
+
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+                OpenChannelCommand {
+                    peer_id: node_b.peer_id.clone(),
+                    funding_amount: 100000000000,
+                    funding_udt_type_script: None,
+                    commitment_fee_rate: None,
+                    funding_fee_rate: None,
+                },
+                rpc_reply,
+            ))
+        };
+        let open_channel_result = call!(node_a.network_actor, message)
+            .expect("node_a alive")
+            .expect("open channel success");
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                    println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+        let message = |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+                AcceptChannelCommand {
+                    temp_channel_id: open_channel_result.channel_id,
+                    funding_amount: 6200000000,
+                },
+                rpc_reply,
+            ))
+        };
+        let accept_channel_result = call!(node_b.network_actor, message)
+            .expect("node_b alive")
+            .expect("accept channel success");
+        let new_channel_id = accept_channel_result.new_channel_id;
+
+        let commitment_tx = node_b
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+                    println!(
+                        "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
+                        num, &tx, peer_id, channel_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    Some(tx.clone())
+                }
+                _ => None,
+            })
+            .await;
+
+        node_a
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        node_b
+            .expect_event(|event| match event {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                    println!(
+                        "A channel ({:?}) to {:?} is now ready",
+                        &channel_id, &peer_id
+                    );
+                    assert_eq!(peer_id, &node_a.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+
+        let _ = node_a
+            .network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::ControlCfnChannel(ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::CommitmentSigned(),
+                }),
+            ))
+            .expect("node_a alive");
+
+        let (privkey, witnesses) = node_a
+            .expect_to_process_event(|event| match event {
+                NetworkServiceEvent::RevokeAndAckReceived(
+                    peer_id,
+                    channel_id,
+                    commitment_number,
+                    commitment_secret,
+                    revocation_base_pubkey,
+                    witnesses,
+                    _commitment_point,
+                ) => {
+                    assert_eq!(peer_id, &node_b.peer_id);
+                    assert_eq!(channel_id, &new_channel_id);
+                    assert_eq!(*commitment_number, 0u64);
+                    let key = derive_private_key(&commitment_secret, &revocation_base_pubkey);
+                    debug!(
+                        "Get revocation base pubkey {:?}, commitment secret {:?}, new key {:?}",
+                        &revocation_base_pubkey,
+                        hex::encode(commitment_secret.as_ref()),
+                        hex::encode(key.as_ref())
+                    );
+                    Some((key, witnesses.clone()))
+                }
+                _ => None,
+            })
+            .await;
+
+        assert_eq!(
+            node_a.submit_tx(commitment_tx.clone()).await,
+            Status::Committed
+        );
+
+        dbg!(hex::encode(privkey.as_ref()));
+        dbg!(&commitment_tx);
+
+        let tx = Transaction::default()
+            .as_advanced_builder()
+            .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
+            .input(
+                CellInput::new_builder()
+                    // The second output of the commitment tx is the output locked by the commitment lock.
+                    .previous_output(commitment_tx.output_pts().get(1).unwrap().clone())
+                    .build(),
+            )
+            .outputs(vec![CellOutput::new_builder()
+                .capacity((62u64 * 100_000_000).pack())
+                .lock(Script::new_builder().build())
+                .build()])
+            .outputs_data(vec![Bytes::default(); 1].pack())
+            .build();
+
+        let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
+        let signature = privkey.sign_ecdsa_recoverable(&message.into());
+
+        dbg!(hex::encode(&witnesses));
+
+        let witness = [witnesses.to_vec(), vec![0xFF], signature.to_vec()].concat();
+
+        let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
+
+        dbg!(&revocation_tx);
+        assert_eq!(
+            node_a.submit_tx(revocation_tx.clone()).await,
+            Status::Committed
+        );
     }
 
     #[tokio::test]

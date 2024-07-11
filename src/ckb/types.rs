@@ -307,6 +307,26 @@ impl Privkey {
         let sk = Scalar::from(self);
         (scalar + sk).unwrap().into()
     }
+
+    // Essentially https://docs.rs/ckb-crypto/latest/ckb_crypto/secp/struct.Privkey.html#method.sign_recoverable
+    // But we don't want to depend on ckb-crypto because ckb-crypto depends on
+    // a different version of secp256k1.
+    pub fn sign_ecdsa_recoverable(&self, message: &[u8; 32]) -> [u8; 65] {
+        tracing::debug!(
+            "Signing message with private key {:?}, public key: {:?}, pubkey hash: {:?},  message {:?}",
+            hex::encode(self.as_ref()),
+            self.pubkey(),
+            hex::encode(ckb_hash::blake2b_256(self.pubkey().serialize())),
+            hex::encode(message)
+        );
+        let (rec_id, data) = secp256k1_instance()
+            .sign_ecdsa_recoverable(&secp256k1::Message::from_digest(*message), &self.0)
+            .serialize_compact();
+        let mut result = [0; 65];
+        result[0..64].copy_from_slice(data.as_slice());
+        result[64] = rec_id.to_i32() as u8;
+        result
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]

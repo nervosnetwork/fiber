@@ -19,7 +19,7 @@ use super::channel::{
 };
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{Hash256, OpenChannel};
+use super::types::{Hash256, OpenChannel, Privkey, Pubkey};
 use super::{
     channel::{ChannelActor, ChannelCommand, ChannelInitializationParameter},
     types::CFNMessage,
@@ -146,10 +146,26 @@ pub enum NetworkServiceEvent {
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
     // We have signed a commitment transaction and sent it to the other party.
-    // The last element is the witnesses for this commitment transaction.
-    // The TransactionView here is not a valid commitment transaction per se,
-    // as we need the other party's signature.
-    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
+    LocalCommitmentSigned(
+        PeerId,          /* Peer Id */
+        Hash256,         /* Channel Id */
+        u64,             /* Commitment number */
+        TransactionView, /* Commitment transaction, not valid per se (requires other party's signature) */
+        Vec<u8>,         /* Commitment transaction witness */
+    ),
+    // A RevokeAndAck is received from the peer. Other data relevant to this
+    // RevokeAndAck message are also assembled here. The watch tower may use this.
+    // TODO: We also need transaction hash from the event `LocalCommitmentSigned` above
+    // for the watch tower to watch older transactions being broadcasted.
+    RevokeAndAckReceived(
+        PeerId,  /* Peer Id */
+        Hash256, /* Channel Id */
+        u64,     /* Commitment number */
+        Privkey, /* Revocation secret */
+        Pubkey,  /* Revocation base point */
+        Vec<u8>, /* Commitment transaction witness */
+        Pubkey,  /* Next commitment point */
+    ),
     // The other party has signed a valid commitment transaction,
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
@@ -1573,6 +1589,17 @@ impl ServiceHandle for Handle {
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
         self.emit_event(NetworkServiceEvent::ServiceEvent(event));
     }
+}
+
+pub(crate) fn emit_service_event(
+    network: &ActorRef<NetworkActorMessage>,
+    event: NetworkServiceEvent,
+) {
+    network
+        .send_message(NetworkActorMessage::new_event(
+            NetworkActorEvent::NetworkServiceEvent(event),
+        ))
+        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 }
 
 pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
