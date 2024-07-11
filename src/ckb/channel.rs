@@ -3868,49 +3868,42 @@ impl ChannelActorState {
         );
         let (delayed_epoch, delayed_payment_key, revocation_key) = {
             let (
+                commitment_point,
+                // The two fields below are used for delay payments to the broadcaster.
+                // So if we are building "local" commitment transaction, it should be
+                // the remote commitment point.
                 delay,
-                // delayed_payment and revocation keys.
-                // The two fields below are used to derive a pubkey for the delayed payment.
-                // The delayed_payment_commitment_point is held by the broadcaster.
-                delayed_payment_commitment_point,
                 delayed_payment_base_key,
-                // The two fields below are used to derive a pubkey for the revocation.
-                // Unlike delayed_payment_commitment_point above, the revocation key is held
-                // by the counter-signatory until this commitment transaction is revoked.
-                revocation_commitment_point,
+                // The field below is used to revoke old transactions.
                 revocation_base_key,
             ) = if local {
+                // The remote party is the one who can broadcast this transaction.
                 (
-                    self.get_local_channel_parameters().selected_contest_delay,
-                    self.get_local_commitment_point(remote_commitment_number),
-                    self.get_local_channel_parameters()
-                        .delayed_payment_base_key(),
                     self.get_remote_commitment_point(local_commitment_number),
+                    self.get_remote_channel_parameters().selected_contest_delay,
+                    self.get_remote_channel_parameters()
+                        .delayed_payment_base_key(),
                     self.get_remote_channel_parameters().revocation_base_key(),
                 )
             } else {
                 (
-                    self.get_remote_channel_parameters().selected_contest_delay,
-                    self.get_remote_commitment_point(local_commitment_number),
-                    self.get_remote_channel_parameters()
-                        .delayed_payment_base_key(),
                     self.get_local_commitment_point(remote_commitment_number),
+                    self.get_local_channel_parameters().selected_contest_delay,
+                    self.get_local_channel_parameters()
+                        .delayed_payment_base_key(),
                     self.get_local_channel_parameters().revocation_base_key(),
                 )
             };
             debug!(
-                "Got base witness parameters: delayed_time: {:?}, delayed_payment_key: {:?}, delayed_commitment_point {:?}, revocation_key: {:?}, revocation_commitment point: {:?}",
+                "Got base witness parameters: commitment_point {:?}, delayed_time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}",
+                commitment_point,
                 delay, delayed_payment_base_key,
-                delayed_payment_commitment_point,
-                revocation_base_key, revocation_commitment_point
+                revocation_base_key
             );
             (
                 delay,
-                derive_delayed_payment_pubkey(
-                    delayed_payment_base_key,
-                    &delayed_payment_commitment_point,
-                ),
-                derive_revocation_pubkey(revocation_base_key, &revocation_commitment_point),
+                derive_delayed_payment_pubkey(delayed_payment_base_key, &commitment_point),
+                derive_revocation_pubkey(revocation_base_key, &commitment_point),
             )
         };
 
