@@ -94,18 +94,14 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
 pub(crate) fn calculate_shutdown_tx_fee(fee_rate: u64, state: &ChannelActorState) -> u64 {
     let udt_type_script = &state.funding_udt_type_script;
     let shutdown_scripts = (
-        state.remote_shutdown_script.clone().unwrap_or(
-            state
-                .funding_source_lock_script
-                .clone()
-                .expect("no funding source lock script"),
-        ),
-        state.local_shutdown_script.clone().unwrap_or(
-            state
-                .funding_source_lock_script
-                .clone()
-                .expect("no funding source lock script"),
-        ),
+        state
+            .remote_shutdown_script
+            .clone()
+            .unwrap_or(state.get_default_remote_funding_script()),
+        state
+            .local_shutdown_script
+            .clone()
+            .unwrap_or(state.get_default_local_funding_script()),
     );
     debug!(
         "calculate_shutdown_tx_fee: {} udt_script: {:?}",
