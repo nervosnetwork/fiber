@@ -22,6 +22,7 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
+    ckb::network::NetworkActorStartArguments,
     ckb_chain::{submit_tx, trace_tx, trace_tx_hash, CkbChainMessage, MockChainActor},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     CkbConfig, NetworkServiceEvent,
@@ -119,7 +120,11 @@ impl NetworkNode {
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
             NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
-            (ckb_config, new_tokio_task_tracker()),
+            NetworkActorStartArguments {
+                config: ckb_config,
+                tracker: new_tokio_task_tracker(),
+                channel_subscribers: Default::default(),
+            },
             root.get_cell(),
         )
         .await

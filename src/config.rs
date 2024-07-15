@@ -14,6 +14,7 @@ use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfi
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_CKB_DIR_NAME: &str = "ckb";
 const DEFAULT_LDK_DIR_NAME: &str = "ldk";
+const DEFAULT_CCH_DIR_NAME: &str = "cch";
 
 fn get_default_base_dir() -> PathBuf {
     let mut path = home_dir().expect("get home directory");
@@ -174,6 +175,7 @@ impl Config {
         args.ckb_chain.base_dir = Some(Some(
             base_dir.join(crate::ckb_chain::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
         ));
+        args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
 
         let (ckb, ldk, cch, rpc, ckb_chain) = config_from_file
             .map(|x| {

@@ -1,0 +1,45 @@
+meta {
+  name: 08-check-btc-received
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{LND_BOB_RPC_URL}}/v1/balance/channels
+  body: none
+  auth: none
+}
+
+vars:post-response {
+  max_iterations: 10
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:pre-request {
+  if(bru.getVar("iteration") === undefined){
+    bru.setVar("iteration", 0);
+  }
+}
+
+script:post-response {
+  const i = bru.getVar("iteration");
+  const n = bru.getVar("max_iterations");
+  if (i < n) {
+    console.log(`Try ${i+1}/${n}`);
+  }
+
+  if (parseInt(res.body.local_balance.sat, 10) > 0) {
+    console.log("Bob has received the payment");
+    bru.setVar("iteration", 0);
+  } else if (i+1 < n) {
+    await new Promise(r => setTimeout(r, 100));
+    bru.setVar("iteration", i + 1);
+    bru.setNextRequest("08-check-btc-received");
+  } else {
+    bru.setVar("iteration", 0);
+    throw new Error("Bob has not received the payment");
+  }
+}

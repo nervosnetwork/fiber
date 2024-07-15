@@ -1,0 +1,45 @@
+meta {
+  name: 07-node1-add-tlc
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "add_tlc",
+    "params": [
+      {
+        "channel_id": "{{N1N3_CHANNEL_ID}}",
+        "amount": "0x4e20",
+        "payment_hash": "{{PAYMENT_HASH}}",
+        "expiry": 40,
+        "hash_algorithm": "sha256"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.tlc_id: isDefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("response from node1 AddTlc:", res.body);
+  bru.setVar("N1N3_TLC_ID1", res.body.result.tlc_id);
+}

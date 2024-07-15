@@ -1,0 +1,19 @@
+meta {
+  name: 18-node1-list-ln-channel
+  type: http
+  seq: 18
+}
+
+get {
+  url: {{LND_BOB_RPC_URL}}/v1/channels
+  body: json
+  auth: none
+}
+
+assert {
+  res.body.channels: length 0
+}
+
+script:post-response {
+  console.log("list channel result: ", res.body);
+}

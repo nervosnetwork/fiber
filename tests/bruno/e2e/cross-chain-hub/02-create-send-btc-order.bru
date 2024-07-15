@@ -1,0 +1,46 @@
+meta {
+  name: 02-create-send-btc-order
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_btc",
+    "params": [
+      {
+        "btc_pay_req": "{{BTC_PAY_REQ}}",
+        "currency": "Fibt"
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  if (res.body.result) {
+    bru.setVar("CKB_PAY_REQ", res.body.result.ckb_pay_req);
+    console.log(res.body.result.payment_hash);
+  }
+}
+
+docs {
+  CKB user sends the received BTC invoice to the cross-chain hub to exchange a CKB invoice.
+}

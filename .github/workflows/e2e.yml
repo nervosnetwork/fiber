@@ -13,6 +13,7 @@ jobs:
           - open-use-close-a-channel
           - udt
           - reestablish
+          - cross-chain-hub
         release:
           - "0.116.1"
         test_env:
@@ -41,9 +42,21 @@ jobs:
           wget "https://github.com/nervosnetwork/ckb/releases/download/v${version}/ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           tar -xvaf "ckb_v${version}_x86_64-unknown-linux-gnu-portable.tar.gz"
           sudo mv "ckb_v${version}_x86_64-unknown-linux-gnu-portable"/* /usr/local/bin/
+          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
+            wget "https://bitcoin.org/bin/bitcoin-core-27.0/bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+            tar -xvaf "bitcoin-27.0-x86_64-linux-gnu.tar.gz"
+            echo "$(pwd)/bitcoin-27.0/bin" >> $GITHUB_PATH
+            wget "https://github.com/lightningnetwork/lnd/releases/download/v0.18.0-beta/lnd-linux-amd64-v0.18.0-beta.tar.gz"
+            tar -xvaf "lnd-linux-amd64-v0.18.0-beta.tar.gz"
+            echo "$(pwd)/lnd-linux-amd64-v0.18.0-beta" >> $GITHUB_PATH
+          fi
 
       - name: Run e2e workflow
         run: |
+          if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
+            ./tests/deploy/lnd-init/setup-lnd.sh
+          fi
+
           # Prebuild the program so that we can run the following script faster
           cargo build
           cd tests/deploy/udt-init && cargo build && cd -

@@ -1,0 +1,20 @@
+meta {
+  name: 16-node1-list-ln-channel
+  type: http
+  seq: 16
+}
+
+get {
+  url: {{LND_BOB_RPC_URL}}/v1/channels
+  body: json
+  auth: none
+}
+
+assert {
+  res.body.channels: length 1
+}
+
+script:post-response {
+  console.log("list ln channel result: ", res.body);
+  bru.setVar("LN_CHANNEL_ID", res.body.channels[0].channel_point.replace(":", "/"));
+}

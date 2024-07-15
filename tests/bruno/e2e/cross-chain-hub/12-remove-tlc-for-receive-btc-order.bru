@@ -1,0 +1,38 @@
+meta {
+  name: 12-remove-tlc-for-receive-btc-order
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "remove_tlc",
+    "params": [
+      {
+        "channel_id": "{{N1N3_CHANNEL_ID}}",
+        "tlc_id": "{{N3N1_TLC_ID1}}",
+        "reason": {
+          "payment_preimage": "{{PAYMENT_PREIMAGE}}"
+        }
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isNull
+}

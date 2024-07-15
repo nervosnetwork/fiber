@@ -1,0 +1,61 @@
+meta {
+  name: 09-create-receive-btc-order
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "receive_btc",
+    "params": [
+      {
+        "payment_hash": "{{PAYMENT_HASH}}",
+        "channel_id": "{{N1N3_CHANNEL_ID}}",
+        "amount_sats": "0x1",
+        "final_tlc_expiry": "0x3c"
+      }
+    ]
+  }
+}
+
+assert {
+  res.status: eq 200
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  const uuid = require('uuid');
+  const CryptoJS = require("crypto-js");
+
+  const preimage = CryptoJS.SHA256(uuid.v4());
+  const hash = CryptoJS.SHA256(preimage);
+  console.log(preimage.toString(CryptoJS.enc.Hex));
+  console.log(hash.toString(CryptoJS.enc.Hex));
+
+  bru.setVar("PAYMENT_HASH", `0x${hash.toString(CryptoJS.enc.Hex)}`);
+  bru.setVar("PAYMENT_PREIMAGE", `0x${preimage.toString(CryptoJS.enc.Hex)}`);
+}
+
+script:post-response {
+  if (res.body.result) {
+    bru.setVar("BTC_PAY_REQ", res.body.result.btc_pay_req);
+    console.log(res.body.result.payment_hash);
+  }
+}
+
+docs {
+  CKB user requests a BTC invoice to receive BTC from Bitcoin user.
+}

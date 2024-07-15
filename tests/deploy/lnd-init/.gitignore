@@ -1,0 +1,12 @@
+/bitcoind/regtest
+/lnd-bob/data
+/lnd-bob/letsencrypt
+/lnd-bob/logs
+/lnd-bob/tls.cert
+/lnd-bob/tls.key
+/lnd-ingrid/data
+/lnd-ingrid/letsencrypt
+/lnd-ingrid/logs
+/lnd-ingrid/tls.cert
+/lnd-ingrid/tls.key
+*.pid

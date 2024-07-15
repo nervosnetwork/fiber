@@ -86,7 +86,8 @@ impl Actor for CkbChainActor {
                     tokio::task::block_in_place(move || {
                         let result = tx.fulfill(request, context);
                         if !reply_port.is_closed() {
-                            reply_port.send(result).expect("reply ok");
+                            // ignore error
+                            let _ = reply_port.send(result);
                         }
                     });
                 }
@@ -98,7 +99,8 @@ impl Actor for CkbChainActor {
                     tokio::task::block_in_place(move || {
                         let result = tx.sign(secret_key, rpc_url);
                         if !reply_port.is_closed() {
-                            reply_port.send(result).expect("reply ok");
+                            // ignore error
+                            let _ = reply_port.send(result);
                         }
                     });
                 }
@@ -135,7 +137,8 @@ impl Actor for CkbChainActor {
                         }
                     };
                     if !reply_port.is_closed() {
-                        reply_port.send(result).expect("reply ok");
+                        // ignore error
+                        let _ = reply_port.send(result);
                     }
                 });
             }
@@ -201,7 +204,8 @@ impl Actor for CkbChainActor {
                     match status {
                         Some(status) => {
                             if !reply_port.is_closed() {
-                                reply_port.send(status).expect("reply ok");
+                                // ignore error
+                                let _ = reply_port.send(status);
                             }
                             return Ok(());
                         }

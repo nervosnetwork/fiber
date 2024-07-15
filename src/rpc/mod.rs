@@ -6,7 +6,7 @@ mod peer;
 mod utils;
 
 use crate::{
-    cch::CchCommand,
+    cch::CchMessage,
     ckb::{channel::ChannelActorStateStore, NetworkActorMessage},
     invoice::{InvoiceCommand, InvoiceStore},
 };
@@ -51,7 +51,7 @@ fn build_server(addr: &str) -> Server {
 pub async fn start_rpc<S: ChannelActorStateStore + InvoiceStore + Clone + Send + Sync + 'static>(
     config: RpcConfig,
     ckb_network_actor: Option<ActorRef<NetworkActorMessage>>,
-    cch_command_sender: Option<Sender<CchCommand>>,
+    cch_actor: Option<ActorRef<CchMessage>>,
     store: S,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
@@ -63,8 +63,8 @@ pub async fn start_rpc<S: ChannelActorStateStore + InvoiceStore + Clone + Send +
         methods.merge(peer.into_rpc()).unwrap();
         methods.merge(channel.into_rpc()).unwrap();
     }
-    if let Some(cch_command_sender) = cch_command_sender {
-        let cch = CchRpcServerImpl::new(cch_command_sender);
+    if let Some(cch_actor) = cch_actor {
+        let cch = CchRpcServerImpl::new(cch_actor);
         methods.merge(cch.into_rpc()).unwrap();
     }
     server.start(methods)

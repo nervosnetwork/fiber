@@ -1,0 +1,48 @@
+meta {
+  name: 10-pay-btc-invoice
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{LND_BOB_RPC_URL}}/v2/router/send
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "payment_request": "{{BTC_PAY_REQ}}",
+    "timeout_seconds": 1
+  }
+}
+
+assert {
+  res.status: eq 409
+}
+
+script:pre-request {
+  const axios = require('axios');
+
+  const url = bru.getEnvVar("LND_BOB_RPC_URL") + "/v2/router/send";
+  const body = {
+    payment_request: bru.getVar("BTC_PAY_REQ"),
+    timeout_seconds: 1
+  };
+  console.log(url);
+  console.log(body);
+
+  const resp = await axios({
+    method: 'POST',
+    url: url,
+    data: body,
+    responseType: 'stream'
+  });
+  resp.data.destroy();
+}
+
+docs {
+  Send payment via lnd RPC https://lightning.engineering/api-docs/api/lnd/router/send-payment-v2.
+
+  This is a server-streaming RPC which will block Bruno. The workaround is sending the request in the pre-script so the Bruno request will return 409 because the payment is already sent.
+}

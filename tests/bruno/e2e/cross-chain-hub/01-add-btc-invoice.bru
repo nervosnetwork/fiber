@@ -1,0 +1,30 @@
+meta {
+  name: 01-add-btc-invoice
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{LND_BOB_RPC_URL}}/v1/invoices
+  body: json
+  auth: none
+}
+
+body:json {
+  {"value":20000}
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  bru.setVar("BTC_PAY_REQ", res.body.payment_request);
+  const payment_hash = Buffer.from(res.body.r_hash, 'base64').toString('hex');
+  console.log(payment_hash);
+  bru.setVar("PAYMENT_HASH", `0x${payment_hash}`);
+}
+
+docs {
+  BTC user generates an invoice via lnd.
+}

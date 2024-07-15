@@ -1,0 +1,47 @@
+meta {
+  name: 04-node1-open-channel-to-node3
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}",
+        "funding_amount": "0xc350",
+        "funding_udt_type_script": {
+          "code_hash": "0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419",
+          "hash_type": "data1",
+          "args": "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+        }
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("N1N3 response: ", res.body);
+  console.log("N1N3 response: ", res.body.result.temporary_channel_id);
+  bru.setVar("N1N3_TEMP_CHANNEL_ID", res.body.result.temporary_channel_id);
+}
