@@ -1,5 +1,5 @@
 use super::invoice_impl::Currency;
-use crate::ckb::types::Hash256;
+use crate::fiber::types::Hash256;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]

@@ -7,7 +7,7 @@ use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 use tracing::debug;
 
-use crate::ckb::{config::CkbNetwork, types::Hash256};
+use crate::fiber::{config::CkbNetwork, types::Hash256};
 
 #[cfg(not(test))]
 use ckb_types::bytes::Bytes;

@@ -12,7 +12,7 @@ use std::io::{Cursor, Result as IoResult};
 
 use super::invoice_impl::Currency;
 use super::InvoiceError;
-use crate::ckb::types::Hash256;
+use crate::fiber::types::Hash256;
 use std::str::FromStr;
 
 /// Encodes bytes and returns the compressed form

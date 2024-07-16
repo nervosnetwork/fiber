@@ -7,7 +7,7 @@ mod utils;
 
 use crate::{
     cch::CchMessage,
-    ckb::{channel::ChannelActorStateStore, NetworkActorMessage},
+    fiber::{channel::ChannelActorStateStore, NetworkActorMessage},
     invoice::{InvoiceCommand, InvoiceStore},
 };
 use cch::{CchRpcServer, CchRpcServerImpl};

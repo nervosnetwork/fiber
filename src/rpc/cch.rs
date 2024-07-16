@@ -1,6 +1,6 @@
 use crate::{
     cch::{CchMessage, CchOrderStatus, ReceiveBTCOrder},
-    ckb::{
+    fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },

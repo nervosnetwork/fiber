@@ -14,13 +14,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb::channel::{
+use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
+use crate::fiber::channel::{
     AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
 };
-use crate::ckb::hash_algorithm::HashAlgorithm;
-use crate::ckb::types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason};
-use crate::ckb::{NetworkActorCommand, NetworkActorMessage};
-use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
+use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 
 use super::error::CchDbError;

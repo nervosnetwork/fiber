@@ -1,4 +1,4 @@
-use crate::ckb::{NetworkActorCommand, NetworkActorMessage};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::log_and_error;
 use jsonrpsee::{
     core::async_trait, proc_macros::rpc, types::error::CALL_EXECUTION_FAILED_CODE,

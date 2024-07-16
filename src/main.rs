@@ -1,5 +1,4 @@
 use cfn_node::cch::CchMessage;
-use cfn_node::ckb::channel::ChannelSubscribers;
 use cfn_node::ckb_chain::contracts::init_contracts_context;
 use cfn_node::store::Store;
 use ractor::Actor;
@@ -13,8 +12,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use std::str::FromStr;
 
 use cfn_node::actors::RootActor;
-use cfn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
 use cfn_node::ckb_chain::CkbChainActor;
+use cfn_node::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
 use cfn_node::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use crate::ckb::hash_algorithm::HashAlgorithm;
-use crate::ckb::serde_utils::{U128Hex, U64Hex};
-use crate::ckb::types::Hash256;
+use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::serde_utils::{U128Hex, U64Hex};
+use crate::fiber::types::Hash256;
 use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
