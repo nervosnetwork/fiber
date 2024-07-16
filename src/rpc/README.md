@@ -1,4 +1,4 @@
-# CKB Fiber Network Node RPC
+# Fiber Network Node RPC
 
 The RPC module provides a set of APIs for developers to interact with cfn nodes. Please note that APIs are not stable yet and may change in the future.
 

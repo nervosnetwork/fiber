@@ -1,6 +1,6 @@
 # Payment Channel Cross-Chain Protocol with HTLC
 
-## Synopsis 
+## Synopsis
 
 In the rapidly evolving world of blockchain technology, interoperability between different networks is becoming increasingly crucial. One of the most promising solutions to this challenge is the use of payment channel cross-chain protocols based on Hash Time-Locked Contracts (HTLCs). This post will delve into how HTLCs can be used to ensure atomic payments across different blockchain networks using the same preimage.
 
@@ -29,11 +29,11 @@ The protocol has three actors:
 
 To understand how HTLCs can be used for cross-chain payments, let's break down the process:
 
-1. **Negotiating**: 
+1. **Negotiating**:
    - Bob wants to receive $N_b$ amount of asset $T_b$ in the Blockchain B.
    - Alice negotiates with Ingrid that if Alice pays $N_a$ amount of asset $T_b$ in the Blockchain A to Ingrid, Ingrid will send $N_b$ amount of asset $T_b$ to Bob in the Blockchain B.
 
-2. **Offering HTLCs**: 
+2. **Offering HTLCs**:
    - Alice offers an HTLC with $N_a$ amount of $T_a$ on Blockchain A to Ingrid, locking her funds with a hashlock and a timelock. The hashlock is derived from a secret preimage $S$ that only Bob knows.
    - Ingrid, upon receiving the hashlock from Alice, creates a corresponding HTLC on Blockchain B with $N_b$ amount of $T_b$, locking his funds with the same hashlock and a timelock.
 
@@ -46,9 +46,9 @@ To understand how HTLCs can be used for cross-chain payments, let's break down t
 
 ### Setup
 
-- Alice is in the Blockchain CKB and runs a CFN (CKB Fiber Network) node.
+- Alice is in the Blockchain CKB and runs a FNN (Fiber Network Node).
 - Bob is in the Blockchain Bitcoin and runs any BOLT compatible lightning node.
-- Ingrid is the cross-chain hub service provider who runs both a CFN node in CKB and a BOLT lighting node in Bitcoin.
+- Ingrid is the cross-chain hub service provider who runs both a FNN in CKB and a BOLT lighting node in Bitcoin.
 - The asset used in Blockchain Bitcoin ($T_b$) is BTC.
 - Ingrid configures a UDT asset $T_a$ in CKB as the wrapped BTC.
 

@@ -1,8 +1,8 @@
-# CKB Fiber Network Invoice Protocol
+# Fiber Network Invoice Protocol
 
 ## Overall Design
 
-CKB Fiber network invoice will be generated and parsed by CKB Fiber Node, we referred to the design of [BOLT 11](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md), and made some adjustments from an implementation perspective.
+Fiber network invoice will be generated and parsed by Fiber Node, we referred to the design of [BOLT 11](https://github.com/lightning/bolts/blob/master/11-payment-encoding.md), and made some adjustments from an implementation perspective.
 
 - The invoice is encode/decoded base on [molecule](https://github.com/nervosnetwork/molecule), which is widely used in the CKB projects.
 - Instead of using `bech32`, we switch to `bech32m`.

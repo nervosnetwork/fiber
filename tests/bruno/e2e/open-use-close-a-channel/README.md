@@ -1,4 +1,4 @@
-# E2E test for a happy path ckb fiber channel open and closure
+# E2E test for a happy path fiber network channel open and closure
 
 Below is a complete happy path process to open, transact over and close a fiber channel.
 We intend to create a [bruno](https://www.usebruno.com/) collection to execute all these operations.
