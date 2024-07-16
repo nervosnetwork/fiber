@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{select, time::sleep};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_script_by_contract, Contract};
 use crate::fiber::channel::{
     AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
 };

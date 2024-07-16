@@ -40,8 +40,8 @@ use super::key::blake2b_hash_with_salt;
 use super::types::{CFNMessage, Hash256, OpenChannel, Privkey, Pubkey};
 use super::CkbConfig;
 
-use crate::ckb_chain::contracts::{check_udt_script, is_udt_type_auto_accept};
-use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
+use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
+use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::fiber::types::TxSignatures;
 use crate::{unwrap_or_return, Error};

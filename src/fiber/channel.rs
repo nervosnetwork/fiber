@@ -36,7 +36,7 @@ use std::{
 };
 
 use crate::{
-    ckb_chain::{
+    ckb::{
         contracts::{get_cell_deps, get_script_by_contract, Contract},
         FundingRequest,
     },
@@ -4717,7 +4717,7 @@ impl InMemorySigner {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ckb_chain::contracts::{get_cell_deps, Contract},
+        ckb::contracts::{get_cell_deps, Contract},
         fiber::{
             channel::{
                 derive_revocation_pubkey, AddTlcCommand, ChannelCommand, ChannelCommandWithId,

@@ -5,7 +5,7 @@ use ractor::{
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
 };
 
-use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_script_by_contract, Contract};
 
 use super::{funding::FundingContext, CkbChainConfig, FundingError, FundingRequest, FundingTx};
 
@@ -239,7 +239,7 @@ mod test_utils {
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
 
-    use crate::ckb_chain::TraceTxRequest;
+    use crate::ckb::TraceTxRequest;
 
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;

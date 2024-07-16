@@ -1,6 +1,6 @@
 # Fiber Network Node
 
-Fiber Network Node (FNN) is a reference implementation of Fiber Network/Protocol (FNP). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of FNP. It's capable of:
+Fiber Network Node (FNN) is a reference implementation of Fiber Network Protocol (FNP). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of FNP. It's capable of:
 
 * Establishing connections with other cfn nodes
 * Creating and closing fiber channel

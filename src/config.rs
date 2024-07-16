@@ -9,7 +9,7 @@ use home::home_dir;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{ckb_chain::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
+use crate::{ckb::CkbChainConfig, CchConfig, CkbConfig, LdkConfig, RpcConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_CKB_DIR_NAME: &str = "ckb";
@@ -173,7 +173,7 @@ impl Config {
         args.ckb.base_dir = Some(Some(base_dir.join(DEFAULT_CKB_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
         args.ckb_chain.base_dir = Some(Some(
-            base_dir.join(crate::ckb_chain::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
+            base_dir.join(crate::ckb::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
         ));
         args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
 

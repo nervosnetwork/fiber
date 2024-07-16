@@ -1,8 +1,7 @@
 mod config;
 pub use config::Config;
 
-pub mod ckb_chain;
-
+pub mod ckb;
 pub mod ldk;
 pub use ldk::{start_ldk, LdkConfig};
 pub mod fiber;

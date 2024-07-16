@@ -543,9 +543,7 @@ mod test {
     use ckb_types::{core::TransactionView, packed::CellOutput, prelude::Pack};
     use molecule::prelude::{Builder, Entity};
 
-    use crate::ckb_chain::contracts::{
-        get_script_by_contract, Contract, ContractsContext, MockContext,
-    };
+    use crate::ckb::contracts::{get_script_by_contract, Contract, ContractsContext, MockContext};
 
     // This test is to ensure that the same transaction is generated for different mock contexts.
     // If different transactions are generated, then the mock context is not deterministic.

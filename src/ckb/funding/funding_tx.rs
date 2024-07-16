@@ -1,5 +1,5 @@
 use super::super::FundingError;
-use crate::{ckb_chain::contracts::get_udt_cell_deps, fiber::serde_utils::EntityHex};
+use crate::{ckb::contracts::get_udt_cell_deps, fiber::serde_utils::EntityHex};
 use anyhow::anyhow;
 use ckb_sdk::{
     constants::SIGHASH_TYPE_HASH,
