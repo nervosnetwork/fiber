@@ -74,7 +74,7 @@ struct Args {
     #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
     services: Vec<Service>,
 
-    /// config for ckb fiber network
+    /// config for fiber network
     #[command(flatten)]
     pub ckb: <CkbConfig as ClapSerde>::Opt,
 

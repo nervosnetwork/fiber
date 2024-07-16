@@ -1,6 +1,6 @@
-# CKB Fiber Network Node
+# Fiber Network Node
 
-CKB Fiber Network Node (cfn-node) is a reference implementation of a CKB Fiber Network protocol (cfn-protocol). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of the cfn-protocol. It's capable of:
+Fiber Network Node (FNN) is a reference implementation of Fiber Network/Protocol (FNP). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of FNP. It's capable of:
 
 * Establishing connections with other cfn nodes
 * Creating and closing fiber channel
@@ -31,7 +31,7 @@ cp config/testnet/config.yml /folder-to/my-cfn-node
 cd /folder-to/my-cfn-node
 ```
 
-3. CFN node has the built-in wallet functionality to sign funding transactions, let's create or import a private key first. The private key is stored in the data folder and named `ckb-chain/key`. You may use the ckb-cli to generate a new key or export an existing key:
+3. FNN has the built-in wallet functionality to sign funding transactions, let's create or import a private key first. The private key is stored in the data folder and named `ckb-chain/key`. You may use the ckb-cli to generate a new key or export an existing key:
 
 ```
 mkdir ckb-chain

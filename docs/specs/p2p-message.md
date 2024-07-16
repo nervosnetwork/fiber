@@ -1,4 +1,4 @@
-# CKB Fiber Network P2P Message Protocol
+# Fiber Network P2P Message Protocol
 
 This document describes the protocol between nodes of the fiber network on CKB, used to establish payment channels, construct transactions, close channels, and perform payment operations. Essentially, it is an adaptation and simplification of [BOLT 02] to suit the transaction structure of CKB.
 
@@ -172,7 +172,7 @@ table ChannelReady {
 
 ## Transaction Collaboration
 
-In the CKB fiber network, the channel initiator begins the transaction construction protocol using the TxUpdate message. The responder replies with either TxUpdate or TxComplete messages. The transaction construction process is completed when both nodes have sent and received consecutive TxComplete messages.
+In the fiber network, the channel initiator begins the transaction construction protocol using the TxUpdate message. The responder replies with either TxUpdate or TxComplete messages. The transaction construction process is completed when both nodes have sent and received consecutive TxComplete messages.
 
 Here is the `Dual Funding` example, A initially funds part of the channel (2 inputs), then B adds their contribution (1 input). A replies with TxComplete, and B responds with TxComplete, completing the transaction construction process.
 
