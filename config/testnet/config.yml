@@ -1,4 +1,4 @@
-ckb:
+fiber:
   listening_port: 8228
   network: "Testnet"
 
@@ -9,6 +9,6 @@ ckb_chain:
   rpc_url: "https://testnet.ckbapp.dev/"
 
 services:
-  - ckb
+  - fiber
   - rpc
   - ckb_chain

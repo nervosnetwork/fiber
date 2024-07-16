@@ -25,7 +25,7 @@ use crate::{
     ckb::{submit_tx, trace_tx, trace_tx_hash, CkbChainMessage, MockChainActor},
     fiber::network::NetworkActorStartArguments,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
-    CkbConfig, NetworkServiceEvent,
+    FiberConfig, NetworkServiceEvent,
 };
 
 use super::{
@@ -100,7 +100,7 @@ pub struct NetworkNode {
 impl NetworkNode {
     pub async fn new() -> Self {
         let base_dir = TempDir::new("cfn-node-test");
-        let ckb_config = CkbConfig {
+        let fiber_config = FiberConfig {
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
             ..Default::default()
@@ -121,7 +121,7 @@ impl NetworkNode {
             Some(format!("network actor at {:?}", base_dir.as_ref())),
             NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
             NetworkActorStartArguments {
-                config: ckb_config,
+                config: fiber_config,
                 tracker: new_tokio_task_tracker(),
                 channel_subscribers: Default::default(),
             },

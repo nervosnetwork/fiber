@@ -1,5 +1,5 @@
 pub mod config;
-pub use config::CkbConfig;
+pub use config::FiberConfig;
 
 pub mod network;
 pub use network::start_ckb;

@@ -33,59 +33,59 @@ pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
-pub struct CkbConfig {
+pub struct FiberConfig {
     /// ckb base directory
     #[arg(
-        name = "CKB_BASE_DIR",
-        long = "ckb-base-dir",
+        name = "FIBER_BASE_DIR",
+        long = "fiber-base-dir",
         env,
-        help = "base directory for ckb [default: $BASE_DIR/ckb]"
+        help = "base directory for fiber [default: $BASE_DIR/fiber]"
     )]
     pub(crate) base_dir: Option<PathBuf>,
 
     /// listening port for fiber network
-    #[arg(name = "CKB_LISTENING_PORT", long = "ckb-listening-port", env)]
+    #[arg(name = "FIBER_LISTENING_PORT", long = "fiber-listening-port", env)]
     pub(crate) listening_port: u16,
 
     /// addresses to be announced to fiber network (separated by `,`)
-    #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDRS", long = "ckb-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    #[arg(name = "FIBER_ANNOUNCED_LISTEN_ADDRS", long = "fiber-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_listen_addrs: Vec<String>,
 
     /// bootstrap node addresses to be connected at startup (separated by `,`)
-    #[arg(name = "CKB_BOOTNODES_ADDRS", long = "ckb-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    #[arg(name = "FIBER_BOOTNODES_ADDRS", long = "fiber-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub bootnode_addrs: Vec<String>,
 
-    /// node name to be announced to lightning network
+    /// node name to be announced to fiber network
     #[arg(
-        name = "CKB_ANNOUNCED_NODE_NAME",
-        long = "ckb-announced-node-name",
+        name = "fiber_ANNOUNCED_NODE_NAME",
+        long = "fiber-announced-node-name",
         env
     )]
     pub(crate) announced_node_name: String,
 
     /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
-    #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]
+    #[arg(name = "FIBER_NETWORK", long = "fiber-network", env)]
     pub network: Option<CkbNetwork>,
 
     /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
     #[arg(
-        name = "CKB_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
-        long = "ckb-open-channel-auto-accept-min-ckb-funding-amount",
+        name = "FIBER_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
+        long = "fiber-open-channel-auto-accept-min-ckb-funding-amount",
         env,
         help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 16200000000 shannons]"
     )]
     pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
     /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
     #[arg(
-        name = "CKB_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
-        long = "ckb-auto-accept-channel-ckb-funding-amount",
+        name = "FIBER_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
+        long = "fiber-auto-accept-channel-ckb-funding-amount",
         env,
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 }
 
-impl CkbConfig {
+impl FiberConfig {
     pub fn base_dir(&self) -> &PathBuf {
         self.base_dir.as_ref().expect("have set base dir")
     }

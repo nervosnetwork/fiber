@@ -375,7 +375,7 @@ mod test_utils {
                         request, &tx, &fulfilled_tx
                     );
 
-                    if let Err(e) = reply_port.send(Ok((fulfilled_tx))) {
+                    if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
