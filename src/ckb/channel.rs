@@ -160,7 +160,6 @@ pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 #[derive(Debug)]
 pub struct TxUpdateCommand {
     pub transaction: Transaction,
-    pub funding_source_lock_script: Script,
 }
 
 pub struct OpenChannelParameter {
@@ -452,22 +451,21 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                     matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
 
                 if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-                    let funding_source_lock_script =
-                        state.funding_source_lock_script.as_ref().unwrap();
+                    let local_funding_script = state.get_default_local_funding_script();
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId {
                                 peer_id: self.peer_id.clone(),
                                 message: CFNMessage::Shutdown(Shutdown {
                                     channel_id: state.get_id(),
-                                    close_script: funding_source_lock_script.clone(),
+                                    close_script: local_funding_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
                                     force: shutdown.force,
                                 }),
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    state.local_shutdown_script = Some(funding_source_lock_script.clone());
+                    state.local_shutdown_script = Some(local_funding_script);
                     state.local_shutdown_fee_rate = Some(0);
                     flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
                     debug!("Auto accept shutdown ...");
@@ -862,7 +860,6 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                     CollaboratingFundingTxFlags::AWAITING_REMOTE_TX_COLLABORATION_MSG,
                 ));
                 state.funding_tx = Some(tx_update.transaction.clone());
-                state.funding_source_lock_script = Some(tx_update.funding_source_lock_script);
                 state.maybe_complete_tx_collaboration(tx_update.transaction, &self.network)?;
             }
             TxCollaborationCommand::TxComplete() => {
@@ -1481,9 +1478,6 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 
-    #[serde_as(as = "Option<EntityHex>")]
-    pub funding_source_lock_script: Option<Script>,
-
     // Is this channel initially inbound?
     // An inbound channel is one where the counterparty is the funder of the channel.
     pub is_acceptor: bool,
@@ -1805,7 +1799,6 @@ impl ChannelActorState {
             tlc_ids: Default::default(),
             tlcs: Default::default(),
             local_shutdown_script: None,
-            funding_source_lock_script: None,
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_base_pubkeys,
                 selected_contest_delay: remote_delay,
@@ -1871,7 +1864,6 @@ impl ChannelActorState {
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
-            funding_source_lock_script: None,
             local_shutdown_script: None,
             local_shutdown_fee_rate: None,
             remote_shutdown_script: None,
@@ -2494,6 +2486,18 @@ impl ChannelActorState {
         let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
         let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
         KeyAggContext::new(keys).expect("Valid pubkeys")
+    }
+
+    pub fn get_default_local_funding_script(&self) -> Script {
+        let pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
+        get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
+    }
+
+    pub fn get_default_remote_funding_script(&self) -> Script {
+        let pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
+        get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
     }
 
     pub fn get_local_musig2_secnonce(&self) -> SecNonce {
