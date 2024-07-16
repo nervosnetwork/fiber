@@ -232,7 +232,7 @@ fn genrate_nodes_config() {
         let mut data = data.clone();
         data["fiber"]["listening_port"] =
             serde_yaml::Value::Number(serde_yaml::Number::from(8344 + i - 1));
-        data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("ckb-{}", i));
+        data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
         data["ckb_chain"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
