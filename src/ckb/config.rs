@@ -1,37 +1,29 @@
-use crate::Result;
-use ckb_sdk::NetworkType;
-use clap::ValueEnum;
-use clap_serde_derive::{
-    clap::{self},
-    ClapSerde,
+use ckb_types::prelude::PackVec;
+use clap_serde_derive::ClapSerde;
+use secp256k1::SecretKey;
+use serde_with::serde_as;
+use std::{
+    io::{ErrorKind, Read},
+    path::PathBuf,
 };
+
+use std::str::FromStr;
+
+use ckb_types::prelude::Builder;
+use ckb_types::prelude::Pack;
+use ckb_types::H256;
+use ckb_types::{
+    core::DepType,
+    packed::{CellDep, OutPoint},
+};
+use ckb_types::{core::ScriptHashType, packed::CellDepVec};
+use clap_serde_derive::clap::{self};
+use molecule::prelude::Entity;
 use serde::Deserialize;
-use std::{fs, path::PathBuf};
 
-pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
-pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
-pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
-pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
+pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
+const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
 
-/// 62 CKB minimal channel amount, at any time a partner should keep at least
-/// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,
-/// to make sure he can build a valid shutdown transaction and pay proper fee.
-pub const DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT: u64 =
-    MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
-
-/// 143 CKB for minimal UDT amount
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
-    MIN_UDT_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
-
-/// 162 CKB to open a channel which maybe automatically acceptted.
-/// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity, 1 CKB for shutdown fee
-/// The other party may auto accept the channel if the amount is greater than this.
-pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
-    DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
-
-// See comment in `LdkConfig` for why do we need to specify both name and long,
-// and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
 pub struct CkbConfig {
     /// ckb base directory
@@ -39,50 +31,26 @@ pub struct CkbConfig {
         name = "CKB_BASE_DIR",
         long = "ckb-base-dir",
         env,
-        help = "base directory for ckb [default: $BASE_DIR/ckb]"
+        help = format!("base directory for ckb actor [default: $BASE_DIR/{}]", DEFAULT_CKB_BASE_DIR_NAME)
     )]
-    pub(crate) base_dir: Option<PathBuf>,
+    pub base_dir: Option<PathBuf>,
 
-    /// listening port for fiber network
-    #[arg(name = "CKB_LISTENING_PORT", long = "ckb-listening-port", env)]
-    pub(crate) listening_port: u16,
-
-    /// addresses to be announced to fiber network (separated by `,`)
-    #[arg(name = "CKB_ANNOUNCED_LISTEN_ADDRS", long = "ckb-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
-    pub(crate) announced_listen_addrs: Vec<String>,
-
-    /// bootstrap node addresses to be connected at startup (separated by `,`)
-    #[arg(name = "CKB_BOOTNODES_ADDRS", long = "ckb-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
-    pub bootnode_addrs: Vec<String>,
-
-    /// node name to be announced to lightning network
+    #[default(DEFAULT_CKB_NODE_RPC_URL.to_string())]
     #[arg(
-        name = "CKB_ANNOUNCED_NODE_NAME",
-        long = "ckb-announced-node-name",
-        env
-    )]
-    pub(crate) announced_node_name: String,
-
-    /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
-    #[arg(name = "CKB_NETWORK", long = "ckb-network", env)]
-    pub network: Option<CkbNetwork>,
-
-    /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
-    #[arg(
-        name = "CKB_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
-        long = "ckb-open-channel-auto-accept-min-ckb-funding-amount",
+        name = "CKB_NODE_RPC_URL",
+        long = "ckb-node-rpc-url",
         env,
-        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 16200000000 shannons]"
+        help = "rpc url to connect the ckb node [default: http://127.0.0.1:8114]"
     )]
-    pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
-    /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
+    pub rpc_url: String,
+
     #[arg(
-        name = "CKB_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT",
-        long = "ckb-auto-accept-channel-ckb-funding-amount",
+        name = "CKB_UDT_WHITELIST",
+        long = "ckb-udt-whitelist",
         env,
-        help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
+        help = "a list of supported UDT scripts"
     )]
-    pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+    pub udt_whitelist: Option<UdtCfgInfos>,
 }
 
 impl CkbConfig {
@@ -90,57 +58,132 @@ impl CkbConfig {
         self.base_dir.as_ref().expect("have set base dir")
     }
 
-    pub fn create_base_dir(&self) -> Result<()> {
+    pub fn create_base_dir(&self) -> crate::Result<()> {
         if !self.base_dir().exists() {
-            fs::create_dir_all(self.base_dir()).map_err(Into::into)
+            std::fs::create_dir_all(self.base_dir()).map_err(Into::into)
         } else {
             Ok(())
         }
     }
 
-    pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+    // TODO: Use keystore and password to read secret key and add an RPC method to authorize the secret key access.
+    pub fn read_secret_key(&self) -> crate::Result<SecretKey> {
         self.create_base_dir()?;
-        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
-    }
+        let path = self.base_dir().join("key");
+        let mut file = std::fs::File::open(&path)?;
 
-    pub fn store_path(&self) -> PathBuf {
-        let path = self.base_dir().join("store");
-        if !path.exists() {
-            fs::create_dir_all(&path).expect("create store directory");
+        let warn = |m: bool, d: &str| {
+            if m {
+                tracing::warn!(
+                    "Your secret file's permission is not {}, path: {:?}. \
+                Please fix it as soon as possible",
+                    d,
+                    path
+                )
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            warn(
+                file.metadata()?.permissions().mode() & 0o177 != 0,
+                "less than 0o600",
+            );
         }
-        path
-    }
+        #[cfg(not(unix))]
+        {
+            warn(!file.metadata()?.permissions().readonly(), "readonly");
+        }
 
-    pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
-        self.open_channel_auto_accept_min_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT)
-    }
-
-    pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
-        self.auto_accept_channel_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+        let mut key_hex: String = Default::default();
+        file.read_to_string(&mut key_hex)?;
+        let key_bin = hex::decode(key_hex.trim())
+            .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data"))?;
+        SecretKey::from_slice(&key_bin).map_err(|_| {
+            std::io::Error::new(ErrorKind::InvalidData, "invalid secret key data").into()
+        })
     }
 }
 
-// Basically ckb_sdk::types::NetworkType. But we added a `Mocknet` variant.
-// And we can't use `ckb_sdk::types::NetworkType` directly because it is not `ValueEnum`.
-#[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
-pub enum CkbNetwork {
-    Mocknet,
-    Mainnet,
-    Testnet,
-    Staging,
-    Dev,
+serde_with::serde_conv!(
+    ScriptHashTypeWrapper,
+    ScriptHashType,
+    |_: &ScriptHashType| { panic!("no support to serialize") },
+    |s: String| {
+        let v = match s.to_lowercase().as_str() {
+            "type" => ScriptHashType::Type,
+            "data" => ScriptHashType::Data,
+            "data1" => ScriptHashType::Data1,
+            "data2" => ScriptHashType::Data2,
+            _ => return Err("invalid hash type"),
+        };
+        Ok(v)
+    }
+);
+
+#[serde_as]
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct UdtScript {
+    pub code_hash: H256,
+    #[serde_as(as = "ScriptHashTypeWrapper")]
+    pub hash_type: ScriptHashType,
+    /// args may be used in pattern matching
+    pub args: String,
 }
 
-impl From<CkbNetwork> for Option<NetworkType> {
-    fn from(network: CkbNetwork) -> Self {
-        match network {
-            CkbNetwork::Mocknet => None,
-            CkbNetwork::Mainnet => Some(NetworkType::Mainnet),
-            CkbNetwork::Testnet => Some(NetworkType::Testnet),
-            CkbNetwork::Staging => Some(NetworkType::Staging),
-            CkbNetwork::Dev => Some(NetworkType::Dev),
-        }
+#[derive(Deserialize, Clone, Debug)]
+struct UdtCellDep {
+    dep_type: String,
+    tx_hash: H256,
+    index: u32,
+}
+
+serde_with::serde_conv!(
+    CellDepVecWrapper,
+    CellDepVec,
+    |_: &CellDepVec| { panic!("no support to serialize") },
+    |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
+        let cell_deps: Vec<CellDep> = s.iter().map(CellDep::from).collect();
+        Ok(cell_deps.pack())
+    }
+);
+
+#[serde_as]
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct UdtArgInfo {
+    pub name: String,
+    pub script: UdtScript,
+    pub auto_accept_amount: Option<u128>,
+    #[serde_as(as = "CellDepVecWrapper")]
+    pub cell_deps: CellDepVec,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+
+impl FromStr for UdtCfgInfos {
+    type Err = serde_json::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_str(s)
+    }
+}
+
+impl From<&UdtCellDep> for CellDep {
+    fn from(cell_dep: &UdtCellDep) -> Self {
+        let dep_type = match cell_dep.dep_type.as_str() {
+            "code" => DepType::Code,
+            "dep_group" => DepType::DepGroup,
+            _ => panic!("invalid dep type"),
+        };
+        CellDep::new_builder()
+            .dep_type(dep_type.into())
+            .out_point(
+                OutPoint::new_builder()
+                    .tx_hash(cell_dep.tx_hash.pack())
+                    .index(cell_dep.index.pack())
+                    .build(),
+            )
+            .build()
     }
 }

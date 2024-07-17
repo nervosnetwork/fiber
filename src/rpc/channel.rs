@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 
-use crate::ckb::{
+use crate::fiber::{
     channel::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
         RemoveTlcCommand, ShutdownCommand,
@@ -313,12 +313,12 @@ where
                             id: params.tlc_id,
                             reason: match params.reason {
                                 RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
-                                    crate::ckb::types::RemoveTlcReason::RemoveTlcFulfill(
+                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
                                         RemoveTlcFulfill { payment_preimage },
                                     )
                                 }
                                 RemoveTlcReason::RemoveTlcFail { error_code } => {
-                                    crate::ckb::types::RemoveTlcReason::RemoveTlcFail(
+                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
                                         RemoveTlcFail { error_code },
                                     )
                                 }

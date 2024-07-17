@@ -1,25 +1,13 @@
-pub mod config;
-pub use config::CkbConfig;
+mod actor;
+mod config;
+mod error;
+mod funding;
 
-pub mod network;
-pub use network::start_ckb;
-pub use network::{
-    NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
-};
-
-mod fee;
-mod key;
-pub use key::KeyPair;
-
-pub mod gen;
-
-pub mod channel;
-
-pub mod types;
-
-pub mod hash_algorithm;
-
-pub mod serde_utils;
+pub use actor::{CkbChainActor, CkbChainMessage, TraceTxRequest};
+pub use config::{CkbConfig, DEFAULT_CKB_BASE_DIR_NAME};
+pub use error::{CkbChainError, FundingError};
+pub use funding::{FundingRequest, FundingTx};
 
 #[cfg(test)]
-pub mod test_utils;
+pub use actor::{submit_tx, trace_tx, trace_tx_hash, MockChainActor};
+pub mod contracts;

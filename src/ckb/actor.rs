@@ -5,16 +5,16 @@ use ractor::{
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
 };
 
-use crate::ckb_chain::contracts::{get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_script_by_contract, Contract};
 
-use super::{funding::FundingContext, CkbChainConfig, FundingError, FundingRequest, FundingTx};
+use super::{funding::FundingContext, CkbConfig, FundingError, FundingRequest, FundingTx};
 
 pub struct CkbChainActor {}
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
-    config: CkbChainConfig,
+    config: CkbConfig,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
 }
@@ -42,7 +42,7 @@ pub enum CkbChainMessage {
 impl Actor for CkbChainActor {
     type Msg = CkbChainMessage;
     type State = CkbChainState;
-    type Arguments = CkbChainConfig;
+    type Arguments = CkbConfig;
 
     async fn pre_start(
         &self,
@@ -239,7 +239,7 @@ mod test_utils {
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
 
-    use crate::ckb_chain::TraceTxRequest;
+    use crate::ckb::TraceTxRequest;
 
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;
@@ -375,7 +375,7 @@ mod test_utils {
                         request, &tx, &fulfilled_tx
                     );
 
-                    if let Err(e) = reply_port.send(Ok((fulfilled_tx))) {
+                    if let Err(e) = reply_port.send(Ok(fulfilled_tx)) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),

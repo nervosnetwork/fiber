@@ -1,6 +1,5 @@
 use cfn_node::cch::CchMessage;
-use cfn_node::ckb::channel::ChannelSubscribers;
-use cfn_node::ckb_chain::contracts::init_contracts_context;
+use cfn_node::ckb::contracts::init_contracts_context;
 use cfn_node::store::Store;
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
@@ -13,8 +12,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use std::str::FromStr;
 
 use cfn_node::actors::RootActor;
-use cfn_node::ckb::{NetworkActorCommand, NetworkActorMessage};
-use cfn_node::ckb_chain::CkbChainActor;
+use cfn_node::ckb::CkbChainActor;
+use cfn_node::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
 use cfn_node::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -62,37 +61,37 @@ pub async fn main() {
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
 
-    let store = Store::new(config.ckb.as_ref().unwrap().store_path());
+    let store = Store::new(config.fiber.as_ref().unwrap().store_path());
     let subscribers = ChannelSubscribers::default();
 
-    let ckb_command_sender = match config.ckb {
-        Some(ckb_config) => {
+    let fiber_command_sender = match config.fiber {
+        Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. \
-            Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
+            let ckb_config = config.ckb.expect("ckb service is required for ckb service. \
+            Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
 
-            let _ = init_contracts_context(ckb_config.network, Some(&ckb_chain_config));
+            let _ = init_contracts_context(fiber_config.network, Some(&ckb_config));
 
-            let ckb_chain_actor = Actor::spawn_linked(
-                Some("ckb-chain".to_string()),
+            let ckb_actor = Actor::spawn_linked(
+                Some("ckb".to_string()),
                 CkbChainActor {},
-                ckb_chain_config,
+                ckb_config,
                 root_actor.get_cell(),
             )
             .await
-            .expect("start ckb-chain actor")
+            .expect("start ckb actor")
             .0;
 
             const CHANNEL_SIZE: usize = 4000;
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
 
-            let bootnodes = ckb_config.bootnode_addrs.clone();
+            let bootnodes = fiber_config.bootnode_addrs.clone();
 
-            info!("Starting ckb");
-            let ckb_actor = start_ckb(
-                ckb_config,
-                ckb_chain_actor,
+            info!("Starting fiber");
+            let network_actor = start_ckb(
+                fiber_config,
+                ckb_actor,
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
@@ -104,7 +103,7 @@ pub async fn main() {
             for bootnode in bootnodes {
                 let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
                 let command = NetworkActorCommand::ConnectPeer(addr);
-                ckb_actor
+                network_actor
                     .send_message(NetworkActorMessage::new_command(command))
                     .expect("ckb actor alive")
             }
@@ -133,7 +132,7 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
-            Some(ckb_actor)
+            Some(network_actor)
         }
         None => None,
     };
@@ -147,7 +146,7 @@ pub async fn main() {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                ckb_command_sender.clone(),
+                fiber_command_sender.clone(),
             )
             .await
             {
@@ -183,13 +182,13 @@ pub async fn main() {
     // Start rpc service
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
-            if ckb_command_sender.is_none() && cch_actor.is_none() {
+            if fiber_command_sender.is_none() && cch_actor.is_none() {
                 error!("Rpc service requires ckb and cch service to be started. Exiting.");
                 return;
             }
 
             info!("Starting rpc");
-            let handle = start_rpc(rpc_config, ckb_command_sender, cch_actor, store).await;
+            let handle = start_rpc(rpc_config, fiber_command_sender, cch_actor, store).await;
             Some(handle)
         }
         None => None,

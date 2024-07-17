@@ -1,6 +1,6 @@
 # Fiber Network Node
 
-Fiber Network Node (FNN) is a reference implementation of Fiber Network/Protocol (FNP). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of FNP. It's capable of:
+Fiber Network Node (FNN) is a reference implementation of Fiber Network Protocol (FNP). In the current stage, it's not a production-ready implementation, but a prototype to demonstrate the feasibility of FNP. It's capable of:
 
 * Establishing connections with other cfn nodes
 * Creating and closing fiber channel
@@ -31,13 +31,13 @@ cp config/testnet/config.yml /folder-to/my-cfn-node
 cd /folder-to/my-cfn-node
 ```
 
-3. FNN has the built-in wallet functionality to sign funding transactions, let's create or import a private key first. The private key is stored in the data folder and named `ckb-chain/key`. You may use the ckb-cli to generate a new key or export an existing key:
+3. FNN has the built-in wallet functionality to sign funding transactions, let's create or import a private key first. The private key is stored in the data folder and named `ckb/key`. You may use the ckb-cli to generate a new key or export an existing key:
 
 ```
-mkdir ckb-chain
-ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path ./ckb-chain/exported-key
+mkdir ckb
+ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path ./ckb/exported-key
 // ckb-cli exports master private key and chain code, cfn node only needs the private key part
-head -n 1 ./ckb-chain/exported-key > ./ckb-chain/key
+head -n 1 ./ckb/exported-key > ./ckb/key
 ```
 
 4. Start the node, by default it will output logs to the console, you may redirect it to a file:

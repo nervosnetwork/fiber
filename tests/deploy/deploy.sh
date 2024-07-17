@@ -36,7 +36,7 @@ function deploy() {
     GENESIS_TX0="$(ckb -C "$data_dir" list-hashes | sed -n 's/tx_hash = "\(.*\)"/\1/p' | head -1)"
     sed "s/0x8f8c79eb6671709633fe6a46de93c0fedc9c1b8a6527a18d3983879542635c9f/$GENESIS_TX0/" "$TEMPLATE_FILE" >"$CONFIG_FILE"
 
-    ckb-cli deploy gen-txs --from-address $(cat "$nodes_dir/deployer/ckb-chain/wallet") \
+    ckb-cli deploy gen-txs --from-address $(cat "$nodes_dir/deployer/ckb/wallet") \
         --fee-rate 100000 --deployment-config "$CONFIG_FILE" --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
 
     ckb-cli deploy sign-txs --add-signatures --info-file "$INFO_FILE" --privkey-path "$miner_key_file" --output-format json | sed -n 's/: \("[^"]*"\)/: [\1]/p'

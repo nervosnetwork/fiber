@@ -1,6 +1,6 @@
 use super::channel::{ChannelActorState, FUNDING_CELL_WITNESS_LEN};
 use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
-use crate::ckb_chain::contracts::{get_cell_deps, get_script_by_contract, Contract};
+use crate::ckb::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
 use ckb_types::packed::{Bytes, OutPoint, Script};
 use ckb_types::prelude::Builder;

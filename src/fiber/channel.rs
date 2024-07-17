@@ -37,14 +37,14 @@ use std::{
 
 use crate::{
     ckb::{
+        contracts::{get_cell_deps, get_script_by_contract, Contract},
+        FundingRequest,
+    },
+    fiber::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
         network::emit_service_event,
         types::Shutdown,
-    },
-    ckb_chain::{
-        contracts::{get_cell_deps, get_script_by_contract, Contract},
-        FundingRequest,
     },
     NetworkServiceEvent,
 };
@@ -4717,7 +4717,8 @@ impl InMemorySigner {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ckb::{
+        ckb::contracts::{get_cell_deps, Contract},
+        fiber::{
             channel::{
                 derive_revocation_pubkey, AddTlcCommand, ChannelCommand, ChannelCommandWithId,
                 RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
@@ -4728,7 +4729,6 @@ mod tests {
             types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
-        ckb_chain::contracts::{get_cell_deps, Contract},
         NetworkServiceEvent,
     };
 
@@ -4810,7 +4810,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_and_accept_channel() {
-        use crate::ckb::channel::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
+        use crate::fiber::channel::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
 
         let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await

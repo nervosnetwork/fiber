@@ -167,8 +167,8 @@ fn get_nodes_info(node: &str) -> (String, H256) {
     let nodes_dir = std::env::var("NODES_DIR").expect("env var");
     let node_dir = format!("{}/{}", nodes_dir, node);
     let wallet =
-        std::fs::read_to_string(format!("{}/ckb-chain/wallet", node_dir)).expect("read failed");
-    let key = std::fs::read_to_string(format!("{}/ckb-chain/key", node_dir)).expect("read failed");
+        std::fs::read_to_string(format!("{}/ckb/wallet", node_dir)).expect("read failed");
+    let key = std::fs::read_to_string(format!("{}/ckb/key", node_dir)).expect("read failed");
     (wallet, H256::from_str(key.trim()).expect("parse hex"))
 }
 
@@ -230,12 +230,12 @@ fn genrate_nodes_config() {
     );
     for i in 1..=3 {
         let mut data = data.clone();
-        data["ckb"]["listening_port"] =
+        data["fiber"]["listening_port"] =
             serde_yaml::Value::Number(serde_yaml::Number::from(8344 + i - 1));
-        data["ckb"]["announced_node_name"] = serde_yaml::Value::String(format!("ckb-{}", i));
+        data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
-        data["ckb_chain"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
+        data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
 
         // Node 3 acts as a CCH node.
         if i == 3 {

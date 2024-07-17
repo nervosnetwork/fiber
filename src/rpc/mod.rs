@@ -7,7 +7,7 @@ mod utils;
 
 use crate::{
     cch::CchMessage,
-    ckb::{channel::ChannelActorStateStore, NetworkActorMessage},
+    fiber::{channel::ChannelActorStateStore, NetworkActorMessage},
     invoice::{InvoiceCommand, InvoiceStore},
 };
 use cch::{CchRpcServer, CchRpcServerImpl};
@@ -50,16 +50,16 @@ fn build_server(addr: &str) -> Server {
 
 pub async fn start_rpc<S: ChannelActorStateStore + InvoiceStore + Clone + Send + Sync + 'static>(
     config: RpcConfig,
-    ckb_network_actor: Option<ActorRef<NetworkActorMessage>>,
+    network_actor: Option<ActorRef<NetworkActorMessage>>,
     cch_actor: Option<ActorRef<CchMessage>>,
     store: S,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let server = build_server(listening_addr);
     let mut methods = InvoiceRpcServerImpl::new(store.clone()).into_rpc();
-    if let Some(ckb_network_actor) = ckb_network_actor {
-        let peer = PeerRpcServerImpl::new(ckb_network_actor.clone());
-        let channel = ChannelRpcServerImpl::new(ckb_network_actor, store);
+    if let Some(network_actor) = network_actor {
+        let peer = PeerRpcServerImpl::new(network_actor.clone());
+        let channel = ChannelRpcServerImpl::new(network_actor, store);
         methods.merge(peer.into_rpc()).unwrap();
         methods.merge(channel.into_rpc()).unwrap();
     }

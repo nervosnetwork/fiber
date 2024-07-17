@@ -5,7 +5,7 @@ use serde_with::serde_as;
 use std::{str::FromStr as _, time::Duration};
 
 use crate::{
-    ckb::{
+    fiber::{
         serde_utils::{U128Hex, U64Hex},
         types::Hash256,
     },

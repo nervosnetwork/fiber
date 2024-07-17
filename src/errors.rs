@@ -3,12 +3,12 @@ use tentacle::{error::SendErrorKind, secio::PeerId};
 use thiserror::Error;
 
 use crate::{
-    ckb::{
+    ckb::FundingError,
+    fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
         types::Hash256,
         NetworkActorMessage,
     },
-    ckb_chain::FundingError,
 };
 
 use crate::invoice::InvoiceError;

@@ -5,7 +5,7 @@ use serde_json;
 use tentacle::secio::PeerId;
 
 use crate::{
-    ckb::{
+    fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         types::Hash256,
     },

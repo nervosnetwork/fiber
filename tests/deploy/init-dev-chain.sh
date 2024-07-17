@@ -49,21 +49,21 @@ if ! [[ -d "$data_dir" ]]; then
 
     # Transfer some money to the node 1.
     # The address of node 1 can be seen with the following command:
-    # echo | HOME=/tmp ckb-cli account import --local-only --privkey-path "$$nodes_dir/1/ckb-chain/key"
-    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/1/ckb-chain/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb-chain/key"
+    # echo | HOME=/tmp ckb-cli account import --local-only --privkey-path "$$nodes_dir/1/ckb/key"
+    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/1/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
 
     sleep 1
     "$script_dir/generate-blocks.sh" 6
     sleep 1
 
     # Transfer some money to the node 2.
-    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/2/ckb-chain/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb-chain/key"
+    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/2/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
     sleep 1
     "$script_dir/generate-blocks.sh" 6
     sleep 1
 
     # Transfer some money to the node 3.
-    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/3/ckb-chain/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb-chain/key"
+    ckb-cli wallet transfer --to-address $(cat "$nodes_dir/3/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
     sleep 1
     # Generate a few blocks so that above transaction is confirmed.
     echo "begin to generate blocks for wallet updating..."

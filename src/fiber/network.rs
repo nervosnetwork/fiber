@@ -38,12 +38,12 @@ use super::channel::{
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{CFNMessage, Hash256, OpenChannel, Privkey, Pubkey};
-use super::CkbConfig;
+use super::FiberConfig;
 
-use crate::ckb::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::ckb::types::TxSignatures;
-use crate::ckb_chain::contracts::{check_udt_script, is_udt_type_auto_accept};
-use crate::ckb_chain::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
+use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
+use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
+use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
+use crate::fiber::types::TxSignatures;
 use crate::{unwrap_or_return, Error};
 
 pub const CFN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -1368,7 +1368,7 @@ impl NetworkActorState {
 }
 
 pub struct NetworkActorStartArguments {
-    pub config: CkbConfig,
+    pub config: FiberConfig,
     pub tracker: TaskTracker,
     pub channel_subscribers: ChannelSubscribers,
 }
@@ -1627,7 +1627,7 @@ pub(crate) fn emit_service_event(
 }
 
 pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
-    config: CkbConfig,
+    config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     tracker: TaskTracker,

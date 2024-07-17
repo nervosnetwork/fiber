@@ -1,10 +1,10 @@
 use super::errors::VerificationError;
 use super::utils::*;
-use crate::ckb::gen::invoice::{self as gen_invoice, *};
-use crate::ckb::hash_algorithm::HashAlgorithm;
-use crate::ckb::serde_utils::EntityHex;
-use crate::ckb::serde_utils::U128Hex;
-use crate::ckb::types::Hash256;
+use crate::fiber::gen::invoice::{self as gen_invoice, *};
+use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::U128Hex;
+use crate::fiber::types::Hash256;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::sha256::Hash as Sha256;

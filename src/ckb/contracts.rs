@@ -7,7 +7,7 @@ use regex::Regex;
 use std::{collections::HashMap, env, str::FromStr, sync::Arc};
 use tracing::debug;
 
-use crate::ckb::{config::CkbNetwork, types::Hash256};
+use crate::fiber::{config::CkbNetwork, types::Hash256};
 
 #[cfg(not(test))]
 use ckb_types::bytes::Bytes;
@@ -19,7 +19,7 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{
     config::{UdtArgInfo, UdtCfgInfos},
-    CkbChainConfig,
+    CkbConfig,
 };
 
 #[cfg(test)]
@@ -475,10 +475,10 @@ impl ContractsContext {
 
 pub fn init_contracts_context(
     network: Option<CkbNetwork>,
-    ckb_chain_config: Option<&CkbChainConfig>,
+    ckb_config: Option<&CkbConfig>,
 ) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
-    let udt_whitelist = ckb_chain_config
+    let udt_whitelist = ckb_config
         .map(|config| config.udt_whitelist.clone())
         .unwrap_or_default();
     INSTANCE.get_or_init(|| {
@@ -543,9 +543,7 @@ mod test {
     use ckb_types::{core::TransactionView, packed::CellOutput, prelude::Pack};
     use molecule::prelude::{Builder, Entity};
 
-    use crate::ckb_chain::contracts::{
-        get_script_by_contract, Contract, ContractsContext, MockContext,
-    };
+    use crate::ckb::contracts::{get_script_by_contract, Contract, ContractsContext, MockContext};
 
     // This test is to ensure that the same transaction is generated for different mock contexts.
     // If different transactions are generated, then the mock context is not deterministic.

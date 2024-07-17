@@ -4,6 +4,6 @@
 .direnv
 /result*
 
-/tests/nodes/*/ckb/store
-/tests/deploy/udt-init/target
+/tests/nodes/*/fiber/store
 /tests/nodes/*/config.yml
+/tests/deploy/udt-init/target

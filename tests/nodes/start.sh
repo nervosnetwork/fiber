@@ -26,7 +26,7 @@ if [[ ! -f "$deploy_dir/.env" ]]; then
 else
     if [ -n "$should_remove_old_state" ]; then
         echo "starting to reset ...."
-        rm -rf "$nodes_dir"/*/ckb/store
+        rm -rf "$nodes_dir"/*/fiber/store
         "$deploy_dir/init-dev-chain.sh" -f
     fi
     export $(xargs <"$deploy_dir/.env")

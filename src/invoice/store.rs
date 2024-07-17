@@ -1,4 +1,4 @@
-use crate::{ckb::types::Hash256, invoice::CkbInvoice};
+use crate::{fiber::types::Hash256, invoice::CkbInvoice};
 
 use super::InvoiceError;
 
