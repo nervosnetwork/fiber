@@ -19,7 +19,7 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{
     config::{UdtArgInfo, UdtCfgInfos},
-    CkbChainConfig,
+    CkbConfig,
 };
 
 #[cfg(test)]
@@ -475,10 +475,10 @@ impl ContractsContext {
 
 pub fn init_contracts_context(
     network: Option<CkbNetwork>,
-    ckb_chain_config: Option<&CkbChainConfig>,
+    ckb_config: Option<&CkbConfig>,
 ) -> &'static ContractsContext {
     static INSTANCE: once_cell::sync::OnceCell<ContractsContext> = once_cell::sync::OnceCell::new();
-    let udt_whitelist = ckb_chain_config
+    let udt_whitelist = ckb_config
         .map(|config| config.udt_whitelist.clone())
         .unwrap_or_default();
     INSTANCE.get_or_init(|| {

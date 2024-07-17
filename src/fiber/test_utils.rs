@@ -110,7 +110,7 @@ impl NetworkNode {
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let mut chain_base_dir = PathBuf::from(base_dir.as_ref());
-        chain_base_dir.push("ckb-chain");
+        chain_base_dir.push("ckb");
 
         let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
             .await

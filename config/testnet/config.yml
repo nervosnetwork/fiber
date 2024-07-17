@@ -5,10 +5,10 @@ fiber:
 rpc:
   listening_addr: 127.0.0.1:8227
 
-ckb_chain:
+ckb:
   rpc_url: "https://testnet.ckbapp.dev/"
 
 services:
   - fiber
   - rpc
-  - ckb_chain
+  - ckb

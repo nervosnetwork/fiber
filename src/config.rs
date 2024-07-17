@@ -9,7 +9,7 @@ use home::home_dir;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{ckb::CkbChainConfig, CchConfig, FiberConfig, LdkConfig, RpcConfig};
+use crate::{ckb::CkbConfig, CchConfig, FiberConfig, LdkConfig, RpcConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
@@ -38,7 +38,7 @@ enum Service {
     CCH,
     #[serde(alias = "rpc", alias = "RPC")]
     RPC,
-    #[serde(alias = "ckb_chain", alias = "CKB_CHAIN")]
+    #[serde(alias = "ckb", alias = "CKB")]
     CkbChain,
 }
 
@@ -50,7 +50,7 @@ impl FromStr for Service {
             "ldk" | "LDK" => Ok(Self::LDK),
             "cch" | "CCH" => Ok(Self::CCH),
             "rpc" | "RPC" => Ok(Self::RPC),
-            "ckb_chain" | "CKB_CHAIN" => Ok(Self::CkbChain),
+            "ckb" | "CKB" => Ok(Self::CkbChain),
             _ => Err(format!("invalid service {}", s)),
         }
     }
@@ -90,9 +90,9 @@ struct Args {
     #[command(flatten)]
     pub rpc: <RpcConfig as ClapSerde>::Opt,
 
-    /// config for ckb chain
+    /// config for ckb
     #[command(flatten)]
-    pub ckb_chain: <CkbChainConfig as ClapSerde>::Opt,
+    pub ckb: <CkbConfig as ClapSerde>::Opt,
 }
 
 #[derive(Deserialize)]
@@ -102,7 +102,7 @@ struct SerializedConfig {
     ldk: Option<<LdkConfig as ClapSerde>::Opt>,
     cch: Option<<CchConfig as ClapSerde>::Opt>,
     rpc: Option<<RpcConfig as ClapSerde>::Opt>,
-    ckb_chain: Option<<CkbChainConfig as ClapSerde>::Opt>,
+    ckb: Option<<CkbConfig as ClapSerde>::Opt>,
 }
 
 #[derive(Debug)]
@@ -115,8 +115,8 @@ pub struct Config {
     pub cch: Option<CchConfig>,
     // rpc server config, None represents that we should not run rpc service
     pub rpc: Option<RpcConfig>,
-    // ckb chain actor config, None represents that we should not run ckb chain actor
-    pub ckb_chain: Option<CkbChainConfig>,
+    // ckb actor config, None represents that we should not run ckb actor
+    pub ckb: Option<CkbConfig>,
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
@@ -172,12 +172,10 @@ impl Config {
         // Set default fiber/ldk base directory. These may be overridden by values explicitly set by the user.
         args.fiber.base_dir = Some(Some(base_dir.join(DEFAULT_FIBER_DIR_NAME)));
         args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
-        args.ckb_chain.base_dir = Some(Some(
-            base_dir.join(crate::ckb::DEFAULT_CKB_CHAIN_BASE_DIR_NAME),
-        ));
+        args.ckb.base_dir = Some(Some(base_dir.join(crate::ckb::DEFAULT_CKB_BASE_DIR_NAME)));
         args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
 
-        let (fiber, ldk, cch, rpc, ckb_chain) = config_from_file
+        let (fiber, ldk, cch, rpc, ckb) = config_from_file
             .map(|x| {
                 let SerializedConfig {
                     services: _,
@@ -185,7 +183,7 @@ impl Config {
                     ldk,
                     cch,
                     rpc,
-                    ckb_chain,
+                    ckb,
                 } = x;
                 (
                     // Successfully read config file, merging these options with the default ones.
@@ -193,29 +191,29 @@ impl Config {
                     ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
                     cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
                     rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
-                    ckb_chain.map(|c| CkbChainConfig::from(c).merge(&mut args.ckb_chain)),
+                    ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                 )
             })
             .unwrap_or((None, None, None, None, None));
-        let (fiber, ldk, cch, rpc, ckb_chain) = (
+        let (fiber, ldk, cch, rpc, ckb) = (
             fiber.unwrap_or(FiberConfig::from(&mut args.fiber)),
             ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
             cch.unwrap_or(CchConfig::from(&mut args.cch)),
             rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
-            ckb_chain.unwrap_or(CkbChainConfig::from(&mut args.ckb_chain)),
+            ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
         );
 
         let fiber = services.contains(&Service::FIBER).then_some(fiber);
         let ldk = services.contains(&Service::LDK).then_some(ldk);
         let cch = services.contains(&Service::CCH).then_some(cch);
         let rpc = services.contains(&Service::RPC).then_some(rpc);
-        let ckb_chain = services.contains(&Service::CkbChain).then_some(ckb_chain);
+        let ckb = services.contains(&Service::CkbChain).then_some(ckb);
         Self {
             fiber,
             ldk,
             cch,
             rpc,
-            ckb_chain,
+            ckb,
         }
     }
 }

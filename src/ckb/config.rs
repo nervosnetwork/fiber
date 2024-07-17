@@ -21,24 +21,24 @@ use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
 use serde::Deserialize;
 
-pub const DEFAULT_CKB_CHAIN_BASE_DIR_NAME: &str = "ckb-chain";
-const DEFAULT_CKB_CHAIN_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
+pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
+const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
 
 #[derive(ClapSerde, Debug, Clone)]
-pub struct CkbChainConfig {
+pub struct CkbConfig {
     /// ckb base directory
     #[arg(
-        name = "CKB_CHAIN_BASE_DIR",
-        long = "ckb-chain-base-dir",
+        name = "CKB_BASE_DIR",
+        long = "ckb-base-dir",
         env,
-        help = format!("base directory for ckb chain actor [default: $BASE_DIR/{}]", DEFAULT_CKB_CHAIN_BASE_DIR_NAME)
+        help = format!("base directory for ckb actor [default: $BASE_DIR/{}]", DEFAULT_CKB_BASE_DIR_NAME)
     )]
     pub base_dir: Option<PathBuf>,
 
-    #[default(DEFAULT_CKB_CHAIN_NODE_RPC_URL.to_string())]
+    #[default(DEFAULT_CKB_NODE_RPC_URL.to_string())]
     #[arg(
-        name = "CKB_CHAIN_NODE_RPC_URL",
-        long = "ckb-chain-node-rpc-url",
+        name = "CKB_NODE_RPC_URL",
+        long = "ckb-node-rpc-url",
         env,
         help = "rpc url to connect the ckb node [default: http://127.0.0.1:8114]"
     )]
@@ -53,7 +53,7 @@ pub struct CkbChainConfig {
     pub udt_whitelist: Option<UdtCfgInfos>,
 }
 
-impl CkbChainConfig {
+impl CkbConfig {
     pub fn base_dir(&self) -> &PathBuf {
         self.base_dir.as_ref().expect("have set base dir")
     }

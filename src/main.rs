@@ -68,19 +68,19 @@ pub async fn main() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_chain_config = config.ckb_chain.expect("ckb-chain service is required for ckb service. \
-            Add ckb-chain service to the services list in the config file and relevant configuration to the ckb_chain section of the config file.");
+            let ckb_config = config.ckb.expect("ckb service is required for ckb service. \
+            Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
 
-            let _ = init_contracts_context(fiber_config.network, Some(&ckb_chain_config));
+            let _ = init_contracts_context(fiber_config.network, Some(&ckb_config));
 
-            let ckb_chain_actor = Actor::spawn_linked(
-                Some("ckb-chain".to_string()),
+            let ckb_actor = Actor::spawn_linked(
+                Some("ckb".to_string()),
                 CkbChainActor {},
-                ckb_chain_config,
+                ckb_config,
                 root_actor.get_cell(),
             )
             .await
-            .expect("start ckb-chain actor")
+            .expect("start ckb actor")
             .0;
 
             const CHANNEL_SIZE: usize = 4000;
@@ -91,7 +91,7 @@ pub async fn main() {
             info!("Starting fiber");
             let network_actor = start_ckb(
                 fiber_config,
-                ckb_chain_actor,
+                ckb_actor,
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
