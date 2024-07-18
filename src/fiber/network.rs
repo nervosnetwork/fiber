@@ -37,7 +37,7 @@ use super::channel::{
 };
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{CFNMessage, Hash256, OpenChannel, Privkey, Pubkey};
+use super::types::{FiberMessage, Hash256, OpenChannel, Privkey, Pubkey};
 use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
@@ -46,7 +46,7 @@ use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::fiber::types::TxSignatures;
 use crate::{unwrap_or_return, Error};
 
-pub const CFN_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
+pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
 
@@ -83,7 +83,7 @@ pub enum NetworkActorCommand {
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
-    SendCFNMessage(CFNMessageWithPeerId),
+    SendFiberMessage(FiberMessageWithPeerId),
     // Open a channel to a peer.
     OpenChannel(
         OpenChannelCommand,
@@ -95,7 +95,7 @@ pub enum NetworkActorCommand {
         RpcReplyPort<Result<AcceptChannelResponse, String>>,
     ),
     // Send a command to a channel.
-    ControlCfnChannel(ChannelCommandWithId),
+    ControlFiberChannel(ChannelCommandWithId),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
 }
@@ -176,7 +176,7 @@ pub enum NetworkActorEvent {
     /// Network eventss to be processed by this actor.
     PeerConnected(PeerId, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
-    PeerMessage(PeerId, CFNMessage),
+    PeerMessage(PeerId, FiberMessage),
 
     /// Channel related events.
 
@@ -246,27 +246,27 @@ pub enum NetworkActorMessage {
 }
 
 #[derive(Debug)]
-pub struct CFNMessageWithPeerId {
+pub struct FiberMessageWithPeerId {
     pub peer_id: PeerId,
-    pub message: CFNMessage,
+    pub message: FiberMessage,
 }
 
-impl CFNMessageWithPeerId {
-    pub fn new(peer_id: PeerId, message: CFNMessage) -> Self {
+impl FiberMessageWithPeerId {
+    pub fn new(peer_id: PeerId, message: FiberMessage) -> Self {
         Self { peer_id, message }
     }
 }
 
 #[derive(Debug)]
-pub struct CFNMessageWithSessionId {
+pub struct FiberMessageWithSessionId {
     pub session_id: SessionId,
-    pub message: CFNMessage,
+    pub message: FiberMessage,
 }
 
 #[derive(Debug)]
-pub struct CFNMessageWithChannelId {
+pub struct FiberMessageWithChannelId {
     pub channel_id: Hash256,
-    pub message: CFNMessage,
+    pub message: FiberMessage,
 }
 
 pub struct NetworkActor<S> {
@@ -300,12 +300,12 @@ where
         &self,
         state: &mut NetworkActorState,
         peer_id: PeerId,
-        message: CFNMessage,
+        message: FiberMessage,
     ) -> crate::Result<()> {
         match message {
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
-            CFNMessage::OpenChannel(open_channel) => {
+            FiberMessage::OpenChannel(open_channel) => {
                 let temp_channel_id = open_channel.channel_id;
                 match state
                     .on_open_channel_msg(peer_id, open_channel.clone())
@@ -535,7 +535,7 @@ where
     ) -> crate::Result<()> {
         debug!("Handling command: {:?}", command);
         match command {
-            NetworkActorCommand::SendCFNMessage(CFNMessageWithPeerId { peer_id, message }) => {
+            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_message_to_peer(&peer_id, message).await?;
             }
 
@@ -590,7 +590,7 @@ where
                 }
             }
 
-            NetworkActorCommand::ControlCfnChannel(c) => {
+            NetworkActorCommand::ControlFiberChannel(c) => {
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
@@ -690,9 +690,9 @@ where
                             .expect("network actor alive");
                         debug!("Fully signed funding tx {:?}", &funding_tx);
 
-                        CFNMessageWithPeerId {
+                        FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
-                            message: CFNMessage::TxSignatures(TxSignatures {
+                            message: FiberMessage::TxSignatures(TxSignatures {
                                 channel_id: *channel_id,
                                 witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
                                 tx_hash: funding_tx.hash().into(),
@@ -716,9 +716,9 @@ where
                         let witnesses = funding_tx.witnesses();
 
                         debug!("Partially signed funding tx {:?}", &funding_tx);
-                        CFNMessageWithPeerId {
+                        FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
-                            message: CFNMessage::TxSignatures(TxSignatures {
+                            message: FiberMessage::TxSignatures(TxSignatures {
                                 channel_id: *channel_id,
                                 witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
                                 tx_hash: funding_tx.hash().into(),
@@ -732,7 +732,7 @@ where
                 );
                 myself
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendCFNMessage(msg),
+                        NetworkActorCommand::SendFiberMessage(msg),
                     ))
                     .expect("network actor alive");
             }
@@ -788,8 +788,8 @@ impl NetworkActorState {
             .into_iter()
             .chain(self.entropy.iter().cloned())
             .collect::<Vec<u8>>();
-        let result = blake2b_hash_with_salt(&seed, b"CFN_CHANNEL_SEED");
-        self.entropy = blake2b_hash_with_salt(&result, b"CFN_NETWORK_ENTROPY_UPDATE");
+        let result = blake2b_hash_with_salt(&seed, b"FIBER_CHANNEL_SEED");
+        self.entropy = blake2b_hash_with_salt(&result, b"FIBER_NETWORK_ENTROPY_UPDATE");
         result
     }
 
@@ -1038,10 +1038,10 @@ impl NetworkActorState {
     async fn send_message_to_session(
         &self,
         session_id: SessionId,
-        message: CFNMessage,
+        message: FiberMessage,
     ) -> crate::Result<()> {
         self.control
-            .send_message_to(session_id, CFN_PROTOCOL_ID, message.to_molecule_bytes())
+            .send_message_to(session_id, FIBER_PROTOCOL_ID, message.to_molecule_bytes())
             .await?;
         Ok(())
     }
@@ -1049,7 +1049,7 @@ impl NetworkActorState {
     async fn send_message_to_peer(
         &self,
         peer_id: &PeerId,
-        message: CFNMessage,
+        message: FiberMessage,
     ) -> crate::Result<()> {
         match self.get_peer_session(peer_id) {
             Some(session) => self.send_message_to_session(session, message).await,
@@ -1402,13 +1402,13 @@ where
             [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
                 .concat()
                 .as_slice(),
-            b"CFN_NETWORK_ENTROPY",
+            b"FIBER_NETWORK_ENTROPY",
         );
         let secio_kp = SecioKeyPair::from(kp);
         let secio_pk = secio_kp.public_key();
         let handle = Handle::new(myself.clone());
         let mut service = ServiceBuilder::default()
-            .insert_protocol(handle.clone().create_meta(CFN_PROTOCOL_ID))
+            .insert_protocol(handle.clone().create_meta(FIBER_PROTOCOL_ID))
             .handshake_type(secio_kp.into())
             .build(handle);
         let listen_addr = service
@@ -1588,7 +1588,7 @@ impl ServiceProtocol for Handle {
     }
 
     async fn received(&mut self, context: ProtocolContextMutRef<'_>, data: Bytes) {
-        let msg = unwrap_or_return!(CFNMessage::from_molecule_slice(&data), "parse message");
+        let msg = unwrap_or_return!(FiberMessage::from_molecule_slice(&data), "parse message");
         match context.session.remote_pubkey.as_ref() {
             Some(pubkey) => {
                 let peer_id = PeerId::from_public_key(pubkey);

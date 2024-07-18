@@ -1,6 +1,6 @@
-use cfn_node::cch::CchMessage;
-use cfn_node::ckb::contracts::init_contracts_context;
-use cfn_node::store::Store;
+use fnn::cch::CchMessage;
+use fnn::ckb::contracts::init_contracts_context;
+use fnn::store::Store;
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -11,13 +11,13 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use std::str::FromStr;
 
-use cfn_node::actors::RootActor;
-use cfn_node::ckb::CkbChainActor;
-use cfn_node::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
-use cfn_node::tasks::{
+use fnn::actors::RootActor;
+use fnn::ckb::CkbChainActor;
+use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
+use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use cfn_node::{start_cch, start_ckb, start_ldk, start_rpc, Config};
+use fnn::{start_cch, start_ckb, start_ldk, start_rpc, Config};
 use core::default::Default;
 use tracing_subscriber::fmt::format;
 
@@ -33,7 +33,7 @@ pub async fn main() {
                 "{}: {:?} on {}",
                 field,
                 value,
-                cfn_node::get_node_prefix()
+                fnn::get_node_prefix()
             )
         } else {
             write!(writer, "{}: {:?}", field, value)
@@ -47,7 +47,7 @@ pub async fn main() {
         .fmt_fields(node_formatter)
         .init();
 
-    let _span = info_span!("node", node = cfn_node::get_node_prefix()).entered();
+    let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);

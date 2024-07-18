@@ -8926,8 +8926,8 @@ impl molecule::prelude::Builder for ReestablishChannelBuilder {
     }
 }
 #[derive(Clone)]
-pub struct CFNMessage(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for CFNMessage {
+pub struct FiberMessage(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for FiberMessage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -8936,25 +8936,25 @@ impl ::core::fmt::LowerHex for CFNMessage {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for CFNMessage {
+impl ::core::fmt::Debug for FiberMessage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for CFNMessage {
+impl ::core::fmt::Display for FiberMessage {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}(", Self::NAME)?;
         self.to_enum().display_inner(f)?;
         write!(f, ")")
     }
 }
-impl ::core::default::Default for CFNMessage {
+impl ::core::default::Default for FiberMessage {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        CFNMessage::new_unchecked(v)
+        FiberMessage::new_unchecked(v)
     }
 }
-impl CFNMessage {
+impl FiberMessage {
     const DEFAULT_VALUE: [u8; 538] = [
         0, 0, 0, 0, 22, 2, 0, 0, 84, 0, 0, 0, 116, 0, 0, 0, 148, 0, 0, 0, 148, 0, 0, 0, 164, 0, 0,
         0, 172, 0, 0, 0, 180, 0, 0, 0, 188, 0, 0, 0, 204, 0, 0, 0, 212, 0, 0, 0, 228, 0, 0, 0, 236,
@@ -8980,7 +8980,7 @@ impl CFNMessage {
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
-    pub fn to_enum(&self) -> CFNMessageUnion {
+    pub fn to_enum(&self) -> FiberMessageUnion {
         let inner = self.0.slice(molecule::NUMBER_SIZE..);
         match self.item_id() {
             0 => OpenChannel::new_unchecked(inner).into(),
@@ -9002,15 +9002,15 @@ impl CFNMessage {
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
-    pub fn as_reader<'r>(&'r self) -> CFNMessageReader<'r> {
-        CFNMessageReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> FiberMessageReader<'r> {
+        FiberMessageReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for CFNMessage {
-    type Builder = CFNMessageBuilder;
-    const NAME: &'static str = "CFNMessage";
+impl molecule::prelude::Entity for FiberMessage {
+    type Builder = FiberMessageBuilder;
+    const NAME: &'static str = "FiberMessage";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        CFNMessage(data)
+        FiberMessage(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -9019,10 +9019,10 @@ impl molecule::prelude::Entity for CFNMessage {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        CFNMessageReader::from_slice(slice).map(|reader| reader.to_entity())
+        FiberMessageReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        CFNMessageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        FiberMessageReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -9032,8 +9032,8 @@ impl molecule::prelude::Entity for CFNMessage {
     }
 }
 #[derive(Clone, Copy)]
-pub struct CFNMessageReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for CFNMessageReader<'r> {
+pub struct FiberMessageReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for FiberMessageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -9042,24 +9042,24 @@ impl<'r> ::core::fmt::LowerHex for CFNMessageReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for CFNMessageReader<'r> {
+impl<'r> ::core::fmt::Debug for FiberMessageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for CFNMessageReader<'r> {
+impl<'r> ::core::fmt::Display for FiberMessageReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}(", Self::NAME)?;
         self.to_enum().display_inner(f)?;
         write!(f, ")")
     }
 }
-impl<'r> CFNMessageReader<'r> {
+impl<'r> FiberMessageReader<'r> {
     pub const ITEMS_COUNT: usize = 16;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
-    pub fn to_enum(&self) -> CFNMessageUnionReader<'r> {
+    pub fn to_enum(&self) -> FiberMessageUnionReader<'r> {
         let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
         match self.item_id() {
             0 => OpenChannelReader::new_unchecked(inner).into(),
@@ -9082,14 +9082,14 @@ impl<'r> CFNMessageReader<'r> {
         }
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for CFNMessageReader<'r> {
-    type Entity = CFNMessage;
-    const NAME: &'static str = "CFNMessageReader";
+impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
+    type Entity = FiberMessage;
+    const NAME: &'static str = "FiberMessageReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        CFNMessageReader(slice)
+        FiberMessageReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -9125,20 +9125,20 @@ impl<'r> molecule::prelude::Reader<'r> for CFNMessageReader<'r> {
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct CFNMessageBuilder(pub(crate) CFNMessageUnion);
-impl CFNMessageBuilder {
+pub struct FiberMessageBuilder(pub(crate) FiberMessageUnion);
+impl FiberMessageBuilder {
     pub const ITEMS_COUNT: usize = 16;
     pub fn set<I>(mut self, v: I) -> Self
     where
-        I: ::core::convert::Into<CFNMessageUnion>,
+        I: ::core::convert::Into<FiberMessageUnion>,
     {
         self.0 = v.into();
         self
     }
 }
-impl molecule::prelude::Builder for CFNMessageBuilder {
-    type Entity = CFNMessage;
-    const NAME: &'static str = "CFNMessageBuilder";
+impl molecule::prelude::Builder for FiberMessageBuilder {
+    type Entity = FiberMessage;
+    const NAME: &'static str = "FiberMessageBuilder";
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE + self.0.as_slice().len()
     }
@@ -9150,11 +9150,11 @@ impl molecule::prelude::Builder for CFNMessageBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        CFNMessage::new_unchecked(inner.into())
+        FiberMessage::new_unchecked(inner.into())
     }
 }
 #[derive(Debug, Clone)]
-pub enum CFNMessageUnion {
+pub enum FiberMessageUnion {
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
     TxSignatures(TxSignatures),
@@ -9173,7 +9173,7 @@ pub enum CFNMessageUnion {
     ReestablishChannel(ReestablishChannel),
 }
 #[derive(Debug, Clone, Copy)]
-pub enum CFNMessageUnionReader<'r> {
+pub enum FiberMessageUnionReader<'r> {
     OpenChannel(OpenChannelReader<'r>),
     AcceptChannel(AcceptChannelReader<'r>),
     TxSignatures(TxSignaturesReader<'r>),
@@ -9191,565 +9191,565 @@ pub enum CFNMessageUnionReader<'r> {
     ClosingSigned(ClosingSignedReader<'r>),
     ReestablishChannel(ReestablishChannelReader<'r>),
 }
-impl ::core::default::Default for CFNMessageUnion {
+impl ::core::default::Default for FiberMessageUnion {
     fn default() -> Self {
-        CFNMessageUnion::OpenChannel(::core::default::Default::default())
+        FiberMessageUnion::OpenChannel(::core::default::Default::default())
     }
 }
-impl ::core::fmt::Display for CFNMessageUnion {
+impl ::core::fmt::Display for FiberMessageUnion {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
-            CFNMessageUnion::OpenChannel(ref item) => {
+            FiberMessageUnion::OpenChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, OpenChannel::NAME, item)
             }
-            CFNMessageUnion::AcceptChannel(ref item) => {
+            FiberMessageUnion::AcceptChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AcceptChannel::NAME, item)
             }
-            CFNMessageUnion::TxSignatures(ref item) => {
+            FiberMessageUnion::TxSignatures(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxSignatures::NAME, item)
             }
-            CFNMessageUnion::TxUpdate(ref item) => {
+            FiberMessageUnion::TxUpdate(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
             }
-            CFNMessageUnion::TxComplete(ref item) => {
+            FiberMessageUnion::TxComplete(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxComplete::NAME, item)
             }
-            CFNMessageUnion::TxAbort(ref item) => {
+            FiberMessageUnion::TxAbort(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAbort::NAME, item)
             }
-            CFNMessageUnion::TxInitRBF(ref item) => {
+            FiberMessageUnion::TxInitRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxInitRBF::NAME, item)
             }
-            CFNMessageUnion::TxAckRBF(ref item) => {
+            FiberMessageUnion::TxAckRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAckRBF::NAME, item)
             }
-            CFNMessageUnion::CommitmentSigned(ref item) => {
+            FiberMessageUnion::CommitmentSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
             }
-            CFNMessageUnion::ChannelReady(ref item) => {
+            FiberMessageUnion::ChannelReady(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
-            CFNMessageUnion::AddTlc(ref item) => {
+            FiberMessageUnion::AddTlc(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
             }
-            CFNMessageUnion::RemoveTlc(ref item) => {
+            FiberMessageUnion::RemoveTlc(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
             }
-            CFNMessageUnion::RevokeAndAck(ref item) => {
+            FiberMessageUnion::RevokeAndAck(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
             }
-            CFNMessageUnion::Shutdown(ref item) => {
+            FiberMessageUnion::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
             }
-            CFNMessageUnion::ClosingSigned(ref item) => {
+            FiberMessageUnion::ClosingSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ClosingSigned::NAME, item)
             }
-            CFNMessageUnion::ReestablishChannel(ref item) => {
+            FiberMessageUnion::ReestablishChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ReestablishChannel::NAME, item)
             }
         }
     }
 }
-impl<'r> ::core::fmt::Display for CFNMessageUnionReader<'r> {
+impl<'r> ::core::fmt::Display for FiberMessageUnionReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
-            CFNMessageUnionReader::OpenChannel(ref item) => {
+            FiberMessageUnionReader::OpenChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, OpenChannel::NAME, item)
             }
-            CFNMessageUnionReader::AcceptChannel(ref item) => {
+            FiberMessageUnionReader::AcceptChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AcceptChannel::NAME, item)
             }
-            CFNMessageUnionReader::TxSignatures(ref item) => {
+            FiberMessageUnionReader::TxSignatures(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxSignatures::NAME, item)
             }
-            CFNMessageUnionReader::TxUpdate(ref item) => {
+            FiberMessageUnionReader::TxUpdate(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxUpdate::NAME, item)
             }
-            CFNMessageUnionReader::TxComplete(ref item) => {
+            FiberMessageUnionReader::TxComplete(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxComplete::NAME, item)
             }
-            CFNMessageUnionReader::TxAbort(ref item) => {
+            FiberMessageUnionReader::TxAbort(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAbort::NAME, item)
             }
-            CFNMessageUnionReader::TxInitRBF(ref item) => {
+            FiberMessageUnionReader::TxInitRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxInitRBF::NAME, item)
             }
-            CFNMessageUnionReader::TxAckRBF(ref item) => {
+            FiberMessageUnionReader::TxAckRBF(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, TxAckRBF::NAME, item)
             }
-            CFNMessageUnionReader::CommitmentSigned(ref item) => {
+            FiberMessageUnionReader::CommitmentSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, CommitmentSigned::NAME, item)
             }
-            CFNMessageUnionReader::ChannelReady(ref item) => {
+            FiberMessageUnionReader::ChannelReady(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ChannelReady::NAME, item)
             }
-            CFNMessageUnionReader::AddTlc(ref item) => {
+            FiberMessageUnionReader::AddTlc(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, AddTlc::NAME, item)
             }
-            CFNMessageUnionReader::RemoveTlc(ref item) => {
+            FiberMessageUnionReader::RemoveTlc(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RemoveTlc::NAME, item)
             }
-            CFNMessageUnionReader::RevokeAndAck(ref item) => {
+            FiberMessageUnionReader::RevokeAndAck(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
             }
-            CFNMessageUnionReader::Shutdown(ref item) => {
+            FiberMessageUnionReader::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
             }
-            CFNMessageUnionReader::ClosingSigned(ref item) => {
+            FiberMessageUnionReader::ClosingSigned(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ClosingSigned::NAME, item)
             }
-            CFNMessageUnionReader::ReestablishChannel(ref item) => {
+            FiberMessageUnionReader::ReestablishChannel(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, ReestablishChannel::NAME, item)
             }
         }
     }
 }
-impl CFNMessageUnion {
+impl FiberMessageUnion {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
-            CFNMessageUnion::OpenChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::AcceptChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxSignatures(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxUpdate(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxComplete(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxAbort(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxInitRBF(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::TxAckRBF(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::CommitmentSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::ChannelReady(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::AddTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::RemoveTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::RevokeAndAck(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::Shutdown(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::ClosingSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnion::ReestablishChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::OpenChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::AcceptChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxSignatures(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxUpdate(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxComplete(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxAbort(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxInitRBF(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::TxAckRBF(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::CommitmentSigned(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::ChannelReady(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::AddTlc(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::RemoveTlc(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::RevokeAndAck(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::Shutdown(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::ClosingSigned(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::ReestablishChannel(ref item) => write!(f, "{}", item),
         }
     }
 }
-impl<'r> CFNMessageUnionReader<'r> {
+impl<'r> FiberMessageUnionReader<'r> {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
-            CFNMessageUnionReader::OpenChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::AcceptChannel(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxSignatures(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxUpdate(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxComplete(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxAbort(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxInitRBF(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::TxAckRBF(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::CommitmentSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::ChannelReady(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::AddTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::RemoveTlc(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::RevokeAndAck(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::Shutdown(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::ClosingSigned(ref item) => write!(f, "{}", item),
-            CFNMessageUnionReader::ReestablishChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::OpenChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::AcceptChannel(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxSignatures(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxUpdate(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxComplete(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxAbort(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxInitRBF(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::TxAckRBF(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::CommitmentSigned(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::ChannelReady(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::AddTlc(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::RemoveTlc(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::RevokeAndAck(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::Shutdown(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::ClosingSigned(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::ReestablishChannel(ref item) => write!(f, "{}", item),
         }
     }
 }
-impl ::core::convert::From<OpenChannel> for CFNMessageUnion {
+impl ::core::convert::From<OpenChannel> for FiberMessageUnion {
     fn from(item: OpenChannel) -> Self {
-        CFNMessageUnion::OpenChannel(item)
+        FiberMessageUnion::OpenChannel(item)
     }
 }
-impl ::core::convert::From<AcceptChannel> for CFNMessageUnion {
+impl ::core::convert::From<AcceptChannel> for FiberMessageUnion {
     fn from(item: AcceptChannel) -> Self {
-        CFNMessageUnion::AcceptChannel(item)
+        FiberMessageUnion::AcceptChannel(item)
     }
 }
-impl ::core::convert::From<TxSignatures> for CFNMessageUnion {
+impl ::core::convert::From<TxSignatures> for FiberMessageUnion {
     fn from(item: TxSignatures) -> Self {
-        CFNMessageUnion::TxSignatures(item)
+        FiberMessageUnion::TxSignatures(item)
     }
 }
-impl ::core::convert::From<TxUpdate> for CFNMessageUnion {
+impl ::core::convert::From<TxUpdate> for FiberMessageUnion {
     fn from(item: TxUpdate) -> Self {
-        CFNMessageUnion::TxUpdate(item)
+        FiberMessageUnion::TxUpdate(item)
     }
 }
-impl ::core::convert::From<TxComplete> for CFNMessageUnion {
+impl ::core::convert::From<TxComplete> for FiberMessageUnion {
     fn from(item: TxComplete) -> Self {
-        CFNMessageUnion::TxComplete(item)
+        FiberMessageUnion::TxComplete(item)
     }
 }
-impl ::core::convert::From<TxAbort> for CFNMessageUnion {
+impl ::core::convert::From<TxAbort> for FiberMessageUnion {
     fn from(item: TxAbort) -> Self {
-        CFNMessageUnion::TxAbort(item)
+        FiberMessageUnion::TxAbort(item)
     }
 }
-impl ::core::convert::From<TxInitRBF> for CFNMessageUnion {
+impl ::core::convert::From<TxInitRBF> for FiberMessageUnion {
     fn from(item: TxInitRBF) -> Self {
-        CFNMessageUnion::TxInitRBF(item)
+        FiberMessageUnion::TxInitRBF(item)
     }
 }
-impl ::core::convert::From<TxAckRBF> for CFNMessageUnion {
+impl ::core::convert::From<TxAckRBF> for FiberMessageUnion {
     fn from(item: TxAckRBF) -> Self {
-        CFNMessageUnion::TxAckRBF(item)
+        FiberMessageUnion::TxAckRBF(item)
     }
 }
-impl ::core::convert::From<CommitmentSigned> for CFNMessageUnion {
+impl ::core::convert::From<CommitmentSigned> for FiberMessageUnion {
     fn from(item: CommitmentSigned) -> Self {
-        CFNMessageUnion::CommitmentSigned(item)
+        FiberMessageUnion::CommitmentSigned(item)
     }
 }
-impl ::core::convert::From<ChannelReady> for CFNMessageUnion {
+impl ::core::convert::From<ChannelReady> for FiberMessageUnion {
     fn from(item: ChannelReady) -> Self {
-        CFNMessageUnion::ChannelReady(item)
+        FiberMessageUnion::ChannelReady(item)
     }
 }
-impl ::core::convert::From<AddTlc> for CFNMessageUnion {
+impl ::core::convert::From<AddTlc> for FiberMessageUnion {
     fn from(item: AddTlc) -> Self {
-        CFNMessageUnion::AddTlc(item)
+        FiberMessageUnion::AddTlc(item)
     }
 }
-impl ::core::convert::From<RemoveTlc> for CFNMessageUnion {
+impl ::core::convert::From<RemoveTlc> for FiberMessageUnion {
     fn from(item: RemoveTlc) -> Self {
-        CFNMessageUnion::RemoveTlc(item)
+        FiberMessageUnion::RemoveTlc(item)
     }
 }
-impl ::core::convert::From<RevokeAndAck> for CFNMessageUnion {
+impl ::core::convert::From<RevokeAndAck> for FiberMessageUnion {
     fn from(item: RevokeAndAck) -> Self {
-        CFNMessageUnion::RevokeAndAck(item)
+        FiberMessageUnion::RevokeAndAck(item)
     }
 }
-impl ::core::convert::From<Shutdown> for CFNMessageUnion {
+impl ::core::convert::From<Shutdown> for FiberMessageUnion {
     fn from(item: Shutdown) -> Self {
-        CFNMessageUnion::Shutdown(item)
+        FiberMessageUnion::Shutdown(item)
     }
 }
-impl ::core::convert::From<ClosingSigned> for CFNMessageUnion {
+impl ::core::convert::From<ClosingSigned> for FiberMessageUnion {
     fn from(item: ClosingSigned) -> Self {
-        CFNMessageUnion::ClosingSigned(item)
+        FiberMessageUnion::ClosingSigned(item)
     }
 }
-impl ::core::convert::From<ReestablishChannel> for CFNMessageUnion {
+impl ::core::convert::From<ReestablishChannel> for FiberMessageUnion {
     fn from(item: ReestablishChannel) -> Self {
-        CFNMessageUnion::ReestablishChannel(item)
+        FiberMessageUnion::ReestablishChannel(item)
     }
 }
-impl<'r> ::core::convert::From<OpenChannelReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<OpenChannelReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: OpenChannelReader<'r>) -> Self {
-        CFNMessageUnionReader::OpenChannel(item)
+        FiberMessageUnionReader::OpenChannel(item)
     }
 }
-impl<'r> ::core::convert::From<AcceptChannelReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<AcceptChannelReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: AcceptChannelReader<'r>) -> Self {
-        CFNMessageUnionReader::AcceptChannel(item)
+        FiberMessageUnionReader::AcceptChannel(item)
     }
 }
-impl<'r> ::core::convert::From<TxSignaturesReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxSignaturesReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxSignaturesReader<'r>) -> Self {
-        CFNMessageUnionReader::TxSignatures(item)
+        FiberMessageUnionReader::TxSignatures(item)
     }
 }
-impl<'r> ::core::convert::From<TxUpdateReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxUpdateReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxUpdateReader<'r>) -> Self {
-        CFNMessageUnionReader::TxUpdate(item)
+        FiberMessageUnionReader::TxUpdate(item)
     }
 }
-impl<'r> ::core::convert::From<TxCompleteReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxCompleteReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxCompleteReader<'r>) -> Self {
-        CFNMessageUnionReader::TxComplete(item)
+        FiberMessageUnionReader::TxComplete(item)
     }
 }
-impl<'r> ::core::convert::From<TxAbortReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxAbortReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxAbortReader<'r>) -> Self {
-        CFNMessageUnionReader::TxAbort(item)
+        FiberMessageUnionReader::TxAbort(item)
     }
 }
-impl<'r> ::core::convert::From<TxInitRBFReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxInitRBFReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxInitRBFReader<'r>) -> Self {
-        CFNMessageUnionReader::TxInitRBF(item)
+        FiberMessageUnionReader::TxInitRBF(item)
     }
 }
-impl<'r> ::core::convert::From<TxAckRBFReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<TxAckRBFReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: TxAckRBFReader<'r>) -> Self {
-        CFNMessageUnionReader::TxAckRBF(item)
+        FiberMessageUnionReader::TxAckRBF(item)
     }
 }
-impl<'r> ::core::convert::From<CommitmentSignedReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<CommitmentSignedReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: CommitmentSignedReader<'r>) -> Self {
-        CFNMessageUnionReader::CommitmentSigned(item)
+        FiberMessageUnionReader::CommitmentSigned(item)
     }
 }
-impl<'r> ::core::convert::From<ChannelReadyReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<ChannelReadyReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: ChannelReadyReader<'r>) -> Self {
-        CFNMessageUnionReader::ChannelReady(item)
+        FiberMessageUnionReader::ChannelReady(item)
     }
 }
-impl<'r> ::core::convert::From<AddTlcReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<AddTlcReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: AddTlcReader<'r>) -> Self {
-        CFNMessageUnionReader::AddTlc(item)
+        FiberMessageUnionReader::AddTlc(item)
     }
 }
-impl<'r> ::core::convert::From<RemoveTlcReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<RemoveTlcReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: RemoveTlcReader<'r>) -> Self {
-        CFNMessageUnionReader::RemoveTlc(item)
+        FiberMessageUnionReader::RemoveTlc(item)
     }
 }
-impl<'r> ::core::convert::From<RevokeAndAckReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<RevokeAndAckReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: RevokeAndAckReader<'r>) -> Self {
-        CFNMessageUnionReader::RevokeAndAck(item)
+        FiberMessageUnionReader::RevokeAndAck(item)
     }
 }
-impl<'r> ::core::convert::From<ShutdownReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<ShutdownReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: ShutdownReader<'r>) -> Self {
-        CFNMessageUnionReader::Shutdown(item)
+        FiberMessageUnionReader::Shutdown(item)
     }
 }
-impl<'r> ::core::convert::From<ClosingSignedReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<ClosingSignedReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: ClosingSignedReader<'r>) -> Self {
-        CFNMessageUnionReader::ClosingSigned(item)
+        FiberMessageUnionReader::ClosingSigned(item)
     }
 }
-impl<'r> ::core::convert::From<ReestablishChannelReader<'r>> for CFNMessageUnionReader<'r> {
+impl<'r> ::core::convert::From<ReestablishChannelReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: ReestablishChannelReader<'r>) -> Self {
-        CFNMessageUnionReader::ReestablishChannel(item)
+        FiberMessageUnionReader::ReestablishChannel(item)
     }
 }
-impl CFNMessageUnion {
-    pub const NAME: &'static str = "CFNMessageUnion";
+impl FiberMessageUnion {
+    pub const NAME: &'static str = "FiberMessageUnion";
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
         match self {
-            CFNMessageUnion::OpenChannel(item) => item.as_bytes(),
-            CFNMessageUnion::AcceptChannel(item) => item.as_bytes(),
-            CFNMessageUnion::TxSignatures(item) => item.as_bytes(),
-            CFNMessageUnion::TxUpdate(item) => item.as_bytes(),
-            CFNMessageUnion::TxComplete(item) => item.as_bytes(),
-            CFNMessageUnion::TxAbort(item) => item.as_bytes(),
-            CFNMessageUnion::TxInitRBF(item) => item.as_bytes(),
-            CFNMessageUnion::TxAckRBF(item) => item.as_bytes(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_bytes(),
-            CFNMessageUnion::ChannelReady(item) => item.as_bytes(),
-            CFNMessageUnion::AddTlc(item) => item.as_bytes(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_bytes(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_bytes(),
-            CFNMessageUnion::Shutdown(item) => item.as_bytes(),
-            CFNMessageUnion::ClosingSigned(item) => item.as_bytes(),
-            CFNMessageUnion::ReestablishChannel(item) => item.as_bytes(),
+            FiberMessageUnion::OpenChannel(item) => item.as_bytes(),
+            FiberMessageUnion::AcceptChannel(item) => item.as_bytes(),
+            FiberMessageUnion::TxSignatures(item) => item.as_bytes(),
+            FiberMessageUnion::TxUpdate(item) => item.as_bytes(),
+            FiberMessageUnion::TxComplete(item) => item.as_bytes(),
+            FiberMessageUnion::TxAbort(item) => item.as_bytes(),
+            FiberMessageUnion::TxInitRBF(item) => item.as_bytes(),
+            FiberMessageUnion::TxAckRBF(item) => item.as_bytes(),
+            FiberMessageUnion::CommitmentSigned(item) => item.as_bytes(),
+            FiberMessageUnion::ChannelReady(item) => item.as_bytes(),
+            FiberMessageUnion::AddTlc(item) => item.as_bytes(),
+            FiberMessageUnion::RemoveTlc(item) => item.as_bytes(),
+            FiberMessageUnion::RevokeAndAck(item) => item.as_bytes(),
+            FiberMessageUnion::Shutdown(item) => item.as_bytes(),
+            FiberMessageUnion::ClosingSigned(item) => item.as_bytes(),
+            FiberMessageUnion::ReestablishChannel(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
-            CFNMessageUnion::OpenChannel(item) => item.as_slice(),
-            CFNMessageUnion::AcceptChannel(item) => item.as_slice(),
-            CFNMessageUnion::TxSignatures(item) => item.as_slice(),
-            CFNMessageUnion::TxUpdate(item) => item.as_slice(),
-            CFNMessageUnion::TxComplete(item) => item.as_slice(),
-            CFNMessageUnion::TxAbort(item) => item.as_slice(),
-            CFNMessageUnion::TxInitRBF(item) => item.as_slice(),
-            CFNMessageUnion::TxAckRBF(item) => item.as_slice(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_slice(),
-            CFNMessageUnion::ChannelReady(item) => item.as_slice(),
-            CFNMessageUnion::AddTlc(item) => item.as_slice(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_slice(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_slice(),
-            CFNMessageUnion::Shutdown(item) => item.as_slice(),
-            CFNMessageUnion::ClosingSigned(item) => item.as_slice(),
-            CFNMessageUnion::ReestablishChannel(item) => item.as_slice(),
+            FiberMessageUnion::OpenChannel(item) => item.as_slice(),
+            FiberMessageUnion::AcceptChannel(item) => item.as_slice(),
+            FiberMessageUnion::TxSignatures(item) => item.as_slice(),
+            FiberMessageUnion::TxUpdate(item) => item.as_slice(),
+            FiberMessageUnion::TxComplete(item) => item.as_slice(),
+            FiberMessageUnion::TxAbort(item) => item.as_slice(),
+            FiberMessageUnion::TxInitRBF(item) => item.as_slice(),
+            FiberMessageUnion::TxAckRBF(item) => item.as_slice(),
+            FiberMessageUnion::CommitmentSigned(item) => item.as_slice(),
+            FiberMessageUnion::ChannelReady(item) => item.as_slice(),
+            FiberMessageUnion::AddTlc(item) => item.as_slice(),
+            FiberMessageUnion::RemoveTlc(item) => item.as_slice(),
+            FiberMessageUnion::RevokeAndAck(item) => item.as_slice(),
+            FiberMessageUnion::Shutdown(item) => item.as_slice(),
+            FiberMessageUnion::ClosingSigned(item) => item.as_slice(),
+            FiberMessageUnion::ReestablishChannel(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
-            CFNMessageUnion::OpenChannel(_) => 0,
-            CFNMessageUnion::AcceptChannel(_) => 1,
-            CFNMessageUnion::TxSignatures(_) => 2,
-            CFNMessageUnion::TxUpdate(_) => 3,
-            CFNMessageUnion::TxComplete(_) => 4,
-            CFNMessageUnion::TxAbort(_) => 5,
-            CFNMessageUnion::TxInitRBF(_) => 6,
-            CFNMessageUnion::TxAckRBF(_) => 7,
-            CFNMessageUnion::CommitmentSigned(_) => 8,
-            CFNMessageUnion::ChannelReady(_) => 9,
-            CFNMessageUnion::AddTlc(_) => 10,
-            CFNMessageUnion::RemoveTlc(_) => 11,
-            CFNMessageUnion::RevokeAndAck(_) => 12,
-            CFNMessageUnion::Shutdown(_) => 13,
-            CFNMessageUnion::ClosingSigned(_) => 14,
-            CFNMessageUnion::ReestablishChannel(_) => 15,
+            FiberMessageUnion::OpenChannel(_) => 0,
+            FiberMessageUnion::AcceptChannel(_) => 1,
+            FiberMessageUnion::TxSignatures(_) => 2,
+            FiberMessageUnion::TxUpdate(_) => 3,
+            FiberMessageUnion::TxComplete(_) => 4,
+            FiberMessageUnion::TxAbort(_) => 5,
+            FiberMessageUnion::TxInitRBF(_) => 6,
+            FiberMessageUnion::TxAckRBF(_) => 7,
+            FiberMessageUnion::CommitmentSigned(_) => 8,
+            FiberMessageUnion::ChannelReady(_) => 9,
+            FiberMessageUnion::AddTlc(_) => 10,
+            FiberMessageUnion::RemoveTlc(_) => 11,
+            FiberMessageUnion::RevokeAndAck(_) => 12,
+            FiberMessageUnion::Shutdown(_) => 13,
+            FiberMessageUnion::ClosingSigned(_) => 14,
+            FiberMessageUnion::ReestablishChannel(_) => 15,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
-            CFNMessageUnion::OpenChannel(_) => "OpenChannel",
-            CFNMessageUnion::AcceptChannel(_) => "AcceptChannel",
-            CFNMessageUnion::TxSignatures(_) => "TxSignatures",
-            CFNMessageUnion::TxUpdate(_) => "TxUpdate",
-            CFNMessageUnion::TxComplete(_) => "TxComplete",
-            CFNMessageUnion::TxAbort(_) => "TxAbort",
-            CFNMessageUnion::TxInitRBF(_) => "TxInitRBF",
-            CFNMessageUnion::TxAckRBF(_) => "TxAckRBF",
-            CFNMessageUnion::CommitmentSigned(_) => "CommitmentSigned",
-            CFNMessageUnion::ChannelReady(_) => "ChannelReady",
-            CFNMessageUnion::AddTlc(_) => "AddTlc",
-            CFNMessageUnion::RemoveTlc(_) => "RemoveTlc",
-            CFNMessageUnion::RevokeAndAck(_) => "RevokeAndAck",
-            CFNMessageUnion::Shutdown(_) => "Shutdown",
-            CFNMessageUnion::ClosingSigned(_) => "ClosingSigned",
-            CFNMessageUnion::ReestablishChannel(_) => "ReestablishChannel",
+            FiberMessageUnion::OpenChannel(_) => "OpenChannel",
+            FiberMessageUnion::AcceptChannel(_) => "AcceptChannel",
+            FiberMessageUnion::TxSignatures(_) => "TxSignatures",
+            FiberMessageUnion::TxUpdate(_) => "TxUpdate",
+            FiberMessageUnion::TxComplete(_) => "TxComplete",
+            FiberMessageUnion::TxAbort(_) => "TxAbort",
+            FiberMessageUnion::TxInitRBF(_) => "TxInitRBF",
+            FiberMessageUnion::TxAckRBF(_) => "TxAckRBF",
+            FiberMessageUnion::CommitmentSigned(_) => "CommitmentSigned",
+            FiberMessageUnion::ChannelReady(_) => "ChannelReady",
+            FiberMessageUnion::AddTlc(_) => "AddTlc",
+            FiberMessageUnion::RemoveTlc(_) => "RemoveTlc",
+            FiberMessageUnion::RevokeAndAck(_) => "RevokeAndAck",
+            FiberMessageUnion::Shutdown(_) => "Shutdown",
+            FiberMessageUnion::ClosingSigned(_) => "ClosingSigned",
+            FiberMessageUnion::ReestablishChannel(_) => "ReestablishChannel",
         }
     }
-    pub fn as_reader<'r>(&'r self) -> CFNMessageUnionReader<'r> {
+    pub fn as_reader<'r>(&'r self) -> FiberMessageUnionReader<'r> {
         match self {
-            CFNMessageUnion::OpenChannel(item) => item.as_reader().into(),
-            CFNMessageUnion::AcceptChannel(item) => item.as_reader().into(),
-            CFNMessageUnion::TxSignatures(item) => item.as_reader().into(),
-            CFNMessageUnion::TxUpdate(item) => item.as_reader().into(),
-            CFNMessageUnion::TxComplete(item) => item.as_reader().into(),
-            CFNMessageUnion::TxAbort(item) => item.as_reader().into(),
-            CFNMessageUnion::TxInitRBF(item) => item.as_reader().into(),
-            CFNMessageUnion::TxAckRBF(item) => item.as_reader().into(),
-            CFNMessageUnion::CommitmentSigned(item) => item.as_reader().into(),
-            CFNMessageUnion::ChannelReady(item) => item.as_reader().into(),
-            CFNMessageUnion::AddTlc(item) => item.as_reader().into(),
-            CFNMessageUnion::RemoveTlc(item) => item.as_reader().into(),
-            CFNMessageUnion::RevokeAndAck(item) => item.as_reader().into(),
-            CFNMessageUnion::Shutdown(item) => item.as_reader().into(),
-            CFNMessageUnion::ClosingSigned(item) => item.as_reader().into(),
-            CFNMessageUnion::ReestablishChannel(item) => item.as_reader().into(),
+            FiberMessageUnion::OpenChannel(item) => item.as_reader().into(),
+            FiberMessageUnion::AcceptChannel(item) => item.as_reader().into(),
+            FiberMessageUnion::TxSignatures(item) => item.as_reader().into(),
+            FiberMessageUnion::TxUpdate(item) => item.as_reader().into(),
+            FiberMessageUnion::TxComplete(item) => item.as_reader().into(),
+            FiberMessageUnion::TxAbort(item) => item.as_reader().into(),
+            FiberMessageUnion::TxInitRBF(item) => item.as_reader().into(),
+            FiberMessageUnion::TxAckRBF(item) => item.as_reader().into(),
+            FiberMessageUnion::CommitmentSigned(item) => item.as_reader().into(),
+            FiberMessageUnion::ChannelReady(item) => item.as_reader().into(),
+            FiberMessageUnion::AddTlc(item) => item.as_reader().into(),
+            FiberMessageUnion::RemoveTlc(item) => item.as_reader().into(),
+            FiberMessageUnion::RevokeAndAck(item) => item.as_reader().into(),
+            FiberMessageUnion::Shutdown(item) => item.as_reader().into(),
+            FiberMessageUnion::ClosingSigned(item) => item.as_reader().into(),
+            FiberMessageUnion::ReestablishChannel(item) => item.as_reader().into(),
         }
     }
 }
-impl<'r> CFNMessageUnionReader<'r> {
-    pub const NAME: &'r str = "CFNMessageUnionReader";
+impl<'r> FiberMessageUnionReader<'r> {
+    pub const NAME: &'r str = "FiberMessageUnionReader";
     pub fn as_slice(&self) -> &'r [u8] {
         match self {
-            CFNMessageUnionReader::OpenChannel(item) => item.as_slice(),
-            CFNMessageUnionReader::AcceptChannel(item) => item.as_slice(),
-            CFNMessageUnionReader::TxSignatures(item) => item.as_slice(),
-            CFNMessageUnionReader::TxUpdate(item) => item.as_slice(),
-            CFNMessageUnionReader::TxComplete(item) => item.as_slice(),
-            CFNMessageUnionReader::TxAbort(item) => item.as_slice(),
-            CFNMessageUnionReader::TxInitRBF(item) => item.as_slice(),
-            CFNMessageUnionReader::TxAckRBF(item) => item.as_slice(),
-            CFNMessageUnionReader::CommitmentSigned(item) => item.as_slice(),
-            CFNMessageUnionReader::ChannelReady(item) => item.as_slice(),
-            CFNMessageUnionReader::AddTlc(item) => item.as_slice(),
-            CFNMessageUnionReader::RemoveTlc(item) => item.as_slice(),
-            CFNMessageUnionReader::RevokeAndAck(item) => item.as_slice(),
-            CFNMessageUnionReader::Shutdown(item) => item.as_slice(),
-            CFNMessageUnionReader::ClosingSigned(item) => item.as_slice(),
-            CFNMessageUnionReader::ReestablishChannel(item) => item.as_slice(),
+            FiberMessageUnionReader::OpenChannel(item) => item.as_slice(),
+            FiberMessageUnionReader::AcceptChannel(item) => item.as_slice(),
+            FiberMessageUnionReader::TxSignatures(item) => item.as_slice(),
+            FiberMessageUnionReader::TxUpdate(item) => item.as_slice(),
+            FiberMessageUnionReader::TxComplete(item) => item.as_slice(),
+            FiberMessageUnionReader::TxAbort(item) => item.as_slice(),
+            FiberMessageUnionReader::TxInitRBF(item) => item.as_slice(),
+            FiberMessageUnionReader::TxAckRBF(item) => item.as_slice(),
+            FiberMessageUnionReader::CommitmentSigned(item) => item.as_slice(),
+            FiberMessageUnionReader::ChannelReady(item) => item.as_slice(),
+            FiberMessageUnionReader::AddTlc(item) => item.as_slice(),
+            FiberMessageUnionReader::RemoveTlc(item) => item.as_slice(),
+            FiberMessageUnionReader::RevokeAndAck(item) => item.as_slice(),
+            FiberMessageUnionReader::Shutdown(item) => item.as_slice(),
+            FiberMessageUnionReader::ClosingSigned(item) => item.as_slice(),
+            FiberMessageUnionReader::ReestablishChannel(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
-            CFNMessageUnionReader::OpenChannel(_) => 0,
-            CFNMessageUnionReader::AcceptChannel(_) => 1,
-            CFNMessageUnionReader::TxSignatures(_) => 2,
-            CFNMessageUnionReader::TxUpdate(_) => 3,
-            CFNMessageUnionReader::TxComplete(_) => 4,
-            CFNMessageUnionReader::TxAbort(_) => 5,
-            CFNMessageUnionReader::TxInitRBF(_) => 6,
-            CFNMessageUnionReader::TxAckRBF(_) => 7,
-            CFNMessageUnionReader::CommitmentSigned(_) => 8,
-            CFNMessageUnionReader::ChannelReady(_) => 9,
-            CFNMessageUnionReader::AddTlc(_) => 10,
-            CFNMessageUnionReader::RemoveTlc(_) => 11,
-            CFNMessageUnionReader::RevokeAndAck(_) => 12,
-            CFNMessageUnionReader::Shutdown(_) => 13,
-            CFNMessageUnionReader::ClosingSigned(_) => 14,
-            CFNMessageUnionReader::ReestablishChannel(_) => 15,
+            FiberMessageUnionReader::OpenChannel(_) => 0,
+            FiberMessageUnionReader::AcceptChannel(_) => 1,
+            FiberMessageUnionReader::TxSignatures(_) => 2,
+            FiberMessageUnionReader::TxUpdate(_) => 3,
+            FiberMessageUnionReader::TxComplete(_) => 4,
+            FiberMessageUnionReader::TxAbort(_) => 5,
+            FiberMessageUnionReader::TxInitRBF(_) => 6,
+            FiberMessageUnionReader::TxAckRBF(_) => 7,
+            FiberMessageUnionReader::CommitmentSigned(_) => 8,
+            FiberMessageUnionReader::ChannelReady(_) => 9,
+            FiberMessageUnionReader::AddTlc(_) => 10,
+            FiberMessageUnionReader::RemoveTlc(_) => 11,
+            FiberMessageUnionReader::RevokeAndAck(_) => 12,
+            FiberMessageUnionReader::Shutdown(_) => 13,
+            FiberMessageUnionReader::ClosingSigned(_) => 14,
+            FiberMessageUnionReader::ReestablishChannel(_) => 15,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
-            CFNMessageUnionReader::OpenChannel(_) => "OpenChannel",
-            CFNMessageUnionReader::AcceptChannel(_) => "AcceptChannel",
-            CFNMessageUnionReader::TxSignatures(_) => "TxSignatures",
-            CFNMessageUnionReader::TxUpdate(_) => "TxUpdate",
-            CFNMessageUnionReader::TxComplete(_) => "TxComplete",
-            CFNMessageUnionReader::TxAbort(_) => "TxAbort",
-            CFNMessageUnionReader::TxInitRBF(_) => "TxInitRBF",
-            CFNMessageUnionReader::TxAckRBF(_) => "TxAckRBF",
-            CFNMessageUnionReader::CommitmentSigned(_) => "CommitmentSigned",
-            CFNMessageUnionReader::ChannelReady(_) => "ChannelReady",
-            CFNMessageUnionReader::AddTlc(_) => "AddTlc",
-            CFNMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
-            CFNMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
-            CFNMessageUnionReader::Shutdown(_) => "Shutdown",
-            CFNMessageUnionReader::ClosingSigned(_) => "ClosingSigned",
-            CFNMessageUnionReader::ReestablishChannel(_) => "ReestablishChannel",
+            FiberMessageUnionReader::OpenChannel(_) => "OpenChannel",
+            FiberMessageUnionReader::AcceptChannel(_) => "AcceptChannel",
+            FiberMessageUnionReader::TxSignatures(_) => "TxSignatures",
+            FiberMessageUnionReader::TxUpdate(_) => "TxUpdate",
+            FiberMessageUnionReader::TxComplete(_) => "TxComplete",
+            FiberMessageUnionReader::TxAbort(_) => "TxAbort",
+            FiberMessageUnionReader::TxInitRBF(_) => "TxInitRBF",
+            FiberMessageUnionReader::TxAckRBF(_) => "TxAckRBF",
+            FiberMessageUnionReader::CommitmentSigned(_) => "CommitmentSigned",
+            FiberMessageUnionReader::ChannelReady(_) => "ChannelReady",
+            FiberMessageUnionReader::AddTlc(_) => "AddTlc",
+            FiberMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
+            FiberMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
+            FiberMessageUnionReader::Shutdown(_) => "Shutdown",
+            FiberMessageUnionReader::ClosingSigned(_) => "ClosingSigned",
+            FiberMessageUnionReader::ReestablishChannel(_) => "ReestablishChannel",
         }
     }
 }
-impl From<OpenChannel> for CFNMessage {
+impl From<OpenChannel> for FiberMessage {
     fn from(value: OpenChannel) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<AcceptChannel> for CFNMessage {
+impl From<AcceptChannel> for FiberMessage {
     fn from(value: AcceptChannel) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxSignatures> for CFNMessage {
+impl From<TxSignatures> for FiberMessage {
     fn from(value: TxSignatures) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxUpdate> for CFNMessage {
+impl From<TxUpdate> for FiberMessage {
     fn from(value: TxUpdate) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxComplete> for CFNMessage {
+impl From<TxComplete> for FiberMessage {
     fn from(value: TxComplete) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxAbort> for CFNMessage {
+impl From<TxAbort> for FiberMessage {
     fn from(value: TxAbort) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxInitRBF> for CFNMessage {
+impl From<TxInitRBF> for FiberMessage {
     fn from(value: TxInitRBF) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<TxAckRBF> for CFNMessage {
+impl From<TxAckRBF> for FiberMessage {
     fn from(value: TxAckRBF) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<CommitmentSigned> for CFNMessage {
+impl From<CommitmentSigned> for FiberMessage {
     fn from(value: CommitmentSigned) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<ChannelReady> for CFNMessage {
+impl From<ChannelReady> for FiberMessage {
     fn from(value: ChannelReady) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<AddTlc> for CFNMessage {
+impl From<AddTlc> for FiberMessage {
     fn from(value: AddTlc) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<RemoveTlc> for CFNMessage {
+impl From<RemoveTlc> for FiberMessage {
     fn from(value: RemoveTlc) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<RevokeAndAck> for CFNMessage {
+impl From<RevokeAndAck> for FiberMessage {
     fn from(value: RevokeAndAck) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<Shutdown> for CFNMessage {
+impl From<Shutdown> for FiberMessage {
     fn from(value: Shutdown) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<ClosingSigned> for CFNMessage {
+impl From<ClosingSigned> for FiberMessage {
     fn from(value: ClosingSigned) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl From<ReestablishChannel> for CFNMessage {
+impl From<ReestablishChannel> for FiberMessage {
     fn from(value: ReestablishChannel) -> Self {
         Self::new_builder().set(value).build()
     }

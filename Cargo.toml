@@ -1,5 +1,5 @@
 [package]
-name = "cfn-node"
+name = "fnn"
 version = "0.1.0"
 edition = "2021"
 

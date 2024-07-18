@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::gen::cfn::{self as molecule_cfn, PubNonce as Byte66};
+use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::serde_utils::SliceHex;
 use anyhow::anyhow;
@@ -411,9 +411,9 @@ pub enum Error {
     AnyHow(#[from] anyhow::Error),
 }
 
-impl From<Pubkey> for molecule_cfn::Pubkey {
-    fn from(pk: Pubkey) -> molecule_cfn::Pubkey {
-        molecule_cfn::Pubkey::new_builder()
+impl From<Pubkey> for molecule_fiber::Pubkey {
+    fn from(pk: Pubkey) -> molecule_fiber::Pubkey {
+        molecule_fiber::Pubkey::new_builder()
             .set(
                 pk.0.serialize()
                     .into_iter()
@@ -426,10 +426,10 @@ impl From<Pubkey> for molecule_cfn::Pubkey {
     }
 }
 
-impl TryFrom<molecule_cfn::Pubkey> for Pubkey {
+impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
     type Error = Error;
 
-    fn try_from(pubkey: molecule_cfn::Pubkey) -> Result<Self, Self::Error> {
+    fn try_from(pubkey: molecule_fiber::Pubkey) -> Result<Self, Self::Error> {
         let pubkey = pubkey.as_slice();
         PublicKey::from_slice(pubkey)
             .map(Into::into)
@@ -437,9 +437,9 @@ impl TryFrom<molecule_cfn::Pubkey> for Pubkey {
     }
 }
 
-impl From<Signature> for molecule_cfn::Signature {
-    fn from(signature: Signature) -> molecule_cfn::Signature {
-        molecule_cfn::Signature::new_builder()
+impl From<Signature> for molecule_fiber::Signature {
+    fn from(signature: Signature) -> molecule_fiber::Signature {
+        molecule_fiber::Signature::new_builder()
             .set(
                 signature
                     .0
@@ -454,10 +454,10 @@ impl From<Signature> for molecule_cfn::Signature {
     }
 }
 
-impl TryFrom<molecule_cfn::Signature> for Signature {
+impl TryFrom<molecule_fiber::Signature> for Signature {
     type Error = Error;
 
-    fn try_from(signature: molecule_cfn::Signature) -> Result<Self, Self::Error> {
+    fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
         Secp256k1Signature::from_compact(signature)
             .map(Into::into)
@@ -507,9 +507,9 @@ impl OpenChannel {
     }
 }
 
-impl From<OpenChannel> for molecule_cfn::OpenChannel {
+impl From<OpenChannel> for molecule_fiber::OpenChannel {
     fn from(open_channel: OpenChannel) -> Self {
-        molecule_cfn::OpenChannel::new_builder()
+        molecule_fiber::OpenChannel::new_builder()
             .chain_hash(open_channel.chain_hash.into())
             .channel_id(open_channel.channel_id.into())
             .funding_udt_type_script(open_channel.funding_udt_type_script.pack())
@@ -534,10 +534,10 @@ impl From<OpenChannel> for molecule_cfn::OpenChannel {
     }
 }
 
-impl TryFrom<molecule_cfn::OpenChannel> for OpenChannel {
+impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
     type Error = Error;
 
-    fn try_from(open_channel: molecule_cfn::OpenChannel) -> Result<Self, Self::Error> {
+    fn try_from(open_channel: molecule_fiber::OpenChannel) -> Result<Self, Self::Error> {
         Ok(OpenChannel {
             chain_hash: open_channel.chain_hash().into(),
             channel_id: open_channel.channel_id().into(),
@@ -585,9 +585,9 @@ pub struct AcceptChannel {
     pub next_local_nonce: PubNonce,
 }
 
-impl From<AcceptChannel> for molecule_cfn::AcceptChannel {
+impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
     fn from(accept_channel: AcceptChannel) -> Self {
-        molecule_cfn::AcceptChannel::new_builder()
+        molecule_fiber::AcceptChannel::new_builder()
             .channel_id(accept_channel.channel_id.into())
             .funding_amount(accept_channel.funding_amount.pack())
             .reserved_ckb_amount(accept_channel.reserved_ckb_amount.pack())
@@ -607,10 +607,10 @@ impl From<AcceptChannel> for molecule_cfn::AcceptChannel {
     }
 }
 
-impl TryFrom<molecule_cfn::AcceptChannel> for AcceptChannel {
+impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
     type Error = Error;
 
-    fn try_from(accept_channel: molecule_cfn::AcceptChannel) -> Result<Self, Self::Error> {
+    fn try_from(accept_channel: molecule_fiber::AcceptChannel) -> Result<Self, Self::Error> {
         Ok(AcceptChannel {
             channel_id: accept_channel.channel_id().into(),
             funding_amount: accept_channel.funding_amount().unpack(),
@@ -655,9 +655,9 @@ fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32
         .build()
 }
 
-impl From<CommitmentSigned> for molecule_cfn::CommitmentSigned {
+impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
     fn from(commitment_signed: CommitmentSigned) -> Self {
-        molecule_cfn::CommitmentSigned::new_builder()
+        molecule_fiber::CommitmentSigned::new_builder()
             .channel_id(commitment_signed.channel_id.into())
             .partial_signature(partial_signature_to_molecule(
                 commitment_signed.partial_signature,
@@ -667,10 +667,10 @@ impl From<CommitmentSigned> for molecule_cfn::CommitmentSigned {
     }
 }
 
-impl TryFrom<molecule_cfn::CommitmentSigned> for CommitmentSigned {
+impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
     type Error = Error;
 
-    fn try_from(commitment_signed: molecule_cfn::CommitmentSigned) -> Result<Self, Self::Error> {
+    fn try_from(commitment_signed: molecule_fiber::CommitmentSigned) -> Result<Self, Self::Error> {
         Ok(CommitmentSigned {
             channel_id: commitment_signed.channel_id().into(),
             partial_signature: PartialSignature::from_slice(
@@ -692,9 +692,9 @@ pub struct TxSignatures {
     pub witnesses: Vec<Vec<u8>>,
 }
 
-impl From<TxSignatures> for molecule_cfn::TxSignatures {
+impl From<TxSignatures> for molecule_fiber::TxSignatures {
     fn from(tx_signatures: TxSignatures) -> Self {
-        molecule_cfn::TxSignatures::new_builder()
+        molecule_fiber::TxSignatures::new_builder()
             .channel_id(tx_signatures.channel_id.into())
             .tx_hash(tx_signatures.tx_hash.into())
             .witnesses(
@@ -712,10 +712,10 @@ impl From<TxSignatures> for molecule_cfn::TxSignatures {
     }
 }
 
-impl TryFrom<molecule_cfn::TxSignatures> for TxSignatures {
+impl TryFrom<molecule_fiber::TxSignatures> for TxSignatures {
     type Error = Error;
 
-    fn try_from(tx_signatures: molecule_cfn::TxSignatures) -> Result<Self, Self::Error> {
+    fn try_from(tx_signatures: molecule_fiber::TxSignatures) -> Result<Self, Self::Error> {
         Ok(TxSignatures {
             channel_id: tx_signatures.channel_id().into(),
             tx_hash: tx_signatures.tx_hash().into(),
@@ -733,18 +733,18 @@ pub struct ChannelReady {
     pub channel_id: Hash256,
 }
 
-impl From<ChannelReady> for molecule_cfn::ChannelReady {
+impl From<ChannelReady> for molecule_fiber::ChannelReady {
     fn from(channel_ready: ChannelReady) -> Self {
-        molecule_cfn::ChannelReady::new_builder()
+        molecule_fiber::ChannelReady::new_builder()
             .channel_id(channel_ready.channel_id.into())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::ChannelReady> for ChannelReady {
+impl TryFrom<molecule_fiber::ChannelReady> for ChannelReady {
     type Error = Error;
 
-    fn try_from(channel_ready: molecule_cfn::ChannelReady) -> Result<Self, Self::Error> {
+    fn try_from(channel_ready: molecule_fiber::ChannelReady) -> Result<Self, Self::Error> {
         Ok(ChannelReady {
             channel_id: channel_ready.channel_id().into(),
         })
@@ -763,19 +763,19 @@ pub struct TxUpdate {
     pub tx: Transaction,
 }
 
-impl From<TxUpdate> for molecule_cfn::TxUpdate {
+impl From<TxUpdate> for molecule_fiber::TxUpdate {
     fn from(tx_update: TxUpdate) -> Self {
-        molecule_cfn::TxUpdate::new_builder()
+        molecule_fiber::TxUpdate::new_builder()
             .channel_id(tx_update.channel_id.into())
             .tx(tx_update.tx)
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::TxUpdate> for TxUpdate {
+impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
     type Error = Error;
 
-    fn try_from(tx_update: molecule_cfn::TxUpdate) -> Result<Self, Self::Error> {
+    fn try_from(tx_update: molecule_fiber::TxUpdate) -> Result<Self, Self::Error> {
         Ok(TxUpdate {
             channel_id: tx_update.channel_id().into(),
             tx: tx_update.tx(),
@@ -788,18 +788,18 @@ pub struct TxComplete {
     pub channel_id: Hash256,
 }
 
-impl From<TxComplete> for molecule_cfn::TxComplete {
+impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
-        molecule_cfn::TxComplete::new_builder()
+        molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::TxComplete> for TxComplete {
+impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     type Error = Error;
 
-    fn try_from(tx_complete: molecule_cfn::TxComplete) -> Result<Self, Self::Error> {
+    fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
         })
@@ -812,19 +812,19 @@ pub struct TxAbort {
     pub message: Vec<u8>,
 }
 
-impl From<TxAbort> for molecule_cfn::TxAbort {
+impl From<TxAbort> for molecule_fiber::TxAbort {
     fn from(tx_abort: TxAbort) -> Self {
-        molecule_cfn::TxAbort::new_builder()
+        molecule_fiber::TxAbort::new_builder()
             .channel_id(tx_abort.channel_id.into())
             .message(tx_abort.message.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::TxAbort> for TxAbort {
+impl TryFrom<molecule_fiber::TxAbort> for TxAbort {
     type Error = Error;
 
-    fn try_from(tx_abort: molecule_cfn::TxAbort) -> Result<Self, Self::Error> {
+    fn try_from(tx_abort: molecule_fiber::TxAbort) -> Result<Self, Self::Error> {
         Ok(TxAbort {
             channel_id: tx_abort.channel_id().into(),
             message: tx_abort.message().unpack(),
@@ -838,19 +838,19 @@ pub struct TxInitRBF {
     pub fee_rate: u64,
 }
 
-impl From<TxInitRBF> for molecule_cfn::TxInitRBF {
+impl From<TxInitRBF> for molecule_fiber::TxInitRBF {
     fn from(tx_init_rbf: TxInitRBF) -> Self {
-        molecule_cfn::TxInitRBF::new_builder()
+        molecule_fiber::TxInitRBF::new_builder()
             .channel_id(tx_init_rbf.channel_id.into())
             .fee_rate(tx_init_rbf.fee_rate.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::TxInitRBF> for TxInitRBF {
+impl TryFrom<molecule_fiber::TxInitRBF> for TxInitRBF {
     type Error = Error;
 
-    fn try_from(tx_init_rbf: molecule_cfn::TxInitRBF) -> Result<Self, Self::Error> {
+    fn try_from(tx_init_rbf: molecule_fiber::TxInitRBF) -> Result<Self, Self::Error> {
         Ok(TxInitRBF {
             channel_id: tx_init_rbf.channel_id().into(),
             fee_rate: tx_init_rbf.fee_rate().unpack(),
@@ -863,18 +863,18 @@ pub struct TxAckRBF {
     pub channel_id: Hash256,
 }
 
-impl From<TxAckRBF> for molecule_cfn::TxAckRBF {
+impl From<TxAckRBF> for molecule_fiber::TxAckRBF {
     fn from(tx_ack_rbf: TxAckRBF) -> Self {
-        molecule_cfn::TxAckRBF::new_builder()
+        molecule_fiber::TxAckRBF::new_builder()
             .channel_id(tx_ack_rbf.channel_id.into())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::TxAckRBF> for TxAckRBF {
+impl TryFrom<molecule_fiber::TxAckRBF> for TxAckRBF {
     type Error = Error;
 
-    fn try_from(tx_ack_rbf: molecule_cfn::TxAckRBF) -> Result<Self, Self::Error> {
+    fn try_from(tx_ack_rbf: molecule_fiber::TxAckRBF) -> Result<Self, Self::Error> {
         Ok(TxAckRBF {
             channel_id: tx_ack_rbf.channel_id().into(),
         })
@@ -889,9 +889,9 @@ pub struct Shutdown {
     pub fee_rate: FeeRate,
 }
 
-impl From<Shutdown> for molecule_cfn::Shutdown {
+impl From<Shutdown> for molecule_fiber::Shutdown {
     fn from(shutdown: Shutdown) -> Self {
-        molecule_cfn::Shutdown::new_builder()
+        molecule_fiber::Shutdown::new_builder()
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
             .fee_rate(shutdown.fee_rate.as_u64().pack())
@@ -900,10 +900,10 @@ impl From<Shutdown> for molecule_cfn::Shutdown {
     }
 }
 
-impl TryFrom<molecule_cfn::Shutdown> for Shutdown {
+impl TryFrom<molecule_fiber::Shutdown> for Shutdown {
     type Error = Error;
 
-    fn try_from(shutdown: molecule_cfn::Shutdown) -> Result<Self, Self::Error> {
+    fn try_from(shutdown: molecule_fiber::Shutdown) -> Result<Self, Self::Error> {
         let force: u8 = shutdown.force().into();
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
@@ -920,9 +920,9 @@ pub struct ClosingSigned {
     pub partial_signature: PartialSignature,
 }
 
-impl From<ClosingSigned> for molecule_cfn::ClosingSigned {
+impl From<ClosingSigned> for molecule_fiber::ClosingSigned {
     fn from(closing_signed: ClosingSigned) -> Self {
-        molecule_cfn::ClosingSigned::new_builder()
+        molecule_fiber::ClosingSigned::new_builder()
             .channel_id(closing_signed.channel_id.into())
             .partial_signature(partial_signature_to_molecule(
                 closing_signed.partial_signature,
@@ -931,10 +931,10 @@ impl From<ClosingSigned> for molecule_cfn::ClosingSigned {
     }
 }
 
-impl TryFrom<molecule_cfn::ClosingSigned> for ClosingSigned {
+impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
     type Error = Error;
 
-    fn try_from(closing_signed: molecule_cfn::ClosingSigned) -> Result<Self, Self::Error> {
+    fn try_from(closing_signed: molecule_fiber::ClosingSigned) -> Result<Self, Self::Error> {
         Ok(ClosingSigned {
             channel_id: closing_signed.channel_id().into(),
             partial_signature: PartialSignature::from_slice(
@@ -955,9 +955,9 @@ pub struct AddTlc {
     pub hash_algorithm: HashAlgorithm,
 }
 
-impl From<AddTlc> for molecule_cfn::AddTlc {
+impl From<AddTlc> for molecule_fiber::AddTlc {
     fn from(add_tlc: AddTlc) -> Self {
-        molecule_cfn::AddTlc::new_builder()
+        molecule_fiber::AddTlc::new_builder()
             .channel_id(add_tlc.channel_id.into())
             .tlc_id(add_tlc.tlc_id.pack())
             .amount(add_tlc.amount.pack())
@@ -968,10 +968,10 @@ impl From<AddTlc> for molecule_cfn::AddTlc {
     }
 }
 
-impl TryFrom<molecule_cfn::AddTlc> for AddTlc {
+impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     type Error = Error;
 
-    fn try_from(add_tlc: molecule_cfn::AddTlc) -> Result<Self, Self::Error> {
+    fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
         Ok(AddTlc {
             channel_id: add_tlc.channel_id().into(),
             tlc_id: add_tlc.tlc_id().unpack(),
@@ -993,9 +993,9 @@ pub struct RevokeAndAck {
     pub next_per_commitment_point: Pubkey,
 }
 
-impl From<RevokeAndAck> for molecule_cfn::RevokeAndAck {
+impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
     fn from(revoke_and_ack: RevokeAndAck) -> Self {
-        molecule_cfn::RevokeAndAck::new_builder()
+        molecule_fiber::RevokeAndAck::new_builder()
             .channel_id(revoke_and_ack.channel_id.into())
             .per_commitment_secret(revoke_and_ack.per_commitment_secret.into())
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
@@ -1003,10 +1003,10 @@ impl From<RevokeAndAck> for molecule_cfn::RevokeAndAck {
     }
 }
 
-impl TryFrom<molecule_cfn::RevokeAndAck> for RevokeAndAck {
+impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     type Error = Error;
 
-    fn try_from(revoke_and_ack: molecule_cfn::RevokeAndAck) -> Result<Self, Self::Error> {
+    fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
         Ok(RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
             per_commitment_secret: revoke_and_ack.per_commitment_secret().into(),
@@ -1020,18 +1020,18 @@ pub struct RemoveTlcFulfill {
     pub payment_preimage: Hash256,
 }
 
-impl From<RemoveTlcFulfill> for molecule_cfn::RemoveTlcFulfill {
+impl From<RemoveTlcFulfill> for molecule_fiber::RemoveTlcFulfill {
     fn from(remove_tlc_fulfill: RemoveTlcFulfill) -> Self {
-        molecule_cfn::RemoveTlcFulfill::new_builder()
+        molecule_fiber::RemoveTlcFulfill::new_builder()
             .payment_preimage(remove_tlc_fulfill.payment_preimage.into())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::RemoveTlcFulfill> for RemoveTlcFulfill {
+impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     type Error = Error;
 
-    fn try_from(remove_tlc_fulfill: molecule_cfn::RemoveTlcFulfill) -> Result<Self, Self::Error> {
+    fn try_from(remove_tlc_fulfill: molecule_fiber::RemoveTlcFulfill) -> Result<Self, Self::Error> {
         Ok(RemoveTlcFulfill {
             payment_preimage: remove_tlc_fulfill.payment_preimage().into(),
         })
@@ -1043,18 +1043,18 @@ pub struct RemoveTlcFail {
     pub error_code: u32,
 }
 
-impl From<RemoveTlcFail> for molecule_cfn::RemoveTlcFail {
+impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
     fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
-        molecule_cfn::RemoveTlcFail::new_builder()
+        molecule_fiber::RemoveTlcFail::new_builder()
             .error_code(remove_tlc_fail.error_code.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::RemoveTlcFail> for RemoveTlcFail {
+impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
     type Error = Error;
 
-    fn try_from(remove_tlc_fail: molecule_cfn::RemoveTlcFail) -> Result<Self, Self::Error> {
+    fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
         Ok(RemoveTlcFail {
             error_code: remove_tlc_fail.error_code().unpack(),
         })
@@ -1067,36 +1067,36 @@ pub enum RemoveTlcReason {
     RemoveTlcFail(RemoveTlcFail),
 }
 
-impl From<RemoveTlcReason> for molecule_cfn::RemoveTlcReasonUnion {
+impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
     fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
         match remove_tlc_reason {
             RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
-                molecule_cfn::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
+                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
             }
             RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                molecule_cfn::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail.into())
+                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail.into())
             }
         }
     }
 }
 
-impl From<RemoveTlcReason> for molecule_cfn::RemoveTlcReason {
+impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReason {
     fn from(remove_tlc_reason: RemoveTlcReason) -> Self {
-        molecule_cfn::RemoveTlcReason::new_builder()
+        molecule_fiber::RemoveTlcReason::new_builder()
             .set(remove_tlc_reason)
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::RemoveTlcReason> for RemoveTlcReason {
+impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
     type Error = Error;
 
-    fn try_from(remove_tlc_reason: molecule_cfn::RemoveTlcReason) -> Result<Self, Self::Error> {
+    fn try_from(remove_tlc_reason: molecule_fiber::RemoveTlcReason) -> Result<Self, Self::Error> {
         match remove_tlc_reason.to_enum() {
-            molecule_cfn::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => Ok(
+            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => Ok(
                 RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.try_into()?),
             ),
-            molecule_cfn::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail) => {
+            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail) => {
                 Ok(RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.try_into()?))
             }
         }
@@ -1110,13 +1110,13 @@ pub struct RemoveTlc {
     pub reason: RemoveTlcReason,
 }
 
-impl From<RemoveTlc> for molecule_cfn::RemoveTlc {
+impl From<RemoveTlc> for molecule_fiber::RemoveTlc {
     fn from(remove_tlc: RemoveTlc) -> Self {
-        molecule_cfn::RemoveTlc::new_builder()
+        molecule_fiber::RemoveTlc::new_builder()
             .channel_id(remove_tlc.channel_id.into())
             .tlc_id(remove_tlc.tlc_id.pack())
             .reason(
-                molecule_cfn::RemoveTlcReason::new_builder()
+                molecule_fiber::RemoveTlcReason::new_builder()
                     .set(remove_tlc.reason)
                     .build(),
             )
@@ -1124,10 +1124,10 @@ impl From<RemoveTlc> for molecule_cfn::RemoveTlc {
     }
 }
 
-impl TryFrom<molecule_cfn::RemoveTlc> for RemoveTlc {
+impl TryFrom<molecule_fiber::RemoveTlc> for RemoveTlc {
     type Error = Error;
 
-    fn try_from(remove_tlc: molecule_cfn::RemoveTlc) -> Result<Self, Self::Error> {
+    fn try_from(remove_tlc: molecule_fiber::RemoveTlc) -> Result<Self, Self::Error> {
         Ok(RemoveTlc {
             channel_id: remove_tlc.channel_id().into(),
             tlc_id: remove_tlc.tlc_id().unpack(),
@@ -1143,9 +1143,9 @@ pub struct ReestablishChannel {
     pub remote_commitment_number: u64,
 }
 
-impl From<ReestablishChannel> for molecule_cfn::ReestablishChannel {
+impl From<ReestablishChannel> for molecule_fiber::ReestablishChannel {
     fn from(reestablish_channel: ReestablishChannel) -> Self {
-        molecule_cfn::ReestablishChannel::new_builder()
+        molecule_fiber::ReestablishChannel::new_builder()
             .channel_id(reestablish_channel.channel_id.into())
             .local_commitment_number(reestablish_channel.local_commitment_number.pack())
             .remote_commitment_number(reestablish_channel.remote_commitment_number.pack())
@@ -1153,11 +1153,11 @@ impl From<ReestablishChannel> for molecule_cfn::ReestablishChannel {
     }
 }
 
-impl TryFrom<molecule_cfn::ReestablishChannel> for ReestablishChannel {
+impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
     type Error = Error;
 
     fn try_from(
-        reestablish_channel: molecule_cfn::ReestablishChannel,
+        reestablish_channel: molecule_fiber::ReestablishChannel,
     ) -> Result<Self, Self::Error> {
         Ok(ReestablishChannel {
             channel_id: reestablish_channel.channel_id().into(),
@@ -1168,7 +1168,7 @@ impl TryFrom<molecule_cfn::ReestablishChannel> for ReestablishChannel {
 }
 
 #[derive(Debug, Clone)]
-pub enum CFNMessage {
+pub enum FiberMessage {
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
     CommitmentSigned(CommitmentSigned),
@@ -1187,142 +1187,142 @@ pub enum CFNMessage {
     ReestablishChannel(ReestablishChannel),
 }
 
-impl CFNMessage {
+impl FiberMessage {
     pub fn get_channel_id(&self) -> Hash256 {
         match &self {
-            CFNMessage::OpenChannel(open_channel) => open_channel.channel_id,
-            CFNMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
-            CFNMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
-            CFNMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
-            CFNMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
-            CFNMessage::TxUpdate(tx_update) => tx_update.channel_id,
-            CFNMessage::TxComplete(tx_complete) => tx_complete.channel_id,
-            CFNMessage::TxAbort(tx_abort) => tx_abort.channel_id,
-            CFNMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
-            CFNMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-            CFNMessage::Shutdown(shutdown) => shutdown.channel_id,
-            CFNMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
-            CFNMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            CFNMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
-            CFNMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            CFNMessage::ReestablishChannel(reestablish_channel) => reestablish_channel.channel_id,
+            FiberMessage::OpenChannel(open_channel) => open_channel.channel_id,
+            FiberMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
+            FiberMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
+            FiberMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
+            FiberMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+            FiberMessage::TxUpdate(tx_update) => tx_update.channel_id,
+            FiberMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+            FiberMessage::TxAbort(tx_abort) => tx_abort.channel_id,
+            FiberMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
+            FiberMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
+            FiberMessage::Shutdown(shutdown) => shutdown.channel_id,
+            FiberMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberMessage::AddTlc(add_tlc) => add_tlc.channel_id,
+            FiberMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+            FiberMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+            FiberMessage::ReestablishChannel(reestablish_channel) => reestablish_channel.channel_id,
         }
     }
 }
 
-impl From<CFNMessage> for molecule_cfn::CFNMessageUnion {
-    fn from(cfn_message: CFNMessage) -> Self {
-        match cfn_message {
-            CFNMessage::OpenChannel(open_channel) => {
-                molecule_cfn::CFNMessageUnion::OpenChannel(open_channel.into())
+impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
+    fn from(fiber_message: FiberMessage) -> Self {
+        match fiber_message {
+            FiberMessage::OpenChannel(open_channel) => {
+                molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
-            CFNMessage::AcceptChannel(accept_channel) => {
-                molecule_cfn::CFNMessageUnion::AcceptChannel(accept_channel.into())
+            FiberMessage::AcceptChannel(accept_channel) => {
+                molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
             }
-            CFNMessage::CommitmentSigned(commitment_signed) => {
-                molecule_cfn::CFNMessageUnion::CommitmentSigned(commitment_signed.into())
+            FiberMessage::CommitmentSigned(commitment_signed) => {
+                molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed.into())
             }
-            CFNMessage::TxSignatures(tx_signatures) => {
-                molecule_cfn::CFNMessageUnion::TxSignatures(tx_signatures.into())
+            FiberMessage::TxSignatures(tx_signatures) => {
+                molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures.into())
             }
-            CFNMessage::ChannelReady(channel_ready) => {
-                molecule_cfn::CFNMessageUnion::ChannelReady(channel_ready.into())
+            FiberMessage::ChannelReady(channel_ready) => {
+                molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready.into())
             }
-            CFNMessage::TxUpdate(tx_update) => {
-                molecule_cfn::CFNMessageUnion::TxUpdate(tx_update.into())
+            FiberMessage::TxUpdate(tx_update) => {
+                molecule_fiber::FiberMessageUnion::TxUpdate(tx_update.into())
             }
-            CFNMessage::TxComplete(tx_complete) => {
-                molecule_cfn::CFNMessageUnion::TxComplete(tx_complete.into())
+            FiberMessage::TxComplete(tx_complete) => {
+                molecule_fiber::FiberMessageUnion::TxComplete(tx_complete.into())
             }
-            CFNMessage::TxAbort(tx_abort) => {
-                molecule_cfn::CFNMessageUnion::TxAbort(tx_abort.into())
+            FiberMessage::TxAbort(tx_abort) => {
+                molecule_fiber::FiberMessageUnion::TxAbort(tx_abort.into())
             }
-            CFNMessage::TxInitRBF(tx_init_rbf) => {
-                molecule_cfn::CFNMessageUnion::TxInitRBF(tx_init_rbf.into())
+            FiberMessage::TxInitRBF(tx_init_rbf) => {
+                molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf.into())
             }
-            CFNMessage::TxAckRBF(tx_ack_rbf) => {
-                molecule_cfn::CFNMessageUnion::TxAckRBF(tx_ack_rbf.into())
+            FiberMessage::TxAckRBF(tx_ack_rbf) => {
+                molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf.into())
             }
-            CFNMessage::Shutdown(shutdown) => {
-                molecule_cfn::CFNMessageUnion::Shutdown(shutdown.into())
+            FiberMessage::Shutdown(shutdown) => {
+                molecule_fiber::FiberMessageUnion::Shutdown(shutdown.into())
             }
-            CFNMessage::ClosingSigned(closing_signed) => {
-                molecule_cfn::CFNMessageUnion::ClosingSigned(closing_signed.into())
+            FiberMessage::ClosingSigned(closing_signed) => {
+                molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
             }
-            CFNMessage::AddTlc(add_tlc) => molecule_cfn::CFNMessageUnion::AddTlc(add_tlc.into()),
-            CFNMessage::RemoveTlc(remove_tlc) => {
-                molecule_cfn::CFNMessageUnion::RemoveTlc(remove_tlc.into())
+            FiberMessage::AddTlc(add_tlc) => molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into()),
+            FiberMessage::RemoveTlc(remove_tlc) => {
+                molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
             }
-            CFNMessage::RevokeAndAck(revoke_and_ack) => {
-                molecule_cfn::CFNMessageUnion::RevokeAndAck(revoke_and_ack.into())
+            FiberMessage::RevokeAndAck(revoke_and_ack) => {
+                molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack.into())
             }
-            CFNMessage::ReestablishChannel(reestablish_channel) => {
-                molecule_cfn::CFNMessageUnion::ReestablishChannel(reestablish_channel.into())
+            FiberMessage::ReestablishChannel(reestablish_channel) => {
+                molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel.into())
             }
         }
     }
 }
 
-impl From<CFNMessage> for molecule_cfn::CFNMessage {
-    fn from(cfn_message: CFNMessage) -> Self {
-        molecule_cfn::CFNMessage::new_builder()
-            .set(cfn_message)
+impl From<FiberMessage> for molecule_fiber::FiberMessage {
+    fn from(fiber_message: FiberMessage) -> Self {
+        molecule_fiber::FiberMessage::new_builder()
+            .set(fiber_message)
             .build()
     }
 }
 
-impl TryFrom<molecule_cfn::CFNMessage> for CFNMessage {
+impl TryFrom<molecule_fiber::FiberMessage> for FiberMessage {
     type Error = Error;
 
-    fn try_from(cfn_message: molecule_cfn::CFNMessage) -> Result<Self, Self::Error> {
-        Ok(match cfn_message.to_enum() {
-            molecule_cfn::CFNMessageUnion::OpenChannel(open_channel) => {
-                CFNMessage::OpenChannel(open_channel.try_into()?)
+    fn try_from(fiber_message: molecule_fiber::FiberMessage) -> Result<Self, Self::Error> {
+        Ok(match fiber_message.to_enum() {
+            molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
+                FiberMessage::OpenChannel(open_channel.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::AcceptChannel(accept_channel) => {
-                CFNMessage::AcceptChannel(accept_channel.try_into()?)
+            molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel) => {
+                FiberMessage::AcceptChannel(accept_channel.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::CommitmentSigned(commitment_signed) => {
-                CFNMessage::CommitmentSigned(commitment_signed.try_into()?)
+            molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed) => {
+                FiberMessage::CommitmentSigned(commitment_signed.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxSignatures(tx_signatures) => {
-                CFNMessage::TxSignatures(tx_signatures.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
+                FiberMessage::TxSignatures(tx_signatures.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::ChannelReady(channel_ready) => {
-                CFNMessage::ChannelReady(channel_ready.try_into()?)
+            molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready) => {
+                FiberMessage::ChannelReady(channel_ready.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxUpdate(tx_update) => {
-                CFNMessage::TxUpdate(tx_update.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxUpdate(tx_update) => {
+                FiberMessage::TxUpdate(tx_update.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxComplete(tx_complete) => {
-                CFNMessage::TxComplete(tx_complete.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxComplete(tx_complete) => {
+                FiberMessage::TxComplete(tx_complete.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxAbort(tx_abort) => {
-                CFNMessage::TxAbort(tx_abort.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxAbort(tx_abort) => {
+                FiberMessage::TxAbort(tx_abort.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxInitRBF(tx_init_rbf) => {
-                CFNMessage::TxInitRBF(tx_init_rbf.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf) => {
+                FiberMessage::TxInitRBF(tx_init_rbf.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::TxAckRBF(tx_ack_rbf) => {
-                CFNMessage::TxAckRBF(tx_ack_rbf.try_into()?)
+            molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf) => {
+                FiberMessage::TxAckRBF(tx_ack_rbf.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::Shutdown(shutdown) => {
-                CFNMessage::Shutdown(shutdown.try_into()?)
+            molecule_fiber::FiberMessageUnion::Shutdown(shutdown) => {
+                FiberMessage::Shutdown(shutdown.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::ClosingSigned(closing_signed) => {
-                CFNMessage::ClosingSigned(closing_signed.try_into()?)
+            molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
+                FiberMessage::ClosingSigned(closing_signed.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::AddTlc(add_tlc) => {
-                CFNMessage::AddTlc(add_tlc.try_into()?)
+            molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {
+                FiberMessage::AddTlc(add_tlc.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::RemoveTlc(remove_tlc) => {
-                CFNMessage::RemoveTlc(remove_tlc.try_into()?)
+            molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc) => {
+                FiberMessage::RemoveTlc(remove_tlc.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::RevokeAndAck(revoke_and_ack) => {
-                CFNMessage::RevokeAndAck(revoke_and_ack.try_into()?)
+            molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack) => {
+                FiberMessage::RevokeAndAck(revoke_and_ack.try_into()?)
             }
-            molecule_cfn::CFNMessageUnion::ReestablishChannel(reestablish_channel) => {
-                CFNMessage::ReestablishChannel(reestablish_channel.try_into()?)
+            molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
+                FiberMessage::ReestablishChannel(reestablish_channel.try_into()?)
             }
         })
     }
@@ -1332,13 +1332,13 @@ macro_rules! impl_traits {
     ($t:ident) => {
         impl $t {
             pub fn to_molecule_bytes(self) -> molecule::bytes::Bytes {
-                molecule_cfn::$t::from(self).as_bytes()
+                molecule_fiber::$t::from(self).as_bytes()
             }
         }
 
         impl $t {
             pub fn from_molecule_slice(data: &[u8]) -> Result<Self, Error> {
-                molecule_cfn::$t::from_slice(data)
+                molecule_fiber::$t::from_slice(data)
                     .map_err(Into::into)
                     .and_then(TryInto::try_into)
             }
@@ -1346,7 +1346,7 @@ macro_rules! impl_traits {
     };
 }
 
-impl_traits!(CFNMessage);
+impl_traits!(FiberMessage);
 
 #[cfg(test)]
 mod tests {
@@ -1377,7 +1377,7 @@ mod tests {
             expiry: 42.into(),
             hash_algorithm: super::HashAlgorithm::Sha256,
         };
-        let add_tlc_mol: super::molecule_cfn::AddTlc = add_tlc.clone().into();
+        let add_tlc_mol: super::molecule_fiber::AddTlc = add_tlc.clone().into();
         let add_tlc2 = add_tlc_mol.try_into().expect("decode");
         assert_eq!(add_tlc, add_tlc2);
     }
