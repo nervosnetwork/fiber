@@ -4,7 +4,7 @@ Fiber Network Node (FNN) is a reference implementation of Fiber Network Protocol
 
 * Establishing connections with other FNN
 * Creating and closing fiber channel
-* Payments over fiber channel (via [cfn-scripts])
+* Payments over fiber channel (via [fiber-scripts])
 * Cross-chain asset transfer
 
 Please note that the implementation is still under development, there are two major features not implemented yet:
@@ -36,7 +36,7 @@ cd /folder-to/my-fnn
 ```
 mkdir ckb
 ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path ./ckb/exported-key
-// ckb-cli exports master private key and chain code, cfn node only needs the private key part
+// ckb-cli exports master private key and chain code, FNN only needs the private key part
 head -n 1 ./ckb/exported-key > ./ckb/key
 ```
 
@@ -56,4 +56,4 @@ RUST_LOG=info ./fnn -c config.yml -d .
 
 * TODO: Add testnet deployed nodes information *
 
-[cfn-scripts]: https://github.com/nervosnetwork/cfn-scripts
+[fiber-scripts]: https://github.com/nervosnetwork/fiber-scripts

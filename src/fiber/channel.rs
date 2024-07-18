@@ -3964,7 +3964,7 @@ impl ChannelActorState {
         );
 
         // for xudt compatibility issue,
-        // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+        // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
         let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
         let witnesses = [
             (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
@@ -4254,7 +4254,7 @@ pub fn create_witness_for_funding_cell(
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
 
     // for xudt compatibility issue,
-    // refer to: https://github.com/nervosnetwork/cfn-scripts/pull/5
+    // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
     let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     witness.extend_from_slice(&empty_witness_args);
     for bytes in [
