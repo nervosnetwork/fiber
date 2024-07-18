@@ -57,9 +57,9 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, FiberMessage, ChannelReady, ClosingSigned, CommitmentSigned, Hash256,
-        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
+        AcceptChannel, AddTlc, ChannelReady, ClosingSigned, CommitmentSigned, FiberMessage,
+        Hash256, LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc,
+        RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -3472,17 +3472,19 @@ impl ChannelActorState {
                                 // resend AddTlc message
                                 network
                                     .send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                                            peer_id: self.peer_id.clone(),
-                                            message: FiberMessage::AddTlc(AddTlc {
-                                                channel_id: self.get_id(),
-                                                tlc_id: info.tlc.get_id(),
-                                                amount: info.tlc.amount,
-                                                payment_hash: info.tlc.payment_hash,
-                                                expiry: info.tlc.lock_time,
-                                                hash_algorithm: info.tlc.hash_algorithm,
-                                            }),
-                                        }),
+                                        NetworkActorCommand::SendFiberMessage(
+                                            FiberMessageWithPeerId {
+                                                peer_id: self.peer_id.clone(),
+                                                message: FiberMessage::AddTlc(AddTlc {
+                                                    channel_id: self.get_id(),
+                                                    tlc_id: info.tlc.get_id(),
+                                                    amount: info.tlc.amount,
+                                                    payment_hash: info.tlc.payment_hash,
+                                                    expiry: info.tlc.lock_time,
+                                                    hash_algorithm: info.tlc.hash_algorithm,
+                                                }),
+                                            },
+                                        ),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -3493,14 +3495,16 @@ impl ChannelActorState {
                                 // resend RemoveTlc message
                                 network
                                     .send_message(NetworkActorMessage::new_command(
-                                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                                            peer_id: self.peer_id.clone(),
-                                            message: FiberMessage::RemoveTlc(RemoveTlc {
-                                                channel_id: self.get_id(),
-                                                tlc_id: info.tlc.get_id(),
-                                                reason: remove_reason,
-                                            }),
-                                        }),
+                                        NetworkActorCommand::SendFiberMessage(
+                                            FiberMessageWithPeerId {
+                                                peer_id: self.peer_id.clone(),
+                                                message: FiberMessage::RemoveTlc(RemoveTlc {
+                                                    channel_id: self.get_id(),
+                                                    tlc_id: info.tlc.get_id(),
+                                                    reason: remove_reason,
+                                                }),
+                                            },
+                                        ),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 

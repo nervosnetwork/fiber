@@ -11,6 +11,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use std::str::FromStr;
 
+use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::ckb::CkbChainActor;
 use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
@@ -18,7 +19,6 @@ use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::{start_cch, start_ckb, start_ldk, start_rpc, Config};
-use core::default::Default;
 use tracing_subscriber::fmt::format;
 
 #[tokio::main]

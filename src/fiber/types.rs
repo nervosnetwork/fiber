@@ -1249,7 +1249,9 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
             FiberMessage::ClosingSigned(closing_signed) => {
                 molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
             }
-            FiberMessage::AddTlc(add_tlc) => molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into()),
+            FiberMessage::AddTlc(add_tlc) => {
+                molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
+            }
             FiberMessage::RemoveTlc(remove_tlc) => {
                 molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
             }
