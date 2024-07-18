@@ -153,8 +153,8 @@ pub struct ChannelCommandWithId {
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
-pub const DEFAULT_MAX_ACCEPT_TLCS: u64 = 30;
-pub const SYS_MAX_ACCEPT_TLCS: u64 = 254;
+pub const DEFAULT_MAX_NUM_OF_ACCEPT_TLCS: u64 = 30;
+pub const SYS_MAX_NUM_OF_ACCEPT_TLCS: u64 = 254;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 
@@ -171,7 +171,7 @@ pub struct OpenChannelParameter {
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: Option<u128>,
-    pub max_accept_tlcs: Option<u64>,
+    pub max_num_of_accept_tlcs: Option<u64>,
 }
 
 pub struct AcceptChannelParameter {
@@ -1063,7 +1063,7 @@ where
                     second_per_commitment_point,
                     next_local_nonce,
                     max_tlc_value_in_flight,
-                    max_accept_tlcs,
+                    max_num_of_accept_tlcs,
                     ..
                 } = &open_channel;
 
@@ -1091,7 +1091,7 @@ where
                     *first_per_commitment_point,
                     *second_per_commitment_point,
                     *max_tlc_value_in_flight,
-                    *max_accept_tlcs,
+                    *max_num_of_accept_tlcs,
                 );
 
                 state.check_ckb_params(vec![
@@ -1099,7 +1099,7 @@ where
                     "remote_reserved_ckb_amount",
                     "commitment_fee_rate",
                     "funding_fee_rate",
-                    "max_accept_tlcs",
+                    "max_num_of_accept_tlcs",
                 ])?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
@@ -1109,7 +1109,7 @@ where
                     funding_amount: my_funding_amount,
                     reserved_ckb_amount: my_reserved_ckb_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-                    max_accept_tlcs: DEFAULT_MAX_ACCEPT_TLCS,
+                    max_num_of_accept_tlcs: DEFAULT_MAX_NUM_OF_ACCEPT_TLCS,
                     to_local_delay: *to_local_delay,
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     revocation_basepoint: state.signer.revocation_base_key.pubkey(),
@@ -1161,7 +1161,7 @@ where
                 channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
-                max_accept_tlcs,
+                max_num_of_accept_tlcs,
                 max_tlc_value_in_flight,
             }) => {
                 let peer_id = self.peer_id.clone();
@@ -1183,7 +1183,7 @@ where
                     funding_fee_rate,
                     funding_udt_type_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
-                    max_accept_tlcs.unwrap_or(DEFAULT_MAX_ACCEPT_TLCS),
+                    max_num_of_accept_tlcs.unwrap_or(DEFAULT_MAX_NUM_OF_ACCEPT_TLCS),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
@@ -1191,7 +1191,7 @@ where
                     "commitment_fee_rate",
                     "funding_fee_rate",
                     "local_reserved_ckb_amount",
-                    "max_accept_tlcs",
+                    "max_num_of_accept_tlcs",
                 ])?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
@@ -1204,7 +1204,7 @@ where
                     funding_fee_rate,
                     commitment_fee_rate,
                     max_tlc_value_in_flight: channel.max_tlc_value_in_flight,
-                    max_accept_tlcs: channel.max_accept_tlcs,
+                    max_num_of_accept_tlcs: channel.max_num_of_accept_tlcs,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
                     to_local_delay: LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                     channel_flags: 0,
@@ -1544,7 +1544,7 @@ pub struct ChannelActorState {
     pub max_tlc_value_in_flight: u128,
 
     // The maximum number of tlcs that we can accept.
-    pub max_accept_tlcs: u64,
+    pub max_num_of_accept_tlcs: u64,
 
     // Below are fields that are only usable after the channel is funded,
     // (or at some point of the state).
@@ -1791,7 +1791,7 @@ impl ChannelActorState {
         first_commitment_point: Pubkey,
         second_commitment_point: Pubkey,
         max_tlc_value_in_flight: u128,
-        max_accept_tlcs: u64,
+        max_num_of_accept_tlcs: u64,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -1841,7 +1841,7 @@ impl ChannelActorState {
             remote_reserved_ckb_amount,
             latest_commitment_transaction: None,
             max_tlc_value_in_flight,
-            max_accept_tlcs,
+            max_num_of_accept_tlcs,
 
             reestablishing: false,
             #[cfg(debug_assertions)]
@@ -1860,7 +1860,7 @@ impl ChannelActorState {
         funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         max_tlc_value_in_flight: u128,
-        max_accept_tlcs: u64,
+        max_num_of_accept_tlcs: u64,
         to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -1885,7 +1885,7 @@ impl ChannelActorState {
                 pubkeys: local_pubkeys,
                 selected_contest_delay: to_local_delay,
             },
-            max_accept_tlcs,
+            max_num_of_accept_tlcs,
             max_tlc_value_in_flight,
             remote_channel_parameters: None,
             remote_nonce: None,
@@ -1967,11 +1967,11 @@ impl ChannelActorState {
                     )));
                     }
                 }
-                "max_accept_tlcs" => {
-                    if self.max_accept_tlcs > SYS_MAX_ACCEPT_TLCS {
+                "max_num_of_accept_tlcs" => {
+                    if self.max_num_of_accept_tlcs > SYS_MAX_NUM_OF_ACCEPT_TLCS {
                         return Err(ProcessingChannelError::InvalidParameter(format!(
                             "Max accept tlcs does not exceed {}",
-                            SYS_MAX_ACCEPT_TLCS,
+                            SYS_MAX_NUM_OF_ACCEPT_TLCS,
                         )));
                     }
                 }
@@ -2789,10 +2789,10 @@ impl ChannelActorState {
             let active_tls_number = self.get_active_offered_tlcs(true).count()
                 + self.get_active_received_tlcs(true).count();
 
-            if active_tls_number as u64 + 1 > self.max_accept_tlcs {
+            if active_tls_number as u64 + 1 > self.max_num_of_accept_tlcs {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Exceeding the maximum number of tlcs: {}",
-                    self.max_accept_tlcs
+                    self.max_num_of_accept_tlcs
                 )));
             }
 
@@ -4854,6 +4854,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -4891,6 +4893,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -4942,6 +4946,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -5125,6 +5131,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -5451,6 +5459,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -5627,6 +5637,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
@@ -5745,6 +5757,8 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    max_num_of_accept_tlcs: None,
+                    max_tlc_value_in_flight: None,
                 },
                 rpc_reply,
             ))
