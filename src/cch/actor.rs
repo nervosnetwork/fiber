@@ -455,7 +455,7 @@ impl CchActor {
             order.payment_preimage = Some(preimage.clone());
 
             let message = move |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id,
                         command: ChannelCommand::RemoveTlc(
@@ -583,7 +583,7 @@ impl CchActor {
         if event.status == CchOrderStatus::Accepted && self.network_actor.is_some() {
             // AddTlc to initiate the CKB payment
             let message = |rpc_reply| -> NetworkActorMessage {
-                NetworkActorMessage::Command(NetworkActorCommand::ControlCfnChannel(
+                NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                     ChannelCommandWithId {
                         channel_id: order.channel_id,
                         command: ChannelCommand::AddTlc(

@@ -1,6 +1,6 @@
 # Fiber Network Node RPC
 
-The RPC module provides a set of APIs for developers to interact with cfn nodes. Please note that APIs are not stable yet and may change in the future.
+The RPC module provides a set of APIs for developers to interact with FNN. Please note that APIs are not stable yet and may change in the future.
 
 Allowing arbitrary machines to access the JSON-RPC port (using the `rpc.listening_addr` configuration option) is **dangerous and strongly discouraged**. Please strictly limit the access to only trusted machines.
 

@@ -99,7 +99,7 @@ pub struct NetworkNode {
 
 impl NetworkNode {
     pub async fn new() -> Self {
-        let base_dir = TempDir::new("cfn-node-test");
+        let base_dir = TempDir::new("fnn-test");
         let fiber_config = FiberConfig {
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests

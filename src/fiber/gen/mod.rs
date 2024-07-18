@@ -1,8 +1,8 @@
 #[allow(clippy::all)]
-pub mod cfn;
+pub mod fiber;
 #[allow(clippy::all)]
 pub mod invoice;
-// cfn module requires types from blockchain.
+// fiber module requires types from blockchain.
 // We need to re-export these types.
 mod blockchain {
     pub use ckb_types::packed::*;

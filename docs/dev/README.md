@@ -2,7 +2,7 @@
 
 ## Run 3 nodes with default balances and deploy contracts to the devchain
 
-Below command automatically start 3 cfn nodes and 1 ckb node.
+Below command automatically start 3 FNN and 1 ckb node.
 When we have not intialized the dev chain for ckb, this command will automatically do that.
 
 ```

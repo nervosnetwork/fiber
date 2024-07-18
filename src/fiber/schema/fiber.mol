@@ -136,7 +136,7 @@ table ReestablishChannel {
     remote_commitment_number: Uint64,
 }
 
-union CFNMessage {
+union FiberMessage {
     OpenChannel,
     AcceptChannel,
     TxSignatures,
