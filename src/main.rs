@@ -151,10 +151,11 @@ pub async fn main() {
             .await
             {
                 Err(err) => {
-                    error!("Cross-chain service failed to start: {}", err);
                     if ignore_startup_failure {
+                        info!("Cross-chain service failed to start and is ignored by the config option ignore_startup_failure: {}", err);
                         None
                     } else {
+                        error!("Cross-chain service failed to start: {}", err);
                         return;
                     }
                 }
