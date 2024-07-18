@@ -107,6 +107,8 @@ pub struct OpenChannelCommand {
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
+    pub max_tlc_value_in_flight: Option<u128>,
+    pub max_accept_tlcs: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -805,6 +807,8 @@ impl NetworkActorState {
             funding_udt_type_script,
             commitment_fee_rate,
             funding_fee_rate,
+            max_tlc_value_in_flight,
+            max_accept_tlcs,
         } = open_channel;
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
@@ -833,6 +837,8 @@ impl NetworkActorState {
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 funding_fee_rate,
+                max_tlc_value_in_flight,
+                max_accept_tlcs,
             }),
             network.clone().get_cell(),
         )
