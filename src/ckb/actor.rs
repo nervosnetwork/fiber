@@ -35,7 +35,7 @@ pub enum CkbChainMessage {
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
-    TraceTx(TraceTxRequest, RpcReplyPort<ckb_jsonrpc_types::Status>),
+    TraceTx(TraceTxRequest, RpcReplyPort<ckb_jsonrpc_types::TxStatus>),
 }
 
 #[ractor::async_trait]
@@ -170,7 +170,7 @@ impl Actor for CkbChainActor {
                                                 .unwrap_or_default()
                                                 .into();
                                             (tip_number >= commit_number + confirmations)
-                                                .then_some(ckb_jsonrpc_types::Status::Committed)
+                                                .then_some(resp.tx_status)
                                         }
                                         Err(err) => {
                                             tracing::error!(
@@ -182,9 +182,7 @@ impl Actor for CkbChainActor {
                                         }
                                     }
                                 }
-                                ckb_jsonrpc_types::Status::Rejected => {
-                                    Some(ckb_jsonrpc_types::Status::Rejected)
-                                }
+                                ckb_jsonrpc_types::Status::Rejected => Some(resp.tx_status),
                                 _ => None,
                             },
                             Err(err) => {
@@ -233,6 +231,7 @@ mod test_utils {
     use std::collections::HashMap;
 
     use anyhow::anyhow;
+    use ckb_jsonrpc_types::TxStatus;
     use ckb_types::{
         core::TransactionView,
         packed::{CellOutput, OutPoint},
@@ -478,7 +477,13 @@ mod test_utils {
                         "Tracing transaction: {:?}, status: {:?}",
                         &tx.tx_hash, &status
                     );
-                    if let Err(e) = reply_port.send(status) {
+                    let status = TxStatus {
+                        status,
+                        block_number: None,
+                        block_hash: None,
+                        reason: None,
+                    };
+                    if let Err(e) = reply_port.send(status.into()) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
@@ -528,6 +533,7 @@ mod test_utils {
             request.clone()
         )
         .expect("chain actor alive")
+        .status
     }
 }
 

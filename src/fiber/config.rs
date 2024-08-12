@@ -5,7 +5,7 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serializer};
 use std::{fs, path::PathBuf};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
@@ -61,7 +61,7 @@ pub struct FiberConfig {
         long = "fiber-announced-node-name",
         env
     )]
-    pub(crate) announced_node_name: String,
+    pub(crate) announced_node_name: Option<AnnouncedNodeName>,
 
     /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
     #[arg(name = "FIBER_NETWORK", long = "fiber-network", env)]
@@ -83,6 +83,64 @@ pub struct FiberConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Copy, Clone, Default)]
+pub struct AnnouncedNodeName(pub [u8; 32]);
+
+impl AnnouncedNodeName {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn from_slice(slice: &[u8]) -> std::result::Result<Self, String> {
+        if slice.len() > 32 {
+            return Err("Node Alias can not be longer than 32 bytes".to_string());
+        }
+        let mut bytes = [0; 32];
+        bytes[..slice.len()].copy_from_slice(slice);
+        Ok(Self(bytes))
+    }
+
+    pub fn from_str(value: &str) -> std::result::Result<Self, String> {
+        let str_bytes = value.as_bytes();
+        Self::from_slice(str_bytes)
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("valid utf8 string")
+    }
+}
+
+impl<'s> From<&'s str> for AnnouncedNodeName {
+    fn from(value: &'s str) -> Self {
+        Self::from_str(value).expect("Valid announced node name")
+    }
+}
+
+impl ToString for AnnouncedNodeName {
+    fn to_string(&self) -> String {
+        self.as_str().to_string()
+    }
+}
+
+impl serde::Serialize for AnnouncedNodeName {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(std::str::from_utf8(&self.0).expect("valid utf8 string"))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl FiberConfig {

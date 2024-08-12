@@ -1,4 +1,4 @@
-use ckb_jsonrpc_types::Status;
+use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -35,9 +35,12 @@ use super::channel::{
     ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
     DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
+use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{FiberMessage, Hash256, OpenChannel, Privkey, Pubkey};
+use super::types::{
+    FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+};
 use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
@@ -98,6 +101,8 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
+    // Broadcast node/channel information
+    BroadcastMessage(FiberBroadcastMessage),
 }
 
 #[derive(Debug)]
@@ -176,7 +181,7 @@ pub enum NetworkServiceEvent {
 #[derive(Debug)]
 pub enum NetworkActorEvent {
     /// Network eventss to be processed by this actor.
-    PeerConnected(PeerId, SessionContext),
+    PeerConnected(PeerId, Pubkey, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
     PeerMessage(PeerId, FiberMessage),
 
@@ -339,11 +344,42 @@ where
                     }
                 }
             }
-
-            _ => state.send_message_to_channel_actor(
-                message.get_channel_id(),
-                ChannelActorMessage::PeerMessage(message),
-            ),
+            _ if message.is_broadcast_message() => {
+                state
+                    .on_broadcasted_message(FiberBroadcastMessage::try_from(message).unwrap())
+                    .await;
+            }
+            _ => {
+                let channel_id = match &message {
+                    FiberMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
+                    FiberMessage::CommitmentSigned(commitment_signed) => {
+                        commitment_signed.channel_id
+                    }
+                    FiberMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
+                    FiberMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+                    FiberMessage::TxUpdate(tx_update) => tx_update.channel_id,
+                    FiberMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+                    FiberMessage::TxAbort(tx_abort) => tx_abort.channel_id,
+                    FiberMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
+                    FiberMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
+                    FiberMessage::Shutdown(shutdown) => shutdown.channel_id,
+                    FiberMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+                    FiberMessage::AddTlc(add_tlc) => add_tlc.channel_id,
+                    FiberMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+                    FiberMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+                    FiberMessage::ReestablishChannel(reestablish_channel) => {
+                        reestablish_channel.channel_id
+                    }
+                    _ => unreachable!(
+                        "Invalid message type (should have been processed above): {:?}",
+                        message
+                    ),
+                };
+                state.send_message_to_channel_actor(
+                    channel_id,
+                    ChannelActorMessage::PeerMessage(message),
+                );
+            }
         };
         Ok(())
     }
@@ -359,9 +395,9 @@ where
             NetworkActorEvent::NetworkServiceEvent(e) => {
                 self.on_service_event(e).await;
             }
-            NetworkActorEvent::PeerConnected(id, session) => {
+            NetworkActorEvent::PeerConnected(id, pubkey, session) => {
                 state
-                    .on_peer_connected(&id, &session, self.store.clone())
+                    .on_peer_connected(&id, pubkey, &session, self.store.clone())
                     .await;
                 // Notify outside observers.
                 myself
@@ -738,13 +774,23 @@ where
                     ))
                     .expect("network actor alive");
             }
+            NetworkActorCommand::BroadcastMessage(message) => {
+                warn!(
+                    "Broadcasting node announcement is not implemented yet: {:?}",
+                    message
+                );
+            }
         };
         Ok(())
     }
 }
 
 pub struct NetworkActorState {
+    // The name of the node to be announced to the network, may be empty.
+    node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
+    // We need to keep private key here in order to sign node announcement messages.
+    private_key: Privkey,
     // This is the entropy used to generate various random values.
     // Must be kept secret.
     // TODO: Maybe we should abstract this into a separate trait.
@@ -754,6 +800,8 @@ pub struct NetworkActorState {
     // the pre_start function.
     control: ServiceAsyncControl,
     peer_session_map: HashMap<PeerId, SessionId>,
+    // This map is used to store the public key of the peer.
+    peer_pubkey_map: HashMap<PeerId, Pubkey>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
     // Channels in this hashmap are pending for acceptance. The user needs to
@@ -783,6 +831,20 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
 }
 
 impl NetworkActorState {
+    pub fn get_node_announcement_message(&self) -> Option<NodeAnnouncement> {
+        let alias = self.node_name?;
+        let addresses = vec![];
+        Some(NodeAnnouncement::new(alias, addresses, &self.private_key))
+    }
+
+    pub fn get_private_key(&self) -> Privkey {
+        self.private_key
+    }
+
+    pub fn get_public_key(&self) -> Pubkey {
+        self.get_private_key().pubkey()
+    }
+
     pub fn generate_channel_seed(&mut self) -> [u8; 32] {
         let channel_user_id = self.channels.len();
         let seed = channel_user_id
@@ -810,6 +872,12 @@ impl NetworkActorState {
             max_tlc_value_in_flight,
             max_num_of_accept_tlcs,
         } = open_channel;
+        let remote_pubkey =
+            self.get_peer_pubkey(&peer_id)
+                .ok_or(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} pubkey not found",
+                    &peer_id
+                )))?;
         if let Some(udt_type_script) = funding_udt_type_script.as_ref() {
             if !check_udt_script(udt_type_script) {
                 return Err(ProcessingChannelError::InvalidParameter(
@@ -825,7 +893,8 @@ impl NetworkActorState {
         let channel = Actor::spawn_linked(
             Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
             ChannelActor::new(
-                peer_id.clone(),
+                self.get_public_key(),
+                remote_pubkey,
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
@@ -866,6 +935,13 @@ impl NetworkActorState {
                 &temp_channel_id
             )))?;
 
+        let remote_pubkey =
+            self.get_peer_pubkey(&peer_id)
+                .ok_or(ProcessingChannelError::InvalidParameter(format!(
+                    "Peer {:?} pubkey not found",
+                    &peer_id
+                )))?;
+
         let (funding_amount, reserved_ckb_amount) = self.get_funding_and_reserved_amount(
             funding_amount,
             &open_channel.funding_udt_type_script,
@@ -881,9 +957,10 @@ impl NetworkActorState {
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
-            Some(generate_channel_actor_name(&self.peer_id, &peer_id)),
+            None,
             ChannelActor::new(
-                peer_id.clone(),
+                self.get_public_key(),
+                remote_pubkey,
                 network.clone(),
                 store,
                 self.channel_subscribers.clone(),
@@ -905,7 +982,7 @@ impl NetworkActorState {
 
     async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
-        F: Send + 'static + FnOnce(Result<Status, RactorErr<CkbChainMessage>>),
+        F: Send + 'static + FnOnce(Result<TxStatus, RactorErr<CkbChainMessage>>),
     {
         debug!("Trying to broadcast transaction {:?}", &transaction);
         let chain = self.chain_actor.clone();
@@ -943,6 +1020,10 @@ impl NetworkActorState {
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).cloned()
+    }
+
+    fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
+        self.peer_pubkey_map.get(peer_id).cloned()
     }
 
     fn get_funding_and_reserved_amount(
@@ -1079,18 +1160,23 @@ impl NetworkActorState {
 
     async fn on_peer_connected<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
         &mut self,
-        peer_id: &PeerId,
+        remote_peer_id: &PeerId,
+        remote_pubkey: Pubkey,
         session: &SessionContext,
         store: S,
     ) {
-        self.peer_session_map.insert(peer_id.clone(), session.id);
+        self.peer_session_map
+            .insert(remote_peer_id.clone(), session.id);
+        self.peer_pubkey_map
+            .insert(remote_peer_id.clone(), remote_pubkey);
 
-        for channel_id in store.get_active_channel_ids_by_peer(peer_id) {
+        for channel_id in store.get_active_channel_ids_by_peer(&remote_peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((channel, _)) = Actor::spawn_linked(
-                Some(generate_channel_actor_name(&self.peer_id, peer_id)),
+                None,
                 ChannelActor::new(
-                    peer_id.clone(),
+                    self.get_public_key(),
+                    remote_pubkey,
                     self.network.clone(),
                     store.clone(),
                     self.channel_subscribers.clone(),
@@ -1100,7 +1186,7 @@ impl NetworkActorState {
             )
             .await
             {
-                self.on_channel_created(channel_id, peer_id, channel);
+                self.on_channel_created(channel_id, remote_peer_id, channel);
             }
         }
     }
@@ -1148,7 +1234,10 @@ impl NetworkActorState {
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(Status::Committed) => {
+                Ok(TxStatus {
+                    status: Status::Committed,
+                    ..
+                }) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
                     NetworkActorEvent::ClosingTransactionConfirmed(peer_id, channel_id, tx_hash)
                 }
@@ -1267,7 +1356,10 @@ impl NetworkActorState {
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(Status::Committed) => {
+                Ok(TxStatus {
+                    status: Status::Committed,
+                    ..
+                }) => {
                     info!("Funding transaction {:?} confirmed", &tx_hash);
                     NetworkActorEvent::FundingTransactionConfirmed(outpoint)
                 }
@@ -1307,7 +1399,10 @@ impl NetworkActorState {
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(Status::Committed) => {
+                Ok(TxStatus {
+                    status: Status::Committed,
+                    ..
+                }) => {
                     info!("Commitment transaction {:?} confirmed", tx_hash,);
                     NetworkActorEvent::CommitmentTransactionConfirmed(tx_hash.into(), channel_id)
                 }
@@ -1331,6 +1426,13 @@ impl NetworkActorState {
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
+    }
+
+    async fn on_broadcasted_message(&mut self, message: FiberBroadcastMessage) {
+        warn!(
+            "Broadcasted message received but not handled: {:?}",
+            &message
+        );
     }
 
     async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
@@ -1404,6 +1506,10 @@ where
         let kp = config
             .read_or_generate_secret_key()
             .expect("read or generate secret key");
+        let private_key = <[u8; 32]>::try_from(kp.as_ref())
+            .expect("valid length for key")
+            .try_into()
+            .expect("valid secret key");
         let entropy = blake2b_hash_with_salt(
             [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
                 .concat()
@@ -1449,12 +1555,15 @@ where
             debug!("Tentacle service shutdown");
         });
 
-        Ok(NetworkActorState {
+        let state = NetworkActorState {
+            node_name: config.announced_node_name,
             peer_id: my_peer_id,
+            private_key: private_key,
             entropy,
-            network: myself,
+            network: myself.clone(),
             control,
             peer_session_map: Default::default(),
+            peer_pubkey_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
             to_be_accepted_channels: Default::default(),
@@ -1464,7 +1573,19 @@ where
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             channel_subscribers,
-        })
+        };
+
+        if let Some(message) = state.get_node_announcement_message() {
+            myself
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                        message,
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
+
+        Ok(state)
     }
 
     async fn handle(
@@ -1565,9 +1686,14 @@ impl ServiceProtocol for Handle {
             context.proto_id, session.id, session.address, session.ty, version
         );
 
-        if let Some(peer_id) = context.session.remote_pubkey.clone().map(PeerId::from) {
+        if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
+            let remote_peer_id = PeerId::from_public_key(&remote_pubkey);
             self.send_actor_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::PeerConnected(peer_id, context.session.clone()),
+                NetworkActorEvent::PeerConnected(
+                    remote_peer_id,
+                    remote_pubkey.into(),
+                    context.session.clone(),
+                ),
             ));
         } else {
             warn!("Peer connected without remote pubkey {:?}", context.session);

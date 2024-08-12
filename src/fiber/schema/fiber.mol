@@ -103,6 +103,9 @@ table AddTlc {
     payment_hash:   Byte32,
     expiry:         Uint64,
     hash_algorithm: byte,
+    // This is the packet each hops need to decrypt and determine
+    // which nodes to forward (or accept the tlc if it is the final node).
+    onion_packet:   Bytes,
 }
 
 table RevokeAndAck {
@@ -136,6 +139,58 @@ table ReestablishChannel {
     remote_commitment_number: Uint64,
 }
 
+table AnnouncementSignatures {
+    channel_id: Byte32,
+    short_channel_id: Uint64,
+    partial_signature: Byte32,
+}
+
+table NodeAnnouncement {
+    // Signature to this message.
+    signature: Signature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/features.rs#L448-L457
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    // Timestamp to the node announcement update, later update should have larger timestamp.
+    timestamp: Uint64,
+    node_id: Pubkey,
+    // Must be a valid utf-8 string of length maximal length 32 bytes.
+    alias: Byte32,
+    // All the reachable addresses. 
+    address: BytesVec,
+}
+
+table ChannelAnnouncement {
+    node_signature_1: Signature,
+    node_signature_2: Signature,
+    // Signature signed by the funding transaction output public key.
+    ckb_signature: Signature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/msgs.rs#L1200-L1200
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    chain_hash: Byte32,
+    short_channel_id: Uint64,
+    node_1_id: Pubkey,
+    node_2_id: Pubkey,
+    // The aggregated public key of the fundign transaction output.
+    ckb_key: Pubkey,
+}
+
+table ChannelUpdate {
+    // Signature of the node that wants to update the channel information.
+    signature: Signature,
+    chain_hash: Byte32,
+    short_channel_id: Uint64,
+    timestamp: Uint64,
+    message_flags: Uint32,
+    channel_flags: Uint32,
+    cltv_expiry_delta: Uint64,
+    htlc_minimum_value: Uint128,
+    fee_value: Uint128,    
+}
+
 union FiberMessage {
     OpenChannel,
     AcceptChannel,
@@ -153,4 +208,10 @@ union FiberMessage {
     Shutdown,
     ClosingSigned,
     ReestablishChannel,
+    AnnouncementSignatures,
+    NodeAnnouncement,
+    ChannelAnnouncement,
+    ChannelUpdate,
 }
+
+

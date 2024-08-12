@@ -5,9 +5,8 @@ use serde_with::serde_as;
 use std::{
     io::{ErrorKind, Read},
     path::PathBuf,
+    str::FromStr,
 };
-
-use std::str::FromStr;
 
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;

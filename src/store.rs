@@ -115,7 +115,7 @@ impl ChannelActorStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::ChannelActorState(state.id, state.clone()));
         batch.put_kv(KeyValue::PeerIdChannelId(
-            (state.peer_id, state.id),
+            (state.get_remote_peer_id(), state.id),
             state.state,
         ));
         batch.commit();
@@ -125,7 +125,7 @@ impl ChannelActorStateStore for Store {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
             batch.delete([&[0], id.as_ref()].concat());
-            batch.delete([&[64], state.peer_id.as_bytes(), id.as_ref()].concat());
+            batch.delete([&[64], state.get_remote_peer_id().as_bytes(), id.as_ref()].concat());
             batch.commit();
         }
     }

@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::serde_utils::SliceHex;
@@ -16,9 +17,14 @@ use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
-use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{
+    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as Secp256k1SchnorrSignature, All,
+    PublicKey, Secp256k1, SecretKey,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use tentacle::multiaddr::MultiAddr;
+use tentacle::secio::PeerId;
 use thiserror::Error;
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
@@ -252,6 +258,19 @@ impl From<MByte32> for Hash256 {
     }
 }
 
+fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
+    MByte32::new_builder()
+        .set(
+            value
+                .iter()
+                .map(|v| Byte::new(*v))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .build()
+}
+
 impl ::core::fmt::LowerHex for Hash256 {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         if f.alternate() {
@@ -327,6 +346,12 @@ impl Privkey {
         result[64] = rec_id.to_i32() as u8;
         result
     }
+
+    pub fn sign(&self, message: [u8; 32]) -> Signature {
+        let message = secp256k1::Message::from_digest(message);
+        let sig = secp256k1_instance().sign_ecdsa(&message, &self.0);
+        Signature::from(sig)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -368,6 +393,20 @@ impl From<Point> for Pubkey {
     }
 }
 
+impl From<tentacle::secio::PublicKey> for Pubkey {
+    fn from(pk: tentacle::secio::PublicKey) -> Self {
+        secp256k1::PublicKey::from_slice(pk.inner_ref())
+            .expect("valid tentacle pubkey can be converted to secp pubkey")
+            .into()
+    }
+}
+
+impl From<Pubkey> for tentacle::secio::PublicKey {
+    fn from(pk: Pubkey) -> Self {
+        tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
+    }
+}
+
 impl Pubkey {
     pub fn serialize(&self) -> [u8; 33] {
         PublicKey::from(self).serialize()
@@ -379,6 +418,11 @@ impl Pubkey {
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let result = Point::from(self) + scalar.base_point_mul();
         PublicKey::from(result.unwrap()).into()
+    }
+
+    pub fn tentacle_peer_id(&self) -> PeerId {
+        let pubkey = self.clone().into();
+        PeerId::from_public_key(&pubkey)
     }
 }
 
@@ -460,6 +504,33 @@ impl TryFrom<molecule_fiber::Signature> for Signature {
     fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
         Secp256k1Signature::from_compact(signature)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+}
+
+impl From<Secp256k1SchnorrSignature> for molecule_fiber::Signature {
+    fn from(signature: Secp256k1SchnorrSignature) -> molecule_fiber::Signature {
+        molecule_fiber::Signature::new_builder()
+            .set(
+                signature
+                    .serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Signature serialized to corrent length"),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::Signature> for Secp256k1SchnorrSignature {
+    type Error = Error;
+
+    fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
+        let signature = signature.as_slice();
+        Secp256k1SchnorrSignature::from_slice(signature)
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -1168,6 +1239,266 @@ impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnnouncementSignatures {
+    pub channel_id: Hash256,
+    pub short_channel_id: u64,
+    pub partial_signature: Hash256,
+}
+
+impl From<AnnouncementSignatures> for molecule_fiber::AnnouncementSignatures {
+    fn from(announcement_signatures: AnnouncementSignatures) -> Self {
+        molecule_fiber::AnnouncementSignatures::new_builder()
+            .channel_id(announcement_signatures.channel_id.into())
+            .short_channel_id(announcement_signatures.short_channel_id.pack())
+            .partial_signature(announcement_signatures.partial_signature.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures {
+    type Error = Error;
+
+    fn try_from(
+        announcement_signatures: molecule_fiber::AnnouncementSignatures,
+    ) -> Result<Self, Self::Error> {
+        Ok(AnnouncementSignatures {
+            channel_id: announcement_signatures.channel_id().into(),
+            short_channel_id: announcement_signatures.short_channel_id().unpack(),
+            partial_signature: announcement_signatures.partial_signature().into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeAnnouncement {
+    // Signature to this message, may be empty the message is not signed yet.
+    pub signature: Option<Signature>,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // rust-lightning uses a Vec<u8> here.
+    pub features: u64,
+    // Timestamp to the node announcement update, later update should have larger timestamp.
+    pub timestamp: u64,
+    pub node_id: Pubkey,
+    // Must be a valid utf-8 string of length maximal length 32 bytes.
+    // If the length is less than 32 bytes, it will be padded with 0.
+    // If the length is more than 32 bytes, it should be truncated.
+    pub alias: AnnouncedNodeName,
+    // All the reachable addresses.
+    pub addresses: Vec<Vec<u8>>,
+}
+
+impl NodeAnnouncement {
+    pub fn new(
+        alias: AnnouncedNodeName,
+        addresses: Vec<MultiAddr>,
+        private_key: &Privkey,
+    ) -> NodeAnnouncement {
+        let mut unsigned = NodeAnnouncement {
+            signature: None,
+            features: Default::default(),
+            timestamp: Default::default(),
+            node_id: private_key.pubkey(),
+            alias,
+            addresses: addresses.iter().map(|a| a.to_vec()).collect(),
+        };
+        let message = deterministically_hash(&unsigned);
+        unsigned.signature = Some(private_key.sign(message));
+        unsigned
+    }
+}
+
+impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
+    fn from(node_announcement: NodeAnnouncement) -> Self {
+        molecule_fiber::NodeAnnouncement::new_builder()
+            .signature(
+                node_announcement
+                    .signature
+                    .expect("node announcement signed")
+                    .into(),
+            )
+            .features(node_announcement.features.pack())
+            .timestamp(node_announcement.timestamp.pack())
+            .node_id(node_announcement.node_id.into())
+            .alias(u8_32_as_byte_32(&node_announcement.alias.0))
+            .address(
+                BytesVec::new_builder()
+                    .set(
+                        node_announcement
+                            .addresses
+                            .into_iter()
+                            .map(|address| address.pack())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
+    type Error = Error;
+
+    fn try_from(node_announcement: molecule_fiber::NodeAnnouncement) -> Result<Self, Self::Error> {
+        Ok(NodeAnnouncement {
+            signature: Some(node_announcement.signature().try_into()?),
+            features: node_announcement.features().unpack(),
+            timestamp: node_announcement.timestamp().unpack(),
+            node_id: node_announcement.node_id().try_into()?,
+            alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
+                .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
+            addresses: node_announcement
+                .address()
+                .into_iter()
+                .map(|address| address.unpack())
+                .collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelAnnouncement {
+    pub node_1_signature: Option<Signature>,
+    pub node_2_signature: Option<Signature>,
+    // Signature signed by the funding transaction output public key.
+    pub ckb_signature: Option<Secp256k1SchnorrSignature>,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // rust-lightning uses a Vec<u8> here.
+    pub features: u64,
+    pub chain_hash: Hash256,
+    pub short_channel_id: u64,
+    pub node_1_id: Pubkey,
+    pub node_2_id: Pubkey,
+    // The aggregated public key of the funding transaction output.
+    pub ckb_key: Pubkey,
+}
+
+impl ChannelAnnouncement {
+    pub fn new_unsigned(
+        node_1_pubkey: &Pubkey,
+        node_2_pubkey: &Pubkey,
+        short_channel_id: u64,
+        chain_hash: Hash256,
+        ckb_pubkey: &Pubkey,
+    ) -> Self {
+        Self {
+            node_1_signature: None,
+            node_2_signature: None,
+            ckb_signature: None,
+            features: Default::default(),
+            chain_hash,
+            short_channel_id,
+            node_1_id: node_1_pubkey.clone(),
+            node_2_id: node_2_pubkey.clone(),
+            ckb_key: ckb_pubkey.clone(),
+        }
+    }
+}
+
+impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
+    fn from(channel_announcement: ChannelAnnouncement) -> Self {
+        molecule_fiber::ChannelAnnouncement::new_builder()
+            .node_signature_1(
+                channel_announcement
+                    .node_1_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .node_signature_2(
+                channel_announcement
+                    .node_2_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .ckb_signature(
+                channel_announcement
+                    .ckb_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .features(channel_announcement.features.pack())
+            .chain_hash(channel_announcement.chain_hash.into())
+            .short_channel_id(channel_announcement.short_channel_id.pack())
+            .node_1_id(channel_announcement.node_1_id.into())
+            .node_2_id(channel_announcement.node_2_id.into())
+            .ckb_key(channel_announcement.ckb_key.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
+    type Error = Error;
+
+    fn try_from(
+        channel_announcement: molecule_fiber::ChannelAnnouncement,
+    ) -> Result<Self, Self::Error> {
+        Ok(ChannelAnnouncement {
+            node_1_signature: Some(channel_announcement.node_signature_1().try_into()?),
+            node_2_signature: Some(channel_announcement.node_signature_2().try_into()?),
+            ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
+            features: channel_announcement.features().unpack(),
+            chain_hash: channel_announcement.chain_hash().into(),
+            short_channel_id: channel_announcement.short_channel_id().unpack(),
+            node_1_id: channel_announcement.node_1_id().try_into()?,
+            node_2_id: channel_announcement.node_2_id().try_into()?,
+            ckb_key: channel_announcement.ckb_key().try_into()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelUpdate {
+    // Signature of the node that wants to update the channel information.
+    pub signature: Option<Signature>,
+    pub chain_hash: Hash256,
+    pub short_channel_id: u64,
+    pub timestamp: u64,
+    pub message_flags: u32,
+    pub channel_flags: u32,
+    pub cltv_expiry_delta: u64,
+    pub htlc_minimum_value: u128,
+    pub fee_value: u128,
+}
+
+impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
+    fn from(channel_update: ChannelUpdate) -> Self {
+        molecule_fiber::ChannelUpdate::new_builder()
+            .signature(
+                channel_update
+                    .signature
+                    .expect("channel update signed")
+                    .into(),
+            )
+            .chain_hash(channel_update.chain_hash.into())
+            .short_channel_id(channel_update.short_channel_id.pack())
+            .timestamp(channel_update.timestamp.pack())
+            .message_flags(channel_update.message_flags.pack())
+            .channel_flags(channel_update.channel_flags.pack())
+            .cltv_expiry_delta(channel_update.cltv_expiry_delta.pack())
+            .htlc_minimum_value(channel_update.htlc_minimum_value.pack())
+            .fee_value(channel_update.fee_value.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
+    type Error = Error;
+
+    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
+        Ok(ChannelUpdate {
+            signature: Some(channel_update.signature().try_into()?),
+            chain_hash: channel_update.chain_hash().into(),
+            short_channel_id: channel_update.short_channel_id().unpack(),
+            timestamp: channel_update.timestamp().unpack(),
+            message_flags: channel_update.message_flags().unpack(),
+            channel_flags: channel_update.channel_flags().unpack(),
+            cltv_expiry_delta: channel_update.cltv_expiry_delta().unpack(),
+            htlc_minimum_value: channel_update.htlc_minimum_value().unpack(),
+            fee_value: channel_update.fee_value().unpack(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum FiberMessage {
     OpenChannel(OpenChannel),
     AcceptChannel(AcceptChannel),
@@ -1185,27 +1516,44 @@ pub enum FiberMessage {
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
+    AnnouncementSignatures(AnnouncementSignatures),
+    NodeAnnouncement(NodeAnnouncement),
+    ChannelAnnouncement(ChannelAnnouncement),
+    ChannelUpdate(ChannelUpdate),
 }
 
 impl FiberMessage {
-    pub fn get_channel_id(&self) -> Hash256 {
-        match &self {
-            FiberMessage::OpenChannel(open_channel) => open_channel.channel_id,
-            FiberMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
-            FiberMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
-            FiberMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
-            FiberMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
-            FiberMessage::TxUpdate(tx_update) => tx_update.channel_id,
-            FiberMessage::TxComplete(tx_complete) => tx_complete.channel_id,
-            FiberMessage::TxAbort(tx_abort) => tx_abort.channel_id,
-            FiberMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
-            FiberMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-            FiberMessage::Shutdown(shutdown) => shutdown.channel_id,
-            FiberMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
-            FiberMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            FiberMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
-            FiberMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            FiberMessage::ReestablishChannel(reestablish_channel) => reestablish_channel.channel_id,
+    pub fn is_broadcast_message(&self) -> bool {
+        match self {
+            FiberMessage::NodeAnnouncement(_)
+            | FiberMessage::ChannelAnnouncement(_)
+            | FiberMessage::ChannelUpdate(_) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FiberBroadcastMessage {
+    NodeAnnouncement(NodeAnnouncement),
+    ChannelAnnouncement(ChannelAnnouncement),
+    ChannelUpdate(ChannelUpdate),
+}
+
+impl TryFrom<FiberMessage> for FiberBroadcastMessage {
+    type Error = ();
+    fn try_from(value: FiberMessage) -> Result<Self, Self::Error> {
+        match value {
+            FiberMessage::NodeAnnouncement(node_announcement) => {
+                Ok(FiberBroadcastMessage::NodeAnnouncement(node_announcement))
+            }
+            FiberMessage::ChannelAnnouncement(channel_announcement) => Ok(
+                FiberBroadcastMessage::ChannelAnnouncement(channel_announcement),
+            ),
+            FiberMessage::ChannelUpdate(channel_update) => {
+                Ok(FiberBroadcastMessage::ChannelUpdate(channel_update))
+            }
+            _ => Err(()),
         }
     }
 }
@@ -1260,6 +1608,20 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
             }
             FiberMessage::ReestablishChannel(reestablish_channel) => {
                 molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel.into())
+            }
+            FiberMessage::NodeAnnouncement(node_annoucement) => {
+                molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_annoucement.into())
+            }
+            FiberMessage::ChannelAnnouncement(channel_announcement) => {
+                molecule_fiber::FiberMessageUnion::ChannelAnnouncement(channel_announcement.into())
+            }
+            FiberMessage::ChannelUpdate(channel_update) => {
+                molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update.into())
+            }
+            FiberMessage::AnnouncementSignatures(announcement_signatures) => {
+                molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
+                    announcement_signatures.into(),
+                )
             }
         }
     }
@@ -1326,6 +1688,18 @@ impl TryFrom<molecule_fiber::FiberMessage> for FiberMessage {
             molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
                 FiberMessage::ReestablishChannel(reestablish_channel.try_into()?)
             }
+            molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_announcement) => {
+                FiberMessage::NodeAnnouncement(node_announcement.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::ChannelAnnouncement(channel_announcement) => {
+                FiberMessage::ChannelAnnouncement(channel_announcement.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update) => {
+                FiberMessage::ChannelUpdate(channel_update.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::AnnouncementSignatures(announcement_signatures) => {
+                FiberMessage::AnnouncementSignatures(announcement_signatures.try_into()?)
+            }
         })
     }
 }
@@ -1349,6 +1723,14 @@ macro_rules! impl_traits {
 }
 
 impl_traits!(FiberMessage);
+
+pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec_pretty(v).expect("serialize value")
+}
+
+pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
+    ckb_hash::blake2b_256(deterministically_serialize(v))
+}
 
 #[cfg(test)]
 mod tests {
