@@ -141,7 +141,7 @@ table ReestablishChannel {
 
 table AnnouncementSignatures {
     channel_id: Byte32,
-    short_channel_id: Uint64,
+    channel_outpoint: OutPoint,
     partial_signature: Byte32,
 }
 
@@ -171,7 +171,7 @@ table ChannelAnnouncement {
     // rust-lightning uses a Vec<u8> here.
     features: Uint64,
     chain_hash: Byte32,
-    short_channel_id: Uint64,
+    channel_outpoint: OutPoint,
     node_1_id: Pubkey,
     node_2_id: Pubkey,
     // The aggregated public key of the fundign transaction output.
@@ -182,7 +182,7 @@ table ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     signature: Signature,
     chain_hash: Byte32,
-    short_channel_id: Uint64,
+    channel_outpoint: OutPoint,
     timestamp: Uint64,
     message_flags: Uint32,
     channel_flags: Uint32,

@@ -3,11 +3,11 @@ use std::str::FromStr;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::serde_utils::SliceHex;
+use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
 use ckb_types::core::FeeRate;
-use ckb_types::packed::Uint64;
+use ckb_types::packed::{OutPoint, Uint64};
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
@@ -1241,7 +1241,7 @@ impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
 #[derive(Debug, Clone)]
 pub struct AnnouncementSignatures {
     pub channel_id: Hash256,
-    pub short_channel_id: u64,
+    pub channel_outpoint: OutPoint,
     pub partial_signature: Hash256,
 }
 
@@ -1249,7 +1249,7 @@ impl From<AnnouncementSignatures> for molecule_fiber::AnnouncementSignatures {
     fn from(announcement_signatures: AnnouncementSignatures) -> Self {
         molecule_fiber::AnnouncementSignatures::new_builder()
             .channel_id(announcement_signatures.channel_id.into())
-            .short_channel_id(announcement_signatures.short_channel_id.pack())
+            .channel_outpoint(announcement_signatures.channel_outpoint)
             .partial_signature(announcement_signatures.partial_signature.into())
             .build()
     }
@@ -1263,7 +1263,7 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
     ) -> Result<Self, Self::Error> {
         Ok(AnnouncementSignatures {
             channel_id: announcement_signatures.channel_id().into(),
-            short_channel_id: announcement_signatures.short_channel_id().unpack(),
+            channel_outpoint: announcement_signatures.channel_outpoint(),
             partial_signature: announcement_signatures.partial_signature().into(),
         })
     }
@@ -1355,6 +1355,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelAnnouncement {
     pub node_1_signature: Option<Signature>,
@@ -1365,7 +1366,8 @@ pub struct ChannelAnnouncement {
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
     pub chain_hash: Hash256,
-    pub short_channel_id: u64,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
     pub node_1_id: Pubkey,
     pub node_2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
@@ -1376,7 +1378,7 @@ impl ChannelAnnouncement {
     pub fn new_unsigned(
         node_1_pubkey: &Pubkey,
         node_2_pubkey: &Pubkey,
-        short_channel_id: u64,
+        channel_outpoint: OutPoint,
         chain_hash: Hash256,
         ckb_pubkey: &Pubkey,
     ) -> Self {
@@ -1386,7 +1388,7 @@ impl ChannelAnnouncement {
             ckb_signature: None,
             features: Default::default(),
             chain_hash,
-            short_channel_id,
+            channel_outpoint,
             node_1_id: node_1_pubkey.clone(),
             node_2_id: node_2_pubkey.clone(),
             ckb_key: ckb_pubkey.clone(),
@@ -1417,7 +1419,7 @@ impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
             )
             .features(channel_announcement.features.pack())
             .chain_hash(channel_announcement.chain_hash.into())
-            .short_channel_id(channel_announcement.short_channel_id.pack())
+            .channel_outpoint(channel_announcement.channel_outpoint)
             .node_1_id(channel_announcement.node_1_id.into())
             .node_2_id(channel_announcement.node_2_id.into())
             .ckb_key(channel_announcement.ckb_key.into())
@@ -1437,7 +1439,7 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
             ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
             features: channel_announcement.features().unpack(),
             chain_hash: channel_announcement.chain_hash().into(),
-            short_channel_id: channel_announcement.short_channel_id().unpack(),
+            channel_outpoint: channel_announcement.channel_outpoint(),
             node_1_id: channel_announcement.node_1_id().try_into()?,
             node_2_id: channel_announcement.node_2_id().try_into()?,
             ckb_key: channel_announcement.ckb_key().try_into()?,
@@ -1445,12 +1447,14 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     pub signature: Option<Signature>,
     pub chain_hash: Hash256,
-    pub short_channel_id: u64,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
     pub timestamp: u64,
     pub message_flags: u32,
     pub channel_flags: u32,
@@ -1469,7 +1473,7 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
                     .into(),
             )
             .chain_hash(channel_update.chain_hash.into())
-            .short_channel_id(channel_update.short_channel_id.pack())
+            .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
@@ -1487,7 +1491,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
         Ok(ChannelUpdate {
             signature: Some(channel_update.signature().try_into()?),
             chain_hash: channel_update.chain_hash().into(),
-            short_channel_id: channel_update.short_channel_id().unpack(),
+            channel_outpoint: channel_update.channel_outpoint(),
             timestamp: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),

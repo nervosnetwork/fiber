@@ -8990,7 +8990,7 @@ impl ::core::fmt::Display for AnnouncementSignatures {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -9006,10 +9006,11 @@ impl ::core::default::Default for AnnouncementSignatures {
     }
 }
 impl AnnouncementSignatures {
-    const DEFAULT_VALUE: [u8; 88] = [
-        88, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 116] = [
+        116, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 84, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
@@ -9034,11 +9035,11 @@ impl AnnouncementSignatures {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn short_channel_id(&self) -> Uint64 {
+    pub fn channel_outpoint(&self) -> OutPoint {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        OutPoint::new_unchecked(self.0.slice(start..end))
     }
     pub fn partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
@@ -9078,7 +9079,7 @@ impl molecule::prelude::Entity for AnnouncementSignatures {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .short_channel_id(self.short_channel_id())
+            .channel_outpoint(self.channel_outpoint())
             .partial_signature(self.partial_signature())
     }
 }
@@ -9102,7 +9103,7 @@ impl<'r> ::core::fmt::Display for AnnouncementSignaturesReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -9135,11 +9136,11 @@ impl<'r> AnnouncementSignaturesReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn short_channel_id(&self) -> Uint64Reader<'r> {
+    pub fn channel_outpoint(&self) -> OutPointReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        OutPointReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
@@ -9199,7 +9200,7 @@ impl<'r> molecule::prelude::Reader<'r> for AnnouncementSignaturesReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        OutPointReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Byte32Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Ok(())
     }
@@ -9207,7 +9208,7 @@ impl<'r> molecule::prelude::Reader<'r> for AnnouncementSignaturesReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct AnnouncementSignaturesBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) short_channel_id: Uint64,
+    pub(crate) channel_outpoint: OutPoint,
     pub(crate) partial_signature: Byte32,
 }
 impl AnnouncementSignaturesBuilder {
@@ -9216,8 +9217,8 @@ impl AnnouncementSignaturesBuilder {
         self.channel_id = v;
         self
     }
-    pub fn short_channel_id(mut self, v: Uint64) -> Self {
-        self.short_channel_id = v;
+    pub fn channel_outpoint(mut self, v: OutPoint) -> Self {
+        self.channel_outpoint = v;
         self
     }
     pub fn partial_signature(mut self, v: Byte32) -> Self {
@@ -9231,7 +9232,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.short_channel_id.as_slice().len()
+            + self.channel_outpoint.as_slice().len()
             + self.partial_signature.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -9240,7 +9241,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.short_channel_id.as_slice().len();
+        total_size += self.channel_outpoint.as_slice().len();
         offsets.push(total_size);
         total_size += self.partial_signature.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -9248,7 +9249,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.short_channel_id.as_slice())?;
+        writer.write_all(self.channel_outpoint.as_slice())?;
         writer.write_all(self.partial_signature.as_slice())?;
         Ok(())
     }
@@ -9651,7 +9652,7 @@ impl ::core::fmt::Display for ChannelAnnouncement {
         write!(f, ", {}: {}", "ckb_signature", self.ckb_signature())?;
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "node_1_id", self.node_1_id())?;
         write!(f, ", {}: {}", "node_2_id", self.node_2_id())?;
         write!(f, ", {}: {}", "ckb_key", self.ckb_key())?;
@@ -9669,9 +9670,9 @@ impl ::core::default::Default for ChannelAnnouncement {
     }
 }
 impl ChannelAnnouncement {
-    const DEFAULT_VALUE: [u8; 379] = [
-        123, 1, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 168, 0, 0, 0, 232, 0, 0, 0, 240, 0, 0, 0, 16, 1,
-        0, 0, 24, 1, 0, 0, 57, 1, 0, 0, 90, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 407] = [
+        151, 1, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 168, 0, 0, 0, 232, 0, 0, 0, 240, 0, 0, 0, 16, 1,
+        0, 0, 52, 1, 0, 0, 85, 1, 0, 0, 118, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -9682,7 +9683,8 @@ impl ChannelAnnouncement {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
@@ -9731,11 +9733,11 @@ impl ChannelAnnouncement {
         let end = molecule::unpack_number(&slice[24..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn short_channel_id(&self) -> Uint64 {
+    pub fn channel_outpoint(&self) -> OutPoint {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
         let end = molecule::unpack_number(&slice[28..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        OutPoint::new_unchecked(self.0.slice(start..end))
     }
     pub fn node_1_id(&self) -> Pubkey {
         let slice = self.as_slice();
@@ -9791,7 +9793,7 @@ impl molecule::prelude::Entity for ChannelAnnouncement {
             .ckb_signature(self.ckb_signature())
             .features(self.features())
             .chain_hash(self.chain_hash())
-            .short_channel_id(self.short_channel_id())
+            .channel_outpoint(self.channel_outpoint())
             .node_1_id(self.node_1_id())
             .node_2_id(self.node_2_id())
             .ckb_key(self.ckb_key())
@@ -9821,7 +9823,7 @@ impl<'r> ::core::fmt::Display for ChannelAnnouncementReader<'r> {
         write!(f, ", {}: {}", "ckb_signature", self.ckb_signature())?;
         write!(f, ", {}: {}", "features", self.features())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "node_1_id", self.node_1_id())?;
         write!(f, ", {}: {}", "node_2_id", self.node_2_id())?;
         write!(f, ", {}: {}", "ckb_key", self.ckb_key())?;
@@ -9880,11 +9882,11 @@ impl<'r> ChannelAnnouncementReader<'r> {
         let end = molecule::unpack_number(&slice[24..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn short_channel_id(&self) -> Uint64Reader<'r> {
+    pub fn channel_outpoint(&self) -> OutPointReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
         let end = molecule::unpack_number(&slice[28..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        OutPointReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn node_1_id(&self) -> PubkeyReader<'r> {
         let slice = self.as_slice();
@@ -9960,7 +9962,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelAnnouncementReader<'r> {
         SignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
+        OutPointReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         PubkeyReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         PubkeyReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         PubkeyReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
@@ -9974,7 +9976,7 @@ pub struct ChannelAnnouncementBuilder {
     pub(crate) ckb_signature: Signature,
     pub(crate) features: Uint64,
     pub(crate) chain_hash: Byte32,
-    pub(crate) short_channel_id: Uint64,
+    pub(crate) channel_outpoint: OutPoint,
     pub(crate) node_1_id: Pubkey,
     pub(crate) node_2_id: Pubkey,
     pub(crate) ckb_key: Pubkey,
@@ -10001,8 +10003,8 @@ impl ChannelAnnouncementBuilder {
         self.chain_hash = v;
         self
     }
-    pub fn short_channel_id(mut self, v: Uint64) -> Self {
-        self.short_channel_id = v;
+    pub fn channel_outpoint(mut self, v: OutPoint) -> Self {
+        self.channel_outpoint = v;
         self
     }
     pub fn node_1_id(mut self, v: Pubkey) -> Self {
@@ -10028,7 +10030,7 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
             + self.ckb_signature.as_slice().len()
             + self.features.as_slice().len()
             + self.chain_hash.as_slice().len()
-            + self.short_channel_id.as_slice().len()
+            + self.channel_outpoint.as_slice().len()
             + self.node_1_id.as_slice().len()
             + self.node_2_id.as_slice().len()
             + self.ckb_key.as_slice().len()
@@ -10047,7 +10049,7 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
         offsets.push(total_size);
         total_size += self.chain_hash.as_slice().len();
         offsets.push(total_size);
-        total_size += self.short_channel_id.as_slice().len();
+        total_size += self.channel_outpoint.as_slice().len();
         offsets.push(total_size);
         total_size += self.node_1_id.as_slice().len();
         offsets.push(total_size);
@@ -10063,7 +10065,7 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
         writer.write_all(self.ckb_signature.as_slice())?;
         writer.write_all(self.features.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
-        writer.write_all(self.short_channel_id.as_slice())?;
+        writer.write_all(self.channel_outpoint.as_slice())?;
         writer.write_all(self.node_1_id.as_slice())?;
         writer.write_all(self.node_2_id.as_slice())?;
         writer.write_all(self.ckb_key.as_slice())?;
@@ -10097,7 +10099,7 @@ impl ::core::fmt::Display for ChannelUpdate {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
@@ -10123,14 +10125,15 @@ impl ::core::default::Default for ChannelUpdate {
     }
 }
 impl ChannelUpdate {
-    const DEFAULT_VALUE: [u8; 200] = [
-        200, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 136, 0, 0, 0, 144, 0, 0, 0, 152, 0, 0, 0, 156, 0,
-        0, 0, 160, 0, 0, 0, 168, 0, 0, 0, 184, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 228] = [
+        228, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 136, 0, 0, 0, 172, 0, 0, 0, 180, 0, 0, 0, 184, 0,
+        0, 0, 188, 0, 0, 0, 196, 0, 0, 0, 212, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
@@ -10161,11 +10164,11 @@ impl ChannelUpdate {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn short_channel_id(&self) -> Uint64 {
+    pub fn channel_outpoint(&self) -> OutPoint {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint64::new_unchecked(self.0.slice(start..end))
+        OutPoint::new_unchecked(self.0.slice(start..end))
     }
     pub fn timestamp(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -10236,7 +10239,7 @@ impl molecule::prelude::Entity for ChannelUpdate {
         Self::new_builder()
             .signature(self.signature())
             .chain_hash(self.chain_hash())
-            .short_channel_id(self.short_channel_id())
+            .channel_outpoint(self.channel_outpoint())
             .timestamp(self.timestamp())
             .message_flags(self.message_flags())
             .channel_flags(self.channel_flags())
@@ -10266,7 +10269,7 @@ impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "signature", self.signature())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
-        write!(f, ", {}: {}", "short_channel_id", self.short_channel_id())?;
+        write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
@@ -10315,11 +10318,11 @@ impl<'r> ChannelUpdateReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn short_channel_id(&self) -> Uint64Reader<'r> {
+    pub fn channel_outpoint(&self) -> OutPointReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+        OutPointReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn timestamp(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -10410,7 +10413,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
         }
         SignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        OutPointReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Uint32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         Uint32Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
@@ -10424,7 +10427,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
 pub struct ChannelUpdateBuilder {
     pub(crate) signature: Signature,
     pub(crate) chain_hash: Byte32,
-    pub(crate) short_channel_id: Uint64,
+    pub(crate) channel_outpoint: OutPoint,
     pub(crate) timestamp: Uint64,
     pub(crate) message_flags: Uint32,
     pub(crate) channel_flags: Uint32,
@@ -10442,8 +10445,8 @@ impl ChannelUpdateBuilder {
         self.chain_hash = v;
         self
     }
-    pub fn short_channel_id(mut self, v: Uint64) -> Self {
-        self.short_channel_id = v;
+    pub fn channel_outpoint(mut self, v: OutPoint) -> Self {
+        self.channel_outpoint = v;
         self
     }
     pub fn timestamp(mut self, v: Uint64) -> Self {
@@ -10478,7 +10481,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.signature.as_slice().len()
             + self.chain_hash.as_slice().len()
-            + self.short_channel_id.as_slice().len()
+            + self.channel_outpoint.as_slice().len()
             + self.timestamp.as_slice().len()
             + self.message_flags.as_slice().len()
             + self.channel_flags.as_slice().len()
@@ -10494,7 +10497,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         offsets.push(total_size);
         total_size += self.chain_hash.as_slice().len();
         offsets.push(total_size);
-        total_size += self.short_channel_id.as_slice().len();
+        total_size += self.channel_outpoint.as_slice().len();
         offsets.push(total_size);
         total_size += self.timestamp.as_slice().len();
         offsets.push(total_size);
@@ -10513,7 +10516,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         }
         writer.write_all(self.signature.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
-        writer.write_all(self.short_channel_id.as_slice())?;
+        writer.write_all(self.channel_outpoint.as_slice())?;
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.message_flags.as_slice())?;
         writer.write_all(self.channel_flags.as_slice())?;

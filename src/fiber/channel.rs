@@ -1821,7 +1821,7 @@ impl ChannelActorState {
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
-        let short_channel_id = self.get_short_channel_id()?;
+        let short_channel_id = self.get_funding_transaction_outpoint_option()?;
 
         let (node_1_id, node_1_signature, node_2_id, node_2_signature) =
             if self.local_pubkey < self.remote_pubkey {
@@ -2535,14 +2535,16 @@ impl ChannelActorState {
             .expect("Funding transaction is present")
     }
 
-    pub fn get_short_channel_id(&self) -> Option<u64> {
-        self.short_channel_id
+    pub fn get_funding_transaction_outpoint_option(&self) -> Option<OutPoint> {
+        // By convention, the funding tx output for the channel is the first output.
+        self.funding_tx
+            .as_ref()
+            .map(|tx| OutPoint::new(tx.calc_tx_hash(), 0))
     }
 
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
-        let tx = self.get_funding_transaction();
-        // By convention, the funding tx output for the channel is the first output.
-        OutPoint::new(tx.calc_tx_hash(), 0)
+        self.get_funding_transaction_outpoint_option()
+            .expect("must get channel outpoint")
     }
 
     pub fn get_local_shutdown_script(&self) -> &Script {
