@@ -46,7 +46,7 @@ use super::FiberConfig;
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::fiber::types::TxSignatures;
+use crate::fiber::types::{FiberChannelNormalOperationMessage, TxSignatures};
 use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -312,7 +312,7 @@ where
         match message {
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
-            FiberMessage::OpenChannel(open_channel) => {
+            FiberMessage::ChannelInitialization(open_channel) => {
                 let temp_channel_id = open_channel.channel_id;
                 match state
                     .on_open_channel_msg(peer_id, open_channel.clone())
@@ -344,41 +344,13 @@ where
                     }
                 }
             }
-            _ if message.is_broadcast_message() => {
-                state
-                    .on_broadcasted_message(FiberBroadcastMessage::try_from(message).unwrap())
-                    .await;
+            FiberMessage::BroadcastMessage(m) => {
+                state.on_broadcasted_message(m).await;
             }
-            _ => {
-                let channel_id = match &message {
-                    FiberMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
-                    FiberMessage::CommitmentSigned(commitment_signed) => {
-                        commitment_signed.channel_id
-                    }
-                    FiberMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
-                    FiberMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
-                    FiberMessage::TxUpdate(tx_update) => tx_update.channel_id,
-                    FiberMessage::TxComplete(tx_complete) => tx_complete.channel_id,
-                    FiberMessage::TxAbort(tx_abort) => tx_abort.channel_id,
-                    FiberMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
-                    FiberMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-                    FiberMessage::Shutdown(shutdown) => shutdown.channel_id,
-                    FiberMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
-                    FiberMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-                    FiberMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
-                    FiberMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-                    FiberMessage::ReestablishChannel(reestablish_channel) => {
-                        reestablish_channel.channel_id
-                    }
-                    _ => unreachable!(
-                        "Invalid message type (should have been processed above): {:?}",
-                        message
-                    ),
-                };
-                state.send_message_to_channel_actor(
-                    channel_id,
-                    ChannelActorMessage::PeerMessage(message),
-                );
+            FiberMessage::ChannelNormalOperation(m) => {
+                let channel_id = m.get_channel_id();
+                state
+                    .send_message_to_channel_actor(channel_id, ChannelActorMessage::PeerMessage(m));
             }
         };
         Ok(())
@@ -730,11 +702,13 @@ where
 
                         FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
-                            message: FiberMessage::TxSignatures(TxSignatures {
-                                channel_id: *channel_id,
-                                witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                tx_hash: funding_tx.hash().into(),
-                            }),
+                            message: FiberMessage::ChannelNormalOperation(
+                                FiberChannelNormalOperationMessage::TxSignatures(TxSignatures {
+                                    channel_id: *channel_id,
+                                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                                    tx_hash: funding_tx.hash().into(),
+                                }),
+                            ),
                         }
                     }
                     None => {
@@ -756,11 +730,13 @@ where
                         debug!("Partially signed funding tx {:?}", &funding_tx);
                         FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
-                            message: FiberMessage::TxSignatures(TxSignatures {
-                                channel_id: *channel_id,
-                                witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                tx_hash: funding_tx.hash().into(),
-                            }),
+                            message: FiberMessage::ChannelNormalOperation(
+                                FiberChannelNormalOperationMessage::TxSignatures(TxSignatures {
+                                    channel_id: *channel_id,
+                                    witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
+                                    tx_hash: funding_tx.hash().into(),
+                                }),
+                            ),
                         }
                     }
                 };

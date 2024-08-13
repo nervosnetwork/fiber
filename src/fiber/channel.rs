@@ -58,9 +58,9 @@ use super::{
     serde_utils::EntityHex,
     types::{
         deterministically_hash, AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady,
-        ClosingSigned, CommitmentSigned, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
-        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-        Signature, TxCollaborationMsg, TxComplete, TxUpdate,
+        ClosingSigned, CommitmentSigned, FiberChannelNormalOperationMessage, FiberMessage, Hash256,
+        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, Signature, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -85,7 +85,7 @@ pub enum ChannelActorMessage {
     /// Some system events associated to a channel, such as the funding transaction confirmed.
     Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
-    PeerMessage(FiberMessage),
+    PeerMessage(FiberChannelNormalOperationMessage),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -252,21 +252,13 @@ impl<S> ChannelActor<S> {
     pub fn handle_peer_message(
         &self,
         state: &mut ChannelActorState,
-        message: FiberMessage,
+        message: FiberChannelNormalOperationMessage,
     ) -> Result<(), ProcessingChannelError> {
         match message {
-            FiberMessage::OpenChannel(_) => {
-                panic!("OpenChannel message should be processed while prestarting")
-            }
-            FiberMessage::NodeAnnouncement(_)
-            | FiberMessage::ChannelAnnouncement(_)
-            | FiberMessage::ChannelUpdate(_) => {
-                todo!("handle peer message {:?}", message)
-            }
-            FiberMessage::AnnouncementSignatures(_) => {
+            FiberChannelNormalOperationMessage::AnnouncementSignatures(_) => {
                 todo!("handle peer message AnnouncementSignatures {:?}", message)
             }
-            FiberMessage::AcceptChannel(accept_channel) => {
+            FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
@@ -288,10 +280,10 @@ impl<S> ChannelActor<S> {
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(())
             }
-            FiberMessage::TxUpdate(tx) => {
+            FiberChannelNormalOperationMessage::TxUpdate(tx) => {
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
             }
-            FiberMessage::TxComplete(tx) => {
+            FiberChannelNormalOperationMessage::TxComplete(tx) => {
                 state.handle_tx_collaboration_msg(
                     TxCollaborationMsg::TxComplete(tx),
                     &self.network,
@@ -303,7 +295,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberMessage::CommitmentSigned(commitment_signed) => {
+            FiberChannelNormalOperationMessage::CommitmentSigned(commitment_signed) => {
                 state.handle_commitment_signed_message(commitment_signed, &self.network)?;
                 if let ChannelState::SigningCommitment(flags) = state.state {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
@@ -325,7 +317,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberMessage::TxSignatures(tx_signatures) => {
+            FiberChannelNormalOperationMessage::TxSignatures(tx_signatures) => {
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
@@ -367,11 +359,11 @@ impl<S> ChannelActor<S> {
                 state.handle_tx_signatures(&self.network, Some(tx_signatures.witnesses))?;
                 Ok(())
             }
-            FiberMessage::RevokeAndAck(revoke_and_ack) => {
+            FiberChannelNormalOperationMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
-            FiberMessage::ChannelReady(channel_ready) => {
+            FiberChannelNormalOperationMessage::ChannelReady(channel_ready) => {
                 let flags = match state.state {
                     ChannelState::AwaitingTxSignatures(flags) => {
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
@@ -403,7 +395,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            FiberMessage::AddTlc(add_tlc) => {
+            FiberChannelNormalOperationMessage::AddTlc(add_tlc) => {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
                 let tlc = state.create_inbounding_tlc(add_tlc)?;
@@ -423,7 +415,7 @@ impl<S> ChannelActor<S> {
                 // this message, and our processing of this message is idempotent.
                 Ok(())
             }
-            FiberMessage::RemoveTlc(remove_tlc) => {
+            FiberChannelNormalOperationMessage::RemoveTlc(remove_tlc) => {
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
@@ -446,7 +438,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberMessage::Shutdown(shutdown) => {
+            FiberChannelNormalOperationMessage::Shutdown(shutdown) => {
                 let flags = match state.state {
                     ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
                     ChannelState::ShuttingDown(flags)
@@ -481,15 +473,15 @@ impl<S> ChannelActor<S> {
                     let local_funding_script = state.get_default_local_funding_script();
                     self.network
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                                peer_id: state.get_remote_peer_id(),
-                                message: FiberMessage::Shutdown(Shutdown {
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                state.get_remote_peer_id(),
+                                FiberMessage::shutdown(Shutdown {
                                     channel_id: state.get_id(),
                                     close_script: local_funding_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
                                     force: shutdown.force,
                                 }),
-                            }),
+                            )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     state.local_shutdown_script = Some(local_funding_script);
@@ -502,7 +494,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            FiberMessage::ClosingSigned(closing) => {
+            FiberChannelNormalOperationMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
                     partial_signature,
                     channel_id,
@@ -525,11 +517,13 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-            FiberMessage::ReestablishChannel(reestablish_channel) => {
+            FiberChannelNormalOperationMessage::ReestablishChannel(reestablish_channel) => {
                 state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
                 Ok(())
             }
-            FiberMessage::TxAbort(_) | FiberMessage::TxInitRBF(_) | FiberMessage::TxAckRBF(_) => {
+            FiberChannelNormalOperationMessage::TxAbort(_)
+            | FiberChannelNormalOperationMessage::TxInitRBF(_)
+            | FiberChannelNormalOperationMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
             }
@@ -626,10 +620,10 @@ impl<S> ChannelActor<S> {
         );
         self.network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                    peer_id: state.get_remote_peer_id(),
-                    message: FiberMessage::CommitmentSigned(commitment_signed),
-                }),
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    state.get_remote_peer_id(),
+                    FiberMessage::commitment_signed(commitment_signed),
+                )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.network
@@ -676,9 +670,9 @@ impl<S> ChannelActor<S> {
         // To make things worse, we currently don't have a way to ACK all the messages.
 
         // Send tlc update message to peer.
-        let msg = FiberMessageWithPeerId {
-            peer_id: state.get_remote_peer_id(),
-            message: FiberMessage::AddTlc(AddTlc {
+        let msg = FiberMessageWithPeerId::new(
+            state.get_remote_peer_id(),
+            FiberMessage::add_tlc(AddTlc {
                 channel_id: state.get_id(),
                 tlc_id: tlc.id.into(),
                 amount: tlc.amount,
@@ -686,7 +680,7 @@ impl<S> ChannelActor<S> {
                 expiry: tlc.lock_time,
                 hash_algorithm: tlc.hash_algorithm,
             }),
-        };
+        );
         debug!("Sending AddTlc message: {:?}", &msg);
         self.network
             .send_message(NetworkActorMessage::new_command(
@@ -705,14 +699,14 @@ impl<S> ChannelActor<S> {
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None)?;
         let tlc = state.remove_tlc_with_reason(TLCId::Received(command.id), command.reason)?;
-        let msg = FiberMessageWithPeerId {
-            peer_id: state.get_remote_peer_id(),
-            message: FiberMessage::RemoveTlc(RemoveTlc {
+        let msg = FiberMessageWithPeerId::new(
+            state.get_remote_peer_id(),
+            FiberMessage::remove_tlc(RemoveTlc {
                 channel_id: state.get_id(),
                 tlc_id: command.id,
                 reason: command.reason,
             }),
-        };
+        );
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(msg),
@@ -786,15 +780,15 @@ impl<S> ChannelActor<S> {
         } else {
             self.network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                        peer_id: self.get_remote_peer_id(),
-                        message: FiberMessage::Shutdown(Shutdown {
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::shutdown(Shutdown {
                             channel_id: state.get_id(),
                             close_script: command.close_script.clone(),
                             fee_rate: command.fee_rate,
                             force: command.force,
                         }),
-                    }),
+                    )),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -870,7 +864,7 @@ impl<S> ChannelActor<S> {
         // as in that case both us and the remote are waiting for each other to send the message.
         match command {
             TxCollaborationCommand::TxUpdate(tx_update) => {
-                let fiber_message = FiberMessage::TxUpdate(TxUpdate {
+                let fiber_message = FiberMessage::tx_update(TxUpdate {
                     channel_id: state.get_id(),
                     tx: tx_update.transaction.clone(),
                 });
@@ -891,7 +885,7 @@ impl<S> ChannelActor<S> {
             }
             TxCollaborationCommand::TxComplete() => {
                 state.check_tx_complete_preconditions()?;
-                let fiber_message = FiberMessage::TxComplete(TxComplete {
+                let fiber_message = FiberMessage::tx_complete(TxComplete {
                     channel_id: state.get_id(),
                 });
                 self.network
@@ -985,12 +979,12 @@ impl<S> ChannelActor<S> {
                 };
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                            peer_id: state.get_remote_peer_id(),
-                            message: FiberMessage::ChannelReady(ChannelReady {
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            state.get_remote_peer_id(),
+                            FiberMessage::channel_ready(ChannelReady {
                                 channel_id: state.get_id(),
                             }),
-                        }),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
@@ -1151,10 +1145,10 @@ where
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
-                let command = FiberMessageWithPeerId {
+                let command = FiberMessageWithPeerId::new(
                     peer_id,
-                    message: FiberMessage::AcceptChannel(accept_channel),
-                };
+                    FiberMessage::accept_channel(accept_channel),
+                );
                 // TODO: maybe we should not use try_send here.
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -1221,7 +1215,7 @@ where
                 ])?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
-                let message = FiberMessage::OpenChannel(OpenChannel {
+                let message = FiberMessage::ChannelInitialization(OpenChannel {
                     chain_hash: Hash256::default(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
@@ -1321,10 +1315,10 @@ where
                     remote_commitment_number: channel.get_current_commitment_number(false),
                 };
 
-                let command = FiberMessageWithPeerId {
-                    peer_id: self.get_remote_peer_id(),
-                    message: FiberMessage::ReestablishChannel(reestablish_channel),
-                };
+                let command = FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::reestablish_channel(reestablish_channel),
+                );
 
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -1356,7 +1350,9 @@ where
             ChannelActorMessage::PeerMessage(message) => {
                 if state.reestablishing {
                     match message {
-                        FiberMessage::ReestablishChannel(reestablish_channel) => {
+                        FiberChannelNormalOperationMessage::ReestablishChannel(
+                            reestablish_channel,
+                        ) => {
                             state.handle_reestablish_channel_message(
                                 reestablish_channel,
                                 &self.network,
@@ -2176,14 +2172,14 @@ impl ChannelActorState {
         );
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                    peer_id: self.get_remote_peer_id(),
-                    message: FiberMessage::RevokeAndAck(RevokeAndAck {
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::revoke_and_ack(RevokeAndAck {
                         channel_id: self.get_id(),
                         per_commitment_secret: commitment_secret.into(),
                         next_per_commitment_point: point,
                     }),
-                }),
+                )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -3119,13 +3115,13 @@ impl ChannelActorState {
 
                 network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
-                            peer_id: self.get_remote_peer_id(),
-                            message: FiberMessage::ClosingSigned(ClosingSigned {
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            self.get_remote_peer_id(),
+                            FiberMessage::closing_signed(ClosingSigned {
                                 partial_signature: signature,
                                 channel_id: self.get_id(),
                             }),
-                        }),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 signature
@@ -3655,9 +3651,9 @@ impl ChannelActorState {
                                 network
                                     .send_message(NetworkActorMessage::new_command(
                                         NetworkActorCommand::SendFiberMessage(
-                                            FiberMessageWithPeerId {
-                                                peer_id: self.get_remote_peer_id(),
-                                                message: FiberMessage::AddTlc(AddTlc {
+                                            FiberMessageWithPeerId::new(
+                                                self.get_remote_peer_id(),
+                                                FiberMessage::add_tlc(AddTlc {
                                                     channel_id: self.get_id(),
                                                     tlc_id: info.tlc.get_id(),
                                                     amount: info.tlc.amount,
@@ -3665,7 +3661,7 @@ impl ChannelActorState {
                                                     expiry: info.tlc.lock_time,
                                                     hash_algorithm: info.tlc.hash_algorithm,
                                                 }),
-                                            },
+                                            ),
                                         ),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3678,14 +3674,14 @@ impl ChannelActorState {
                                 network
                                     .send_message(NetworkActorMessage::new_command(
                                         NetworkActorCommand::SendFiberMessage(
-                                            FiberMessageWithPeerId {
-                                                peer_id: self.get_remote_peer_id(),
-                                                message: FiberMessage::RemoveTlc(RemoveTlc {
+                                            FiberMessageWithPeerId::new(
+                                                self.get_remote_peer_id(),
+                                                FiberMessage::remove_tlc(RemoveTlc {
                                                     channel_id: self.get_id(),
                                                     tlc_id: info.tlc.get_id(),
                                                     reason: remove_reason,
                                                 }),
-                                            },
+                                            ),
                                         ),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -3809,7 +3805,7 @@ impl ChannelActorState {
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                         self.get_remote_peer_id(),
-                        FiberMessage::TxComplete(TxComplete {
+                        FiberMessage::tx_complete(TxComplete {
                             channel_id: self.get_id(),
                         }),
                     )),
