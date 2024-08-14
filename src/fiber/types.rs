@@ -603,6 +603,11 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
             .next_local_nonce((&open_channel.next_local_nonce).into())
+            .channel_annoucement_nonce(
+                PubNonceOpt::new_builder()
+                    .set(open_channel.channel_announcement_nonce.map(|x| (&x).into()))
+                    .build(),
+            )
             .channel_flags(open_channel.channel_flags.bits().into())
             .build()
     }

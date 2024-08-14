@@ -262,6 +262,9 @@ impl<S> ChannelActor<S> {
                     "handle peer message AnnouncementSignatures {:?}",
                     &announcement_signatures
                 );
+                state
+                    .maybe_broadcast_announcement_signatures(&self.network)
+                    .await;
                 Ok(())
             }
             FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
@@ -396,6 +399,7 @@ impl<S> ChannelActor<S> {
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    debug!("Running on_channel_ready as ChannelReady message is received");
                     state.on_channel_ready(&self.network).await;
                 }
 
@@ -971,6 +975,7 @@ impl<S> ChannelActor<S> {
     ) -> Result<(), ProcessingChannelError> {
         match event {
             ChannelEvent::FundingTransactionConfirmed => {
+                debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
                     ChannelState::AwaitingTxSignatures(f)
@@ -996,6 +1001,7 @@ impl<S> ChannelActor<S> {
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    debug!("Running on_channel_ready as funding transaction confirmed");
                     state.on_channel_ready(&self.network).await;
                 }
             }
@@ -1851,11 +1857,6 @@ impl ChannelActorState {
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelAnnouncement> {
-        debug!(
-            "Trying to create channel announcement for channel {:?}",
-            &self.id
-        );
-
         if !self.public {
             debug!("Ignoring non-public channel announcement");
             return None;
@@ -1915,6 +1916,10 @@ impl ChannelActorState {
             let node_signature = sign_network_message(network.clone(), message)
                 .await
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            debug!(
+                "Sending channel announcement signature for channel {:?}",
+                &self.id
+            );
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1982,6 +1987,10 @@ impl ChannelActorState {
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
     ) -> Self {
+        debug!(
+            "remote channel announcement nonce {:?}",
+            remote_channel_announcement_nonce
+        );
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
 
@@ -3328,6 +3337,12 @@ impl ChannelActorState {
             accept_channel.second_per_commitment_point,
         ];
 
+        self.remote_channel_announcement_nonce = accept_channel.channel_announcement_nonce.clone();
+
+        debug!(
+            "remote channel announcement nonce: {:?}",
+            &self.remote_channel_announcement_nonce
+        );
         debug!(
             "Successfully processed AcceptChannel message {:?}",
             &accept_channel
@@ -3653,20 +3668,11 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        self.update_state(ChannelState::ChannelReady());
-        self.increment_local_commitment_number();
-        self.increment_remote_commitment_number();
-        let peer_id = self.get_remote_peer_id();
-        network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelReady(self.get_id(), peer_id.clone()),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        debug!(
-            "Channel {:?} is ready, sending channel announcement message",
-            self.get_id()
-        );
+    pub async fn maybe_broadcast_announcement_signatures(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
+        debug!("Running maybe_broadcast_announcement_signatures");
         if let Some(channel_annoucement) =
             self.try_create_channel_announcement_message(network).await
         {
@@ -3683,6 +3689,19 @@ impl ChannelActorState {
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
+    }
+
+    pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        self.update_state(ChannelState::ChannelReady());
+        self.increment_local_commitment_number();
+        self.increment_remote_commitment_number();
+        let peer_id = self.get_remote_peer_id();
+        network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::ChannelReady(self.get_id(), peer_id.clone()),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.maybe_broadcast_announcement_signatures(network).await;
     }
 
     pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
@@ -5209,7 +5228,7 @@ mod tests {
         )
         .await;
         // Wait for the channel announcement to be broadcasted
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {

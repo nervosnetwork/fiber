@@ -1351,6 +1351,7 @@ impl NetworkActorState {
         );
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
+            debug!("Funding transaction broadcast result: {:?}", &result);
             let message = match result {
                 Ok(TxStatus {
                     status: Status::Committed,
@@ -1432,6 +1433,7 @@ impl NetworkActorState {
     }
 
     async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
+        debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
             Some(channel_id) => channel_id,
             None => {
