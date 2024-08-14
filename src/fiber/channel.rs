@@ -1512,9 +1512,6 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
-    // The short channel id that represents the on-chain block number and transaction index.
-    pub short_channel_id: Option<u64>,
-
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 
@@ -1817,7 +1814,7 @@ impl ChannelActorState {
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
-        let short_channel_id = self.get_funding_transaction_outpoint_option()?;
+        let channel_outpoint = self.get_funding_transaction_outpoint_option()?;
 
         let (node_1_id, node_1_signature, node_2_id, node_2_signature) =
             if self.local_pubkey < self.remote_pubkey {
@@ -1839,7 +1836,7 @@ impl ChannelActorState {
         let mut unsigned = ChannelAnnouncement::new_unsigned(
             &node_1_id,
             &node_2_id,
-            short_channel_id,
+            channel_outpoint,
             Default::default(),
             &self.get_musig2_agg_pubkey(),
         );
@@ -1896,7 +1893,6 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
-            short_channel_id: None,
             is_acceptor: true,
             funding_udt_type_script,
             to_local_amount: local_value,
@@ -1964,7 +1960,6 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
-            short_channel_id: None,
             funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
