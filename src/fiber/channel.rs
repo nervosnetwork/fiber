@@ -45,7 +45,7 @@ use crate::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
         network::emit_service_event,
-        types::Shutdown,
+        types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
     },
     NetworkServiceEvent,
 };
@@ -257,8 +257,9 @@ impl<S> ChannelActor<S> {
         message: FiberChannelNormalOperationMessage,
     ) -> Result<(), ProcessingChannelError> {
         match message {
-            FiberChannelNormalOperationMessage::AnnouncementSignatures(_) => {
-                todo!("handle peer message AnnouncementSignatures {:?}", message)
+            FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signature) => {
+                warn!("handle peer message AnnouncementSignatures {:?}", message);
+                Ok(())
             }
             FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
                 state.handle_accept_channel_message(accept_channel)?;
@@ -1828,11 +1829,21 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 // Constructors for the channel actor state.
 #[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
-    pub fn try_create_channel_announcement_message(&mut self) -> Option<ChannelAnnouncement> {
+    pub fn try_create_channel_announcement_message(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> Option<ChannelAnnouncement> {
         if !self.public {
+            debug!("Ignoring non-public channel announcement");
             return None;
         }
 
+        debug!(
+            "Trying to create channel announcement for channel {:?}",
+            &self.id
+        );
+        let channel_id = self.get_id();
+        let peer_id = self.get_remote_peer_id();
         let channel_outpoint = self.get_funding_transaction_outpoint_option()?;
         let local_is_node_1 = self.local_pubkey < self.remote_pubkey;
         let agg_pubkey = self.get_musig2_agg_pubkey();
@@ -1845,10 +1856,11 @@ impl ChannelActorState {
                 } else {
                     (self.remote_pubkey, self.local_pubkey)
                 };
+                debug!("Creating channel announcement for channel {:?}", &self.id);
                 ChannelAnnouncement::new_unsigned(
                     &node_1_id,
                     &node_2_id,
-                    channel_outpoint,
+                    channel_outpoint.clone(),
                     Default::default(),
                     &agg_pubkey,
                 )
@@ -1860,18 +1872,18 @@ impl ChannelActorState {
         };
         let message = channel_announcement.message_to_sign();
 
-        let current_local_announcement_signature =
-            self.local_channel_announcement_signature.clone();
-
         // TODO: we should use a random secnonce.
         let hardcoded_secnonce = SecNonce::build([42u8; 32]).build();
         let hardcoded_pubnonce = hardcoded_secnonce.public_nonce();
         let hardcoded_agg_nonce =
             AggNonce::sum([hardcoded_pubnonce.clone(), hardcoded_pubnonce.clone()]);
 
-        let (local_node_signature, local_partial_signature, local_nonce) =
-            current_local_announcement_signature.unwrap_or_else(|| {
-                let partial_signature = sign_partial(
+        let (local_node_signature, local_partial_signature, local_nonce) = self
+            .local_channel_announcement_signature
+            .clone()
+            .unwrap_or_else(|| {
+                debug!("Signing channel announcement for channel {:?}", &self.id);
+                let partial_signature: PartialSignature = sign_partial(
                     &key_agg_ctx,
                     self.signer.funding_key,
                     hardcoded_secnonce,
@@ -1879,15 +1891,39 @@ impl ChannelActorState {
                     &message,
                 )
                 .expect("Partial sign channel announcement");
+
+                // TODO: instead of creating dummy signatures, we should use real signatures.
                 let node_signature = Signature::from(
                     secp256k1::ecdsa::Signature::from_compact([1u8; 64].as_slice())
                         .expect("Valid signature"),
                 );
+                network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            peer_id,
+                            FiberMessage::announcement_signatures(AnnouncementSignatures {
+                                channel_id,
+                                channel_outpoint,
+                                partial_signature: partial_signature.clone(),
+                            }),
+                        )),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                 (node_signature, partial_signature, hardcoded_pubnonce)
             });
 
+        self.local_channel_announcement_signature = Some((
+            local_node_signature.clone(),
+            local_partial_signature.clone(),
+            local_nonce.clone(),
+        ));
+
         let (remote_node_signature, remote_partial_signature, remote_nonce) =
             self.remote_channel_announcement_signature.clone()?;
+
+        debug!("Aggregating partial signatures for channel {:?}", &self.id);
+
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
         let agg_nonce = AggNonce::sum(nonces);
         let partial_signatures =
@@ -3596,13 +3632,21 @@ impl ChannelActorState {
                 NetworkActorEvent::ChannelReady(self.get_id(), peer_id.clone()),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        if let Some(channel_annoucement) = self.try_create_channel_announcement_message() {
+        debug!(
+            "Channel {:?} is ready, sending channel announcement message",
+            self.get_id()
+        );
+        if let Some(channel_annoucement) = self.try_create_channel_announcement_message(network) {
+            debug!(
+                "Channel {:?} is ready, broadcasting channel announcement message {:?}",
+                self.get_id(),
+                &channel_annoucement,
+            );
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        peer_id,
-                        FiberMessage::channel_announcement(channel_annoucement),
-                    )),
+                    NetworkActorCommand::BroadcastMessage(
+                        FiberBroadcastMessage::ChannelAnnouncement(channel_annoucement),
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
@@ -5131,6 +5175,8 @@ mod tests {
             true,
         )
         .await;
+        // Wait for the channel announcement to be broadcasted
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {

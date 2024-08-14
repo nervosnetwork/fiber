@@ -1245,7 +1245,7 @@ impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
 pub struct AnnouncementSignatures {
     pub channel_id: Hash256,
     pub channel_outpoint: OutPoint,
-    pub partial_signature: Hash256,
+    pub partial_signature: PartialSignature,
 }
 
 impl From<AnnouncementSignatures> for molecule_fiber::AnnouncementSignatures {
@@ -1253,7 +1253,9 @@ impl From<AnnouncementSignatures> for molecule_fiber::AnnouncementSignatures {
         molecule_fiber::AnnouncementSignatures::new_builder()
             .channel_id(announcement_signatures.channel_id.into())
             .channel_outpoint(announcement_signatures.channel_outpoint)
-            .partial_signature(announcement_signatures.partial_signature.into())
+            .partial_signature(partial_signature_to_molecule(
+                announcement_signatures.partial_signature,
+            ))
             .build()
     }
 }
@@ -1267,7 +1269,10 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
         Ok(AnnouncementSignatures {
             channel_id: announcement_signatures.channel_id().into(),
             channel_outpoint: announcement_signatures.channel_outpoint(),
-            partial_signature: announcement_signatures.partial_signature().into(),
+            partial_signature: PartialSignature::from_slice(
+                announcement_signatures.partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
         })
     }
 }
