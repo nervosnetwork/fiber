@@ -5030,6 +5030,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5069,6 +5070,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5122,6 +5124,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: node_a_funding_amount,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5297,6 +5300,7 @@ mod tests {
     async fn create_nodes_with_established_channel(
         node_a_funding_amount: u128,
         node_b_funding_amount: u128,
+        public: bool,
     ) -> (NetworkNode, NetworkNode, Hash256) {
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
@@ -5307,6 +5311,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public,
                     funding_amount: node_a_funding_amount,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5384,9 +5389,12 @@ mod tests {
         let node_a_funding_amount = 100000000000;
         let node_b_funding_amount = 6200000000;
 
-        let (node_a, node_b, new_channel_id) =
-            create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount)
-                .await;
+        let (node_a, node_b, new_channel_id) = create_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            false,
+        )
+        .await;
 
         let preimage = [1; 32];
         let digest = correct_algorithm.hash(&preimage);
@@ -5500,9 +5508,12 @@ mod tests {
         let node_a_funding_amount = 100000000000;
         let node_b_funding_amount = 6200000000;
 
-        let (mut node_a, mut node_b, new_channel_id) =
-            create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount)
-                .await;
+        let (mut node_a, mut node_b, new_channel_id) = create_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            false,
+        )
+        .await;
 
         let preimage = [1; 32];
         let digest = algorithm.hash(&preimage);
@@ -5635,6 +5646,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5813,6 +5825,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5933,6 +5946,7 @@ mod tests {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
+                    public: false,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
