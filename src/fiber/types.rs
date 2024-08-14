@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
@@ -565,7 +566,7 @@ pub struct OpenChannel {
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
     pub next_local_nonce: PubNonce,
-    pub channel_flags: u8,
+    pub channel_flags: ChannelFlags,
 }
 
 impl OpenChannel {
@@ -600,7 +601,7 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
             .next_local_nonce((&open_channel.next_local_nonce).into())
-            .channel_flags(open_channel.channel_flags.into())
+            .channel_flags(open_channel.channel_flags.bits().into())
             .build()
     }
 }
@@ -632,7 +633,9 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
                 .next_local_nonce()
                 .try_into()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
-            channel_flags: open_channel.channel_flags().into(),
+            channel_flags: ChannelFlags::from_bits(open_channel.channel_flags().into()).ok_or(
+                anyhow!("Invalid channel flags: {}", open_channel.channel_flags()),
+            )?,
         })
     }
 }

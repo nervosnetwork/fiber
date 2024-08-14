@@ -31,6 +31,7 @@ pub struct OpenChannelParams {
     pub peer_id: PeerId,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub public: Option<bool>,
     pub funding_udt_type_script: Option<Script>,
     #[serde_as(as = "Option<U64Hex>")]
     pub commitment_fee_rate: Option<u64>,
@@ -209,6 +210,7 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
+                    public: params.public.unwrap_or(false),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()

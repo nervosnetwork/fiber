@@ -167,6 +167,7 @@ pub struct TxUpdateCommand {
 pub struct OpenChannelParameter {
     pub funding_amount: u128,
     pub seed: [u8; 32],
+    pub public: bool,
     pub funding_udt_type_script: Option<Script>,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
@@ -1070,6 +1071,7 @@ where
                 let counterpart_pubkeys = (&open_channel).into();
                 let OpenChannel {
                     channel_id,
+                    channel_flags,
                     chain_hash,
                     commitment_fee_rate,
                     funding_fee_rate,
@@ -1092,8 +1094,13 @@ where
                     ))));
                 }
 
+                // TODO: we may reject the channel opening request here
+                // if the peer want to open a public channel, but we don't want to.
+                let public = channel_flags.contains(ChannelFlags::PUBLIC);
+
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
+                    public,
                     my_funding_amount,
                     my_reserved_ckb_amount,
                     *commitment_fee_rate,
@@ -1176,6 +1183,7 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
+                public,
                 funding_udt_type_script,
                 channel_id_sender,
                 commitment_fee_rate,
@@ -1194,6 +1202,7 @@ where
                     self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
+                    public,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
@@ -1214,6 +1223,11 @@ where
                     "max_num_of_accept_tlcs",
                 ])?;
 
+                let channel_flags = if public {
+                    ChannelFlags::PUBLIC
+                } else {
+                    ChannelFlags::empty()
+                };
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let message = FiberMessage::ChannelInitialization(OpenChannel {
                     chain_hash: Hash256::default(),
@@ -1227,7 +1241,7 @@ where
                     max_num_of_accept_tlcs: channel.max_num_of_accept_tlcs,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
                     to_local_delay: LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
-                    channel_flags: 0,
+                    channel_flags,
                     first_per_commitment_point: channel
                         .signer
                         .get_commitment_point(commitment_number),
@@ -1504,6 +1518,8 @@ impl TLCId {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelActorState {
     pub state: ChannelState,
+    // Whether to broadcast channel information to the network.
+    pub public: bool,
     // The local public key used to establish p2p network connection.
     pub local_pubkey: Pubkey,
     // The remote public key used to establish p2p network connection.
@@ -1648,6 +1664,12 @@ pub enum ProcessingChannelError {
 }
 
 bitflags! {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct ChannelFlags: u8 {
+        const PUBLIC = 1;
+    }
+
     #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[serde(transparent)]
     pub struct NegotiatingFundingFlags: u32 {
@@ -1857,6 +1879,7 @@ impl ChannelActorState {
 
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
+        public: bool,
         local_value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
@@ -1890,6 +1913,7 @@ impl ChannelActorState {
 
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+            public,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -1939,6 +1963,7 @@ impl ChannelActorState {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_outbound_channel(
+        public: bool,
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
@@ -1957,6 +1982,7 @@ impl ChannelActorState {
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+            public,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,

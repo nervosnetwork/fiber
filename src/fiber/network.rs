@@ -109,6 +109,7 @@ pub enum NetworkActorCommand {
 pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
+    pub public: bool,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
@@ -842,6 +843,7 @@ impl NetworkActorState {
         let OpenChannelCommand {
             peer_id,
             funding_amount,
+            public,
             funding_udt_type_script,
             commitment_fee_rate,
             funding_fee_rate,
@@ -878,6 +880,7 @@ impl NetworkActorState {
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
+                public,
                 funding_udt_type_script,
                 channel_id_sender: tx,
                 commitment_fee_rate,
