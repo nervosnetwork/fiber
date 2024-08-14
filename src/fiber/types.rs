@@ -1359,7 +1359,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelAnnouncement {
     pub node_1_signature: Option<Signature>,
     pub node_2_signature: Option<Signature>,
@@ -1396,6 +1396,27 @@ impl ChannelAnnouncement {
             node_2_id: node_2_pubkey.clone(),
             ckb_key: ckb_pubkey.clone(),
         }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.node_1_signature.is_some()
+            && self.node_2_signature.is_some()
+            && self.ckb_signature.is_some()
+    }
+
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = Self {
+            node_1_signature: None,
+            node_2_signature: None,
+            ckb_signature: None,
+            features: self.features,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            node_1_id: self.node_1_id,
+            node_2_id: self.node_2_id,
+            ckb_key: self.ckb_key,
+        };
+        deterministically_hash(&unsigned_announcement)
     }
 }
 

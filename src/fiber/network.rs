@@ -1537,7 +1537,7 @@ where
         let state = NetworkActorState {
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
-            private_key: private_key,
+            private_key,
             entropy,
             network: myself.clone(),
             control,

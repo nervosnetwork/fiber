@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+
 use tracing::{debug, error, info, warn};
 
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -57,10 +58,10 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        deterministically_hash, AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady,
-        ClosingSigned, CommitmentSigned, FiberChannelNormalOperationMessage, FiberMessage, Hash256,
-        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, Signature, TxCollaborationMsg, TxComplete, TxUpdate,
+        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
+        FiberChannelNormalOperationMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
+        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+        Signature, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -1626,6 +1627,7 @@ pub struct ChannelActorState {
     pub local_channel_announcement_signature: Option<(Signature, PartialSignature, PubNonce)>,
     pub remote_channel_announcement_signature: Option<(Signature, PartialSignature, PubNonce)>,
 
+    pub channel_announcement: Option<ChannelAnnouncement>,
     // A redundant field to record the total amount of the channel.
     // Used only for debugging purposes.
     #[cfg(debug_assertions)]
@@ -1826,9 +1828,62 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 // Constructors for the channel actor state.
 #[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
-    pub fn get_channel_announcement_message(&self) -> Option<ChannelAnnouncement> {
+    pub fn try_create_channel_announcement_message(&mut self) -> Option<ChannelAnnouncement> {
+        if !self.public {
+            return None;
+        }
+
+        let channel_outpoint = self.get_funding_transaction_outpoint_option()?;
+        let local_is_node_1 = self.local_pubkey < self.remote_pubkey;
+        let agg_pubkey = self.get_musig2_agg_pubkey();
+        let key_agg_ctx = self.get_musig2_agg_context();
+
+        let mut channel_announcement = {
+            let channel_announcement = self.channel_announcement.get_or_insert_with(|| {
+                let (node_1_id, node_2_id) = if local_is_node_1 {
+                    (self.local_pubkey, self.remote_pubkey)
+                } else {
+                    (self.remote_pubkey, self.local_pubkey)
+                };
+                ChannelAnnouncement::new_unsigned(
+                    &node_1_id,
+                    &node_2_id,
+                    channel_outpoint,
+                    Default::default(),
+                    &agg_pubkey,
+                )
+            });
+            if channel_announcement.is_signed() {
+                return Some(channel_announcement.clone());
+            }
+            channel_announcement.clone()
+        };
+        let message = channel_announcement.message_to_sign();
+
+        let current_local_announcement_signature =
+            self.local_channel_announcement_signature.clone();
+
+        // TODO: we should use a random secnonce.
+        let hardcoded_secnonce = SecNonce::build([42u8; 32]).build();
+        let hardcoded_pubnonce = hardcoded_secnonce.public_nonce();
+        let hardcoded_agg_nonce =
+            AggNonce::sum([hardcoded_pubnonce.clone(), hardcoded_pubnonce.clone()]);
+
         let (local_node_signature, local_partial_signature, local_nonce) =
-            self.local_channel_announcement_signature.clone()?;
+            current_local_announcement_signature.unwrap_or_else(|| {
+                let partial_signature = sign_partial(
+                    &key_agg_ctx,
+                    self.signer.funding_key,
+                    hardcoded_secnonce,
+                    &hardcoded_agg_nonce,
+                    &message,
+                )
+                .expect("Partial sign channel announcement");
+                let node_signature =
+                    todo!("Create a node signature from the private key owned by network actor");
+                (node_signature, partial_signature, hardcoded_pubnonce)
+            });
+
         let (remote_node_signature, remote_partial_signature, remote_nonce) =
             self.remote_channel_announcement_signature.clone()?;
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
@@ -1836,45 +1891,20 @@ impl ChannelActorState {
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
-        let channel_outpoint = self.get_funding_transaction_outpoint_option()?;
+        let signature =
+            aggregate_partial_signatures(&key_agg_ctx, &agg_nonce, partial_signatures, message)
+                .expect("aggregate partial signatures");
 
-        let (node_1_id, node_1_signature, node_2_id, node_2_signature) =
-            if self.local_pubkey < self.remote_pubkey {
-                (
-                    self.local_pubkey,
-                    local_node_signature,
-                    self.remote_pubkey,
-                    remote_node_signature,
-                )
-            } else {
-                (
-                    self.remote_pubkey,
-                    remote_node_signature,
-                    self.local_pubkey,
-                    local_node_signature,
-                )
-            };
-
-        let mut unsigned = ChannelAnnouncement::new_unsigned(
-            &node_1_id,
-            &node_2_id,
-            channel_outpoint,
-            Default::default(),
-            &self.get_musig2_agg_pubkey(),
-        );
-
-        let signature = aggregate_partial_signatures(
-            &self.get_musig2_agg_context(),
-            &agg_nonce,
-            partial_signatures,
-            deterministically_hash(&unsigned),
-        )
-        .expect("aggregate partial signatures");
-
-        unsigned.node_1_signature = Some(node_1_signature);
-        unsigned.node_2_signature = Some(node_2_signature);
-        unsigned.ckb_signature = Some(signature);
-        Some(unsigned)
+        if local_is_node_1 {
+            channel_announcement.node_1_signature = Some(local_node_signature);
+            channel_announcement.node_2_signature = Some(remote_node_signature);
+        } else {
+            channel_announcement.node_1_signature = Some(remote_node_signature);
+            channel_announcement.node_2_signature = Some(local_node_signature);
+        }
+        channel_announcement.ckb_signature = Some(signature);
+        self.channel_announcement = Some(channel_announcement.clone());
+        Some(channel_announcement)
     }
 
     pub fn new_inbound_channel<'a>(
@@ -1916,6 +1946,7 @@ impl ChannelActorState {
             public,
             local_pubkey,
             remote_pubkey,
+            channel_announcement: None,
             funding_tx: None,
             is_acceptor: true,
             funding_udt_type_script,
@@ -1982,6 +2013,7 @@ impl ChannelActorState {
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
+            channel_announcement: None,
             public,
             local_pubkey,
             remote_pubkey,
@@ -3556,11 +3588,22 @@ impl ChannelActorState {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
+        let peer_id = self.get_remote_peer_id();
         network
             .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelReady(self.get_id(), self.get_remote_peer_id()),
+                NetworkActorEvent::ChannelReady(self.get_id(), peer_id.clone()),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        if let Some(channel_annoucement) = self.try_create_channel_announcement_message() {
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        peer_id,
+                        FiberMessage::channel_announcement(channel_annoucement),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
     }
 
     pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
