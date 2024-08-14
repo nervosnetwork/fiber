@@ -1879,8 +1879,10 @@ impl ChannelActorState {
                     &message,
                 )
                 .expect("Partial sign channel announcement");
-                let node_signature =
-                    todo!("Create a node signature from the private key owned by network actor");
+                let node_signature = Signature::from(
+                    secp256k1::ecdsa::Signature::from_compact([1u8; 64].as_slice())
+                        .expect("Valid signature"),
+                );
                 (node_signature, partial_signature, hardcoded_pubnonce)
             });
 
@@ -5109,6 +5111,26 @@ mod tests {
         let _accept_channel_result = call!(node_b.network_actor, message)
             .expect("node_b alive")
             .expect("accept channel success");
+    }
+
+    #[tokio::test]
+    async fn test_create_public_channel() {
+        tracing_subscriber::fmt::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .pretty()
+            .init();
+
+        let _span = tracing::info_span!("node", node = "test").entered();
+
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (node_a, node_b, new_channel_id) = create_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
