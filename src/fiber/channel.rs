@@ -258,10 +258,14 @@ impl<S> ChannelActor<S> {
     ) -> Result<(), ProcessingChannelError> {
         match message {
             FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signatures) => {
-                warn!(
-                    "handle peer message AnnouncementSignatures {:?}",
-                    &announcement_signatures
-                );
+                // TODO: check announcement_signatures validity here.
+                let AnnouncementSignatures {
+                    node_signature,
+                    partial_signature,
+                    ..
+                } = announcement_signatures;
+                state.remote_channel_announcement_signature =
+                    Some((node_signature, partial_signature));
                 state
                     .maybe_broadcast_announcement_signatures(&self.network)
                     .await;
@@ -1928,6 +1932,7 @@ impl ChannelActorState {
                             channel_id,
                             channel_outpoint,
                             partial_signature: partial_signature.clone(),
+                            node_signature: node_signature.clone(),
                         }),
                     )),
                 ))
