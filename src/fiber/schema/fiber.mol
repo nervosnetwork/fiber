@@ -10,11 +10,11 @@ table OpenChannel {
     channel_id:                  Byte32,
     funding_udt_type_script:     ScriptOpt,
     funding_amount:              Uint128,
-    reserved_ckb_amount:          Uint64,
+    reserved_ckb_amount:         Uint64,
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
     max_tlc_value_in_flight:     Uint128,
-    max_num_of_accept_tlcs:             Uint64,
+    max_num_of_accept_tlcs:      Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Pubkey,
@@ -32,9 +32,9 @@ table OpenChannel {
 table AcceptChannel {
     channel_id:                  Byte32,
     funding_amount:              Uint128,
-    reserved_ckb_amount:          Uint64,
+    reserved_ckb_amount:         Uint64,
     max_tlc_value_in_flight:     Uint128,
-    max_num_of_accept_tlcs:             Uint64,
+    max_num_of_accept_tlcs:      Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Pubkey,
@@ -145,6 +145,7 @@ table ReestablishChannel {
 table AnnouncementSignatures {
     channel_id: Byte32,
     channel_outpoint: OutPoint,
+    signature: Signature,
     partial_signature: Byte32,
 }
 

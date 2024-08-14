@@ -257,8 +257,11 @@ impl<S> ChannelActor<S> {
         message: FiberChannelNormalOperationMessage,
     ) -> Result<(), ProcessingChannelError> {
         match message {
-            FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signature) => {
-                warn!("handle peer message AnnouncementSignatures {:?}", message);
+            FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signatures) => {
+                warn!(
+                    "handle peer message AnnouncementSignatures {:?}",
+                    &announcement_signatures
+                );
                 Ok(())
             }
             FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
@@ -1086,6 +1089,7 @@ where
                     next_local_nonce,
                     max_tlc_value_in_flight,
                     max_num_of_accept_tlcs,
+                    channel_announcement_nonce,
                     ..
                 } = &open_channel;
 
@@ -1116,6 +1120,7 @@ where
                     *to_local_delay,
                     counterpart_pubkeys,
                     next_local_nonce.clone(),
+                    channel_announcement_nonce.clone(),
                     *first_per_commitment_point,
                     *second_per_commitment_point,
                     *max_tlc_value_in_flight,
@@ -1132,6 +1137,11 @@ where
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
 
+                let channel_announcement_nonce = if public {
+                    Some(state.get_channel_announcement_musig2_pubnonce())
+                } else {
+                    None
+                };
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: my_funding_amount,
@@ -1151,6 +1161,7 @@ where
                     second_per_commitment_point: state
                         .signer
                         .get_commitment_point(commitment_number + 1),
+                    channel_announcement_nonce,
                     next_local_nonce: state.get_local_musig2_pubnonce(),
                 };
 
@@ -1230,6 +1241,11 @@ where
                 } else {
                     ChannelFlags::empty()
                 };
+                let channel_announcement_nonce = if public {
+                    Some(channel.get_channel_announcement_musig2_pubnonce())
+                } else {
+                    None
+                };
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let message = FiberMessage::ChannelInitialization(OpenChannel {
                     chain_hash: Hash256::default(),
@@ -1268,6 +1284,7 @@ where
                         .delayed_payment_base_key,
                     tlc_basepoint: channel.get_local_channel_parameters().pubkeys.tlc_base_key,
                     next_local_nonce: channel.get_local_musig2_pubnonce(),
+                    channel_announcement_nonce,
                 });
 
                 debug!(
@@ -1625,8 +1642,9 @@ pub struct ChannelActorState {
     // Channel announcement signatures, may be empty for private channel.
     // The first signature is signed by the node public key, and
     // the second signature is partially signed by the funding transaction pubkey.
-    pub local_channel_announcement_signature: Option<(Signature, PartialSignature, PubNonce)>,
-    pub remote_channel_announcement_signature: Option<(Signature, PartialSignature, PubNonce)>,
+    pub local_channel_announcement_signature: Option<(Signature, PartialSignature)>,
+    pub remote_channel_announcement_signature: Option<(Signature, PartialSignature)>,
+    pub remote_channel_announcement_nonce: Option<PubNonce>,
 
     pub channel_announcement: Option<ChannelAnnouncement>,
     // A redundant field to record the total amount of the channel.
@@ -1838,6 +1856,11 @@ impl ChannelActorState {
             return None;
         }
 
+        let local_secnonce = self.get_channel_announcement_musig2_secnonce();
+        let local_nonce = local_secnonce.public_nonce();
+        let remote_nonce = self.remote_channel_announcement_nonce.clone()?;
+        let agg_nonce = AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce));
+
         debug!(
             "Trying to create channel announcement for channel {:?}",
             &self.id
@@ -1872,13 +1895,7 @@ impl ChannelActorState {
         };
         let message = channel_announcement.message_to_sign();
 
-        // TODO: we should use a random secnonce.
-        let hardcoded_secnonce = SecNonce::build([42u8; 32]).build();
-        let hardcoded_pubnonce = hardcoded_secnonce.public_nonce();
-        let hardcoded_agg_nonce =
-            AggNonce::sum([hardcoded_pubnonce.clone(), hardcoded_pubnonce.clone()]);
-
-        let (local_node_signature, local_partial_signature, local_nonce) = self
+        let (local_node_signature, local_partial_signature) = self
             .local_channel_announcement_signature
             .clone()
             .unwrap_or_else(|| {
@@ -1886,8 +1903,8 @@ impl ChannelActorState {
                 let partial_signature: PartialSignature = sign_partial(
                     &key_agg_ctx,
                     self.signer.funding_key,
-                    hardcoded_secnonce,
-                    &hardcoded_agg_nonce,
+                    local_secnonce,
+                    &agg_nonce,
                     &message,
                 )
                 .expect("Partial sign channel announcement");
@@ -1910,22 +1927,19 @@ impl ChannelActorState {
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                (node_signature, partial_signature, hardcoded_pubnonce)
+                (node_signature, partial_signature)
             });
 
         self.local_channel_announcement_signature = Some((
             local_node_signature.clone(),
             local_partial_signature.clone(),
-            local_nonce.clone(),
         ));
 
-        let (remote_node_signature, remote_partial_signature, remote_nonce) =
+        let (remote_node_signature, remote_partial_signature) =
             self.remote_channel_announcement_signature.clone()?;
 
         debug!("Aggregating partial signatures for channel {:?}", &self.id);
 
-        let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
-        let agg_nonce = AggNonce::sum(nonces);
         let partial_signatures =
             self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
 
@@ -1961,6 +1975,7 @@ impl ChannelActorState {
         remote_delay: LockTime,
         remote_pubkeys: ChannelBasePublicKeys,
         remote_nonce: PubNonce,
+        remote_channel_announcement_nonce: Option<PubNonce>,
         first_commitment_point: Pubkey,
         second_commitment_point: Pubkey,
         max_tlc_value_in_flight: u128,
@@ -2023,6 +2038,7 @@ impl ChannelActorState {
 
             local_channel_announcement_signature: None,
             remote_channel_announcement_signature: None,
+            remote_channel_announcement_nonce,
 
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
@@ -2091,6 +2107,7 @@ impl ChannelActorState {
 
             local_channel_announcement_signature: None,
             remote_channel_announcement_signature: None,
+            remote_channel_announcement_nonce: None,
 
             #[cfg(debug_assertions)]
             total_amount: value,
@@ -2736,6 +2753,19 @@ impl ChannelActorState {
         let pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
         let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
         get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
+    }
+
+    pub fn get_channel_announcement_musig2_secnonce(&self) -> SecNonce {
+        let seckey = blake2b_hash_with_salt(
+            self.signer.musig2_base_nonce.as_ref(),
+            b"channel_announcement".as_slice(),
+        );
+        SecNonce::build(seckey).build()
+    }
+
+    pub fn get_channel_announcement_musig2_pubnonce(&self) -> PubNonce {
+        self.get_channel_announcement_musig2_secnonce()
+            .public_nonce()
     }
 
     pub fn get_local_musig2_secnonce(&self) -> SecNonce {

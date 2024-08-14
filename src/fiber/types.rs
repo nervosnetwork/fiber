@@ -4,6 +4,7 @@ use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
+use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
@@ -565,6 +566,7 @@ pub struct OpenChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
     pub next_local_nonce: PubNonce,
     pub channel_flags: ChannelFlags,
 }
@@ -633,6 +635,12 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
                 .next_local_nonce()
                 .try_into()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
+            channel_announcement_nonce: open_channel
+                .channel_annoucement_nonce()
+                .to_opt()
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
             channel_flags: ChannelFlags::from_bits(open_channel.channel_flags().into()).ok_or(
                 anyhow!("Invalid channel flags: {}", open_channel.channel_flags()),
             )?,
@@ -656,6 +664,7 @@ pub struct AcceptChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
     pub next_local_nonce: PubNonce,
 }
 
@@ -676,6 +685,15 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
+            .channel_annoucement_nonce(
+                PubNonceOpt::new_builder()
+                    .set(
+                        accept_channel
+                            .channel_announcement_nonce
+                            .map(|x| (&x).into()),
+                    )
+                    .build(),
+            )
             .next_local_nonce((&accept_channel.next_local_nonce).into())
             .build()
     }
@@ -700,6 +718,12 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
+            channel_announcement_nonce: accept_channel
+                .channel_annoucement_nonce()
+                .to_opt()
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
             next_local_nonce: accept_channel
                 .next_local_nonce()
                 .try_into()
