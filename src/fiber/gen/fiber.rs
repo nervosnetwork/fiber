@@ -3,8 +3,8 @@
 use super::blockchain::*;
 use molecule::prelude::*;
 #[derive(Clone)]
-pub struct Signature(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for Signature {
+pub struct EcdsaSignature(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for EcdsaSignature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -13,25 +13,280 @@ impl ::core::fmt::LowerHex for Signature {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for Signature {
+impl ::core::fmt::Debug for EcdsaSignature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for Signature {
+impl ::core::fmt::Display for EcdsaSignature {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl ::core::default::Default for Signature {
+impl ::core::default::Default for EcdsaSignature {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        Signature::new_unchecked(v)
+        EcdsaSignature::new_unchecked(v)
     }
 }
-impl Signature {
+impl EcdsaSignature {
+    const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
+    pub const ITEM_SIZE: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
+    }
+    pub fn item_count(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn len(&self) -> usize {
+        self.item_count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn get(&self, idx: usize) -> Option<Byte> {
+        if idx >= self.len() {
+            None
+        } else {
+            Some(self.get_unchecked(idx))
+        }
+    }
+    pub fn get_unchecked(&self, idx: usize) -> Byte {
+        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
+        let end = start + Self::ITEM_SIZE;
+        Byte::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn raw_data(&self) -> molecule::bytes::Bytes {
+        self.0.slice(molecule::NUMBER_SIZE..)
+    }
+    pub fn as_reader<'r>(&'r self) -> EcdsaSignatureReader<'r> {
+        EcdsaSignatureReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for EcdsaSignature {
+    type Builder = EcdsaSignatureBuilder;
+    const NAME: &'static str = "EcdsaSignature";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        EcdsaSignature(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        EcdsaSignatureReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        EcdsaSignatureReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().extend(self.into_iter())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct EcdsaSignatureReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for EcdsaSignatureReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for EcdsaSignatureReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for EcdsaSignatureReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        let raw_data = hex_string(&self.raw_data());
+        write!(f, "{}(0x{})", Self::NAME, raw_data)
+    }
+}
+impl<'r> EcdsaSignatureReader<'r> {
+    pub const ITEM_SIZE: usize = 1;
+    pub fn total_size(&self) -> usize {
+        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
+    }
+    pub fn item_count(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn len(&self) -> usize {
+        self.item_count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn get(&self, idx: usize) -> Option<ByteReader<'r>> {
+        if idx >= self.len() {
+            None
+        } else {
+            Some(self.get_unchecked(idx))
+        }
+    }
+    pub fn get_unchecked(&self, idx: usize) -> ByteReader<'r> {
+        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
+        let end = start + Self::ITEM_SIZE;
+        ByteReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn raw_data(&self) -> &'r [u8] {
+        &self.as_slice()[molecule::NUMBER_SIZE..]
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for EcdsaSignatureReader<'r> {
+    type Entity = EcdsaSignature;
+    const NAME: &'static str = "EcdsaSignatureReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        EcdsaSignatureReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let item_count = molecule::unpack_number(slice) as usize;
+        if item_count == 0 {
+            if slice_len != molecule::NUMBER_SIZE {
+                return ve!(Self, TotalSizeNotMatch, molecule::NUMBER_SIZE, slice_len);
+            }
+            return Ok(());
+        }
+        let total_size = molecule::NUMBER_SIZE + Self::ITEM_SIZE * item_count;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct EcdsaSignatureBuilder(pub(crate) Vec<Byte>);
+impl EcdsaSignatureBuilder {
+    pub const ITEM_SIZE: usize = 1;
+    pub fn set(mut self, v: Vec<Byte>) -> Self {
+        self.0 = v;
+        self
+    }
+    pub fn push(mut self, v: Byte) -> Self {
+        self.0.push(v);
+        self
+    }
+    pub fn extend<T: ::core::iter::IntoIterator<Item = Byte>>(mut self, iter: T) -> Self {
+        for elem in iter {
+            self.0.push(elem);
+        }
+        self
+    }
+    pub fn replace(&mut self, index: usize, v: Byte) -> Option<Byte> {
+        self.0
+            .get_mut(index)
+            .map(|item| ::core::mem::replace(item, v))
+    }
+}
+impl molecule::prelude::Builder for EcdsaSignatureBuilder {
+    type Entity = EcdsaSignature;
+    const NAME: &'static str = "EcdsaSignatureBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.0.len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        writer.write_all(&molecule::pack_number(self.0.len() as molecule::Number))?;
+        for inner in &self.0[..] {
+            writer.write_all(inner.as_slice())?;
+        }
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        EcdsaSignature::new_unchecked(inner.into())
+    }
+}
+pub struct EcdsaSignatureIterator(EcdsaSignature, usize, usize);
+impl ::core::iter::Iterator for EcdsaSignatureIterator {
+    type Item = Byte;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.1 >= self.2 {
+            None
+        } else {
+            let ret = self.0.get_unchecked(self.1);
+            self.1 += 1;
+            Some(ret)
+        }
+    }
+}
+impl ::core::iter::ExactSizeIterator for EcdsaSignatureIterator {
+    fn len(&self) -> usize {
+        self.2 - self.1
+    }
+}
+impl ::core::iter::IntoIterator for EcdsaSignature {
+    type Item = Byte;
+    type IntoIter = EcdsaSignatureIterator;
+    fn into_iter(self) -> Self::IntoIter {
+        let len = self.len();
+        EcdsaSignatureIterator(self, 0, len)
+    }
+}
+impl ::core::iter::FromIterator<Byte> for EcdsaSignature {
+    fn from_iter<T: IntoIterator<Item = Byte>>(iter: T) -> Self {
+        Self::new_builder().extend(iter).build()
+    }
+}
+impl ::core::iter::FromIterator<u8> for EcdsaSignature {
+    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+        Self::new_builder()
+            .extend(iter.into_iter().map(Into::into))
+            .build()
+    }
+}
+#[derive(Clone)]
+pub struct SchnorrSignature(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for SchnorrSignature {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for SchnorrSignature {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for SchnorrSignature {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        let raw_data = hex_string(&self.raw_data());
+        write!(f, "{}(0x{})", Self::NAME, raw_data)
+    }
+}
+impl ::core::default::Default for SchnorrSignature {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        SchnorrSignature::new_unchecked(v)
+    }
+}
+impl SchnorrSignature {
     const DEFAULT_VALUE: [u8; 64] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -235,15 +490,15 @@ impl Signature {
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
         self.as_bytes()
     }
-    pub fn as_reader<'r>(&'r self) -> SignatureReader<'r> {
-        SignatureReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> SchnorrSignatureReader<'r> {
+        SchnorrSignatureReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for Signature {
-    type Builder = SignatureBuilder;
-    const NAME: &'static str = "Signature";
+impl molecule::prelude::Entity for SchnorrSignature {
+    type Builder = SchnorrSignatureBuilder;
+    const NAME: &'static str = "SchnorrSignature";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        Signature(data)
+        SchnorrSignature(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -252,10 +507,10 @@ impl molecule::prelude::Entity for Signature {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SignatureReader::from_slice(slice).map(|reader| reader.to_entity())
+        SchnorrSignatureReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        SignatureReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        SchnorrSignatureReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
@@ -330,8 +585,8 @@ impl molecule::prelude::Entity for Signature {
     }
 }
 #[derive(Clone, Copy)]
-pub struct SignatureReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for SignatureReader<'r> {
+pub struct SchnorrSignatureReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for SchnorrSignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -340,19 +595,19 @@ impl<'r> ::core::fmt::LowerHex for SignatureReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for SignatureReader<'r> {
+impl<'r> ::core::fmt::Debug for SchnorrSignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for SignatureReader<'r> {
+impl<'r> ::core::fmt::Display for SchnorrSignatureReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         let raw_data = hex_string(&self.raw_data());
         write!(f, "{}(0x{})", Self::NAME, raw_data)
     }
 }
-impl<'r> SignatureReader<'r> {
+impl<'r> SchnorrSignatureReader<'r> {
     pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 64;
@@ -552,14 +807,14 @@ impl<'r> SignatureReader<'r> {
         self.as_slice()
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for SignatureReader<'r> {
-    type Entity = Signature;
-    const NAME: &'static str = "SignatureReader";
+impl<'r> molecule::prelude::Reader<'r> for SchnorrSignatureReader<'r> {
+    type Entity = SchnorrSignature;
+    const NAME: &'static str = "SchnorrSignatureReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        SignatureReader(slice)
+        SchnorrSignatureReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -574,15 +829,15 @@ impl<'r> molecule::prelude::Reader<'r> for SignatureReader<'r> {
     }
 }
 #[derive(Clone)]
-pub struct SignatureBuilder(pub(crate) [Byte; 64]);
-impl ::core::fmt::Debug for SignatureBuilder {
+pub struct SchnorrSignatureBuilder(pub(crate) [Byte; 64]);
+impl ::core::fmt::Debug for SchnorrSignatureBuilder {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:?})", Self::NAME, &self.0[..])
     }
 }
-impl ::core::default::Default for SignatureBuilder {
+impl ::core::default::Default for SchnorrSignatureBuilder {
     fn default() -> Self {
-        SignatureBuilder([
+        SchnorrSignatureBuilder([
             Byte::default(),
             Byte::default(),
             Byte::default(),
@@ -650,7 +905,7 @@ impl ::core::default::Default for SignatureBuilder {
         ])
     }
 }
-impl SignatureBuilder {
+impl SchnorrSignatureBuilder {
     pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
     pub const ITEM_COUNT: usize = 64;
@@ -915,9 +1170,9 @@ impl SignatureBuilder {
         self
     }
 }
-impl molecule::prelude::Builder for SignatureBuilder {
-    type Entity = Signature;
-    const NAME: &'static str = "SignatureBuilder";
+impl molecule::prelude::Builder for SchnorrSignatureBuilder {
+    type Entity = SchnorrSignature;
+    const NAME: &'static str = "SchnorrSignatureBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -992,15 +1247,15 @@ impl molecule::prelude::Builder for SignatureBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        Signature::new_unchecked(inner.into())
+        SchnorrSignature::new_unchecked(inner.into())
     }
 }
-impl From<[Byte; 64usize]> for Signature {
+impl From<[Byte; 64usize]> for SchnorrSignature {
     fn from(value: [Byte; 64usize]) -> Self {
         Self::new_builder().set(value).build()
     }
 }
-impl ::core::convert::TryFrom<&[Byte]> for Signature {
+impl ::core::convert::TryFrom<&[Byte]> for SchnorrSignature {
     type Error = ::core::array::TryFromSliceError;
     fn try_from(value: &[Byte]) -> Result<Self, ::core::array::TryFromSliceError> {
         Ok(Self::new_builder()
@@ -1008,9 +1263,9 @@ impl ::core::convert::TryFrom<&[Byte]> for Signature {
             .build())
     }
 }
-impl From<Signature> for [Byte; 64usize] {
+impl From<SchnorrSignature> for [Byte; 64usize] {
     #[track_caller]
-    fn from(value: Signature) -> Self {
+    fn from(value: SchnorrSignature) -> Self {
         [
             value.nth0(),
             value.nth1(),
@@ -1079,32 +1334,32 @@ impl From<Signature> for [Byte; 64usize] {
         ]
     }
 }
-impl From<[u8; 64usize]> for Signature {
+impl From<[u8; 64usize]> for SchnorrSignature {
     fn from(value: [u8; 64usize]) -> Self {
-        SignatureReader::new_unchecked(&value).to_entity()
+        SchnorrSignatureReader::new_unchecked(&value).to_entity()
     }
 }
-impl ::core::convert::TryFrom<&[u8]> for Signature {
+impl ::core::convert::TryFrom<&[u8]> for SchnorrSignature {
     type Error = ::core::array::TryFromSliceError;
     fn try_from(value: &[u8]) -> Result<Self, ::core::array::TryFromSliceError> {
         Ok(<[u8; 64usize]>::try_from(value)?.into())
     }
 }
-impl From<Signature> for [u8; 64usize] {
+impl From<SchnorrSignature> for [u8; 64usize] {
     #[track_caller]
-    fn from(value: Signature) -> Self {
+    fn from(value: SchnorrSignature) -> Self {
         ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
     }
 }
-impl<'a> From<SignatureReader<'a>> for &'a [u8; 64usize] {
+impl<'a> From<SchnorrSignatureReader<'a>> for &'a [u8; 64usize] {
     #[track_caller]
-    fn from(value: SignatureReader<'a>) -> Self {
+    fn from(value: SchnorrSignatureReader<'a>) -> Self {
         ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
     }
 }
-impl<'a> From<&'a SignatureReader<'a>> for &'a [u8; 64usize] {
+impl<'a> From<&'a SchnorrSignatureReader<'a>> for &'a [u8; 64usize] {
     #[track_caller]
-    fn from(value: &'a SignatureReader<'a>) -> Self {
+    fn from(value: &'a SchnorrSignatureReader<'a>) -> Self {
         ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
     }
 }
@@ -9230,7 +9485,7 @@ impl ::core::fmt::Display for AnnouncementSignatures {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
+        write!(f, ", {}: {}", "node_signature", self.node_signature())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -9246,10 +9501,8 @@ impl ::core::default::Default for AnnouncementSignatures {
     }
 }
 impl AnnouncementSignatures {
-    const DEFAULT_VALUE: [u8; 184] = [
-        184, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 88, 0, 0, 0, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 124] = [
+        124, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 88, 0, 0, 0, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -9284,11 +9537,11 @@ impl AnnouncementSignatures {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         OutPoint::new_unchecked(self.0.slice(start..end))
     }
-    pub fn signature(&self) -> Signature {
+    pub fn node_signature(&self) -> EcdsaSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
     pub fn partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
@@ -9329,7 +9582,7 @@ impl molecule::prelude::Entity for AnnouncementSignatures {
         Self::new_builder()
             .channel_id(self.channel_id())
             .channel_outpoint(self.channel_outpoint())
-            .signature(self.signature())
+            .node_signature(self.node_signature())
             .partial_signature(self.partial_signature())
     }
 }
@@ -9354,7 +9607,7 @@ impl<'r> ::core::fmt::Display for AnnouncementSignaturesReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "channel_outpoint", self.channel_outpoint())?;
-        write!(f, ", {}: {}", "signature", self.signature())?;
+        write!(f, ", {}: {}", "node_signature", self.node_signature())?;
         write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -9393,11 +9646,11 @@ impl<'r> AnnouncementSignaturesReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         OutPointReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn signature(&self) -> SignatureReader<'r> {
+    pub fn node_signature(&self) -> EcdsaSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
@@ -9458,7 +9711,7 @@ impl<'r> molecule::prelude::Reader<'r> for AnnouncementSignaturesReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         OutPointReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        SignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        EcdsaSignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Byte32Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Ok(())
     }
@@ -9467,7 +9720,7 @@ impl<'r> molecule::prelude::Reader<'r> for AnnouncementSignaturesReader<'r> {
 pub struct AnnouncementSignaturesBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) channel_outpoint: OutPoint,
-    pub(crate) signature: Signature,
+    pub(crate) node_signature: EcdsaSignature,
     pub(crate) partial_signature: Byte32,
 }
 impl AnnouncementSignaturesBuilder {
@@ -9480,8 +9733,8 @@ impl AnnouncementSignaturesBuilder {
         self.channel_outpoint = v;
         self
     }
-    pub fn signature(mut self, v: Signature) -> Self {
-        self.signature = v;
+    pub fn node_signature(mut self, v: EcdsaSignature) -> Self {
+        self.node_signature = v;
         self
     }
     pub fn partial_signature(mut self, v: Byte32) -> Self {
@@ -9496,7 +9749,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
             + self.channel_outpoint.as_slice().len()
-            + self.signature.as_slice().len()
+            + self.node_signature.as_slice().len()
             + self.partial_signature.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -9507,7 +9760,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
         offsets.push(total_size);
         total_size += self.channel_outpoint.as_slice().len();
         offsets.push(total_size);
-        total_size += self.signature.as_slice().len();
+        total_size += self.node_signature.as_slice().len();
         offsets.push(total_size);
         total_size += self.partial_signature.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -9516,7 +9769,7 @@ impl molecule::prelude::Builder for AnnouncementSignaturesBuilder {
         }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.channel_outpoint.as_slice())?;
-        writer.write_all(self.signature.as_slice())?;
+        writer.write_all(self.node_signature.as_slice())?;
         writer.write_all(self.partial_signature.as_slice())?;
         Ok(())
     }
@@ -9566,14 +9819,11 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 177] = [
-        177, 0, 0, 0, 28, 0, 0, 0, 92, 0, 0, 0, 100, 0, 0, 0, 108, 0, 0, 0, 141, 0, 0, 0, 173, 0,
+    const DEFAULT_VALUE: [u8; 117] = [
+        117, 0, 0, 0, 28, 0, 0, 0, 32, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 81, 0, 0, 0, 113, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0,
-        0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 6;
     pub fn total_size(&self) -> usize {
@@ -9592,11 +9842,11 @@ impl NodeAnnouncement {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn signature(&self) -> Signature {
+    pub fn signature(&self) -> EcdsaSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
     pub fn features(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -9717,11 +9967,11 @@ impl<'r> NodeAnnouncementReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn signature(&self) -> SignatureReader<'r> {
+    pub fn signature(&self) -> EcdsaSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn features(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -9804,7 +10054,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        SignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        EcdsaSignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         PubkeyReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
@@ -9815,7 +10065,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
 }
 #[derive(Clone, Debug, Default)]
 pub struct NodeAnnouncementBuilder {
-    pub(crate) signature: Signature,
+    pub(crate) signature: EcdsaSignature,
     pub(crate) features: Uint64,
     pub(crate) timestamp: Uint64,
     pub(crate) node_id: Pubkey,
@@ -9824,7 +10074,7 @@ pub struct NodeAnnouncementBuilder {
 }
 impl NodeAnnouncementBuilder {
     pub const FIELD_COUNT: usize = 6;
-    pub fn signature(mut self, v: Signature) -> Self {
+    pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
     }
@@ -9937,13 +10187,9 @@ impl ::core::default::Default for ChannelAnnouncement {
     }
 }
 impl ChannelAnnouncement {
-    const DEFAULT_VALUE: [u8; 407] = [
-        151, 1, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 168, 0, 0, 0, 232, 0, 0, 0, 240, 0, 0, 0, 16, 1,
-        0, 0, 52, 1, 0, 0, 85, 1, 0, 0, 118, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 287] = [
+        31, 1, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 48, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 152, 0, 0,
+        0, 188, 0, 0, 0, 221, 0, 0, 0, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -9970,23 +10216,23 @@ impl ChannelAnnouncement {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn node_signature_1(&self) -> Signature {
+    pub fn node_signature_1(&self) -> EcdsaSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn node_signature_2(&self) -> Signature {
+    pub fn node_signature_2(&self) -> EcdsaSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
-    pub fn ckb_signature(&self) -> Signature {
+    pub fn ckb_signature(&self) -> SchnorrSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        SchnorrSignature::new_unchecked(self.0.slice(start..end))
     }
     pub fn features(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -10119,23 +10365,23 @@ impl<'r> ChannelAnnouncementReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn node_signature_1(&self) -> SignatureReader<'r> {
+    pub fn node_signature_1(&self) -> EcdsaSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn node_signature_2(&self) -> SignatureReader<'r> {
+    pub fn node_signature_2(&self) -> EcdsaSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn ckb_signature(&self) -> SignatureReader<'r> {
+    pub fn ckb_signature(&self) -> SchnorrSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        SchnorrSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn features(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -10224,9 +10470,9 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelAnnouncementReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        SignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        SignatureReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        SignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        EcdsaSignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        EcdsaSignatureReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        SchnorrSignatureReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         OutPointReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
@@ -10238,9 +10484,9 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelAnnouncementReader<'r> {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ChannelAnnouncementBuilder {
-    pub(crate) node_signature_1: Signature,
-    pub(crate) node_signature_2: Signature,
-    pub(crate) ckb_signature: Signature,
+    pub(crate) node_signature_1: EcdsaSignature,
+    pub(crate) node_signature_2: EcdsaSignature,
+    pub(crate) ckb_signature: SchnorrSignature,
     pub(crate) features: Uint64,
     pub(crate) chain_hash: Byte32,
     pub(crate) channel_outpoint: OutPoint,
@@ -10250,15 +10496,15 @@ pub struct ChannelAnnouncementBuilder {
 }
 impl ChannelAnnouncementBuilder {
     pub const FIELD_COUNT: usize = 9;
-    pub fn node_signature_1(mut self, v: Signature) -> Self {
+    pub fn node_signature_1(mut self, v: EcdsaSignature) -> Self {
         self.node_signature_1 = v;
         self
     }
-    pub fn node_signature_2(mut self, v: Signature) -> Self {
+    pub fn node_signature_2(mut self, v: EcdsaSignature) -> Self {
         self.node_signature_2 = v;
         self
     }
-    pub fn ckb_signature(mut self, v: Signature) -> Self {
+    pub fn ckb_signature(mut self, v: SchnorrSignature) -> Self {
         self.ckb_signature = v;
         self
     }
@@ -10392,15 +10638,13 @@ impl ::core::default::Default for ChannelUpdate {
     }
 }
 impl ChannelUpdate {
-    const DEFAULT_VALUE: [u8; 228] = [
-        228, 0, 0, 0, 40, 0, 0, 0, 104, 0, 0, 0, 136, 0, 0, 0, 172, 0, 0, 0, 180, 0, 0, 0, 184, 0,
-        0, 0, 188, 0, 0, 0, 196, 0, 0, 0, 212, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 168] = [
+        168, 0, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 76, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 124, 0, 0,
+        0, 128, 0, 0, 0, 136, 0, 0, 0, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
@@ -10419,11 +10663,11 @@ impl ChannelUpdate {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn signature(&self) -> Signature {
+    pub fn signature(&self) -> EcdsaSignature {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        Signature::new_unchecked(self.0.slice(start..end))
+        EcdsaSignature::new_unchecked(self.0.slice(start..end))
     }
     pub fn chain_hash(&self) -> Byte32 {
         let slice = self.as_slice();
@@ -10573,11 +10817,11 @@ impl<'r> ChannelUpdateReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn signature(&self) -> SignatureReader<'r> {
+    pub fn signature(&self) -> EcdsaSignatureReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
         let end = molecule::unpack_number(&slice[8..]) as usize;
-        SignatureReader::new_unchecked(&self.as_slice()[start..end])
+        EcdsaSignatureReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn chain_hash(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
@@ -10678,7 +10922,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        SignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        EcdsaSignatureReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         OutPointReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
         Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
@@ -10692,7 +10936,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
 }
 #[derive(Clone, Debug, Default)]
 pub struct ChannelUpdateBuilder {
-    pub(crate) signature: Signature,
+    pub(crate) signature: EcdsaSignature,
     pub(crate) chain_hash: Byte32,
     pub(crate) channel_outpoint: OutPoint,
     pub(crate) timestamp: Uint64,
@@ -10704,7 +10948,7 @@ pub struct ChannelUpdateBuilder {
 }
 impl ChannelUpdateBuilder {
     pub const FIELD_COUNT: usize = 9;
-    pub fn signature(mut self, v: Signature) -> Self {
+    pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
     }

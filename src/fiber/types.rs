@@ -20,8 +20,8 @@ use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
 use secp256k1::{
-    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as Secp256k1SchnorrSignature, All,
-    PublicKey, Secp256k1, SecretKey,
+    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
+    Secp256k1, SecretKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -349,10 +349,10 @@ impl Privkey {
         result
     }
 
-    pub fn sign(&self, message: [u8; 32]) -> Signature {
+    pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
         let message = secp256k1::Message::from_digest(message);
         let sig = secp256k1_instance().sign_ecdsa(&message, &self.0);
-        Signature::from(sig)
+        EcdsaSignature::from(sig)
     }
 }
 
@@ -429,15 +429,15 @@ impl Pubkey {
 }
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub struct Signature(pub Secp256k1Signature);
+pub struct EcdsaSignature(pub Secp256k1Signature);
 
-impl From<Signature> for Secp256k1Signature {
-    fn from(sig: Signature) -> Self {
+impl From<EcdsaSignature> for Secp256k1Signature {
+    fn from(sig: EcdsaSignature) -> Self {
         sig.0
     }
 }
 
-impl From<Secp256k1Signature> for Signature {
+impl From<Secp256k1Signature> for EcdsaSignature {
     fn from(sig: Secp256k1Signature) -> Self {
         Self(sig)
     }
@@ -483,9 +483,9 @@ impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
     }
 }
 
-impl From<Signature> for molecule_fiber::Signature {
-    fn from(signature: Signature) -> molecule_fiber::Signature {
-        molecule_fiber::Signature::new_builder()
+impl From<EcdsaSignature> for molecule_fiber::EcdsaSignature {
+    fn from(signature: EcdsaSignature) -> molecule_fiber::EcdsaSignature {
+        molecule_fiber::EcdsaSignature::new_builder()
             .set(
                 signature
                     .0
@@ -500,10 +500,10 @@ impl From<Signature> for molecule_fiber::Signature {
     }
 }
 
-impl TryFrom<molecule_fiber::Signature> for Signature {
+impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
     type Error = Error;
 
-    fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
+    fn try_from(signature: molecule_fiber::EcdsaSignature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
         Secp256k1Signature::from_compact(signature)
             .map(Into::into)
@@ -511,9 +511,9 @@ impl TryFrom<molecule_fiber::Signature> for Signature {
     }
 }
 
-impl From<Secp256k1SchnorrSignature> for molecule_fiber::Signature {
-    fn from(signature: Secp256k1SchnorrSignature) -> molecule_fiber::Signature {
-        molecule_fiber::Signature::new_builder()
+impl From<SchnorrSignature> for molecule_fiber::SchnorrSignature {
+    fn from(signature: SchnorrSignature) -> molecule_fiber::SchnorrSignature {
+        molecule_fiber::SchnorrSignature::new_builder()
             .set(
                 signature
                     .serialize()
@@ -527,12 +527,12 @@ impl From<Secp256k1SchnorrSignature> for molecule_fiber::Signature {
     }
 }
 
-impl TryFrom<molecule_fiber::Signature> for Secp256k1SchnorrSignature {
+impl TryFrom<molecule_fiber::SchnorrSignature> for SchnorrSignature {
     type Error = Error;
 
-    fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
+    fn try_from(signature: molecule_fiber::SchnorrSignature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
-        Secp256k1SchnorrSignature::from_slice(signature)
+        SchnorrSignature::from_slice(signature)
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -1309,7 +1309,7 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
-    pub signature: Option<Signature>,
+    pub signature: Option<EcdsaSignature>,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
@@ -1395,10 +1395,10 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelAnnouncement {
-    pub node_1_signature: Option<Signature>,
-    pub node_2_signature: Option<Signature>,
+    pub node_1_signature: Option<EcdsaSignature>,
+    pub node_2_signature: Option<EcdsaSignature>,
     // Signature signed by the funding transaction output public key.
-    pub ckb_signature: Option<Secp256k1SchnorrSignature>,
+    pub ckb_signature: Option<SchnorrSignature>,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
@@ -1509,7 +1509,7 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
-    pub signature: Option<Signature>,
+    pub signature: Option<EcdsaSignature>,
     pub chain_hash: Hash256,
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,

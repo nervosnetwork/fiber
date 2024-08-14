@@ -1,6 +1,7 @@
 import blockchain;
 
-array Signature [byte; 64];
+vector EcdsaSignature <byte>;
+array SchnorrSignature [byte; 64];
 array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
@@ -145,13 +146,13 @@ table ReestablishChannel {
 table AnnouncementSignatures {
     channel_id: Byte32,
     channel_outpoint: OutPoint,
-    signature: Signature,
+    node_signature: EcdsaSignature,
     partial_signature: Byte32,
 }
 
 table NodeAnnouncement {
     // Signature to this message.
-    signature: Signature,
+    signature: EcdsaSignature,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/features.rs#L448-L457
     // rust-lightning uses a Vec<u8> here.
@@ -166,10 +167,10 @@ table NodeAnnouncement {
 }
 
 table ChannelAnnouncement {
-    node_signature_1: Signature,
-    node_signature_2: Signature,
+    node_signature_1: EcdsaSignature,
+    node_signature_2: EcdsaSignature,
     // Signature signed by the funding transaction output public key.
-    ckb_signature: Signature,
+    ckb_signature: SchnorrSignature,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/msgs.rs#L1200-L1200
     // rust-lightning uses a Vec<u8> here.
@@ -184,7 +185,7 @@ table ChannelAnnouncement {
 
 table ChannelUpdate {
     // Signature of the node that wants to update the channel information.
-    signature: Signature,
+    signature: EcdsaSignature,
     chain_hash: Byte32,
     channel_outpoint: OutPoint,
     timestamp: Uint64,
@@ -217,5 +218,3 @@ union FiberMessage {
     ChannelAnnouncement,
     ChannelUpdate,
 }
-
-

@@ -39,8 +39,8 @@ use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
-    Signature,
+    EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
+    Privkey, Pubkey,
 };
 use super::FiberConfig;
 
@@ -104,13 +104,13 @@ pub enum NetworkActorCommand {
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information
     BroadcastMessage(FiberBroadcastMessage),
-    SignMessage([u8; 32], RpcReplyPort<Signature>),
+    SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
 }
 
 pub async fn sign_network_message(
     network: ActorRef<NetworkActorMessage>,
     message: [u8; 32],
-) -> std::result::Result<Signature, RactorErr<NetworkActorMessage>> {
+) -> std::result::Result<EcdsaSignature, RactorErr<NetworkActorMessage>> {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::SignMessage(message, rpc_reply))
     };

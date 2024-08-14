@@ -59,9 +59,9 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        FiberChannelNormalOperationMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
-        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-        Signature, TxCollaborationMsg, TxComplete, TxUpdate,
+        EcdsaSignature, FiberChannelNormalOperationMessage, FiberMessage, Hash256, LockTime,
+        OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -1648,8 +1648,8 @@ pub struct ChannelActorState {
     // Channel announcement signatures, may be empty for private channel.
     // The first signature is signed by the node public key, and
     // the second signature is partially signed by the funding transaction pubkey.
-    pub local_channel_announcement_signature: Option<(Signature, PartialSignature)>,
-    pub remote_channel_announcement_signature: Option<(Signature, PartialSignature)>,
+    pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
+    pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_nonce: Option<PubNonce>,
 
     pub channel_announcement: Option<ChannelAnnouncement>,
