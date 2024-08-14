@@ -44,7 +44,7 @@ use crate::{
     fiber::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
-        network::emit_service_event,
+        network::{emit_service_event, sign_network_message},
         types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
     },
     NetworkServiceEvent,
@@ -251,7 +251,7 @@ impl<S> ChannelActor<S> {
         self.remote_pubkey.tentacle_peer_id()
     }
 
-    pub fn handle_peer_message(
+    pub async fn handle_peer_message(
         &self,
         state: &mut ChannelActorState,
         message: FiberChannelNormalOperationMessage,
@@ -396,7 +396,7 @@ impl<S> ChannelActor<S> {
                 );
 
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    state.on_channel_ready(&self.network);
+                    state.on_channel_ready(&self.network).await;
                 }
 
                 Ok(())
@@ -963,7 +963,7 @@ impl<S> ChannelActor<S> {
         }
     }
 
-    pub fn handle_event(
+    pub async fn handle_event(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -996,7 +996,7 @@ impl<S> ChannelActor<S> {
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    state.on_channel_ready(&self.network);
+                    state.on_channel_ready(&self.network).await;
                 }
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
@@ -1395,7 +1395,7 @@ where
                             debug!("Ignoring message while reestablishing: {:?}", message);
                         }
                     }
-                } else if let Err(error) = self.handle_peer_message(state, message) {
+                } else if let Err(error) = self.handle_peer_message(state, message).await {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
@@ -1405,7 +1405,7 @@ where
                 }
             }
             ChannelActorMessage::Event(e) => {
-                if let Err(err) = self.handle_event(&myself, state, e) {
+                if let Err(err) = self.handle_event(&myself, state, e).await {
                     error!("Error while processing channel event: {:?}", err);
                 }
             }
@@ -1847,10 +1847,15 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 // Constructors for the channel actor state.
 #[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
-    pub fn try_create_channel_announcement_message(
+    pub async fn try_create_channel_announcement_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelAnnouncement> {
+        debug!(
+            "Trying to create channel announcement for channel {:?}",
+            &self.id
+        );
+
         if !self.public {
             debug!("Ignoring non-public channel announcement");
             return None;
@@ -1895,45 +1900,41 @@ impl ChannelActorState {
         };
         let message = channel_announcement.message_to_sign();
 
+        if self.local_channel_announcement_signature.is_none() {
+            debug!("Signing channel announcement for channel {:?}", &self.id);
+            let partial_signature: PartialSignature = sign_partial(
+                &key_agg_ctx,
+                self.signer.funding_key,
+                local_secnonce,
+                &agg_nonce,
+                &message,
+            )
+            .expect("Partial sign channel announcement");
+
+            // TODO: instead of creating dummy signatures, we should use real signatures.
+            let node_signature = sign_network_message(network.clone(), message)
+                .await
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        peer_id,
+                        FiberMessage::announcement_signatures(AnnouncementSignatures {
+                            channel_id,
+                            channel_outpoint,
+                            partial_signature: partial_signature.clone(),
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            self.local_channel_announcement_signature = Some((node_signature, partial_signature));
+        }
+
         let (local_node_signature, local_partial_signature) = self
             .local_channel_announcement_signature
-            .clone()
-            .unwrap_or_else(|| {
-                debug!("Signing channel announcement for channel {:?}", &self.id);
-                let partial_signature: PartialSignature = sign_partial(
-                    &key_agg_ctx,
-                    self.signer.funding_key,
-                    local_secnonce,
-                    &agg_nonce,
-                    &message,
-                )
-                .expect("Partial sign channel announcement");
-
-                // TODO: instead of creating dummy signatures, we should use real signatures.
-                let node_signature = Signature::from(
-                    secp256k1::ecdsa::Signature::from_compact([1u8; 64].as_slice())
-                        .expect("Valid signature"),
-                );
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            peer_id,
-                            FiberMessage::announcement_signatures(AnnouncementSignatures {
-                                channel_id,
-                                channel_outpoint,
-                                partial_signature: partial_signature.clone(),
-                            }),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                (node_signature, partial_signature)
-            });
-
-        self.local_channel_announcement_signature = Some((
-            local_node_signature.clone(),
-            local_partial_signature.clone(),
-        ));
+            .as_ref()
+            .expect("local channel announcement signature created above")
+            .clone();
 
         let (remote_node_signature, remote_partial_signature) =
             self.remote_channel_announcement_signature.clone()?;
@@ -3652,7 +3653,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
@@ -3666,7 +3667,9 @@ impl ChannelActorState {
             "Channel {:?} is ready, sending channel announcement message",
             self.get_id()
         );
-        if let Some(channel_annoucement) = self.try_create_channel_announcement_message(network) {
+        if let Some(channel_annoucement) =
+            self.try_create_channel_announcement_message(network).await
+        {
             debug!(
                 "Channel {:?} is ready, broadcasting channel announcement message {:?}",
                 self.get_id(),

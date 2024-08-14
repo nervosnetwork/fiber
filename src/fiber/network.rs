@@ -3,8 +3,8 @@ use ckb_types::core::TransactionView;
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use ractor::{
-    async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr,
-    RpcReplyPort, SupervisionEvent,
+    async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
+    RactorErr, RpcReplyPort, SupervisionEvent,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -40,6 +40,7 @@ use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    Signature,
 };
 use super::FiberConfig;
 
@@ -103,6 +104,18 @@ pub enum NetworkActorCommand {
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information
     BroadcastMessage(FiberBroadcastMessage),
+    SignMessage([u8; 32], RpcReplyPort<Signature>),
+}
+
+pub async fn sign_network_message(
+    network: ActorRef<NetworkActorMessage>,
+    message: [u8; 32],
+) -> std::result::Result<Signature, RactorErr<NetworkActorMessage>> {
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SignMessage(message, rpc_reply))
+    };
+
+    call!(network, message)
 }
 
 #[derive(Debug)]
@@ -756,6 +769,10 @@ where
                     "Broadcasting node announcement is not implemented yet: {:?}",
                     message
                 );
+            }
+            NetworkActorCommand::SignMessage(message, reply) => {
+                let signature = state.private_key.sign(message);
+                let _ = reply.send(signature);
             }
         };
         Ok(())
