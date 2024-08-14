@@ -163,7 +163,7 @@ table NodeAnnouncement {
     node_id: Pubkey,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     alias: Byte32,
-    // All the reachable addresses. 
+    // All the reachable addresses.
     address: BytesVec,
 }
 
@@ -180,8 +180,8 @@ table ChannelAnnouncement {
     channel_outpoint: OutPoint,
     node_1_id: Pubkey,
     node_2_id: Pubkey,
-    // The aggregated public key of the fundign transaction output.
-    ckb_key: SchnorrXOnlyPubkey,
+    // The aggregated public key of the funding transaction output.
+    ckb_key: SchnorrXOnlyPubkey
 }
 
 table ChannelUpdate {
@@ -194,7 +194,7 @@ table ChannelUpdate {
     channel_flags: Uint32,
     cltv_expiry_delta: Uint64,
     htlc_minimum_value: Uint128,
-    fee_value: Uint128,    
+    fee_value: Uint128,
 }
 
 union FiberMessage {

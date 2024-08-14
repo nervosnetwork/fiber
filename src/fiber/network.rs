@@ -41,6 +41,7 @@ use super::channel::{
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
+use super::graph::NetworkGraph;
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
@@ -855,6 +856,8 @@ pub struct NetworkActorState {
     // message of the same type.
     broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
+    // network graph
+    network_graph: NetworkGraph,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -1780,6 +1783,7 @@ where
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
+            network_graph: Default::default(),
         };
 
         // TODO: In current implementation, broadcasting node announcement message here

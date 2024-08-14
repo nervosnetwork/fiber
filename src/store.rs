@@ -6,7 +6,10 @@ use tentacle::secio::PeerId;
 
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        channel::{
+            ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore,
+        },
+        graph::{ChannelInfo, NodeId, NodeInfo},
         types::Hash256,
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -67,6 +70,22 @@ impl Batch {
                     serde_json::to_vec(&state).expect("serialize ChannelState should be OK"),
                 )
             }
+            KeyValue::NodeInfo(id, node) => {
+                let key = [&[128], id.as_ref()].concat();
+                (
+                    key,
+                    serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
+                )
+            }
+            KeyValue::ChannelInfo(short_id, channel) => {
+                let mut key = Vec::with_capacity(9); // 1 for 161 + 8 for the bytes
+                key.push(161);
+                key.extend_from_slice(&short_id.to_le_bytes());
+                (
+                    key,
+                    serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
+                )
+            }
         };
         self.put(key, value)
     }
@@ -91,6 +110,8 @@ impl Batch {
 /// | 0            | Hash256            | ChannelActorState        |
 /// | 32           | Hash256            | CkbInvoice               |
 /// | 64           | PeerId | Hash256   | ChannelState             |
+/// | 128          | PeerId             | NodeInfo                 |
+/// | 161          | U64                | ChannelInfo              |
 /// +--------------+--------------------+--------------------------+
 ///
 
@@ -98,6 +119,8 @@ enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
+    NodeInfo(NodeId, NodeInfo),
+    ChannelInfo(u64, ChannelInfo),
 }
 
 impl ChannelActorStateStore for Store {
@@ -183,5 +206,45 @@ impl InvoiceStore for Store {
         batch.put_kv(KeyValue::CkbInvoice(*invoice.payment_hash(), invoice));
         batch.commit();
         return Ok(());
+    }
+}
+
+impl NetworkGraphStateStore for Store {
+    fn get_channels(&self, short_id: Option<u64>) -> Vec<ChannelInfo> {
+        let prefix = match short_id {
+            Some(short_id) => [[161], [short_id as u8]].concat(),
+            None => vec![161],
+        };
+        let iter = self.db.prefix_iterator(prefix.as_ref());
+        iter.map(|(_, value)| {
+            serde_json::from_slice(value.as_ref()).expect("deserialize ChannelInfo should be OK")
+        })
+        .collect()
+    }
+
+    fn get_nodes(&self, node_id: Option<NodeId>) -> Vec<NodeInfo> {
+        let mut key = Vec::with_capacity(34);
+        key.extend_from_slice(&[128]);
+        if let Some(id) = node_id {
+            key.extend_from_slice(id.as_ref());
+        }
+
+        let iter = self.db.prefix_iterator(key.as_ref());
+        iter.map(|(_, value)| {
+            serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
+        })
+        .collect()
+    }
+
+    fn insert_channel(&self, channel: ChannelInfo) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::ChannelInfo(channel.short_id, channel.clone()));
+        batch.commit();
+    }
+
+    fn insert_node(&self, node: NodeInfo) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::NodeInfo(node.node_id, node.clone()));
+        batch.commit();
     }
 }

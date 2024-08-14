@@ -8,7 +8,9 @@ pub use network::{
 };
 
 mod fee;
+pub mod graph;
 mod key;
+
 pub use key::KeyPair;
 
 pub mod gen;
