@@ -36,8 +36,8 @@ use tracing::{debug, error, info, warn};
 use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    ChannelSubscribers, NetworkGraphStateStore, OpenChannelParameter, ProcessingChannelError,
+    ProcessingChannelResult, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
@@ -304,7 +304,7 @@ pub struct NetworkActor<S> {
 
 impl<S> NetworkActor<S>
 where
-    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
@@ -1214,7 +1214,9 @@ impl NetworkActorState {
         }
     }
 
-    async fn on_peer_connected<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
+    async fn on_peer_connected<
+        S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    >(
         &mut self,
         remote_peer_id: &PeerId,
         remote_pubkey: Pubkey,
@@ -1692,7 +1694,7 @@ pub struct NetworkActorStartArguments {
 #[rasync_trait]
 impl<S> Actor for NetworkActor<S>
 where
-    S: ChannelActorStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
@@ -1971,7 +1973,9 @@ pub(crate) fn emit_service_event(
         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 }
 
-pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
+pub async fn start_network<
+    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+>(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,

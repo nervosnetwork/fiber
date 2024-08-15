@@ -18,7 +18,7 @@ use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorM
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use fnn::{start_cch, start_ckb, start_ldk, start_rpc, Config};
+use fnn::{start_cch, start_network, start_ldk, start_rpc, Config};
 use tracing_subscriber::fmt::format;
 
 #[tokio::main]
@@ -89,7 +89,7 @@ pub async fn main() {
             let bootnodes = fiber_config.bootnode_addrs.clone();
 
             info!("Starting fiber");
-            let network_actor = start_ckb(
+            let network_actor = start_network(
                 fiber_config,
                 ckb_actor,
                 event_sender,

@@ -2,7 +2,7 @@ pub mod config;
 pub use config::FiberConfig;
 
 pub mod network;
-pub use network::start_ckb;
+pub use network::start_network;
 pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
 };
