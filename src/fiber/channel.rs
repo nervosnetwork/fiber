@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 
+use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -1879,7 +1880,7 @@ impl ChannelActorState {
         let peer_id = self.get_remote_peer_id();
         let channel_outpoint = self.get_funding_transaction_outpoint_option()?;
         let local_is_node_1 = self.local_pubkey < self.remote_pubkey;
-        let agg_pubkey = self.get_musig2_agg_pubkey();
+        let agg_pubkey = self.get_musig2_agg_pubkey_xonly();
         let key_agg_ctx = self.get_musig2_agg_context();
 
         let mut channel_announcement = {
@@ -1966,6 +1967,7 @@ impl ChannelActorState {
             channel_announcement.node_2_signature = Some(local_node_signature);
         }
         channel_announcement.ckb_signature = Some(signature);
+        channel_announcement.ckb_key = agg_pubkey;
         self.channel_announcement = Some(channel_announcement.clone());
         Some(channel_announcement)
     }
@@ -2720,13 +2722,17 @@ impl ChannelActorState {
         self.get_local_commitment_point(self.get_remote_commitment_number())
     }
 
-    pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
-        let point: musig2::secp::Point = self.get_musig2_agg_context().aggregated_pubkey();
-        point.serialize_xonly()
+    pub fn get_musig2_agg_pubkey_xonly(&self) -> XOnlyPublicKey {
+        let pubkey: secp256k1::PublicKey = self.get_musig2_agg_context().aggregated_pubkey();
+        pubkey.into()
+    }
+
+    pub fn get_musig2_agg_pubkey_serialized_xonly(&self) -> [u8; 32] {
+        self.get_musig2_agg_pubkey_xonly().serialize()
     }
 
     pub fn get_funding_lock_script(&self) -> Script {
-        let args = blake2b_256(self.get_funding_lock_script_xonly());
+        let args = blake2b_256(self.get_musig2_agg_pubkey_serialized_xonly());
         debug!(
             "Aggregated pubkey: {:?}, hash: {:?}",
             hex::encode(args),
@@ -3147,7 +3153,7 @@ impl ChannelActorState {
         version: u64,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
         create_witness_for_funding_cell(
-            self.get_funding_lock_script_xonly(),
+            self.get_musig2_agg_pubkey_serialized_xonly(),
             self.get_funding_transaction_outpoint(),
             signature,
             version,

@@ -19,6 +19,7 @@ use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
+use secp256k1::XOnlyPublicKey;
 use secp256k1::{
     ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
     Secp256k1, SecretKey,
@@ -28,6 +29,7 @@ use serde_with::serde_as;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
+use tracing::debug;
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
@@ -352,6 +354,13 @@ impl Privkey {
     pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
         let message = secp256k1::Message::from_digest(message);
         let sig = secp256k1_instance().sign_ecdsa(&message, &self.0);
+        debug!(
+            "Signing message {:?} with private key {:?} (pub key {:?}), Signature: {:?}",
+            message,
+            self,
+            self.pubkey(),
+            EcdsaSignature::from(sig)
+        );
         EcdsaSignature::from(sig)
     }
 }
@@ -434,6 +443,10 @@ pub struct EcdsaSignature(pub Secp256k1Signature);
 impl EcdsaSignature {
     pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
         let message = secp256k1::Message::from_digest(*message);
+        debug!(
+            "Verifying message {:?} with pubkey {:?} and signature {:?}",
+            message, pubkey, self
+        );
         secp256k1_instance()
             .verify_ecdsa(&message, &self.0, &pubkey.0)
             .is_ok()
@@ -517,6 +530,30 @@ impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
         Secp256k1Signature::from_compact(&signature)
             .map(Into::into)
             .map_err(Into::into)
+    }
+}
+
+impl From<XOnlyPublicKey> for molecule_fiber::SchnorrXOnlyPubkey {
+    fn from(pk: XOnlyPublicKey) -> molecule_fiber::SchnorrXOnlyPubkey {
+        molecule_fiber::SchnorrXOnlyPubkey::new_builder()
+            .set(
+                pk.serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Public serialized to corrent length"),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::SchnorrXOnlyPubkey> for XOnlyPublicKey {
+    type Error = Error;
+
+    fn try_from(pubkey: molecule_fiber::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
+        let pubkey = pubkey.as_slice();
+        XOnlyPublicKey::from_slice(pubkey).map_err(Into::into)
     }
 }
 
@@ -1439,7 +1476,7 @@ pub struct ChannelAnnouncement {
     pub node_1_id: Pubkey,
     pub node_2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
-    pub ckb_key: Pubkey,
+    pub ckb_key: XOnlyPublicKey,
 }
 
 impl ChannelAnnouncement {
@@ -1448,7 +1485,7 @@ impl ChannelAnnouncement {
         node_2_pubkey: &Pubkey,
         channel_outpoint: OutPoint,
         chain_hash: Hash256,
-        ckb_pubkey: &Pubkey,
+        ckb_pubkey: &XOnlyPublicKey,
     ) -> Self {
         Self {
             node_1_signature: None,
