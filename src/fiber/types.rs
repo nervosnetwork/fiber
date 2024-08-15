@@ -431,6 +431,15 @@ impl Pubkey {
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub struct EcdsaSignature(pub Secp256k1Signature);
 
+impl EcdsaSignature {
+    pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
+        let message = secp256k1::Message::from_digest(*message);
+        secp256k1_instance()
+            .verify_ecdsa(&message, &self.0, &pubkey.0)
+            .is_ok()
+    }
+}
+
 impl From<EcdsaSignature> for Secp256k1Signature {
     fn from(sig: EcdsaSignature) -> Self {
         sig.0
@@ -1784,6 +1793,22 @@ pub enum FiberBroadcastMessage {
     NodeAnnouncement(NodeAnnouncement),
     ChannelAnnouncement(ChannelAnnouncement),
     ChannelUpdate(ChannelUpdate),
+}
+
+impl FiberBroadcastMessage {
+    pub fn id(&self) -> Hash256 {
+        match self {
+            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
+                deterministically_hash(node_announcement).into()
+            }
+            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                deterministically_hash(channel_announcement).into()
+            }
+            FiberBroadcastMessage::ChannelUpdate(channel_update) => {
+                deterministically_hash(channel_update).into()
+            }
+        }
+    }
 }
 
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
