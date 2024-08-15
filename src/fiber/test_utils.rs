@@ -99,8 +99,16 @@ pub struct NetworkNode {
 
 impl NetworkNode {
     pub async fn new() -> Self {
+        Self::new_with_node_name(None).await
+    }
+
+    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
         let base_dir = TempDir::new("fnn-test");
         let fiber_config = FiberConfig {
+            announced_node_name: node_name
+                .as_deref()
+                .or(base_dir.as_ref().to_str())
+                .map(Into::into),
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
             ..Default::default()
@@ -158,8 +166,8 @@ impl NetworkNode {
 
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let new = Self::new().await;
+        for i in 0..n {
+            let new = Self::new_with_node_name(Some(format!("Node {i}"))).await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }

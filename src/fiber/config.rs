@@ -85,7 +85,7 @@ pub struct FiberConfig {
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 }
 
-#[derive(Debug, PartialEq, Copy, Clone, Default)]
+#[derive(PartialEq, Copy, Clone, Default)]
 pub struct AnnouncedNodeName(pub [u8; 32]);
 
 impl AnnouncedNodeName {
@@ -112,15 +112,21 @@ impl AnnouncedNodeName {
     }
 }
 
-impl<'s> From<&'s str> for AnnouncedNodeName {
-    fn from(value: &'s str) -> Self {
-        Self::from_str(value).expect("Valid announced node name")
+impl std::fmt::Display for AnnouncedNodeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
-impl ToString for AnnouncedNodeName {
-    fn to_string(&self) -> String {
-        self.as_str().to_string()
+impl std::fmt::Debug for AnnouncedNodeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "AnnouncedNodeName({})", self)
+    }
+}
+
+impl<'s> From<&'s str> for AnnouncedNodeName {
+    fn from(value: &'s str) -> Self {
+        Self::from_str(value).expect("Valid announced node name")
     }
 }
 
