@@ -90,7 +90,7 @@ pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: TempDir,
-    pub listening_addr: MultiAddr,
+    pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
@@ -129,7 +129,7 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (peer_id, listening_addr) = loop {
+        let (peer_id, listening_addrs) = loop {
             select! {
                 Some(NetworkServiceEvent::NetworkStarted(peer_id, multiaddr)) = event_receiver.recv() => {
                     break (peer_id, multiaddr);
@@ -148,7 +148,7 @@ impl NetworkNode {
 
         Self {
             base_dir,
-            listening_addr,
+            listening_addrs,
             network_actor,
             chain_actor,
             peer_id,
@@ -169,11 +169,11 @@ impl NetworkNode {
     }
 
     pub async fn connect_to(&mut self, other: &Self) {
-        let peer_addr = other.listening_addr.clone();
+        let peer_addr = other.listening_addrs[0].clone();
         let peer_id = other.peer_id.clone();
         println!(
             "Trying to connect to {:?} from {:?}",
-            other.listening_addr, &self.listening_addr
+            other.listening_addrs, &self.listening_addrs
         );
 
         self.network_actor
