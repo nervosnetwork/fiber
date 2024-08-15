@@ -361,6 +361,13 @@ where
                 }
             }
             FiberMessage::BroadcastMessage(m) => {
+                // Rebroadcast the message to other peers if necessary.
+                state
+                    .network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(m.clone()),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 state.on_broadcasted_message(m).await;
             }
             FiberMessage::ChannelNormalOperation(m) => {
@@ -767,10 +774,28 @@ where
                     .expect("network actor alive");
             }
             NetworkActorCommand::BroadcastMessage(message) => {
-                warn!(
-                    "Broadcasting node announcement is not implemented yet: {:?}",
-                    message
-                );
+                debug!("Broadcasting message: {:?}", message);
+                if state.should_message_be_broadcasted(&message) {
+                    debug!("Broadcasting unseen message: {:?}", message);
+                    const MAX_BROADCAST_SESSIONS: usize = 5;
+                    let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS);
+                    debug!("Obtained peer ids: {:?}", peer_ids);
+                    for peer_id in peer_ids {
+                        debug!("Broadcasting message to peer: {:?}", peer_id);
+                        if let Err(e) = state
+                            .send_message_to_peer(
+                                &peer_id,
+                                FiberMessage::BroadcastMessage(message.clone()),
+                            )
+                            .await
+                        {
+                            error!(
+                                "Failed to broadcast message {:?} to peer {:?}: {:?}",
+                                &message, &peer_id, e
+                            );
+                        }
+                    }
+                }
             }
             NetworkActorCommand::SignMessage(message, reply) => {
                 let signature = state.private_key.sign(message);
@@ -812,6 +837,18 @@ pub struct NetworkActorState {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
+    // A hashset to store the list of all broadcasted messages.
+    // This is used to avoid re-broadcasting the same message over and over again
+    // TODO: some more intelligent way to manage broadcasting.
+    // 1) The hashset is not a constant size, so we may need to remove old messages.
+    // We can use bloom filter to efficiently check if a message is already broadcasted.
+    // But there is a possibility of false positives. In that case, we can use different
+    // hash functions to make different nodes have different false positives.
+    // 2) The broadcast message NodeAnnouncement and ChannelUpdate have a timestamp field.
+    // We can use this field to determine if a message is too old to be broadcasted.
+    // We didn't check the timestamp field here but all nodes should only save the latest
+    // message of the same type.
+    broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
 }
 
@@ -832,6 +869,10 @@ impl NetworkActorState {
         let alias = self.node_name?;
         let addresses = self.listen_addrs.clone();
         Some(NodeAnnouncement::new(alias, addresses, &self.private_key))
+    }
+
+    pub fn should_message_be_broadcasted(&mut self, message: &FiberBroadcastMessage) -> bool {
+        self.broadcasted_messages.insert(message.id())
     }
 
     pub fn get_private_key(&self) -> Privkey {
@@ -1019,6 +1060,14 @@ impl NetworkActorState {
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).cloned()
+    }
+
+    pub fn get_n_peer_peer_ids(&self, n: usize) -> Vec<PeerId> {
+        self.peer_session_map.keys().take(n).cloned().collect()
+    }
+
+    pub fn get_n_peer_sessions(&self, n: usize) -> Vec<SessionId> {
+        self.peer_session_map.values().take(n).cloned().collect()
     }
 
     fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
@@ -1574,9 +1623,12 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            broadcasted_messages: Default::default(),
             channel_subscribers,
         };
 
+        // TODO: In current implementation, broadcasting node announcement message here
+        // is actually useless, because we haven't connected to any peer yet.
         if let Some(message) = state.get_node_announcement_message() {
             myself
                 .send_message(NetworkActorMessage::new_command(
