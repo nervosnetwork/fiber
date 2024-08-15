@@ -181,7 +181,7 @@ table ChannelAnnouncement {
     node_1_id: Pubkey,
     node_2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
-    ckb_key: SchnorrXOnlyPubkey
+    ckb_key: SchnorrXOnlyPubkey,
 }
 
 table ChannelUpdate {
