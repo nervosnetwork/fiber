@@ -1,6 +1,5 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TxStatus};
-use ckb_sdk::util::blake160;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -44,8 +43,8 @@ use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
-    Privkey, Pubkey,
+    ChannelAnnouncement, EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256,
+    NodeAnnouncement, OpenChannel, Privkey, Pubkey,
 };
 use super::FiberConfig;
 
@@ -777,14 +776,17 @@ where
                     .expect("network actor alive");
             }
             NetworkActorCommand::BroadcastMessage(message) => {
-                debug!("Broadcasting message: {:?}", message);
-                if state.should_message_be_broadcasted(&message) {
-                    debug!("Broadcasting unseen message: {:?}", message);
-                    const MAX_BROADCAST_SESSIONS: usize = 5;
-                    let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS);
-                    debug!("Obtained peer ids: {:?}", peer_ids);
+                const MAX_BROADCAST_SESSIONS: usize = 5;
+                let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS);
+                // The order maters here because should_message_be_broadcasted
+                // will change the state, and we don't want to change the state
+                // if there is not peer to broadcast the message.
+                if !peer_ids.is_empty() && state.should_message_be_broadcasted(&message) {
+                    debug!(
+                        "Broadcasting unseen message {:?} to peers {:?}",
+                        &message, &peer_ids
+                    );
                     for peer_id in peer_ids {
-                        debug!("Broadcasting message to peer: {:?}", peer_id);
                         if let Err(e) = state
                             .send_message_to_peer(
                                 &peer_id,
@@ -1493,8 +1495,7 @@ impl NetworkActorState {
     }
 
     async fn on_broadcasted_message(&mut self, message: FiberBroadcastMessage) {
-        warn!("Broadcasted message received: {:?}", &message);
-
+        warn!("Received broadcasted message: {:?}", &message);
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
