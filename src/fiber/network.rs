@@ -828,7 +828,11 @@ impl NetworkActorState {
     pub fn get_node_announcement_message(&self) -> Option<NodeAnnouncement> {
         let alias = self.node_name?;
         let addresses = vec![];
-        Some(NodeAnnouncement::new(alias, addresses, &self.private_key))
+        Some(NodeAnnouncement::new_unsigned(
+            alias,
+            addresses,
+            &self.private_key,
+        ))
     }
 
     pub fn get_private_key(&self) -> Privkey {

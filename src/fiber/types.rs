@@ -1328,22 +1328,41 @@ pub struct NodeAnnouncement {
 }
 
 impl NodeAnnouncement {
+    pub fn new_unsigned(
+        alias: AnnouncedNodeName,
+        addresses: Vec<MultiAddr>,
+        node_id: Pubkey,
+    ) -> Self {
+        Self {
+            signature: None,
+            features: Default::default(),
+            timestamp: Default::default(),
+            node_id,
+            alias,
+            addresses: addresses.iter().map(|a| a.to_vec()).collect(),
+        }
+    }
+
     pub fn new(
         alias: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
     ) -> NodeAnnouncement {
-        let mut unsigned = NodeAnnouncement {
-            signature: None,
-            features: Default::default(),
-            timestamp: Default::default(),
-            node_id: private_key.pubkey(),
-            alias,
-            addresses: addresses.iter().map(|a| a.to_vec()).collect(),
-        };
-        let message = deterministically_hash(&unsigned);
-        unsigned.signature = Some(private_key.sign(message));
+        let mut unsigned = NodeAnnouncement::new_unsigned(alias, addresses, private_key.pubkey());
+        unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
         unsigned
+    }
+
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = NodeAnnouncement {
+            signature: None,
+            features: self.features,
+            timestamp: self.timestamp,
+            node_id: self.node_id,
+            alias: self.alias,
+            addresses: self.addresses.clone(),
+        };
+        deterministically_hash(&unsigned_announcement)
     }
 }
 
@@ -1522,6 +1541,27 @@ pub struct ChannelUpdate {
     pub cltv_expiry_delta: u64,
     pub htlc_minimum_value: u128,
     pub fee_value: u128,
+}
+
+impl ChannelUpdate {
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_update = ChannelUpdate {
+            signature: None,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            timestamp: self.timestamp,
+            message_flags: self.message_flags,
+            channel_flags: self.channel_flags,
+            cltv_expiry_delta: self.cltv_expiry_delta,
+            htlc_minimum_value: self.htlc_minimum_value,
+            fee_value: self.fee_value,
+        };
+        deterministically_hash(&unsigned_update)
+    }
+
+    pub fn sign(&mut self, private_key: &Privkey) {
+        self.signature = Some(private_key.sign(self.message_to_sign()));
+    }
 }
 
 impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
