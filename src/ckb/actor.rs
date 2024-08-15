@@ -1,4 +1,4 @@
-use ckb_sdk::{CkbRpcClient, RpcError};
+use ckb_sdk::{rpc::ResponseFormatGetter, CkbRpcClient, RpcError};
 use ckb_types::{core::TransactionView, packed, prelude::*};
 use ractor::{
     concurrency::{sleep, Duration},
@@ -35,7 +35,22 @@ pub enum CkbChainMessage {
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
-    TraceTx(TraceTxRequest, RpcReplyPort<ckb_jsonrpc_types::TxStatus>),
+    TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
+}
+
+#[derive(Debug)]
+pub struct TraceTxResponse {
+    pub tx: Option<ckb_jsonrpc_types::TransactionView>,
+    pub status: ckb_jsonrpc_types::TxStatus,
+}
+
+impl TraceTxResponse {
+    pub fn new(
+        tx: Option<ckb_jsonrpc_types::TransactionView>,
+        status: ckb_jsonrpc_types::TxStatus,
+    ) -> Self {
+        Self { tx, status }
+    }
 }
 
 #[ractor::async_trait]
@@ -169,8 +184,25 @@ impl Actor for CkbChainActor {
                                                 .block_number
                                                 .unwrap_or_default()
                                                 .into();
-                                            (tip_number >= commit_number + confirmations)
-                                                .then_some(resp.tx_status)
+                                            let transaction = match resp
+                                                .transaction
+                                                .map(|x| x.get_value())
+                                                .transpose()
+                                            {
+                                                Ok(Some(tx)) => Some(tx),
+                                                Ok(None) => None,
+                                                Err(err) => {
+                                                    tracing::error!(
+                                                        "[{}] get transaction failed: {:?}",
+                                                        actor_name,
+                                                        err
+                                                    );
+                                                    None
+                                                }
+                                            };
+                                            (tip_number >= commit_number + confirmations).then_some(
+                                                TraceTxResponse::new(transaction, resp.tx_status),
+                                            )
                                         }
                                         Err(err) => {
                                             tracing::error!(
@@ -182,7 +214,9 @@ impl Actor for CkbChainActor {
                                         }
                                     }
                                 }
-                                ckb_jsonrpc_types::Status::Rejected => Some(resp.tx_status),
+                                ckb_jsonrpc_types::Status::Rejected => {
+                                    Some(TraceTxResponse::new(None, resp.tx_status))
+                                }
                                 _ => None,
                             },
                             Err(err) => {
@@ -238,7 +272,7 @@ mod test_utils {
         prelude::{Builder, Entity, Pack, PackVec, Unpack},
     };
 
-    use crate::ckb::TraceTxRequest;
+    use crate::ckb::{TraceTxRequest, TraceTxResponse};
 
     use super::super::contracts::MockContext;
     use super::CkbChainMessage;
@@ -256,7 +290,13 @@ mod test_utils {
 
     pub struct MockChainActorState {
         ctx: MockContext,
-        tx_status: HashMap<Byte32, ckb_jsonrpc_types::Status>,
+        tx_status: HashMap<
+            Byte32,
+            (
+                ckb_jsonrpc_types::TransactionView,
+                ckb_jsonrpc_types::Status,
+            ),
+        >,
         cell_status: HashMap<OutPoint, CellStatus>,
     }
 
@@ -458,7 +498,7 @@ mod test_utils {
                         }
                     };
                     let (status, result) = f();
-                    state.tx_status.insert(tx.hash(), status);
+                    state.tx_status.insert(tx.hash(), (tx.into(), status));
                     if let Err(e) = reply_port.send(result) {
                         error!(
                             "[{}] send reply failed: {:?}",
@@ -468,11 +508,11 @@ mod test_utils {
                     }
                 }
                 TraceTx(tx, reply_port) => {
-                    let status = state
-                        .tx_status
-                        .get(&tx.tx_hash)
-                        .cloned()
-                        .unwrap_or(ckb_jsonrpc_types::Status::Unknown);
+                    let (tx_view, status) = match state.tx_status.get(&tx.tx_hash).cloned() {
+                        Some((tx_view, status)) => (Some(tx_view), status),
+                        None => (None, ckb_jsonrpc_types::Status::Unknown),
+                    };
+
                     debug!(
                         "Tracing transaction: {:?}, status: {:?}",
                         &tx.tx_hash, &status
@@ -483,7 +523,12 @@ mod test_utils {
                         block_hash: None,
                         reason: None,
                     };
-                    if let Err(e) = reply_port.send(status.into()) {
+                    let response = TraceTxResponse {
+                        tx: tx_view,
+                        status,
+                    };
+
+                    if let Err(e) = reply_port.send(response) {
                         error!(
                             "[{}] send reply failed: {:?}",
                             myself.get_name().unwrap_or_default(),
@@ -533,6 +578,7 @@ mod test_utils {
             request.clone()
         )
         .expect("chain actor alive")
+        .status
         .status
     }
 }

@@ -47,7 +47,7 @@ use super::types::{
 use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
-use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest};
+use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::fiber::types::{FiberChannelNormalOperationMessage, TxSignatures};
 use crate::{unwrap_or_return, Error};
@@ -1022,7 +1022,7 @@ impl NetworkActorState {
 
     async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
-        F: Send + 'static + FnOnce(Result<TxStatus, RactorErr<CkbChainMessage>>),
+        F: Send + 'static + FnOnce(Result<TraceTxResponse, RactorErr<CkbChainMessage>>),
     {
         debug!("Trying to broadcast transaction {:?}", &transaction);
         let chain = self.chain_actor.clone();
@@ -1282,8 +1282,12 @@ impl NetworkActorState {
         let network: ActorRef<NetworkActorMessage> = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(TxStatus {
-                    status: Status::Committed,
+                Ok(TraceTxResponse {
+                    status:
+                        TxStatus {
+                            status: Status::Committed,
+                            ..
+                        },
                     ..
                 }) => {
                     info!("Cloisng transaction {:?} confirmed", &tx_hash);
@@ -1405,8 +1409,12 @@ impl NetworkActorState {
         self.broadcast_tx_with_callback(transaction, move |result| {
             debug!("Funding transaction broadcast result: {:?}", &result);
             let message = match result {
-                Ok(TxStatus {
-                    status: Status::Committed,
+                Ok(TraceTxResponse {
+                    status:
+                        TxStatus {
+                            status: Status::Committed,
+                            ..
+                        },
                     ..
                 }) => {
                     info!("Funding transaction {:?} confirmed", &tx_hash);
@@ -1448,8 +1456,12 @@ impl NetworkActorState {
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
             let message = match result {
-                Ok(TxStatus {
-                    status: Status::Committed,
+                Ok(TraceTxResponse {
+                    status:
+                        TxStatus {
+                            status: Status::Committed,
+                            ..
+                        },
                     ..
                 }) => {
                     info!("Commitment transaction {:?} confirmed", tx_hash,);
