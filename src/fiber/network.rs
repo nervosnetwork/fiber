@@ -300,6 +300,7 @@ pub struct NetworkActor<S> {
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
+    network_graph: NetworkGraph<S>,
 }
 
 impl<S> NetworkActor<S>
@@ -314,7 +315,8 @@ where
         Self {
             event_sender,
             chain_actor,
-            store,
+            store: store.clone(),
+            network_graph: NetworkGraph::new(store),
         }
     }
 
@@ -856,8 +858,6 @@ pub struct NetworkActorState {
     // message of the same type.
     broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
-    // network graph
-    network_graph: NetworkGraph,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -1785,7 +1785,6 @@ where
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
-            network_graph: Default::default(),
         };
 
         // TODO: In current implementation, broadcasting node announcement message here

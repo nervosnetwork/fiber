@@ -1,4 +1,7 @@
-use super::serde_utils::{EntityHex, SliceHex};
+use super::{
+    channel::NetworkGraphStateStore,
+    serde_utils::{EntityHex, SliceHex},
+};
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -63,19 +66,34 @@ pub struct ChannelInfo {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct NetworkGraph {
+pub struct NetworkGraph<S> {
     chain_hash: Hash256,
     channels: HashMap<u64, ChannelInfo>,
     nodes: Vec<NodeInfo>,
+    store: S,
 }
 
-impl NetworkGraph {
-    pub fn new() -> Self {
-        Self {
+impl<S> NetworkGraph<S>
+where
+    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
+{
+    pub fn new(store: S) -> Self {
+        let mut network_graph = Self {
             chain_hash: Hash256::from([0; 32]),
             channels: HashMap::new(),
             nodes: vec![],
+            store,
+        };
+        network_graph.load_from_store();
+        network_graph
+    }
+
+    fn load_from_store(&mut self) {
+        let channels = self.store.get_channels(None);
+        for channel in channels.iter() {
+            self.channels.insert(channel.short_id, channel.clone());
         }
+        self.nodes = self.store.get_nodes(None);
     }
 
     pub fn add_node(&mut self, node_id: NodeId, node_info: NodeInfo) {
