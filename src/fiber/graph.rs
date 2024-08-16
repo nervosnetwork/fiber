@@ -3,6 +3,7 @@ use super::{
     serde_utils::{EntityHex, SliceHex},
 };
 use ckb_types::packed::OutPoint;
+use ckb_types::prelude::Entity;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -28,22 +29,33 @@ impl AsRef<[u8]> for NodeId {
 }
 
 #[serde_as]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Signature(#[serde_as(as = "SliceHex")] [u8; 64]);
 
+#[serde_as]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChannelId(#[serde_as(as = "EntityHex")] OutPoint);
+impl AsRef<[u8]> for ChannelId {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.
 pub struct NodeInfo {
     pub node_id: NodeId,
     /// All valid channels a node has announced
-    pub channel_short_ids: Vec<u64>,
+    #[serde_as(as = "Vec<EntityHex>")]
+    pub channel_short_ids: Vec<OutPoint>,
 
     /// Protocol features the node announced support for
     pub features: u64,
 
     /// When the last known update to the node state was issued.
     /// Value is opaque, as set in the announcement.
-    pub last_update: u32,
+    pub timestamp: u64,
 
     pub node_name: NodeName,
     pub signature: Signature,
@@ -57,18 +69,22 @@ pub struct ChannelInfo {
     pub node_a_signature: Signature,
     pub node_b_signature: Signature,
     pub ckb_signature: Signature,
-    pub short_id: u64,
+    pub channel_id: ChannelId,
     pub capacity: u64,
     pub features: u64,
     pub last_update: u32,
     #[serde_as(as = "EntityHex")]
     pub channel_output: OutPoint,
+    pub cltv_expiry_delta: u64,
+    pub htlc_minimum_value: u128,
+    // Timestamp of last updated
+    pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct NetworkGraph<S> {
     chain_hash: Hash256,
-    channels: HashMap<u64, ChannelInfo>,
+    channels: HashMap<ChannelId, ChannelInfo>,
     nodes: Vec<NodeInfo>,
     store: S,
 }
@@ -91,7 +107,8 @@ where
     fn load_from_store(&mut self) {
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
-            self.channels.insert(channel.short_id, channel.clone());
+            self.channels
+                .insert(channel.channel_id.clone(), channel.clone());
         }
         self.nodes = self.store.get_nodes(None);
     }
@@ -100,7 +117,7 @@ where
         self.nodes.push(node_info);
     }
 
-    pub fn add_channel(&mut self, channel_id: u64, channel_info: ChannelInfo) {
+    pub fn add_channel(&mut self, channel_id: ChannelId, channel_info: ChannelInfo) {
         self.channels.insert(channel_id, channel_info);
     }
 
@@ -108,7 +125,7 @@ where
         self.nodes.iter().find(|node| node.node_id == node_id)
     }
 
-    pub fn get_channel(&self, channel_id: u64) -> Option<&ChannelInfo> {
+    pub fn get_channel(&self, channel_id: ChannelId) -> Option<&ChannelInfo> {
         self.channels.get(&channel_id)
     }
 }

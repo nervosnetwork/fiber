@@ -9,7 +9,7 @@ use crate::{
         channel::{
             ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore,
         },
-        graph::{ChannelInfo, NodeId, NodeInfo},
+        graph::{ChannelId, ChannelInfo, NodeId, NodeInfo},
         types::Hash256,
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -77,10 +77,10 @@ impl Batch {
                     serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
                 )
             }
-            KeyValue::ChannelInfo(short_id, channel) => {
-                let mut key = Vec::with_capacity(9); // 1 for 161 + 8 for the bytes
+            KeyValue::ChannelInfo(channel_id, channel) => {
+                let mut key = Vec::with_capacity(37); // 1 for 161 + 8 for the bytes
                 key.push(161);
-                key.extend_from_slice(&short_id.to_le_bytes());
+                key.extend_from_slice(channel_id.as_ref());
                 (
                     key,
                     serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
@@ -111,7 +111,7 @@ impl Batch {
 /// | 32           | Hash256            | CkbInvoice               |
 /// | 64           | PeerId | Hash256   | ChannelState             |
 /// | 128          | PeerId             | NodeInfo                 |
-/// | 161          | U64                | ChannelInfo              |
+/// | 161          | ChannelId          | ChannelInfo              |
 /// +--------------+--------------------+--------------------------+
 ///
 
@@ -120,7 +120,7 @@ enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     NodeInfo(NodeId, NodeInfo),
-    ChannelInfo(u64, ChannelInfo),
+    ChannelInfo(ChannelId, ChannelInfo),
 }
 
 impl ChannelActorStateStore for Store {
@@ -210,12 +210,13 @@ impl InvoiceStore for Store {
 }
 
 impl NetworkGraphStateStore for Store {
-    fn get_channels(&self, short_id: Option<u64>) -> Vec<ChannelInfo> {
-        let prefix = match short_id {
-            Some(short_id) => [[161], [short_id as u8]].concat(),
-            None => vec![161],
-        };
-        let iter = self.db.prefix_iterator(prefix.as_ref());
+    fn get_channels(&self, channel_id: Option<ChannelId>) -> Vec<ChannelInfo> {
+        let mut key = Vec::with_capacity(37);
+        key.extend_from_slice(&[161]);
+        if let Some(channel_id) = channel_id {
+            key.extend_from_slice(channel_id.as_ref());
+        }
+        let iter = self.db.prefix_iterator(key.as_ref());
         iter.map(|(_, value)| {
             serde_json::from_slice(value.as_ref()).expect("deserialize ChannelInfo should be OK")
         })
@@ -238,7 +239,10 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelInfo(channel.short_id, channel.clone()));
+        batch.put_kv(KeyValue::ChannelInfo(
+            channel.channel_id.clone(),
+            channel.clone(),
+        ));
         batch.commit();
     }
 
