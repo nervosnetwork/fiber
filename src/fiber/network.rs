@@ -43,15 +43,15 @@ use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    ChannelAnnouncement, EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256,
-    NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
+    Privkey, Pubkey,
 };
 use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::fiber::types::{secp256k1_instance, FiberChannelNormalOperationMessage, TxSignatures};
+use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, TxSignatures};
 use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -728,7 +728,7 @@ where
                         FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
                             message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelNormalOperationMessage::TxSignatures(TxSignatures {
+                                FiberChannelMessage::TxSignatures(TxSignatures {
                                     channel_id: *channel_id,
                                     witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
                                     tx_hash: funding_tx.hash().into(),
@@ -756,7 +756,7 @@ where
                         FiberMessageWithPeerId {
                             peer_id: peer_id.clone(),
                             message: FiberMessage::ChannelNormalOperation(
-                                FiberChannelNormalOperationMessage::TxSignatures(TxSignatures {
+                                FiberChannelMessage::TxSignatures(TxSignatures {
                                     channel_id: *channel_id,
                                     witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
                                     tx_hash: funding_tx.hash().into(),
@@ -778,7 +778,7 @@ where
             NetworkActorCommand::BroadcastMessage(message) => {
                 const MAX_BROADCAST_SESSIONS: usize = 5;
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS);
-                // The order maters here because should_message_be_broadcasted
+                // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
                 if !peer_ids.is_empty() && state.should_message_be_broadcasted(&message) {

@@ -1652,7 +1652,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
 #[derive(Debug, Clone)]
 pub enum FiberMessage {
     ChannelInitialization(OpenChannel),
-    ChannelNormalOperation(FiberChannelNormalOperationMessage),
+    ChannelNormalOperation(FiberChannelMessage),
     BroadcastMessage(FiberBroadcastMessage),
 }
 
@@ -1662,93 +1662,73 @@ impl FiberMessage {
     }
 
     pub fn accept_channel(accept_channel: AcceptChannel) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::AcceptChannel(
-            accept_channel,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(accept_channel))
     }
 
     pub fn commitment_signed(commitment_signed: CommitmentSigned) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::CommitmentSigned(
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
             commitment_signed,
         ))
     }
 
     pub fn tx_signatures(tx_signatures: TxSignatures) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxSignatures(
-            tx_signatures,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(tx_signatures))
     }
 
     pub fn channel_ready(channel_ready: ChannelReady) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::ChannelReady(
-            channel_ready,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(channel_ready))
     }
 
     pub fn tx_update(tx_update: TxUpdate) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxUpdate(
-            tx_update,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(tx_update))
     }
 
     pub fn tx_complete(tx_complete: TxComplete) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxComplete(
-            tx_complete,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(tx_complete))
     }
 
     pub fn tx_abort(tx_abort: TxAbort) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxAbort(tx_abort))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(tx_abort))
     }
 
     pub fn tx_init_rbf(tx_init_rbf: TxInitRBF) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxInitRBF(
-            tx_init_rbf,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxInitRBF(tx_init_rbf))
     }
 
     pub fn tx_ack_rbf(tx_ack_rbf: TxAckRBF) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxAckRBF(
-            tx_ack_rbf,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAckRBF(tx_ack_rbf))
     }
 
     pub fn shutdown(shutdown: Shutdown) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::Shutdown(shutdown))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(shutdown))
     }
 
     pub fn closing_signed(closing_signed: ClosingSigned) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::ClosingSigned(
-            closing_signed,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(closing_signed))
     }
 
     pub fn add_tlc(add_tlc: AddTlc) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::AddTlc(add_tlc))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(add_tlc))
     }
 
     pub fn revoke_and_ack(revoke_and_ack: RevokeAndAck) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::RevokeAndAck(
-            revoke_and_ack,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke_and_ack))
     }
 
     pub fn remove_tlc(remove_tlc: RemoveTlc) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::RemoveTlc(
-            remove_tlc,
-        ))
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(remove_tlc))
     }
 
     pub fn reestablish_channel(reestablish_channel: ReestablishChannel) -> Self {
-        FiberMessage::ChannelNormalOperation(
-            FiberChannelNormalOperationMessage::ReestablishChannel(reestablish_channel),
-        )
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
+            reestablish_channel,
+        ))
     }
 
     pub fn announcement_signatures(announcement_signatures: AnnouncementSignatures) -> Self {
-        FiberMessage::ChannelNormalOperation(
-            FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signatures),
-        )
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+            announcement_signatures,
+        ))
     }
 
     pub fn node_announcement(node_announcement: NodeAnnouncement) -> Self {
@@ -1767,7 +1747,7 @@ impl FiberMessage {
 }
 
 #[derive(Debug, Clone)]
-pub enum FiberChannelNormalOperationMessage {
+pub enum FiberChannelMessage {
     AcceptChannel(AcceptChannel),
     CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
@@ -1786,39 +1766,29 @@ pub enum FiberChannelNormalOperationMessage {
     AnnouncementSignatures(AnnouncementSignatures),
 }
 
-impl FiberChannelNormalOperationMessage {
+impl FiberChannelMessage {
     pub fn get_channel_id(&self) -> Hash256 {
         match self {
-            FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
-                accept_channel.channel_id
-            }
-            FiberChannelNormalOperationMessage::CommitmentSigned(commitment_signed) => {
+            FiberChannelMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
+            FiberChannelMessage::CommitmentSigned(commitment_signed) => {
                 commitment_signed.channel_id
             }
-            FiberChannelNormalOperationMessage::TxSignatures(tx_signatures) => {
-                tx_signatures.channel_id
-            }
-            FiberChannelNormalOperationMessage::ChannelReady(channel_ready) => {
-                channel_ready.channel_id
-            }
-            FiberChannelNormalOperationMessage::TxUpdate(tx_update) => tx_update.channel_id,
-            FiberChannelNormalOperationMessage::TxComplete(tx_complete) => tx_complete.channel_id,
-            FiberChannelNormalOperationMessage::TxAbort(tx_abort) => tx_abort.channel_id,
-            FiberChannelNormalOperationMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
-            FiberChannelNormalOperationMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-            FiberChannelNormalOperationMessage::Shutdown(shutdown) => shutdown.channel_id,
-            FiberChannelNormalOperationMessage::ClosingSigned(closing_signed) => {
-                closing_signed.channel_id
-            }
-            FiberChannelNormalOperationMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            FiberChannelNormalOperationMessage::RevokeAndAck(revoke_and_ack) => {
-                revoke_and_ack.channel_id
-            }
-            FiberChannelNormalOperationMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            FiberChannelNormalOperationMessage::ReestablishChannel(reestablish_channel) => {
+            FiberChannelMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
+            FiberChannelMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+            FiberChannelMessage::TxUpdate(tx_update) => tx_update.channel_id,
+            FiberChannelMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+            FiberChannelMessage::TxAbort(tx_abort) => tx_abort.channel_id,
+            FiberChannelMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
+            FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
+            FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
+            FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
+            FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+            FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+            FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 reestablish_channel.channel_id
             }
-            FiberChannelNormalOperationMessage::AnnouncementSignatures(annoucement_signatures) => {
+            FiberChannelMessage::AnnouncementSignatures(annoucement_signatures) => {
                 annoucement_signatures.channel_id
             }
         }
@@ -1855,58 +1825,58 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
             FiberMessage::ChannelNormalOperation(m) => match m {
-                FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
+                FiberChannelMessage::AcceptChannel(accept_channel) => {
                     molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
                 }
-                FiberChannelNormalOperationMessage::CommitmentSigned(commitment_signed) => {
+                FiberChannelMessage::CommitmentSigned(commitment_signed) => {
                     molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed.into())
                 }
-                FiberChannelNormalOperationMessage::TxSignatures(tx_signatures) => {
+                FiberChannelMessage::TxSignatures(tx_signatures) => {
                     molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures.into())
                 }
-                FiberChannelNormalOperationMessage::ChannelReady(channel_ready) => {
+                FiberChannelMessage::ChannelReady(channel_ready) => {
                     molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready.into())
                 }
-                FiberChannelNormalOperationMessage::TxUpdate(tx_update) => {
+                FiberChannelMessage::TxUpdate(tx_update) => {
                     molecule_fiber::FiberMessageUnion::TxUpdate(tx_update.into())
                 }
-                FiberChannelNormalOperationMessage::TxComplete(tx_complete) => {
+                FiberChannelMessage::TxComplete(tx_complete) => {
                     molecule_fiber::FiberMessageUnion::TxComplete(tx_complete.into())
                 }
-                FiberChannelNormalOperationMessage::TxAbort(tx_abort) => {
+                FiberChannelMessage::TxAbort(tx_abort) => {
                     molecule_fiber::FiberMessageUnion::TxAbort(tx_abort.into())
                 }
-                FiberChannelNormalOperationMessage::TxInitRBF(tx_init_rbf) => {
+                FiberChannelMessage::TxInitRBF(tx_init_rbf) => {
                     molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf.into())
                 }
-                FiberChannelNormalOperationMessage::TxAckRBF(tx_ack_rbf) => {
+                FiberChannelMessage::TxAckRBF(tx_ack_rbf) => {
                     molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf.into())
                 }
-                FiberChannelNormalOperationMessage::Shutdown(shutdown) => {
+                FiberChannelMessage::Shutdown(shutdown) => {
                     molecule_fiber::FiberMessageUnion::Shutdown(shutdown.into())
                 }
-                FiberChannelNormalOperationMessage::ClosingSigned(closing_signed) => {
+                FiberChannelMessage::ClosingSigned(closing_signed) => {
                     molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
                 }
-                FiberChannelNormalOperationMessage::AddTlc(add_tlc) => {
+                FiberChannelMessage::AddTlc(add_tlc) => {
                     molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
                 }
-                FiberChannelNormalOperationMessage::RemoveTlc(remove_tlc) => {
+                FiberChannelMessage::RemoveTlc(remove_tlc) => {
                     molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
                 }
-                FiberChannelNormalOperationMessage::RevokeAndAck(revoke_and_ack) => {
+                FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
                     molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack.into())
                 }
-                FiberChannelNormalOperationMessage::ReestablishChannel(reestablish_channel) => {
+                FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                     molecule_fiber::FiberMessageUnion::ReestablishChannel(
                         reestablish_channel.into(),
                     )
                 }
-                FiberChannelNormalOperationMessage::AnnouncementSignatures(
-                    announcement_signatures,
-                ) => molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
-                    announcement_signatures.into(),
-                ),
+                FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                    molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
+                        announcement_signatures.into(),
+                    )
+                }
             },
             FiberMessage::BroadcastMessage(m) => match m {
                 FiberBroadcastMessage::NodeAnnouncement(node_annoucement) => {
@@ -1942,90 +1912,84 @@ impl TryFrom<molecule_fiber::FiberMessage> for FiberMessage {
                 FiberMessage::ChannelInitialization(open_channel.try_into()?)
             }
             molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::AcceptChannel(accept_channel.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(
+                    accept_channel.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::CommitmentSigned(
-                        commitment_signed.try_into()?,
-                    ),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
+                    commitment_signed.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::TxSignatures(tx_signatures.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
+                    tx_signatures.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::ChannelReady(channel_ready.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(
+                    channel_ready.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::TxUpdate(tx_update) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxUpdate(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(
                     tx_update.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::TxComplete(tx_complete) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::TxComplete(tx_complete.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(
+                    tx_complete.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::TxAbort(tx_abort) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxAbort(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(
                     tx_abort.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxInitRBF(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxInitRBF(
                     tx_init_rbf.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::TxAckRBF(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAckRBF(
                     tx_ack_rbf.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::Shutdown(shutdown) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::Shutdown(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(
                     shutdown.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::ClosingSigned(closing_signed.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(
+                    closing_signed.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::AddTlc(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(
                     add_tlc.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelNormalOperationMessage::RemoveTlc(
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(
                     remove_tlc.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::RevokeAndAck(revoke_and_ack.try_into()?),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(
+                    revoke_and_ack.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::ReestablishChannel(
-                        reestablish_channel.try_into()?,
-                    ),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
+                    reestablish_channel.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::AnnouncementSignatures(announcement_signatures) => {
-                FiberMessage::ChannelNormalOperation(
-                    FiberChannelNormalOperationMessage::AnnouncementSignatures(
-                        announcement_signatures.try_into()?,
-                    ),
-                )
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                    announcement_signatures.try_into()?,
+                ))
             }
             molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_announcement) => {
                 FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(

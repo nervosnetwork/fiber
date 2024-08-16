@@ -60,9 +60,9 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelNormalOperationMessage, FiberMessage, Hash256, LockTime,
-        OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
+        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+        TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -87,7 +87,7 @@ pub enum ChannelActorMessage {
     /// Some system events associated to a channel, such as the funding transaction confirmed.
     Event(ChannelEvent),
     /// PeerMessage are the messages sent from the peer.
-    PeerMessage(FiberChannelNormalOperationMessage),
+    PeerMessage(FiberChannelMessage),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -255,10 +255,10 @@ impl<S> ChannelActor<S> {
     pub async fn handle_peer_message(
         &self,
         state: &mut ChannelActorState,
-        message: FiberChannelNormalOperationMessage,
+        message: FiberChannelMessage,
     ) -> Result<(), ProcessingChannelError> {
         match message {
-            FiberChannelNormalOperationMessage::AnnouncementSignatures(announcement_signatures) => {
+            FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                 // TODO: check announcement_signatures validity here.
                 let AnnouncementSignatures {
                     node_signature,
@@ -272,7 +272,7 @@ impl<S> ChannelActor<S> {
                     .await;
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::AcceptChannel(accept_channel) => {
+            FiberChannelMessage::AcceptChannel(accept_channel) => {
                 state.handle_accept_channel_message(accept_channel)?;
                 let old_id = state.get_id();
                 state.fill_in_channel_id();
@@ -294,10 +294,10 @@ impl<S> ChannelActor<S> {
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::TxUpdate(tx) => {
+            FiberChannelMessage::TxUpdate(tx) => {
                 state.handle_tx_collaboration_msg(TxCollaborationMsg::TxUpdate(tx), &self.network)
             }
-            FiberChannelNormalOperationMessage::TxComplete(tx) => {
+            FiberChannelMessage::TxComplete(tx) => {
                 state.handle_tx_collaboration_msg(
                     TxCollaborationMsg::TxComplete(tx),
                     &self.network,
@@ -309,7 +309,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::CommitmentSigned(commitment_signed) => {
+            FiberChannelMessage::CommitmentSigned(commitment_signed) => {
                 state.handle_commitment_signed_message(commitment_signed, &self.network)?;
                 if let ChannelState::SigningCommitment(flags) = state.state {
                     if !flags.contains(SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT) {
@@ -331,7 +331,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::TxSignatures(tx_signatures) => {
+            FiberChannelMessage::TxSignatures(tx_signatures) => {
                 // We're the one who sent tx_signature first, and we received a tx_signature message.
                 // This means that the tx_signature procedure is now completed. Just change state,
                 // and exit.
@@ -373,11 +373,11 @@ impl<S> ChannelActor<S> {
                 state.handle_tx_signatures(&self.network, Some(tx_signatures.witnesses))?;
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::RevokeAndAck(revoke_and_ack) => {
+            FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
                 state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::ChannelReady(channel_ready) => {
+            FiberChannelMessage::ChannelReady(channel_ready) => {
                 let flags = match state.state {
                     ChannelState::AwaitingTxSignatures(flags) => {
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
@@ -410,7 +410,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::AddTlc(add_tlc) => {
+            FiberChannelMessage::AddTlc(add_tlc) => {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
                 let tlc = state.create_inbounding_tlc(add_tlc)?;
@@ -430,7 +430,7 @@ impl<S> ChannelActor<S> {
                 // this message, and our processing of this message is idempotent.
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::RemoveTlc(remove_tlc) => {
+            FiberChannelMessage::RemoveTlc(remove_tlc) => {
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
@@ -453,7 +453,7 @@ impl<S> ChannelActor<S> {
                 }
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::Shutdown(shutdown) => {
+            FiberChannelMessage::Shutdown(shutdown) => {
                 let flags = match state.state {
                     ChannelState::ChannelReady() => ShuttingDownFlags::empty(),
                     ChannelState::ShuttingDown(flags)
@@ -509,7 +509,7 @@ impl<S> ChannelActor<S> {
 
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::ClosingSigned(closing) => {
+            FiberChannelMessage::ClosingSigned(closing) => {
                 let ClosingSigned {
                     partial_signature,
                     channel_id,
@@ -532,13 +532,13 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::ReestablishChannel(reestablish_channel) => {
+            FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
                 Ok(())
             }
-            FiberChannelNormalOperationMessage::TxAbort(_)
-            | FiberChannelNormalOperationMessage::TxInitRBF(_)
-            | FiberChannelNormalOperationMessage::TxAckRBF(_) => {
+            FiberChannelMessage::TxAbort(_)
+            | FiberChannelMessage::TxInitRBF(_)
+            | FiberChannelMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
             }
@@ -1394,9 +1394,7 @@ where
             ChannelActorMessage::PeerMessage(message) => {
                 if state.reestablishing {
                     match message {
-                        FiberChannelNormalOperationMessage::ReestablishChannel(
-                            reestablish_channel,
-                        ) => {
+                        FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                             state.handle_reestablish_channel_message(
                                 reestablish_channel,
                                 &self.network,
