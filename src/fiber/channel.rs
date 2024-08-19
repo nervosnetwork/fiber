@@ -2497,7 +2497,7 @@ impl ChannelActorState {
             hex::encode(args),
             hex::encode(&args[..20])
         );
-        get_script_by_contract(Contract::FundingLock, args.as_slice())
+        get_script_by_contract(Contract::FundingLock, &args[0..20])
     }
 
     pub fn get_funding_request(&self) -> FundingRequest {
