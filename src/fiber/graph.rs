@@ -17,10 +17,6 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeName(#[serde_as(as = "SliceHex")] pub [u8; 32]);
 
-// #[serde_as]
-// #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-// pub struct Signature(#[serde_as(as = "SliceHex")] [u8; 64]);
-
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelId(#[serde_as(as = "EntityHex")] OutPoint);
@@ -114,6 +110,11 @@ where
 
     pub fn add_channel(&mut self, channel_id: ChannelId, channel_info: ChannelInfo) {
         self.channels.insert(channel_id, channel_info.clone());
+        if let Some(node) = self.nodes.get_mut(&channel_info.node_1) {
+            node.channel_short_ids
+                .push(channel_info.channel_output.clone());
+            self.store.insert_node(node.clone());
+        }
         self.store.insert_channel(channel_info);
     }
 

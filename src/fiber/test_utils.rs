@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use crate::fiber::graph::{ChannelId, ChannelInfo, NodeInfo};
+use crate::fiber::types::Pubkey;
 use ckb_types::{core::TransactionView, packed::Byte32};
 
 use ractor::{Actor, ActorRef};
@@ -29,7 +31,7 @@ use crate::{
 };
 
 use super::{
-    channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+    channel::{ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
@@ -243,6 +245,55 @@ impl NetworkNode {
 #[derive(Clone, Default)]
 struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
+    channels_map: Arc<RwLock<HashMap<ChannelId, ChannelInfo>>>,
+    nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
+}
+
+impl NetworkGraphStateStore for MemoryStore {
+    fn get_channels(&self, channel_id: Option<ChannelId>) -> Vec<ChannelInfo> {
+        if let Some(channel_id) = channel_id {
+            let mut res = vec![];
+
+            if let Some(channel) = self.channels_map.read().unwrap().get(&channel_id) {
+                res.push(channel.clone());
+            }
+            res
+        } else {
+            self.channels_map
+                .read()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn insert_channel(&self, channel: ChannelInfo) {
+        self.channels_map
+            .write()
+            .unwrap()
+            .insert(channel.channel_id.clone(), channel);
+    }
+
+    fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
+        if let Some(node_id) = node_id {
+            let mut res = vec![];
+
+            if let Some(node) = self.nodes_map.read().unwrap().get(&node_id) {
+                res.push(node.clone());
+            }
+            res
+        } else {
+            self.nodes_map.read().unwrap().values().cloned().collect()
+        }
+    }
+
+    fn insert_node(&self, node: NodeInfo) {
+        self.nodes_map
+            .write()
+            .unwrap()
+            .insert(node.node_id.clone(), node);
+    }
 }
 
 impl ChannelActorStateStore for MemoryStore {
