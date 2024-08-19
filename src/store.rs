@@ -9,8 +9,8 @@ use crate::{
         channel::{
             ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore,
         },
-        graph::{ChannelId, ChannelInfo, NodeId, NodeInfo},
-        types::Hash256,
+        graph::{ChannelId, ChannelInfo, NodeInfo},
+        types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
 };
@@ -71,7 +71,9 @@ impl Batch {
                 )
             }
             KeyValue::NodeInfo(id, node) => {
-                let key = [&[128], id.as_ref()].concat();
+                let mut key = Vec::with_capacity(34);
+                key.extend_from_slice(&[128]);
+                key.extend_from_slice(id.serialize().as_ref());
                 (
                     key,
                     serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
@@ -119,7 +121,7 @@ enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
-    NodeInfo(NodeId, NodeInfo),
+    NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(ChannelId, ChannelInfo),
 }
 
@@ -223,11 +225,11 @@ impl NetworkGraphStateStore for Store {
         .collect()
     }
 
-    fn get_nodes(&self, node_id: Option<NodeId>) -> Vec<NodeInfo> {
+    fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
         let mut key = Vec::with_capacity(34);
         key.extend_from_slice(&[128]);
         if let Some(id) = node_id {
-            key.extend_from_slice(id.as_ref());
+            key.extend_from_slice(id.serialize().as_ref());
         }
 
         let iter = self.db.prefix_iterator(key.as_ref());

@@ -11,7 +11,9 @@ use secp256k1::Message;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
+use std::u64;
 use tentacle::multiaddr::Protocol;
 use tentacle::{
     async_trait,
@@ -29,7 +31,7 @@ use tentacle::{
     traits::{ServiceHandle, ServiceProtocol},
     ProtocolId, SessionId,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, warn};
 
@@ -52,6 +54,7 @@ use super::FiberConfig;
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
+use crate::fiber::graph::{ChannelId, ChannelInfo, NodeInfo};
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, TxSignatures};
 use crate::{unwrap_or_return, Error};
 
@@ -300,7 +303,7 @@ pub struct NetworkActor<S> {
     event_sender: mpsc::Sender<NetworkServiceEvent>,
     chain_actor: ActorRef<CkbChainMessage>,
     store: S,
-    network_graph: NetworkGraph<S>,
+    network_graph: Arc<RwLock<NetworkGraph<S>>>,
 }
 
 impl<S> NetworkActor<S>
@@ -316,7 +319,7 @@ where
             event_sender,
             chain_actor,
             store: store.clone(),
-            network_graph: NetworkGraph::new(store),
+            network_graph: Arc::new(RwLock::new(NetworkGraph::new(store))),
         }
     }
 
@@ -373,7 +376,7 @@ where
                         NetworkActorCommand::BroadcastMessage(m.clone()),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                state.on_broadcasted_message(m).await;
+                self.on_broadcasted_message(m).await;
             }
             FiberMessage::ChannelNormalOperation(m) => {
                 let channel_id = m.get_channel_id();
@@ -811,6 +814,185 @@ where
             }
         };
         Ok(())
+    }
+
+    async fn on_broadcasted_message(&self, message: FiberBroadcastMessage) {
+        warn!("Received broadcasted message: {:?}", &message);
+        match message {
+            FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
+                let message = node_announcement.message_to_sign();
+                match node_announcement.signature {
+                    Some(ref signature)
+                        if signature.verify(&node_announcement.node_id, &message) =>
+                    {
+                        debug!(
+                            "Node announcement message verified: {:?}",
+                            &node_announcement
+                        );
+
+                        // Add the node to the network graph.
+                        let node_id = node_announcement.node_id;
+                        let node_info = NodeInfo {
+                            node_id: node_id.clone(),
+                            channel_short_ids: vec![],
+                            node_name: node_announcement.alias.clone(),
+                            features: node_announcement.features,
+                            signature: signature.clone(),
+                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                        };
+                        self.network_graph
+                            .write()
+                            .await
+                            .add_node(node_id, node_info);
+                    }
+                    _ => {
+                        error!(
+                            "Node announcement message signature verification failed: {:?}",
+                            &node_announcement
+                        );
+                        return;
+                    }
+                }
+            }
+
+            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                let message = channel_announcement.message_to_sign();
+                let (node_1_signature, node_2_signature, ckb_signature) = match (
+                    channel_announcement.node_1_signature,
+                    channel_announcement.node_2_signature,
+                    channel_announcement.ckb_signature,
+                ) {
+                    (Some(node_1_signature), Some(node_2_signature), Some(ckb_signature)) => {
+                        (node_1_signature, node_2_signature, ckb_signature)
+                    }
+                    _ => {
+                        error!(
+                            "Channel announcement message signature verification failed, some signatures are missing: {:?}",
+                            &channel_announcement
+                        );
+                        return;
+                    }
+                };
+
+                if !node_1_signature.verify(&channel_announcement.node_1_id, &message) {
+                    error!(
+                        "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
+                        &channel_announcement,
+                        &message,
+                        &node_1_signature,
+                        &channel_announcement.node_1_id
+                    );
+                    return;
+                }
+
+                if !node_2_signature.verify(&channel_announcement.node_2_id, &message) {
+                    error!(
+                        "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
+                        &channel_announcement,
+                        &message,
+                        &node_2_signature,
+                        &channel_announcement.node_2_id
+                    );
+                    return;
+                }
+
+                let tx = match call_t!(
+                    self.chain_actor,
+                    CkbChainMessage::TraceTx,
+                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                    TraceTxRequest {
+                        tx_hash: channel_announcement.channel_outpoint.tx_hash(),
+                        confirmations: 1,
+                    }
+                ) {
+                    Ok(TraceTxResponse {
+                        tx: Some(tx),
+                        status:
+                            TxStatus {
+                                status: Status::Committed,
+                                ..
+                            },
+                    }) => tx,
+                    _ => {
+                        error!(
+                            "Channel announcement transaction {:?} not found or not confirmed",
+                            &channel_announcement.channel_outpoint.tx_hash()
+                        );
+                        return;
+                    }
+                };
+
+                debug!("Channel announcement transaction found: {:?}", &tx);
+
+                let pubkey = channel_announcement.ckb_key.serialize();
+                let pubkey_hash = blake2b_256(pubkey.as_slice());
+                match tx.inner.outputs.get(0) {
+                    None => {
+                        error!(
+                            "On-chain transaction found but no output: {:?}",
+                            &channel_announcement
+                        );
+                        return;
+                    }
+                    Some(output) if output.lock.args.as_bytes() != pubkey_hash => {
+                        error!(
+                            "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
+                            &output.lock.args.as_bytes(), hex::encode(pubkey), &pubkey_hash
+                        );
+                        return;
+                    }
+                    _ => {}
+                };
+
+                if let Err(err) = secp256k1_instance().verify_schnorr(
+                    &ckb_signature,
+                    &Message::from_digest(message),
+                    &channel_announcement.ckb_key,
+                ) {
+                    error!(
+                        "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
+                        &channel_announcement,
+                        &message,
+                        &ckb_signature,
+                        &channel_announcement.ckb_key,
+                        &err
+                    );
+                    return;
+                }
+
+                debug!(
+                    "All signatures in channel announcement message verified: {:?}",
+                    &channel_announcement
+                );
+
+                // Add the channel to the network graph.
+                let channel_id: ChannelId = channel_announcement.channel_outpoint.clone().into();
+                let channel_info = ChannelInfo {
+                    chain_hash: channel_announcement.chain_hash,
+                    channel_id: channel_id.clone(),
+                    node_1: channel_announcement.node_1_id,
+                    node_2: channel_announcement.node_2_id,
+                    channel_output: channel_announcement.channel_outpoint,
+                    capacity: u64::MAX,
+                    features: channel_announcement.features,
+                    ckb_signature: ckb_signature,
+                    cltv_expiry_delta: 128, // FIXME(yukang), set this to a proper value
+                    htlc_minimum_value: 0,  // FIXME(yukang), set this to a proper value
+                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                };
+                self.network_graph
+                    .write()
+                    .await
+                    .add_channel(channel_id, channel_info)
+            }
+
+            FiberBroadcastMessage::ChannelUpdate(ref channel_update) => {
+                let _message = channel_update.message_to_sign();
+
+                // TODO: get pubkey of the node from the channel update message
+                // and verify the signature of the message with the pubkey.
+            }
+        }
     }
 }
 
@@ -1497,151 +1679,6 @@ impl NetworkActorState {
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         })
         .await;
-    }
-
-    async fn on_broadcasted_message(&mut self, message: FiberBroadcastMessage) {
-        warn!("Received broadcasted message: {:?}", &message);
-        match message {
-            FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
-                let message = node_announcement.message_to_sign();
-                match node_announcement.signature {
-                    Some(ref signature)
-                        if signature.verify(&node_announcement.node_id, &message) =>
-                    {
-                        debug!(
-                            "Node announcement message verified: {:?}",
-                            &node_announcement
-                        );
-                    }
-                    _ => {
-                        error!(
-                            "Node announcement message signature verification failed: {:?}",
-                            &node_announcement
-                        );
-                        return;
-                    }
-                }
-            }
-
-            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                let message = channel_announcement.message_to_sign();
-                let (node_1_signature, node_2_signature, ckb_signature) = match (
-                    channel_announcement.node_1_signature,
-                    channel_announcement.node_2_signature,
-                    channel_announcement.ckb_signature,
-                ) {
-                    (Some(node_1_signature), Some(node_2_signature), Some(ckb_signature)) => {
-                        (node_1_signature, node_2_signature, ckb_signature)
-                    }
-                    _ => {
-                        error!(
-                            "Channel announcement message signature verification failed, some signatures are missing: {:?}",
-                            &channel_announcement
-                        );
-                        return;
-                    }
-                };
-
-                if !node_1_signature.verify(&channel_announcement.node_1_id, &message) {
-                    error!(
-                        "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
-                        &channel_announcement,
-                        &message,
-                        &node_1_signature,
-                        &channel_announcement.node_1_id
-                    );
-                    return;
-                }
-
-                if !node_2_signature.verify(&channel_announcement.node_2_id, &message) {
-                    error!(
-                        "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
-                        &channel_announcement,
-                        &message,
-                        &node_2_signature,
-                        &channel_announcement.node_2_id
-                    );
-                    return;
-                }
-
-                let tx = match call_t!(
-                    self.chain_actor,
-                    CkbChainMessage::TraceTx,
-                    DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                    TraceTxRequest {
-                        tx_hash: channel_announcement.channel_outpoint.tx_hash(),
-                        confirmations: 1,
-                    }
-                ) {
-                    Ok(TraceTxResponse {
-                        tx: Some(tx),
-                        status:
-                            TxStatus {
-                                status: Status::Committed,
-                                ..
-                            },
-                    }) => tx,
-                    _ => {
-                        error!(
-                            "Channel announcement transaction {:?} not found or not confirmed",
-                            &channel_announcement.channel_outpoint.tx_hash()
-                        );
-                        return;
-                    }
-                };
-
-                debug!("Channel announcement transaction found: {:?}", &tx);
-
-                let pubkey = channel_announcement.ckb_key.serialize();
-                let pubkey_hash = blake2b_256(pubkey.as_slice());
-                match tx.inner.outputs.get(0) {
-                    None => {
-                        error!(
-                            "On-chain transaction found but no output: {:?}",
-                            &channel_announcement
-                        );
-                        return;
-                    }
-                    Some(output) if output.lock.args.as_bytes() != pubkey_hash => {
-                        error!(
-                            "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
-                            &output.lock.args.as_bytes(), hex::encode(pubkey), &pubkey_hash
-                        );
-                        return;
-                    }
-                    _ => {}
-                };
-
-                if let Err(err) = secp256k1_instance().verify_schnorr(
-                    &ckb_signature,
-                    &Message::from_digest(message),
-                    &channel_announcement.ckb_key,
-                ) {
-                    error!(
-                        "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
-                        &channel_announcement,
-                        &message,
-                        &ckb_signature,
-                        &channel_announcement.ckb_key,
-                        &err
-                    );
-                    return;
-                }
-
-                debug!(
-                    "All signatures in channel announcement message verified: {:?}",
-                    &channel_announcement
-                );
-                // TODO: Persist channel to nodes correspondence, so that we can use this later.
-            }
-
-            FiberBroadcastMessage::ChannelUpdate(ref channel_update) => {
-                let _message = channel_update.message_to_sign();
-
-                // TODO: get pubkey of the node from the channel update message
-                // and verify the signature of the message with the pubkey.
-            }
-        }
     }
 
     async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {

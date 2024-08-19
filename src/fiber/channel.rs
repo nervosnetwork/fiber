@@ -54,7 +54,7 @@ use crate::{
 use super::{
     config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_UDT_OCCUPIED_CAPACITY},
     fee::{calculate_shutdown_tx_fee, default_minimal_ckb_amount},
-    graph::{ChannelId, ChannelInfo, NodeId, NodeInfo},
+    graph::{ChannelId, ChannelInfo, NodeInfo},
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
     network::FiberMessageWithPeerId,
@@ -4583,7 +4583,7 @@ pub trait ChannelActorStateStore {
 
 pub trait NetworkGraphStateStore {
     fn get_channels(&self, peer_id: Option<ChannelId>) -> Vec<ChannelInfo>;
-    fn get_nodes(&self, peer_id: Option<NodeId>) -> Vec<NodeInfo>;
+    fn get_nodes(&self, peer_id: Option<Pubkey>) -> Vec<NodeInfo>;
     fn insert_channel(&self, channel: ChannelInfo);
     fn insert_node(&self, node: NodeInfo);
 }
