@@ -976,8 +976,8 @@ where
                     capacity: u64::MAX,
                     features: channel_announcement.features,
                     ckb_signature: ckb_signature,
-                    cltv_expiry_delta: 128, // FIXME(yukang), set this to a proper value
-                    htlc_minimum_value: 0,  // FIXME(yukang), set this to a proper value
+                    one_to_two: None,
+                    two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
                 };
                 self.network_graph
@@ -987,10 +987,42 @@ where
             }
 
             FiberBroadcastMessage::ChannelUpdate(ref channel_update) => {
-                let _message = channel_update.message_to_sign();
+                let message = channel_update.message_to_sign();
 
-                // TODO: get pubkey of the node from the channel update message
-                // and verify the signature of the message with the pubkey.
+                let signature = match channel_update.signature {
+                    Some(ref signature) => signature,
+                    None => {
+                        error!(
+                            "Channel update message signature verification failed: {:?}",
+                            &channel_update
+                        );
+                        return;
+                    }
+                };
+                let channel_id = ChannelId::from(channel_update.channel_outpoint.clone());
+                let mut network_graph = self.network_graph.write().await;
+                let channel = network_graph.get_channel(channel_id.clone());
+                if let Some(channel) = channel {
+                    let pubkey = if channel_update.message_flags & 1 == 1 {
+                        &channel.node_1
+                    } else {
+                        &channel.node_2
+                    };
+                    if !signature.verify(pubkey, &message) {
+                        error!(
+                            "Channel update message signature verification failed: {:?}",
+                            &channel_update
+                        );
+                        return;
+                    }
+                    network_graph.process_channel_update(channel_id, channel_update.clone());
+                } else {
+                    error!(
+                        "Channel update message signature verification failed: {:?}",
+                        &channel_update
+                    );
+                    return;
+                }
             }
         }
     }

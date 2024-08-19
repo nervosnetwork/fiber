@@ -1,5 +1,5 @@
 use super::config::AnnouncedNodeName;
-use super::types::{EcdsaSignature, Hash256};
+use super::types::{ChannelUpdate, EcdsaSignature, Hash256};
 use super::{
     channel::NetworkGraphStateStore,
     serde_utils::{EntityHex, SliceHex},
@@ -53,7 +53,7 @@ pub struct NodeInfo {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub chain_hash: Hash256,
     pub node_1: Pubkey,
@@ -64,10 +64,29 @@ pub struct ChannelInfo {
     pub features: u64,
     #[serde_as(as = "EntityHex")]
     pub channel_output: OutPoint,
-    pub cltv_expiry_delta: u64,
-    pub htlc_minimum_value: u128,
+    pub one_to_two: Option<ChannelUpdateInfo>,
+    pub two_to_one: Option<ChannelUpdateInfo>,
     // Timestamp of last updated
     pub timestamp: u128,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelUpdateInfo {
+    pub last_update: u64,
+    /// Whether the channel can be currently used for payments (in this one direction).
+    pub enabled: bool,
+    /// The difference in CLTV values that you must have when routing through this channel.
+    pub cltv_expiry_delta: u64,
+    /// The minimum value, which must be relayed to the next hop via the channel
+    pub htlc_minimum_value: u128,
+    /// The maximum value which may be relayed to the next hop via the channel.
+    pub htlc_maximum_value: u128,
+    pub fee_rate: u64,
+    /// Most recent update for the channel received from the network
+    /// Mostly redundant with the data we store in fields explicitly.
+    /// Everything else is useful only for sending out for initial routing sync.
+    /// Not stored if contains excess data to prevent DoS.
+    pub last_update_message: Option<ChannelUpdate>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,5 +143,24 @@ where
 
     pub fn get_channel(&self, channel_id: ChannelId) -> Option<&ChannelInfo> {
         self.channels.get(&channel_id)
+    }
+
+    pub fn process_channel_update(&mut self, channel_id: ChannelId, update: ChannelUpdate) {
+        let channel = self.channels.get_mut(&channel_id).unwrap();
+        let update_info = match update.message_flags & 1 == 1 {
+            true => &mut channel.one_to_two,
+            false => &mut channel.two_to_one,
+        };
+        update_info.get_or_insert(ChannelUpdateInfo {
+            last_update: update.timestamp,
+            enabled: true,
+            cltv_expiry_delta: update.cltv_expiry_delta,
+            htlc_minimum_value: update.htlc_minimum_value,
+            htlc_maximum_value: update.htlc_maximum_value,
+            fee_rate: 0,
+            last_update_message: None,
+        });
+        self.store.insert_channel(channel.to_owned());
+        return;
     }
 }

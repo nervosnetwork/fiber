@@ -1574,7 +1574,7 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     pub signature: Option<EcdsaSignature>,
@@ -1586,6 +1586,7 @@ pub struct ChannelUpdate {
     pub channel_flags: u32,
     pub cltv_expiry_delta: u64,
     pub htlc_minimum_value: u128,
+    pub htlc_maximum_value: u128,
     pub fee_value: u128,
 }
 
@@ -1600,6 +1601,7 @@ impl ChannelUpdate {
             channel_flags: self.channel_flags,
             cltv_expiry_delta: self.cltv_expiry_delta,
             htlc_minimum_value: self.htlc_minimum_value,
+            htlc_maximum_value: self.htlc_maximum_value,
             fee_value: self.fee_value,
         };
         deterministically_hash(&unsigned_update)
@@ -1626,6 +1628,7 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .channel_flags(channel_update.channel_flags.pack())
             .cltv_expiry_delta(channel_update.cltv_expiry_delta.pack())
             .htlc_minimum_value(channel_update.htlc_minimum_value.pack())
+            .htlc_maximum_value(channel_update.htlc_maximum_value.pack())
             .fee_value(channel_update.fee_value.pack())
             .build()
     }
@@ -1644,6 +1647,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             channel_flags: channel_update.channel_flags().unpack(),
             cltv_expiry_delta: channel_update.cltv_expiry_delta().unpack(),
             htlc_minimum_value: channel_update.htlc_minimum_value().unpack(),
+            htlc_maximum_value: channel_update.htlc_maximum_value().unpack(),
             fee_value: channel_update.fee_value().unpack(),
         })
     }

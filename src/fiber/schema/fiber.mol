@@ -194,6 +194,7 @@ table ChannelUpdate {
     channel_flags: Uint32,
     cltv_expiry_delta: Uint64,
     htlc_minimum_value: Uint128,
+    htlc_maximum_value: Uint128,
     fee_value: Uint128,
 }
 

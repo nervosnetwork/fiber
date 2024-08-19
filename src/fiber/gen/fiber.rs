@@ -11280,6 +11280,12 @@ impl ::core::fmt::Display for ChannelUpdate {
             "htlc_minimum_value",
             self.htlc_minimum_value()
         )?;
+        write!(
+            f,
+            ", {}: {}",
+            "htlc_maximum_value",
+            self.htlc_maximum_value()
+        )?;
         write!(f, ", {}: {}", "fee_value", self.fee_value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -11295,15 +11301,16 @@ impl ::core::default::Default for ChannelUpdate {
     }
 }
 impl ChannelUpdate {
-    const DEFAULT_VALUE: [u8; 168] = [
-        168, 0, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 76, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 124, 0, 0,
-        0, 128, 0, 0, 0, 136, 0, 0, 0, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 188] = [
+        188, 0, 0, 0, 44, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 116, 0, 0, 0, 124, 0, 0, 0, 128, 0, 0,
+        0, 132, 0, 0, 0, 140, 0, 0, 0, 156, 0, 0, 0, 172, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -11368,11 +11375,17 @@ impl ChannelUpdate {
         let end = molecule::unpack_number(&slice[36..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn fee_value(&self) -> Uint128 {
+    pub fn htlc_maximum_value(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn fee_value(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
+            let end = molecule::unpack_number(&slice[44..]) as usize;
             Uint128::new_unchecked(self.0.slice(start..end))
         } else {
             Uint128::new_unchecked(self.0.slice(start..))
@@ -11413,6 +11426,7 @@ impl molecule::prelude::Entity for ChannelUpdate {
             .channel_flags(self.channel_flags())
             .cltv_expiry_delta(self.cltv_expiry_delta())
             .htlc_minimum_value(self.htlc_minimum_value())
+            .htlc_maximum_value(self.htlc_maximum_value())
             .fee_value(self.fee_value())
     }
 }
@@ -11448,6 +11462,12 @@ impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
             "htlc_minimum_value",
             self.htlc_minimum_value()
         )?;
+        write!(
+            f,
+            ", {}: {}",
+            "htlc_maximum_value",
+            self.htlc_maximum_value()
+        )?;
         write!(f, ", {}: {}", "fee_value", self.fee_value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -11457,7 +11477,7 @@ impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
     }
 }
 impl<'r> ChannelUpdateReader<'r> {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -11522,11 +11542,17 @@ impl<'r> ChannelUpdateReader<'r> {
         let end = molecule::unpack_number(&slice[36..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn fee_value(&self) -> Uint128Reader<'r> {
+    pub fn htlc_maximum_value(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn fee_value(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
+            let end = molecule::unpack_number(&slice[44..]) as usize;
             Uint128Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
             Uint128Reader::new_unchecked(&self.as_slice()[start..])
@@ -11588,6 +11614,7 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelUpdateReader<'r> {
         Uint64Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         Uint128Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         Uint128Reader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
         Ok(())
     }
 }
@@ -11601,10 +11628,11 @@ pub struct ChannelUpdateBuilder {
     pub(crate) channel_flags: Uint32,
     pub(crate) cltv_expiry_delta: Uint64,
     pub(crate) htlc_minimum_value: Uint128,
+    pub(crate) htlc_maximum_value: Uint128,
     pub(crate) fee_value: Uint128,
 }
 impl ChannelUpdateBuilder {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 10;
     pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
@@ -11637,6 +11665,10 @@ impl ChannelUpdateBuilder {
         self.htlc_minimum_value = v;
         self
     }
+    pub fn htlc_maximum_value(mut self, v: Uint128) -> Self {
+        self.htlc_maximum_value = v;
+        self
+    }
     pub fn fee_value(mut self, v: Uint128) -> Self {
         self.fee_value = v;
         self
@@ -11655,6 +11687,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
             + self.channel_flags.as_slice().len()
             + self.cltv_expiry_delta.as_slice().len()
             + self.htlc_minimum_value.as_slice().len()
+            + self.htlc_maximum_value.as_slice().len()
             + self.fee_value.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -11677,6 +11710,8 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         offsets.push(total_size);
         total_size += self.htlc_minimum_value.as_slice().len();
         offsets.push(total_size);
+        total_size += self.htlc_maximum_value.as_slice().len();
+        offsets.push(total_size);
         total_size += self.fee_value.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
@@ -11690,6 +11725,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         writer.write_all(self.channel_flags.as_slice())?;
         writer.write_all(self.cltv_expiry_delta.as_slice())?;
         writer.write_all(self.htlc_minimum_value.as_slice())?;
+        writer.write_all(self.htlc_maximum_value.as_slice())?;
         writer.write_all(self.fee_value.as_slice())?;
         Ok(())
     }
