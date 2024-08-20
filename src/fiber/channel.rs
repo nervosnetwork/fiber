@@ -64,11 +64,10 @@ use super::{
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
 
-// - `version`: 8 bytes, u64 in little-endian
-// - `funding_out_point`: 36 bytes, out point of the funding transaction
+// - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
-pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
+pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // Some part of the code liberally gets previous commitment number, which is
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
@@ -2892,14 +2891,8 @@ impl ChannelActorState {
     pub fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
-        version: u64,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
-        create_witness_for_funding_cell(
-            self.get_funding_lock_script_xonly(),
-            self.get_funding_transaction_outpoint(),
-            signature,
-            version,
-        )
+        create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature)
     }
 
     pub fn aggregate_partial_signatures_to_consume_funding_cell(
@@ -2930,7 +2923,7 @@ impl ChannelActorState {
             partial_signatures,
         )?;
 
-        let witness = self.create_witness_for_funding_cell(signature, version);
+        let witness = self.create_witness_for_funding_cell(signature);
         Ok(tx
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
@@ -4313,9 +4306,7 @@ pub struct PartiallySignedCommitmentTransaction {
 
 pub fn create_witness_for_funding_cell(
     lock_key_xonly: [u8; 32],
-    out_point: OutPoint,
     signature: CompactSignature,
-    version: u64,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
 
@@ -4323,19 +4314,8 @@ pub fn create_witness_for_funding_cell(
     // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
     let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     witness.extend_from_slice(&empty_witness_args);
-    for bytes in [
-        version.to_le_bytes().as_ref(),
-        out_point.as_slice(),
-        lock_key_xonly.as_slice(),
-        signature.serialize().as_slice(),
-    ] {
-        debug!(
-            "Extending witness with {} bytes: {:?}",
-            bytes.len(),
-            hex::encode(bytes)
-        );
-        witness.extend_from_slice(bytes);
-    }
+    witness.extend_from_slice(lock_key_xonly.as_slice());
+    witness.extend_from_slice(signature.serialize().as_slice());
 
     debug!(
         "Building witnesses for transaction to consume funding cell: {:?}",
