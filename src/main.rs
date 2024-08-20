@@ -18,7 +18,7 @@ use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorM
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use fnn::{start_cch, start_network, start_ldk, start_rpc, Config};
+use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
 use tracing_subscriber::fmt::format;
 
 #[tokio::main]

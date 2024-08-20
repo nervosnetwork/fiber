@@ -1574,7 +1574,7 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     pub signature: Option<EcdsaSignature>,

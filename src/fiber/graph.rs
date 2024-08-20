@@ -53,7 +53,7 @@ pub struct NodeInfo {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub chain_hash: Hash256,
     pub node_1: Pubkey,
@@ -70,7 +70,7 @@ pub struct ChannelInfo {
     pub timestamp: u128,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
     pub last_update: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
@@ -116,6 +116,7 @@ where
             self.channels
                 .insert(channel.channel_id.clone(), channel.clone());
         }
+        eprintln!("load_from_store channels: {:?}", self.channels);
         let nodes = self.store.get_nodes(None);
         for node in nodes.iter() {
             self.nodes.insert(node.node_id, node.clone());
@@ -127,7 +128,8 @@ where
         self.store.insert_node(node_info);
     }
 
-    pub fn add_channel(&mut self, channel_id: ChannelId, channel_info: ChannelInfo) {
+    pub fn add_channel(&mut self, channel_info: ChannelInfo) {
+        let channel_id = channel_info.channel_id.clone();
         self.channels.insert(channel_id, channel_info.clone());
         if let Some(node) = self.nodes.get_mut(&channel_info.node_1) {
             node.channel_short_ids
@@ -141,8 +143,8 @@ where
         self.nodes.get(&node_id)
     }
 
-    pub fn get_channel(&self, channel_id: ChannelId) -> Option<&ChannelInfo> {
-        self.channels.get(&channel_id)
+    pub fn get_channel(&self, channel_id: &ChannelId) -> Option<&ChannelInfo> {
+        self.channels.get(channel_id)
     }
 
     pub fn process_channel_update(&mut self, channel_id: ChannelId, update: ChannelUpdate) {
@@ -162,5 +164,129 @@ where
         });
         self.store.insert_channel(channel.to_owned());
         return;
+    }
+
+    #[cfg(test)]
+    pub fn reset(&mut self) {
+        self.channels.clear();
+        self.nodes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use secp256k1::Message;
+    use secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+    #[test]
+    fn test_channel_id() {
+        let out_point = OutPoint::default();
+        let channel_id = ChannelId::from(out_point.clone());
+        assert_eq!(channel_id.0, out_point);
+    }
+
+    #[test]
+    fn test_channel_info() {
+        let secp = Secp256k1::new();
+        let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+        let public_key1 = PublicKey::from_secret_key(&secp, &secret_key1);
+
+        let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+        let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
+
+        let channel_info = ChannelInfo {
+            chain_hash: Hash256::default(),
+            node_1: public_key1.into(),
+            node_2: public_key2.into(),
+            ckb_signature: SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes"),
+            channel_id: ChannelId::from(OutPoint::default()),
+            capacity: 0,
+            features: 0,
+            channel_output: OutPoint::default(),
+            one_to_two: None,
+            two_to_one: None,
+            timestamp: 0,
+        };
+        let channel_info_ser = serde_json::to_string(&channel_info).unwrap();
+        let channel_info_de: ChannelInfo = serde_json::from_str(&channel_info_ser).unwrap();
+        assert_eq!(channel_info, channel_info_de);
+    }
+
+    #[test]
+    fn test_network_graph() {
+        let temp_path = tempfile::tempdir().unwrap();
+        let store = Store::new(temp_path.path());
+        let mut network_graph = NetworkGraph::new(store);
+
+        let channel_id = ChannelId::from(OutPoint::from_slice(&[0x01; 36]).unwrap());
+
+        let secp = Secp256k1::new();
+        let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+        let public_key1 = PublicKey::from_secret_key(&secp, &secret_key1);
+
+        let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
+        let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
+
+        let ckb_signature = SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes");
+
+        let secp = Secp256k1::new();
+        let (secret_key, _public_key) = secp.generate_keypair(&mut rand::thread_rng());
+        let message = Message::from_digest_slice(&[0xab; 32]).expect("32 bytes");
+        let sig1 = secp.sign_ecdsa(&message, &secret_key);
+        let sig2 = secp.sign_ecdsa(&message, &secret_key);
+
+        let node1 = NodeInfo {
+            node_id: public_key1.into(),
+            channel_short_ids: vec![],
+            features: 0,
+            timestamp: 0,
+            node_name: AnnouncedNodeName::default(),
+            signature: EcdsaSignature::from(sig1),
+        };
+
+        let node2 = NodeInfo {
+            node_id: public_key2.into(),
+            channel_short_ids: vec![],
+            features: 0,
+            timestamp: 0,
+            node_name: AnnouncedNodeName::default(),
+            signature: EcdsaSignature::from(sig2),
+        };
+        network_graph.add_node(public_key1.into(), node1.clone());
+        assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
+        network_graph.add_node(public_key2.into(), node2.clone());
+        assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
+
+        network_graph.reset();
+        assert_eq!(network_graph.get_channel(&channel_id), None);
+        network_graph.load_from_store();
+        network_graph.add_node(public_key1.into(), node1.clone());
+        assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
+        network_graph.add_node(public_key2.into(), node2.clone());
+        assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
+
+        let channel_info = ChannelInfo {
+            chain_hash: Hash256::default(),
+            node_1: public_key1.into(),
+            node_2: public_key2.into(),
+            ckb_signature,
+            channel_id: channel_id.clone(),
+            capacity: 0,
+            features: 0,
+            channel_output: OutPoint::default(),
+            one_to_two: None,
+            two_to_one: None,
+            timestamp: 0,
+        };
+        network_graph.add_channel(channel_info.clone());
+        assert_eq!(network_graph.get_channel(&channel_id), Some(&channel_info));
+
+        network_graph.reset();
+        assert_eq!(network_graph.get_channel(&channel_id), None);
+        network_graph.load_from_store();
+
+        assert_eq!(network_graph.get_channel(&channel_id), Some(&channel_info));
     }
 }

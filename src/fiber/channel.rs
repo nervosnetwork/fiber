@@ -5238,7 +5238,7 @@ mod tests {
         let node_a_funding_amount = 100000000000;
         let node_b_funding_amount = 6200000000;
 
-        let (node_a, node_b, new_channel_id) = create_nodes_with_established_channel(
+        let (_node_a, _node_b, _new_channel_id) = create_nodes_with_established_channel(
             node_a_funding_amount,
             node_b_funding_amount,
             true,
@@ -5246,6 +5246,7 @@ mod tests {
         .await;
         // Wait for the channel announcement to be broadcasted
         tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+        // FIXME: add assertion
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {

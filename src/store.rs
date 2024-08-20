@@ -50,42 +50,47 @@ impl Batch {
     fn put_kv(&mut self, key_value: KeyValue) {
         let (key, value) = match key_value {
             KeyValue::ChannelActorState(id, state) => {
-                let key = [&[0], id.as_ref()].concat();
+                let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
                 (
                     key,
                     serde_json::to_vec(&state).expect("serialize ChannelActorState should be OK"),
                 )
             }
             KeyValue::CkbInvoice(id, invoice) => {
-                let key = [&[32], id.as_ref()].concat();
+                let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
                 (
                     key,
                     serde_json::to_vec(&invoice).expect("serialize CkbInvoice should be OK"),
                 )
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
-                let key = [&[64], peer_id.as_bytes(), channel_id.as_ref()].concat();
+                let key = [
+                    &[PEER_ID_CHANNEL_ID_PREFIX],
+                    peer_id.as_bytes(),
+                    channel_id.as_ref(),
+                ]
+                .concat();
                 (
                     key,
                     serde_json::to_vec(&state).expect("serialize ChannelState should be OK"),
                 )
             }
-            KeyValue::NodeInfo(id, node) => {
-                let mut key = Vec::with_capacity(34);
-                key.extend_from_slice(&[128]);
-                key.extend_from_slice(id.serialize().as_ref());
-                (
-                    key,
-                    serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
-                )
-            }
             KeyValue::ChannelInfo(channel_id, channel) => {
-                let mut key = Vec::with_capacity(37); // 1 for 161 + 8 for the bytes
-                key.push(161);
+                let mut key = Vec::with_capacity(37);
+                key.push(CHANNEL_INFO_PREFIX);
                 key.extend_from_slice(channel_id.as_ref());
                 (
                     key,
                     serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
+                )
+            }
+            KeyValue::NodeInfo(id, node) => {
+                let mut key = Vec::with_capacity(34);
+                key.push(NODE_INFO_PREFIX);
+                key.extend_from_slice(id.serialize().as_ref());
+                (
+                    key,
+                    serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
                 )
             }
         };
@@ -112,10 +117,16 @@ impl Batch {
 /// | 0            | Hash256            | ChannelActorState        |
 /// | 32           | Hash256            | CkbInvoice               |
 /// | 64           | PeerId | Hash256   | ChannelState             |
-/// | 128          | PeerId             | NodeInfo                 |
-/// | 161          | ChannelId          | ChannelInfo              |
+/// | 96           | ChannelId          | ChannelInfo              |
+/// | 128          | NodeId             | NodeInfo                 |
 /// +--------------+--------------------+--------------------------+
 ///
+
+const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
+const CKB_INVOICE_PREFIX: u8 = 32;
+const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
+const CHANNEL_INFO_PREFIX: u8 = 96;
+const NODE_INFO_PREFIX: u8 = 128;
 
 enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
@@ -128,7 +139,7 @@ enum KeyValue {
 impl ChannelActorStateStore for Store {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[0]);
+        key.extend_from_slice(&[CHANNEL_ACTOR_STATE_PREFIX]);
         key.extend_from_slice(id.as_ref());
 
         self.get(key).map(|v| {
@@ -149,7 +160,7 @@ impl ChannelActorStateStore for Store {
     fn delete_channel_actor_state(&self, id: &Hash256) {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
-            batch.delete([&[0], id.as_ref()].concat());
+            batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
             batch.delete([&[64], state.get_remote_peer_id().as_bytes(), id.as_ref()].concat());
             batch.commit();
         }
@@ -213,27 +224,41 @@ impl InvoiceStore for Store {
 
 impl NetworkGraphStateStore for Store {
     fn get_channels(&self, channel_id: Option<ChannelId>) -> Vec<ChannelInfo> {
-        let mut key = Vec::with_capacity(37);
-        key.extend_from_slice(&[161]);
-        if let Some(channel_id) = channel_id {
-            key.extend_from_slice(channel_id.as_ref());
-        }
-        let iter = self.db.prefix_iterator(key.as_ref());
-        iter.map(|(_, value)| {
+        let key = match channel_id.clone() {
+            Some(channel_id) => {
+                let mut key = Vec::with_capacity(37);
+                key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
+                key.extend_from_slice(channel_id.as_ref());
+                key
+            }
+            None => vec![CHANNEL_INFO_PREFIX],
+        };
+
+        let iter = self
+            .db
+            .prefix_iterator(key.as_ref())
+            .take_while(|(col_key, _)| col_key.starts_with(&key));
+        iter.map(|(_key, value)| {
             serde_json::from_slice(value.as_ref()).expect("deserialize ChannelInfo should be OK")
         })
         .collect()
     }
 
     fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
-        let mut key = Vec::with_capacity(34);
-        key.extend_from_slice(&[128]);
-        if let Some(id) = node_id {
-            key.extend_from_slice(id.serialize().as_ref());
-        }
-
-        let iter = self.db.prefix_iterator(key.as_ref());
-        iter.map(|(_, value)| {
+        let key = match node_id {
+            Some(node_id) => {
+                let mut key = Vec::with_capacity(34);
+                key.extend_from_slice(&[NODE_INFO_PREFIX]);
+                key.extend_from_slice(node_id.serialize().as_ref());
+                key
+            }
+            None => vec![NODE_INFO_PREFIX],
+        };
+        let iter = self
+            .db
+            .prefix_iterator(key.as_ref())
+            .take_while(|(col_key, _)| col_key.starts_with(&key));
+        iter.map(|(_col_key, value)| {
             serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
         })
         .collect()

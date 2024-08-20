@@ -980,10 +980,7 @@ where
                     two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
                 };
-                self.network_graph
-                    .write()
-                    .await
-                    .add_channel(channel_id, channel_info)
+                self.network_graph.write().await.add_channel(channel_info)
             }
 
             FiberBroadcastMessage::ChannelUpdate(ref channel_update) => {
@@ -1001,7 +998,7 @@ where
                 };
                 let channel_id = ChannelId::from(channel_update.channel_outpoint.clone());
                 let mut network_graph = self.network_graph.write().await;
-                let channel = network_graph.get_channel(channel_id.clone());
+                let channel = network_graph.get_channel(&channel_id);
                 if let Some(channel) = channel {
                     let pubkey = if channel_update.message_flags & 1 == 1 {
                         &channel.node_1
