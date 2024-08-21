@@ -38,12 +38,12 @@ use tracing::{debug, error, info, warn};
 use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelSubscribers, NetworkGraphStateStore, OpenChannelParameter, ProcessingChannelError,
-    ProcessingChannelResult, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
+    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
-use super::graph::NetworkGraph;
+use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
@@ -399,6 +399,10 @@ where
                 self.on_service_event(e).await;
             }
             NetworkActorEvent::PeerConnected(id, pubkey, session) => {
+                self.network_graph
+                    .write()
+                    .await
+                    .add_connected_peer(&id, session.address.clone());
                 state
                     .on_peer_connected(&id, pubkey, &session, self.store.clone())
                     .await;
@@ -413,6 +417,7 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::PeerDisconnected(id, session) => {
+                self.network_graph.write().await.remove_connected_peer(&id);
                 state.on_peer_disconnected(&id);
                 // Notify outside observers.
                 myself
@@ -1889,6 +1894,16 @@ where
             broadcasted_messages: Default::default(),
             channel_subscribers,
         };
+
+        // load the connected peers from the network graph
+
+        let graph = self.network_graph.read().await;
+        let peers = graph.get_connected_peers();
+        for (_peer_id, addr) in peers {
+            myself.send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ConnectPeer(addr.clone()),
+            ))?;
+        }
 
         // TODO: In current implementation, broadcasting node announcement message here
         // is actually useless, because we haven't connected to any peer yet.

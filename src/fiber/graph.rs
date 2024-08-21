@@ -1,10 +1,12 @@
 use super::types::{ChannelUpdate, Hash256, NodeAnnouncement};
-use super::{channel::NetworkGraphStateStore, serde_utils::EntityHex, types::Pubkey};
+use super::{serde_utils::EntityHex, types::Pubkey};
 use ckb_types::packed::OutPoint;
 use secp256k1::schnorr::Signature as SchnorrSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
+use tentacle::multiaddr::Multiaddr;
+use tentacle::secio::PeerId;
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -62,6 +64,8 @@ pub struct ChannelUpdateInfo {
 #[derive(Clone, Debug, Default)]
 pub struct NetworkGraph<S> {
     channels: HashMap<OutPoint, ChannelInfo>,
+    // when we restarting a node, we will reconnect to these peers
+    connected_peer_addresses: HashMap<PeerId, Multiaddr>,
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
@@ -75,6 +79,7 @@ where
         let mut network_graph = Self {
             channels: HashMap::new(),
             nodes: HashMap::new(),
+            connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: Hash256::default(),
         };
@@ -91,6 +96,9 @@ where
         let nodes = self.store.get_nodes(None);
         for node in nodes.iter() {
             self.nodes.insert(node.node_id, node.clone());
+        }
+        for (peer, addr) in self.store.get_connected_peer(None) {
+            self.connected_peer_addresses.insert(peer, addr);
         }
     }
 
@@ -162,11 +170,37 @@ where
         self.chain_hash == chain_hash
     }
 
+    pub fn add_connected_peer(&mut self, peer_id: &PeerId, address: Multiaddr) {
+        self.connected_peer_addresses
+            .insert(peer_id.clone(), address.clone());
+        self.store.insert_connected_peer(peer_id.clone(), address);
+    }
+
+    pub fn get_connected_peers(&self) -> Vec<(&PeerId, &Multiaddr)> {
+        self.connected_peer_addresses.iter().collect()
+    }
+
+    pub fn remove_connected_peer(&mut self, peer_id: &PeerId) {
+        self.connected_peer_addresses.remove(peer_id);
+        self.store.remove_connected_peer(peer_id);
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
         self.nodes.clear();
+        self.connected_peer_addresses.clear();
     }
+}
+
+pub trait NetworkGraphStateStore {
+    fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo>;
+    fn get_nodes(&self, peer_id: Option<Pubkey>) -> Vec<NodeInfo>;
+    fn insert_channel(&self, channel: ChannelInfo);
+    fn insert_node(&self, node: NodeInfo);
+    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr);
+    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)>;
+    fn remove_connected_peer(&self, peer_id: &PeerId);
 }
 
 #[cfg(test)]
@@ -199,6 +233,39 @@ mod tests {
         let channel_info_ser = serde_json::to_string(&channel_info).unwrap();
         let channel_info_de: ChannelInfo = serde_json::from_str(&channel_info_ser).unwrap();
         assert_eq!(channel_info, channel_info_de);
+    }
+
+    #[test]
+    fn test_graph_connected_peers() {
+        let temp_path = tempfile::tempdir().unwrap();
+        let store = Store::new(temp_path.path());
+        let mut network_graph = NetworkGraph::new(store);
+
+        let peer_id = PeerId::random();
+        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
+        network_graph.add_connected_peer(&peer_id, address.clone());
+
+        let connected_peers = network_graph.get_connected_peers();
+        assert_eq!(connected_peers.len(), 1);
+        assert_eq!(connected_peers[0], (&peer_id, &address));
+
+        network_graph.reset();
+        let connected_peers = network_graph.get_connected_peers();
+        assert_eq!(connected_peers.len(), 0);
+
+        // load from db
+        network_graph.load_from_store();
+        let connected_peers = network_graph.get_connected_peers();
+        assert_eq!(connected_peers.len(), 1);
+        assert_eq!(connected_peers[0], (&peer_id, &address));
+
+        network_graph.remove_connected_peer(&peer_id);
+        let connected_peers = network_graph.get_connected_peers();
+        assert_eq!(connected_peers.len(), 0);
+
+        network_graph.load_from_store();
+        let connected_peers = network_graph.get_connected_peers();
+        assert_eq!(connected_peers.len(), 0);
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
+use tentacle::multiaddr::Multiaddr;
 
 use ractor::{Actor, ActorRef};
 
@@ -31,10 +32,11 @@ use crate::{
 };
 
 use super::{
-    channel::{ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore},
+    channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
+use crate::fiber::graph::NetworkGraphStateStore;
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -247,6 +249,7 @@ struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
+    connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
@@ -293,6 +296,38 @@ impl NetworkGraphStateStore for MemoryStore {
             .write()
             .unwrap()
             .insert(node.node_id.clone(), node);
+    }
+
+    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr) {
+        self.connected_peer_addresses
+            .write()
+            .unwrap()
+            .insert(peer_id, multiaddr);
+    }
+
+    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
+        if let Some(peer_id) = peer_id {
+            let mut res = vec![];
+
+            if let Some(addr) = self.connected_peer_addresses.read().unwrap().get(&peer_id) {
+                res.push((peer_id, addr.clone()));
+            }
+            res
+        } else {
+            self.connected_peer_addresses
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(peer_id, addr)| (peer_id.clone(), addr.clone()))
+                .collect()
+        }
+    }
+
+    fn remove_connected_peer(&self, peer_id: &PeerId) {
+        self.connected_peer_addresses
+            .write()
+            .unwrap()
+            .remove(peer_id);
     }
 }
 

@@ -3,14 +3,12 @@ use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, WriteBatch, DB};
 use serde_json;
 use std::{path::Path, sync::Arc};
-use tentacle::secio::PeerId;
+use tentacle::{multiaddr::Multiaddr, secio::PeerId};
 
 use crate::{
     fiber::{
-        channel::{
-            ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore,
-        },
-        graph::{ChannelInfo, NodeInfo},
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo},
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -94,6 +92,13 @@ impl Batch {
                     serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
                 )
             }
+            KeyValue::PeerIdMultiAddr(peer_id, multiaddr) => {
+                let key = [&[PEER_ID_MULTIADDR_PREFIX], peer_id.as_bytes()].concat();
+                (
+                    key,
+                    serde_json::to_vec(&multiaddr).expect("serialize Multiaddr should be OK"),
+                )
+            }
         };
         self.put(key, value)
     }
@@ -120,6 +125,7 @@ impl Batch {
 /// | 64           | PeerId | Hash256   | ChannelState             |
 /// | 96           | ChannelId          | ChannelInfo              |
 /// | 128          | NodeId             | NodeInfo                 |
+/// | 160          | PeerId             | MultiAddr                |
 /// +--------------+--------------------+--------------------------+
 ///
 
@@ -128,11 +134,13 @@ const CKB_INVOICE_PREFIX: u8 = 32;
 const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
 const CHANNEL_INFO_PREFIX: u8 = 96;
 const NODE_INFO_PREFIX: u8 = 128;
+const PEER_ID_MULTIADDR_PREFIX: u8 = 160;
 
 enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
+    PeerIdMultiAddr(PeerId, Multiaddr),
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
 }
@@ -162,14 +170,24 @@ impl ChannelActorStateStore for Store {
         if let Some(state) = self.get_channel_actor_state(id) {
             let mut batch = self.batch();
             batch.delete([&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat());
-            batch.delete([&[64], state.get_remote_peer_id().as_bytes(), id.as_ref()].concat());
+            batch.delete(
+                [
+                    &[PEER_ID_CHANNEL_ID_PREFIX],
+                    state.get_remote_peer_id().as_bytes(),
+                    id.as_ref(),
+                ]
+                .concat(),
+            );
             batch.commit();
         }
     }
 
     fn get_channel_ids_by_peer(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
-        let prefix = [&[64], peer_id.as_bytes()].concat();
-        let iter = self.db.prefix_iterator(prefix.as_ref());
+        let prefix = [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat();
+        let iter = self
+            .db
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(key, _)| key.starts_with(&prefix));
         iter.map(|(key, _)| {
             let channel_id: [u8; 32] = key[prefix.len()..]
                 .try_into()
@@ -181,10 +199,13 @@ impl ChannelActorStateStore for Store {
 
     fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
         let prefix = match peer_id {
-            Some(peer_id) => [&[64], peer_id.as_bytes()].concat(),
-            None => vec![64],
+            Some(peer_id) => [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat(),
+            None => vec![PEER_ID_CHANNEL_ID_PREFIX],
         };
-        let iter = self.db.prefix_iterator(prefix.as_ref());
+        let iter = self
+            .db
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(key, _)| key.starts_with(&prefix));
         iter.map(|(key, value)| {
             let key_len = key.len();
             let peer_id = PeerId::from_bytes(key[1..key_len - 32].into())
@@ -203,7 +224,7 @@ impl ChannelActorStateStore for Store {
 impl InvoiceStore for Store {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[32]);
+        key.extend_from_slice(&[CKB_INVOICE_PREFIX]);
         key.extend_from_slice(id.as_ref());
 
         self.get(key).map(|v| {
@@ -265,6 +286,30 @@ impl NetworkGraphStateStore for Store {
         .collect()
     }
 
+    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
+        let key = match peer_id {
+            Some(peer_id) => {
+                let mut key = Vec::with_capacity(33);
+                key.push(PEER_ID_MULTIADDR_PREFIX);
+                key.extend_from_slice(peer_id.as_bytes());
+                key
+            }
+            None => vec![PEER_ID_MULTIADDR_PREFIX],
+        };
+        let iter = self
+            .db
+            .prefix_iterator(key.as_ref())
+            .take_while(|(col_key, _)| col_key.starts_with(&key));
+        iter.map(|(key, value)| {
+            let peer_id =
+                PeerId::from_bytes(key[1..].into()).expect("deserialize peer id should be OK");
+            let addr =
+                serde_json::from_slice(value.as_ref()).expect("deserialize Multiaddr should be OK");
+            (peer_id, addr)
+        })
+        .collect()
+    }
+
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::ChannelInfo(
@@ -278,5 +323,22 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::NodeInfo(node.node_id, node.clone()));
         batch.commit();
+    }
+
+    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PeerIdMultiAddr(peer_id, multiaddr));
+        batch.commit();
+    }
+
+    fn remove_connected_peer(&self, peer_id: &PeerId) {
+        let prefix = [&[PEER_ID_MULTIADDR_PREFIX], peer_id.as_bytes()].concat();
+        let iter = self
+            .db
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(key, _)| key.starts_with(&prefix));
+        for (key, _) in iter {
+            self.db.delete(key).expect("delete should be OK");
+        }
     }
 }
