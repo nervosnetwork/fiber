@@ -30,7 +30,7 @@ pub struct ChannelInfo {
     pub node_2: Pubkey,
     pub ckb_signature: SchnorrSignature,
     //pub channel_id: ChannelId,
-    pub capacity: u64,
+    pub capacity: u128,
     pub features: u64,
     #[serde_as(as = "EntityHex")]
     pub channel_output: OutPoint,

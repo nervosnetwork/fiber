@@ -1483,6 +1483,11 @@ pub struct ChannelAnnouncement {
     pub node_2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
     pub ckb_key: XOnlyPublicKey,
+    // The total capacity of the channel.
+    pub capacity: u128,
+    // UDT script
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
 }
 
 impl ChannelAnnouncement {
@@ -1492,6 +1497,8 @@ impl ChannelAnnouncement {
         channel_outpoint: OutPoint,
         chain_hash: Hash256,
         ckb_pubkey: &XOnlyPublicKey,
+        capacity: u128,
+        udt_type_script: Option<Script>,
     ) -> Self {
         Self {
             node_1_signature: None,
@@ -1503,6 +1510,8 @@ impl ChannelAnnouncement {
             node_1_id: node_1_pubkey.clone(),
             node_2_id: node_2_pubkey.clone(),
             ckb_key: ckb_pubkey.clone(),
+            capacity,
+            udt_type_script,
         }
     }
 
@@ -1523,6 +1532,8 @@ impl ChannelAnnouncement {
             node_1_id: self.node_1_id,
             node_2_id: self.node_2_id,
             ckb_key: self.ckb_key,
+            capacity: self.capacity,
+            udt_type_script: self.udt_type_script.clone(),
         };
         deterministically_hash(&unsigned_announcement)
     }
@@ -1554,6 +1565,8 @@ impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
             .channel_outpoint(channel_announcement.channel_outpoint)
             .node_1_id(channel_announcement.node_1_id.into())
             .node_2_id(channel_announcement.node_2_id.into())
+            .capacity(channel_announcement.capacity.pack())
+            .udt_type_script(channel_announcement.udt_type_script.pack())
             .ckb_key(channel_announcement.ckb_key.into())
             .build()
     }
@@ -1570,8 +1583,10 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
             node_2_signature: Some(channel_announcement.node_signature_2().try_into()?),
             ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
             features: channel_announcement.features().unpack(),
+            capacity: channel_announcement.capacity().unpack(),
             chain_hash: channel_announcement.chain_hash().into(),
             channel_outpoint: channel_announcement.channel_outpoint(),
+            udt_type_script: channel_announcement.udt_type_script().to_opt(),
             node_1_id: channel_announcement.node_1_id().try_into()?,
             node_2_id: channel_announcement.node_2_id().try_into()?,
             ckb_key: channel_announcement.ckb_key().try_into()?,

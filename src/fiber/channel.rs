@@ -1881,6 +1881,7 @@ impl ChannelActorState {
         let local_is_node_1 = self.local_pubkey < self.remote_pubkey;
         let agg_pubkey = self.get_musig2_agg_pubkey_xonly();
         let key_agg_ctx = self.get_musig2_agg_context();
+        let capacity = self.to_local_amount + self.to_remote_amount;
 
         let mut channel_announcement = {
             let channel_announcement = self.channel_announcement.get_or_insert_with(|| {
@@ -1896,6 +1897,8 @@ impl ChannelActorState {
                     channel_outpoint.clone(),
                     Default::default(),
                     &agg_pubkey,
+                    capacity,
+                    self.funding_udt_type_script.clone(),
                 )
             });
             if channel_announcement.is_signed() {

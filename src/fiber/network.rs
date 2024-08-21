@@ -951,7 +951,7 @@ where
 
                 let pubkey = channel_announcement.ckb_key.serialize();
                 let pubkey_hash = blake2b_256(pubkey.as_slice());
-                match tx.inner.outputs.get(0) {
+                let capacity = match tx.inner.outputs.get(0) {
                     None => {
                         error!(
                             "On-chain transaction found but no output: {:?}",
@@ -959,14 +959,26 @@ where
                         );
                         return;
                     }
-                    Some(output) if output.lock.args.as_bytes() != pubkey_hash => {
-                        error!(
-                            "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
-                            &output.lock.args.as_bytes(), hex::encode(pubkey), &pubkey_hash
-                        );
-                        return;
+                    Some(output) => {
+                        if output.lock.args.as_bytes() != pubkey_hash {
+                            error!(
+                                "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
+                                &output.lock.args.as_bytes(), hex::encode(pubkey), &pubkey_hash
+                            );
+                            return;
+                        }
+                        let capacity: u128 = u64::from(output.capacity).into();
+                        if channel_announcement.udt_type_script.is_some()
+                            && capacity != channel_announcement.capacity
+                        {
+                            error!(
+                                "On-chain transaction found but capacity mismatched: on chain capacity {:?}, channel capacity {:?}",
+                                &output.capacity, &channel_announcement.capacity
+                            );
+                            return;
+                        }
+                        capacity
                     }
-                    _ => {}
                 };
 
                 if let Err(err) = secp256k1_instance().verify_schnorr(
@@ -996,10 +1008,10 @@ where
                     node_1: channel_announcement.node_1_id,
                     node_2: channel_announcement.node_2_id,
                     channel_output: channel_announcement.channel_outpoint,
-                    capacity: u64::MAX,
+                    capacity,
                     features: channel_announcement.features,
                     ckb_signature: ckb_signature,
-                    one_to_two: None,
+                    one_to_two: None, // wait for channel update message
                     two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
                 };

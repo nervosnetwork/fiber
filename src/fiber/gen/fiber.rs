@@ -10857,6 +10857,8 @@ impl ::core::fmt::Display for ChannelAnnouncement {
         write!(f, ", {}: {}", "node_1_id", self.node_1_id())?;
         write!(f, ", {}: {}", "node_2_id", self.node_2_id())?;
         write!(f, ", {}: {}", "ckb_key", self.ckb_key())?;
+        write!(f, ", {}: {}", "capacity", self.capacity())?;
+        write!(f, ", {}: {}", "udt_type_script", self.udt_type_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10871,9 +10873,9 @@ impl ::core::default::Default for ChannelAnnouncement {
     }
 }
 impl ChannelAnnouncement {
-    const DEFAULT_VALUE: [u8; 286] = [
-        30, 1, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 48, 0, 0, 0, 112, 0, 0, 0, 120, 0, 0, 0, 152, 0, 0,
-        0, 188, 0, 0, 0, 221, 0, 0, 0, 254, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 310] = [
+        54, 1, 0, 0, 48, 0, 0, 0, 52, 0, 0, 0, 56, 0, 0, 0, 120, 0, 0, 0, 128, 0, 0, 0, 160, 0, 0,
+        0, 196, 0, 0, 0, 229, 0, 0, 0, 6, 1, 0, 0, 38, 1, 0, 0, 54, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -10881,9 +10883,10 @@ impl ChannelAnnouncement {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 11;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10951,11 +10954,23 @@ impl ChannelAnnouncement {
     pub fn ckb_key(&self) -> SchnorrXOnlyPubkey {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
+        SchnorrXOnlyPubkey::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn capacity(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[40..]) as usize;
+        let end = molecule::unpack_number(&slice[44..]) as usize;
+        Uint128::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn udt_type_script(&self) -> ScriptOpt {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[44..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
-            SchnorrXOnlyPubkey::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[48..]) as usize;
+            ScriptOpt::new_unchecked(self.0.slice(start..end))
         } else {
-            SchnorrXOnlyPubkey::new_unchecked(self.0.slice(start..))
+            ScriptOpt::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> ChannelAnnouncementReader<'r> {
@@ -10994,6 +11009,8 @@ impl molecule::prelude::Entity for ChannelAnnouncement {
             .node_1_id(self.node_1_id())
             .node_2_id(self.node_2_id())
             .ckb_key(self.ckb_key())
+            .capacity(self.capacity())
+            .udt_type_script(self.udt_type_script())
     }
 }
 #[derive(Clone, Copy)]
@@ -11024,6 +11041,8 @@ impl<'r> ::core::fmt::Display for ChannelAnnouncementReader<'r> {
         write!(f, ", {}: {}", "node_1_id", self.node_1_id())?;
         write!(f, ", {}: {}", "node_2_id", self.node_2_id())?;
         write!(f, ", {}: {}", "ckb_key", self.ckb_key())?;
+        write!(f, ", {}: {}", "capacity", self.capacity())?;
+        write!(f, ", {}: {}", "udt_type_script", self.udt_type_script())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -11032,7 +11051,7 @@ impl<'r> ::core::fmt::Display for ChannelAnnouncementReader<'r> {
     }
 }
 impl<'r> ChannelAnnouncementReader<'r> {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 11;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -11100,11 +11119,23 @@ impl<'r> ChannelAnnouncementReader<'r> {
     pub fn ckb_key(&self) -> SchnorrXOnlyPubkeyReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
+        let end = molecule::unpack_number(&slice[40..]) as usize;
+        SchnorrXOnlyPubkeyReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn capacity(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[40..]) as usize;
+        let end = molecule::unpack_number(&slice[44..]) as usize;
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn udt_type_script(&self) -> ScriptOptReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[44..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[40..]) as usize;
-            SchnorrXOnlyPubkeyReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[48..]) as usize;
+            ScriptOptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            SchnorrXOnlyPubkeyReader::new_unchecked(&self.as_slice()[start..])
+            ScriptOptReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -11163,6 +11194,8 @@ impl<'r> molecule::prelude::Reader<'r> for ChannelAnnouncementReader<'r> {
         PubkeyReader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         PubkeyReader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         SchnorrXOnlyPubkeyReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[9]..offsets[10]], compatible)?;
+        ScriptOptReader::verify(&slice[offsets[10]..offsets[11]], compatible)?;
         Ok(())
     }
 }
@@ -11177,9 +11210,11 @@ pub struct ChannelAnnouncementBuilder {
     pub(crate) node_1_id: Pubkey,
     pub(crate) node_2_id: Pubkey,
     pub(crate) ckb_key: SchnorrXOnlyPubkey,
+    pub(crate) capacity: Uint128,
+    pub(crate) udt_type_script: ScriptOpt,
 }
 impl ChannelAnnouncementBuilder {
-    pub const FIELD_COUNT: usize = 9;
+    pub const FIELD_COUNT: usize = 11;
     pub fn node_signature_1(mut self, v: EcdsaSignature) -> Self {
         self.node_signature_1 = v;
         self
@@ -11216,6 +11251,14 @@ impl ChannelAnnouncementBuilder {
         self.ckb_key = v;
         self
     }
+    pub fn capacity(mut self, v: Uint128) -> Self {
+        self.capacity = v;
+        self
+    }
+    pub fn udt_type_script(mut self, v: ScriptOpt) -> Self {
+        self.udt_type_script = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
     type Entity = ChannelAnnouncement;
@@ -11231,6 +11274,8 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
             + self.node_1_id.as_slice().len()
             + self.node_2_id.as_slice().len()
             + self.ckb_key.as_slice().len()
+            + self.capacity.as_slice().len()
+            + self.udt_type_script.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -11253,6 +11298,10 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
         total_size += self.node_2_id.as_slice().len();
         offsets.push(total_size);
         total_size += self.ckb_key.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.capacity.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.udt_type_script.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -11266,6 +11315,8 @@ impl molecule::prelude::Builder for ChannelAnnouncementBuilder {
         writer.write_all(self.node_1_id.as_slice())?;
         writer.write_all(self.node_2_id.as_slice())?;
         writer.write_all(self.ckb_key.as_slice())?;
+        writer.write_all(self.capacity.as_slice())?;
+        writer.write_all(self.udt_type_script.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

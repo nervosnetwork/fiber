@@ -184,6 +184,8 @@ table ChannelAnnouncement {
     node_2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
     ckb_key: SchnorrXOnlyPubkey,
+    capacity: Uint128,
+    udt_type_script: ScriptOpt,
 }
 
 table ChannelUpdate {
