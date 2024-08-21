@@ -1,7 +1,8 @@
-use std::{path::Path, sync::Arc};
-
+use ckb_types::packed::OutPoint;
+use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, WriteBatch, DB};
 use serde_json;
+use std::{path::Path, sync::Arc};
 use tentacle::secio::PeerId;
 
 use crate::{
@@ -9,7 +10,7 @@ use crate::{
         channel::{
             ChannelActorState, ChannelActorStateStore, ChannelState, NetworkGraphStateStore,
         },
-        graph::{ChannelId, ChannelInfo, NodeInfo},
+        graph::{ChannelInfo, NodeInfo},
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -78,7 +79,7 @@ impl Batch {
             KeyValue::ChannelInfo(channel_id, channel) => {
                 let mut key = Vec::with_capacity(37);
                 key.push(CHANNEL_INFO_PREFIX);
-                key.extend_from_slice(channel_id.as_ref());
+                key.extend_from_slice(channel_id.as_slice());
                 (
                     key,
                     serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
@@ -133,7 +134,7 @@ enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     NodeInfo(Pubkey, NodeInfo),
-    ChannelInfo(ChannelId, ChannelInfo),
+    ChannelInfo(OutPoint, ChannelInfo),
 }
 
 impl ChannelActorStateStore for Store {
@@ -223,12 +224,12 @@ impl InvoiceStore for Store {
 }
 
 impl NetworkGraphStateStore for Store {
-    fn get_channels(&self, channel_id: Option<ChannelId>) -> Vec<ChannelInfo> {
+    fn get_channels(&self, channel_id: Option<OutPoint>) -> Vec<ChannelInfo> {
         let key = match channel_id.clone() {
             Some(channel_id) => {
                 let mut key = Vec::with_capacity(37);
                 key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
-                key.extend_from_slice(channel_id.as_ref());
+                key.extend_from_slice(channel_id.as_slice());
                 key
             }
             None => vec![CHANNEL_INFO_PREFIX],
@@ -267,7 +268,7 @@ impl NetworkGraphStateStore for Store {
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::ChannelInfo(
-            channel.channel_id.clone(),
+            channel.channel_output.clone(),
             channel.clone(),
         ));
         batch.commit();

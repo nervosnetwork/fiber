@@ -1,3 +1,7 @@
+use crate::fiber::graph::{ChannelInfo, NodeInfo};
+use crate::fiber::types::Pubkey;
+use ckb_types::packed::OutPoint;
+use ckb_types::{core::TransactionView, packed::Byte32};
 use std::{
     collections::HashMap,
     env,
@@ -7,10 +11,6 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-
-use crate::fiber::graph::{ChannelId, ChannelInfo, NodeInfo};
-use crate::fiber::types::Pubkey;
-use ckb_types::{core::TransactionView, packed::Byte32};
 
 use ractor::{Actor, ActorRef};
 
@@ -245,16 +245,16 @@ impl NetworkNode {
 #[derive(Clone, Default)]
 struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
-    channels_map: Arc<RwLock<HashMap<ChannelId, ChannelInfo>>>,
+    channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
-    fn get_channels(&self, channel_id: Option<ChannelId>) -> Vec<ChannelInfo> {
-        if let Some(channel_id) = channel_id {
+    fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo> {
+        if let Some(outpoint) = outpoint {
             let mut res = vec![];
 
-            if let Some(channel) = self.channels_map.read().unwrap().get(&channel_id) {
+            if let Some(channel) = self.channels_map.read().unwrap().get(&outpoint) {
                 res.push(channel.clone());
             }
             res
@@ -272,7 +272,7 @@ impl NetworkGraphStateStore for MemoryStore {
         self.channels_map
             .write()
             .unwrap()
-            .insert(channel.channel_id.clone(), channel);
+            .insert(channel.channel_output.clone(), channel);
     }
 
     fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {

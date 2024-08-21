@@ -54,7 +54,7 @@ use super::FiberConfig;
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::fiber::graph::{ChannelId, ChannelInfo, NodeInfo};
+use crate::fiber::graph::{ChannelInfo, NodeInfo};
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, TxSignatures};
 use crate::{unwrap_or_return, Error};
 
@@ -991,10 +991,8 @@ where
                 );
 
                 // Add the channel to the network graph.
-                let channel_id: ChannelId = channel_announcement.channel_outpoint.clone().into();
                 let channel_info = ChannelInfo {
                     chain_hash: channel_announcement.chain_hash,
-                    channel_id: channel_id.clone(),
                     node_1: channel_announcement.node_1_id,
                     node_2: channel_announcement.node_2_id,
                     channel_output: channel_announcement.channel_outpoint,
@@ -1021,9 +1019,8 @@ where
                         return;
                     }
                 };
-                let channel_id = ChannelId::from(channel_update.channel_outpoint.clone());
                 let mut network_graph = self.network_graph.write().await;
-                let channel = network_graph.get_channel(&channel_id);
+                let channel = network_graph.get_channel(&channel_update.channel_outpoint);
                 if let Some(channel) = channel {
                     let pubkey = if channel_update.message_flags & 1 == 1 {
                         &channel.node_1
@@ -1037,7 +1034,10 @@ where
                         );
                         return;
                     }
-                    network_graph.process_channel_update(channel_id, channel_update.clone());
+                    network_graph.process_channel_update(
+                        channel_update.channel_outpoint.clone(),
+                        channel_update.clone(),
+                    );
                 } else {
                     error!(
                         "Channel update message signature verification failed: {:?}",

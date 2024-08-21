@@ -1,35 +1,10 @@
 use super::types::{ChannelUpdate, Hash256, NodeAnnouncement};
-use super::{
-    channel::NetworkGraphStateStore,
-    serde_utils::{EntityHex, SliceHex},
-    types::Pubkey,
-};
+use super::{channel::NetworkGraphStateStore, serde_utils::EntityHex, types::Pubkey};
 use ckb_types::packed::OutPoint;
-use ckb_types::prelude::Entity;
 use secp256k1::schnorr::Signature as SchnorrSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
-
-#[serde_as]
-/// A user-defined name for a node, which may be used when displaying the node in a graph.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NodeName(#[serde_as(as = "SliceHex")] pub [u8; 32]);
-
-#[serde_as]
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ChannelId(#[serde_as(as = "EntityHex")] OutPoint);
-impl AsRef<[u8]> for ChannelId {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_slice()
-    }
-}
-
-impl From<OutPoint> for ChannelId {
-    fn from(out_point: OutPoint) -> Self {
-        ChannelId(out_point)
-    }
-}
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,7 +29,7 @@ pub struct ChannelInfo {
     pub node_1: Pubkey,
     pub node_2: Pubkey,
     pub ckb_signature: SchnorrSignature,
-    pub channel_id: ChannelId,
+    //pub channel_id: ChannelId,
     pub capacity: u64,
     pub features: u64,
     #[serde_as(as = "EntityHex")]
@@ -86,7 +61,7 @@ pub struct ChannelUpdateInfo {
 
 #[derive(Clone, Debug, Default)]
 pub struct NetworkGraph<S> {
-    channels: HashMap<ChannelId, ChannelInfo>,
+    channels: HashMap<OutPoint, ChannelInfo>,
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
@@ -111,9 +86,8 @@ where
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
             self.channels
-                .insert(channel.channel_id.clone(), channel.clone());
+                .insert(channel.channel_output.clone(), channel.clone());
         }
-        eprintln!("load_from_store channels: {:?}", self.channels);
         let nodes = self.store.get_nodes(None);
         for node in nodes.iter() {
             self.nodes.insert(node.node_id, node.clone());
@@ -127,9 +101,8 @@ where
     }
 
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
-        let channel_id = channel_info.channel_id.clone();
         assert_ne!(channel_info.node_1, channel_info.node_2);
-        match self.channels.get(&channel_id) {
+        match self.channels.get(&channel_info.channel_output) {
             Some(channel) => {
                 // If the channel already exists, we don't need to update it
                 // FIXME: if other fields is different, we should consider it as malioucious and ban the node?
@@ -139,15 +112,14 @@ where
             }
             None => {}
         }
-        self.channels.insert(channel_id, channel_info.clone());
+        let outpoint = channel_info.channel_output.clone();
+        self.channels.insert(outpoint.clone(), channel_info.clone());
         if let Some(node) = self.nodes.get_mut(&channel_info.node_1) {
-            node.channel_short_ids
-                .insert(channel_info.channel_output.clone());
+            node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
         if let Some(node) = self.nodes.get_mut(&channel_info.node_2) {
-            node.channel_short_ids
-                .insert(channel_info.channel_output.clone());
+            node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
         self.store.insert_channel(channel_info);
@@ -157,8 +129,8 @@ where
         self.nodes.get(&node_id)
     }
 
-    pub fn get_channel(&self, channel_id: &ChannelId) -> Option<&ChannelInfo> {
-        self.channels.get(channel_id)
+    pub fn get_channel(&self, outpoint: &OutPoint) -> Option<&ChannelInfo> {
+        self.channels.get(outpoint)
     }
 
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
@@ -167,8 +139,8 @@ where
             .filter(move |channel| channel.node_1 == node_id || channel.node_2 == node_id)
     }
 
-    pub fn process_channel_update(&mut self, channel_id: ChannelId, update: ChannelUpdate) {
-        let channel = self.channels.get_mut(&channel_id).unwrap();
+    pub fn process_channel_update(&mut self, channel_outpoint: OutPoint, update: ChannelUpdate) {
+        let channel = self.channels.get_mut(&channel_outpoint).unwrap();
         let update_info = match update.message_flags & 1 == 1 {
             true => &mut channel.one_to_two,
             false => &mut channel.two_to_one,
@@ -204,13 +176,6 @@ mod tests {
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     #[test]
-    fn test_graph_channel_id() {
-        let out_point = OutPoint::default();
-        let channel_id = ChannelId::from(out_point.clone());
-        assert_eq!(channel_id.0, out_point);
-    }
-
-    #[test]
     fn test_graph_channel_info() {
         let secp = Secp256k1::new();
         let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -224,7 +189,6 @@ mod tests {
             node_1: public_key1.into(),
             node_2: public_key2.into(),
             ckb_signature: SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes"),
-            channel_id: ChannelId::from(OutPoint::default()),
             capacity: 0,
             features: 0,
             channel_output: OutPoint::default(),
@@ -239,11 +203,13 @@ mod tests {
 
     #[test]
     fn test_graph_network_graph() {
+        use ckb_types::prelude::Entity;
+
         let temp_path = tempfile::tempdir().unwrap();
         let store = Store::new(temp_path.path());
         let mut network_graph = NetworkGraph::new(store);
 
-        let channel_id = ChannelId::from(OutPoint::from_slice(&[0x01; 36]).unwrap());
+        let channel_outpoint = OutPoint::from_slice(&[0x01; 36]).unwrap();
 
         let secp = Secp256k1::new();
         let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
@@ -278,7 +244,7 @@ mod tests {
         assert_eq!(node2_channels.count(), 0);
 
         network_graph.reset();
-        assert_eq!(network_graph.get_channel(&channel_id), None);
+        assert_eq!(network_graph.get_channel(&channel_outpoint), None);
         network_graph.load_from_store();
 
         network_graph.add_node(node1.clone());
@@ -291,25 +257,30 @@ mod tests {
             node_1: public_key1.into(),
             node_2: public_key2.into(),
             ckb_signature,
-            channel_id: channel_id.clone(),
             capacity: 0,
             features: 0,
-            channel_output: OutPoint::default(),
+            channel_output: channel_outpoint.clone(),
             one_to_two: None,
             two_to_one: None,
             timestamp: 0,
         };
         network_graph.add_channel(channel_info.clone());
-        assert_eq!(network_graph.get_channel(&channel_id), Some(&channel_info));
+        assert_eq!(
+            network_graph.get_channel(&channel_outpoint),
+            Some(&channel_info)
+        );
         let node1_channels = network_graph.get_channels_by_peer(node1.node_id);
         assert_eq!(node1_channels.count(), 1);
         let node2_channels = network_graph.get_channels_by_peer(node2.node_id);
         assert_eq!(node2_channels.count(), 1);
 
         network_graph.reset();
-        assert_eq!(network_graph.get_channel(&channel_id), None);
+        assert_eq!(network_graph.get_channel(&channel_outpoint), None);
         network_graph.load_from_store();
 
-        assert_eq!(network_graph.get_channel(&channel_id), Some(&channel_info));
+        assert_eq!(
+            network_graph.get_channel(&channel_outpoint),
+            Some(&channel_info)
+        );
     }
 }
