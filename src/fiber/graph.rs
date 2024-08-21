@@ -94,6 +94,7 @@ pub struct NetworkGraph<S> {
     channels: HashMap<ChannelId, ChannelInfo>,
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
+    chain_hash: Hash256,
 }
 
 impl<S> NetworkGraph<S>
@@ -105,6 +106,7 @@ where
             channels: HashMap::new(),
             nodes: HashMap::new(),
             store,
+            chain_hash: Hash256::default(),
         };
         network_graph.load_from_store();
         network_graph
@@ -166,6 +168,10 @@ where
         return;
     }
 
+    pub fn check_chain_hash(&self, chain_hash: Hash256) -> bool {
+        self.chain_hash == chain_hash
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
@@ -181,14 +187,14 @@ mod tests {
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     #[test]
-    fn test_channel_id() {
+    fn test_graph_channel_id() {
         let out_point = OutPoint::default();
         let channel_id = ChannelId::from(out_point.clone());
         assert_eq!(channel_id.0, out_point);
     }
 
     #[test]
-    fn test_channel_info() {
+    fn test_graph_channel_info() {
         let secp = Secp256k1::new();
         let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
         let public_key1 = PublicKey::from_secret_key(&secp, &secret_key1);
@@ -215,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_network_graph() {
+    fn test_graph_network_graph() {
         let temp_path = tempfile::tempdir().unwrap();
         let store = Store::new(temp_path.path());
         let mut network_graph = NetworkGraph::new(store);

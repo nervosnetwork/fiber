@@ -1371,6 +1371,8 @@ pub struct NodeAnnouncement {
     pub alias: AnnouncedNodeName,
     // All the reachable addresses.
     pub addresses: Vec<Vec<u8>>,
+    // chain_hash
+    pub chain_hash: Hash256,
 }
 
 impl NodeAnnouncement {
@@ -1385,6 +1387,7 @@ impl NodeAnnouncement {
             timestamp: Default::default(),
             node_id,
             alias,
+            chain_hash: Default::default(),
             addresses: addresses.iter().map(|a| a.to_vec()).collect(),
         }
     }
@@ -1406,6 +1409,7 @@ impl NodeAnnouncement {
             timestamp: self.timestamp,
             node_id: self.node_id,
             alias: self.alias,
+            chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
         };
         deterministically_hash(&unsigned_announcement)
@@ -1425,6 +1429,7 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
             .alias(u8_32_as_byte_32(&node_announcement.alias.0))
+            .chain_hash(node_announcement.chain_hash.into())
             .address(
                 BytesVec::new_builder()
                     .set(
@@ -1449,6 +1454,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
             features: node_announcement.features().unpack(),
             timestamp: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
+            chain_hash: node_announcement.chain_hash().into(),
             alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
             addresses: node_announcement

@@ -821,6 +821,18 @@ where
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
+                if !self
+                    .network_graph
+                    .read()
+                    .await
+                    .check_chain_hash(node_announcement.chain_hash)
+                {
+                    error!(
+                        "Node announcement chain hash mismatched: {:?}",
+                        &node_announcement
+                    );
+                    return;
+                }
                 match node_announcement.signature {
                     Some(ref signature)
                         if signature.verify(&node_announcement.node_id, &message) =>
@@ -857,6 +869,25 @@ where
 
             FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
                 let message = channel_announcement.message_to_sign();
+                if channel_announcement.node_1_id == channel_announcement.node_2_id {
+                    error!(
+                        "Channel announcement node had a channel with itself: {:?}",
+                        &channel_announcement
+                    );
+                    return;
+                }
+                if !self
+                    .network_graph
+                    .read()
+                    .await
+                    .check_chain_hash(channel_announcement.chain_hash)
+                {
+                    error!(
+                        "Channel announcement chain hash mismatched: {:?}",
+                        &channel_announcement
+                    );
+                    return;
+                }
                 let (node_1_signature, node_2_signature, ckb_signature) = match (
                     channel_announcement.node_1_signature,
                     channel_announcement.node_2_signature,

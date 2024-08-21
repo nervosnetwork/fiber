@@ -165,6 +165,8 @@ table NodeAnnouncement {
     alias: Byte32,
     // All the reachable addresses.
     address: BytesVec,
+    // Chain hash
+    chain_hash: Byte32,
 }
 
 table ChannelAnnouncement {

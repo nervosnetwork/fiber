@@ -10462,6 +10462,7 @@ impl ::core::fmt::Display for NodeAnnouncement {
         write!(f, ", {}: {}", "node_id", self.node_id())?;
         write!(f, ", {}: {}", "alias", self.alias())?;
         write!(f, ", {}: {}", "address", self.address())?;
+        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10476,13 +10477,15 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 117] = [
-        117, 0, 0, 0, 28, 0, 0, 0, 32, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 81, 0, 0, 0, 113, 0, 0,
+    const DEFAULT_VALUE: [u8; 153] = [
+        153, 0, 0, 0, 32, 0, 0, 0, 36, 0, 0, 0, 44, 0, 0, 0, 52, 0, 0, 0, 85, 0, 0, 0, 117, 0, 0,
+        0, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+        4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 6;
+    pub const FIELD_COUNT: usize = 7;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10532,11 +10535,17 @@ impl NodeAnnouncement {
     pub fn address(&self) -> BytesVec {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
+        BytesVec::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn chain_hash(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[28..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[28..]) as usize;
-            BytesVec::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            Byte32::new_unchecked(self.0.slice(start..end))
         } else {
-            BytesVec::new_unchecked(self.0.slice(start..))
+            Byte32::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> NodeAnnouncementReader<'r> {
@@ -10572,6 +10581,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .node_id(self.node_id())
             .alias(self.alias())
             .address(self.address())
+            .chain_hash(self.chain_hash())
     }
 }
 #[derive(Clone, Copy)]
@@ -10599,6 +10609,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
         write!(f, ", {}: {}", "node_id", self.node_id())?;
         write!(f, ", {}: {}", "alias", self.alias())?;
         write!(f, ", {}: {}", "address", self.address())?;
+        write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10607,7 +10618,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
     }
 }
 impl<'r> NodeAnnouncementReader<'r> {
-    pub const FIELD_COUNT: usize = 6;
+    pub const FIELD_COUNT: usize = 7;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10657,11 +10668,17 @@ impl<'r> NodeAnnouncementReader<'r> {
     pub fn address(&self) -> BytesVecReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
+        let end = molecule::unpack_number(&slice[28..]) as usize;
+        BytesVecReader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn chain_hash(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[28..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[28..]) as usize;
-            BytesVecReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[32..]) as usize;
+            Byte32Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            BytesVecReader::new_unchecked(&self.as_slice()[start..])
+            Byte32Reader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -10717,6 +10734,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
         PubkeyReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         BytesVecReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         Ok(())
     }
 }
@@ -10728,9 +10746,10 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) node_id: Pubkey,
     pub(crate) alias: Byte32,
     pub(crate) address: BytesVec,
+    pub(crate) chain_hash: Byte32,
 }
 impl NodeAnnouncementBuilder {
-    pub const FIELD_COUNT: usize = 6;
+    pub const FIELD_COUNT: usize = 7;
     pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
@@ -10755,6 +10774,10 @@ impl NodeAnnouncementBuilder {
         self.address = v;
         self
     }
+    pub fn chain_hash(mut self, v: Byte32) -> Self {
+        self.chain_hash = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for NodeAnnouncementBuilder {
     type Entity = NodeAnnouncement;
@@ -10767,6 +10790,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.node_id.as_slice().len()
             + self.alias.as_slice().len()
             + self.address.as_slice().len()
+            + self.chain_hash.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -10783,6 +10807,8 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         total_size += self.alias.as_slice().len();
         offsets.push(total_size);
         total_size += self.address.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.chain_hash.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -10793,6 +10819,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.node_id.as_slice())?;
         writer.write_all(self.alias.as_slice())?;
         writer.write_all(self.address.as_slice())?;
+        writer.write_all(self.chain_hash.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
