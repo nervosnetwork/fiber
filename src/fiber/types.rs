@@ -1355,7 +1355,7 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
     pub signature: Option<EcdsaSignature>,

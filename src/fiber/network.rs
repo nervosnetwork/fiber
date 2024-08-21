@@ -843,19 +843,13 @@ where
                         );
 
                         // Add the node to the network graph.
-                        let node_id = node_announcement.node_id;
                         let node_info = NodeInfo {
-                            node_id: node_id.clone(),
-                            channel_short_ids: vec![],
-                            node_name: node_announcement.alias.clone(),
-                            features: node_announcement.features,
-                            signature: signature.clone(),
+                            node_id: node_announcement.node_id,
+                            channel_short_ids: HashSet::new(),
                             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                            anouncement_msg: Some(node_announcement.clone()),
                         };
-                        self.network_graph
-                            .write()
-                            .await
-                            .add_node(node_id, node_info);
+                        self.network_graph.write().await.add_node(node_info);
                     }
                     _ => {
                         error!(

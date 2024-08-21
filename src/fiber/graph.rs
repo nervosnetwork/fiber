@@ -1,5 +1,4 @@
-use super::config::AnnouncedNodeName;
-use super::types::{ChannelUpdate, EcdsaSignature, Hash256};
+use super::types::{ChannelUpdate, Hash256, NodeAnnouncement};
 use super::{
     channel::NetworkGraphStateStore,
     serde_utils::{EntityHex, SliceHex},
@@ -10,7 +9,7 @@ use ckb_types::prelude::Entity;
 use secp256k1::schnorr::Signature as SchnorrSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[serde_as]
 /// A user-defined name for a node, which may be used when displaying the node in a graph.
@@ -38,18 +37,14 @@ impl From<OutPoint> for ChannelId {
 pub struct NodeInfo {
     pub node_id: Pubkey,
     /// All valid channels a node has announced
-    #[serde_as(as = "Vec<EntityHex>")]
-    pub channel_short_ids: Vec<OutPoint>,
-
-    /// Protocol features the node announced support for
-    pub features: u64,
+    #[serde_as(as = "HashSet<EntityHex>")]
+    pub channel_short_ids: HashSet<OutPoint>,
 
     /// When the last known update to the node state was issued.
     /// Value is opaque, as set in the announcement.
     pub timestamp: u128,
 
-    pub node_name: AnnouncedNodeName,
-    pub signature: EcdsaSignature,
+    pub anouncement_msg: Option<NodeAnnouncement>,
 }
 
 #[serde_as]
@@ -125,17 +120,34 @@ where
         }
     }
 
-    pub fn add_node(&mut self, node_id: Pubkey, node_info: NodeInfo) {
+    pub fn add_node(&mut self, node_info: NodeInfo) {
+        let node_id = node_info.node_id;
         self.nodes.insert(node_id, node_info.clone());
         self.store.insert_node(node_info);
     }
 
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
         let channel_id = channel_info.channel_id.clone();
+        assert_ne!(channel_info.node_1, channel_info.node_2);
+        match self.channels.get(&channel_id) {
+            Some(channel) => {
+                // If the channel already exists, we don't need to update it
+                // FIXME: if other fields is different, we should consider it as malioucious and ban the node?
+                if channel.one_to_two.is_some() || channel.two_to_one.is_some() {
+                    return;
+                }
+            }
+            None => {}
+        }
         self.channels.insert(channel_id, channel_info.clone());
         if let Some(node) = self.nodes.get_mut(&channel_info.node_1) {
             node.channel_short_ids
-                .push(channel_info.channel_output.clone());
+                .insert(channel_info.channel_output.clone());
+            self.store.insert_node(node.clone());
+        }
+        if let Some(node) = self.nodes.get_mut(&channel_info.node_2) {
+            node.channel_short_ids
+                .insert(channel_info.channel_output.clone());
             self.store.insert_node(node.clone());
         }
         self.store.insert_channel(channel_info);
@@ -147,6 +159,12 @@ where
 
     pub fn get_channel(&self, channel_id: &ChannelId) -> Option<&ChannelInfo> {
         self.channels.get(channel_id)
+    }
+
+    pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
+        self.channels
+            .values()
+            .filter(move |channel| channel.node_1 == node_id || channel.node_2 == node_id)
     }
 
     pub fn process_channel_update(&mut self, channel_id: ChannelId, update: ChannelUpdate) {
@@ -183,7 +201,6 @@ where
 mod tests {
     use super::*;
     use crate::store::Store;
-    use secp256k1::Message;
     use secp256k1::{PublicKey, Secp256k1, SecretKey};
 
     #[test]
@@ -237,40 +254,36 @@ mod tests {
 
         let ckb_signature = SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes");
 
-        let secp = Secp256k1::new();
-        let (secret_key, _public_key) = secp.generate_keypair(&mut rand::thread_rng());
-        let message = Message::from_digest_slice(&[0xab; 32]).expect("32 bytes");
-        let sig1 = secp.sign_ecdsa(&message, &secret_key);
-        let sig2 = secp.sign_ecdsa(&message, &secret_key);
-
         let node1 = NodeInfo {
             node_id: public_key1.into(),
-            channel_short_ids: vec![],
-            features: 0,
+            channel_short_ids: HashSet::new(),
             timestamp: 0,
-            node_name: AnnouncedNodeName::default(),
-            signature: EcdsaSignature::from(sig1),
+            anouncement_msg: None,
         };
 
         let node2 = NodeInfo {
             node_id: public_key2.into(),
-            channel_short_ids: vec![],
-            features: 0,
+            channel_short_ids: HashSet::new(),
             timestamp: 0,
-            node_name: AnnouncedNodeName::default(),
-            signature: EcdsaSignature::from(sig2),
+            anouncement_msg: None,
         };
-        network_graph.add_node(public_key1.into(), node1.clone());
+        network_graph.add_node(node1.clone());
         assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
-        network_graph.add_node(public_key2.into(), node2.clone());
+        network_graph.add_node(node2.clone());
         assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
+
+        let node1_channels = network_graph.get_channels_by_peer(node1.node_id);
+        assert_eq!(node1_channels.count(), 0);
+        let node2_channels = network_graph.get_channels_by_peer(node2.node_id);
+        assert_eq!(node2_channels.count(), 0);
 
         network_graph.reset();
         assert_eq!(network_graph.get_channel(&channel_id), None);
         network_graph.load_from_store();
-        network_graph.add_node(public_key1.into(), node1.clone());
+
+        network_graph.add_node(node1.clone());
         assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
-        network_graph.add_node(public_key2.into(), node2.clone());
+        network_graph.add_node(node2.clone());
         assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
 
         let channel_info = ChannelInfo {
@@ -288,6 +301,10 @@ mod tests {
         };
         network_graph.add_channel(channel_info.clone());
         assert_eq!(network_graph.get_channel(&channel_id), Some(&channel_info));
+        let node1_channels = network_graph.get_channels_by_peer(node1.node_id);
+        assert_eq!(node1_channels.count(), 1);
+        let node2_channels = network_graph.get_channels_by_peer(node2.node_id);
+        assert_eq!(node2_channels.count(), 1);
 
         network_graph.reset();
         assert_eq!(network_graph.get_channel(&channel_id), None);
