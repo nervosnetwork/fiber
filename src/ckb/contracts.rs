@@ -346,49 +346,74 @@ impl ContractsContext {
                     )
                 })
                 .collect();
-                let script_cell_deps = [
+                let script_cell_info: HashMap<_, _> = [
                     (
                         Contract::Secp256k1Lock,
-                        "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37",
-                        0,
-                        DepType::DepGroup,
+                        (
+                            "0xf8de3bb47d055cdf460d93a2a6e1b05f7432f9777c8c474abf4eec1d4aee5d37",
+                            0u32,
+                            DepType::DepGroup,
+                        ),
                     ),
                     (
                         Contract::CkbAuth,
-                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
-                        0u32,
-                        DepType::Code,
+                        (
+                            "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
+                            0,
+                            DepType::Code,
+                        ),
                     ),
                     (
                         Contract::FundingLock,
-                        "0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49",
-                        1,
-                        DepType::Code,
+                        (
+                            "0x9ee173a4bc10f61ead2979f5f875049c1656a995ca28d037269c75c0438eae53",
+                            0,
+                            DepType::Code,
+                        ),
                     ),
                     (
                         Contract::CommitmentLock,
-                        "0xd33bd0d7d6e3b087ffdafa0dd769b7a4caa91e28ce87cd04ee1aa1814c5e460e",
-                        0,
-                        DepType::Code,
+                        (
+                            "0x9ee173a4bc10f61ead2979f5f875049c1656a995ca28d037269c75c0438eae53",
+                            1,
+                            DepType::Code,
+                        ),
                     ),
                 ]
                 .into_iter()
-                .map(|(contract, tx, index, dep_type)| {
-                    let cell_dep = CellDep::new_builder()
-                        .out_point(
-                            OutPoint::new_builder()
-                                .tx_hash(Hash256::from_str(tx).unwrap().into())
-                                .index(index.pack())
-                                .build(),
-                        )
-                        .dep_type(dep_type.into())
-                        .build();
-                    (
-                        contract,
-                        CellDepVec::new_builder().push(cell_dep).build().pack(),
-                    )
-                })
                 .collect();
+                let script_deps: HashMap<_, _> = [
+                    (Contract::FundingLock, vec![Contract::CkbAuth]),
+                    (Contract::CommitmentLock, vec![Contract::CkbAuth]),
+                ]
+                .into_iter()
+                .collect();
+
+                let script_cell_deps = script_cell_info
+                    .keys()
+                    .map(|contract| {
+                        let cell_deps = vec![contract]
+                            .into_iter()
+                            .chain(script_deps.get(contract).unwrap_or(&vec![]))
+                            .map(|dep| {
+                                let (tx, index, dep_type) = script_cell_info.get(dep).unwrap();
+                                CellDep::new_builder()
+                                    .out_point(
+                                        OutPoint::new_builder()
+                                            .tx_hash(Hash256::from_str(tx).unwrap().into())
+                                            .index((*index).pack())
+                                            .build(),
+                                    )
+                                    .dep_type((*dep_type).into())
+                                    .build()
+                            })
+                            .collect();
+                        (
+                            *contract,
+                            CellDepVec::new_builder().set(cell_deps).build().pack(),
+                        )
+                    })
+                    .collect();
 
                 Self::Real(Arc::new(ContractsInfo {
                     contract_default_scripts: map,
