@@ -48,7 +48,7 @@ use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
-pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 60000;
+pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
