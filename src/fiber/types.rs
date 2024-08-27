@@ -637,7 +637,8 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitmentSigned {
     pub channel_id: Hash256,
-    pub partial_signature: PartialSignature,
+    pub funding_tx_partial_signature: PartialSignature,
+    pub commitment_tx_partial_signature: PartialSignature,
     pub next_local_nonce: PubNonce,
 }
 
@@ -659,8 +660,11 @@ impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
     fn from(commitment_signed: CommitmentSigned) -> Self {
         molecule_fiber::CommitmentSigned::new_builder()
             .channel_id(commitment_signed.channel_id.into())
-            .partial_signature(partial_signature_to_molecule(
-                commitment_signed.partial_signature,
+            .funding_tx_partial_signature(partial_signature_to_molecule(
+                commitment_signed.funding_tx_partial_signature,
+            ))
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                commitment_signed.commitment_tx_partial_signature,
             ))
             .next_local_nonce((&commitment_signed.next_local_nonce).into())
             .build()
@@ -673,8 +677,14 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
     fn try_from(commitment_signed: molecule_fiber::CommitmentSigned) -> Result<Self, Self::Error> {
         Ok(CommitmentSigned {
             channel_id: commitment_signed.channel_id().into(),
-            partial_signature: PartialSignature::from_slice(
-                commitment_signed.partial_signature().as_slice(),
+            funding_tx_partial_signature: PartialSignature::from_slice(
+                commitment_signed.funding_tx_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                commitment_signed
+                    .commitment_tx_partial_signature()
+                    .as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_local_nonce: commitment_signed

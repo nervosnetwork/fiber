@@ -575,14 +575,11 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             &state.state
         );
         let PartiallySignedCommitmentTransaction {
-            tx,
-            signature,
             version,
+            tx,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         } = state.build_and_sign_commitment_tx()?;
-        debug!(
-            "Built and signed commitment tx #{}: transaction: ({:?}), partial signature: {:?}",
-            version, &tx, &signature
-        );
 
         debug!(
             "Sending next local nonce {:?} (previous nonce {:?})",
@@ -591,7 +588,8 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
         );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
-            partial_signature: signature,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
         debug!(
@@ -2932,7 +2930,7 @@ impl ChannelActorState {
         let signature2 = sign_ctx.sign(psct.tx.hash().as_slice())?;
 
         self.aggregate_partial_signatures_to_consume_funding_cell(
-            [psct.signature, signature2],
+            [psct.funding_tx_partial_signature, signature2],
             &psct.tx,
         )
     }
@@ -3235,7 +3233,10 @@ impl ChannelActorState {
             }
         };
 
-        let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+        let tx = self.verify_and_complete_tx(
+            commitment_signed.funding_tx_partial_signature,
+            commitment_signed.commitment_tx_partial_signature,
+        )?;
         // This is the commitment transaction that both parties signed,
         // can be broadcasted to the network if necessary
         let num = self.get_current_commitment_number(false);
@@ -3982,17 +3983,22 @@ impl ChannelActorState {
 
     pub fn build_and_verify_commitment_tx(
         &self,
-        signature: PartialSignature,
+        funding_tx_partial_signature: PartialSignature,
+        commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let verify_ctx = Musig2VerifyContext::from(self);
 
         let tx = self.build_commitment_tx(false);
-        verify_ctx.verify(signature, tx.hash().as_slice())?;
+        verify_ctx.verify(funding_tx_partial_signature, tx.hash().as_slice())?;
+
+        // FIXME
+        // verify commitment_tx_partial_signature
 
         Ok(PartiallySignedCommitmentTransaction {
             version: self.get_current_commitment_number(false),
             tx,
-            signature,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         })
     }
 
@@ -4002,12 +4008,16 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext::from(self);
 
         let tx = self.build_commitment_tx(true);
-        let signature = sign_ctx.sign(tx.hash().as_slice())?;
+        let funding_tx_partial_signature = sign_ctx.sign(tx.hash().as_slice())?;
+        // FIXIME
+        // build commitment_tx_partial_signature
+        let commitment_tx_partial_signature = funding_tx_partial_signature.clone();
 
         Ok(PartiallySignedCommitmentTransaction {
             version: self.get_current_commitment_number(true),
             tx,
-            signature,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         })
     }
 
@@ -4015,9 +4025,13 @@ impl ChannelActorState {
     /// with valid witnesses.
     pub fn verify_and_complete_tx(
         &self,
-        signature: PartialSignature,
+        funding_tx_partial_signature: PartialSignature,
+        commitment_tx_partial_signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let tx = self.build_and_verify_commitment_tx(signature)?;
+        let tx = self.build_and_verify_commitment_tx(
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
+        )?;
         self.sign_tx_to_consume_funding_cell(&tx)
     }
 }
@@ -4055,8 +4069,10 @@ pub struct PartiallySignedCommitmentTransaction {
     pub version: u64,
     // The commitment transaction.
     pub tx: TransactionView,
-    // The partial signature of the commitment transaction.
-    pub signature: PartialSignature,
+    // The partial signature to unlock the funding transaction.
+    pub funding_tx_partial_signature: PartialSignature,
+    // The partial signature to unlock the commitment transaction.
+    pub commitment_tx_partial_signature: PartialSignature,
 }
 
 pub fn create_witness_for_funding_cell(

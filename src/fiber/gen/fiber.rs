@@ -4425,7 +4425,18 @@ impl ::core::fmt::Display for CommitmentSigned {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
+        write!(
+            f,
+            ", {}: {}",
+            "funding_tx_partial_signature",
+            self.funding_tx_partial_signature()
+        )?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_tx_partial_signature",
+            self.commitment_tx_partial_signature()
+        )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -4441,14 +4452,16 @@ impl ::core::default::Default for CommitmentSigned {
     }
 }
 impl CommitmentSigned {
-    const DEFAULT_VALUE: [u8; 146] = [
-        146, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 182] = [
+        182, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 84, 0, 0, 0, 116, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 4;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4471,17 +4484,23 @@ impl CommitmentSigned {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn partial_signature(&self) -> Byte32 {
+    pub fn funding_tx_partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn next_local_nonce(&self) -> PubNonce {
+    pub fn commitment_tx_partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        Byte32::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn next_local_nonce(&self) -> PubNonce {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[20..]) as usize;
             PubNonce::new_unchecked(self.0.slice(start..end))
         } else {
             PubNonce::new_unchecked(self.0.slice(start..))
@@ -4515,7 +4534,8 @@ impl molecule::prelude::Entity for CommitmentSigned {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .partial_signature(self.partial_signature())
+            .funding_tx_partial_signature(self.funding_tx_partial_signature())
+            .commitment_tx_partial_signature(self.commitment_tx_partial_signature())
             .next_local_nonce(self.next_local_nonce())
     }
 }
@@ -4539,7 +4559,18 @@ impl<'r> ::core::fmt::Display for CommitmentSignedReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
+        write!(
+            f,
+            ", {}: {}",
+            "funding_tx_partial_signature",
+            self.funding_tx_partial_signature()
+        )?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_tx_partial_signature",
+            self.commitment_tx_partial_signature()
+        )?;
         write!(f, ", {}: {}", "next_local_nonce", self.next_local_nonce())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -4549,7 +4580,7 @@ impl<'r> ::core::fmt::Display for CommitmentSignedReader<'r> {
     }
 }
 impl<'r> CommitmentSignedReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 4;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -4572,17 +4603,23 @@ impl<'r> CommitmentSignedReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn partial_signature(&self) -> Byte32Reader<'r> {
+    pub fn funding_tx_partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
+    pub fn commitment_tx_partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
+        let end = molecule::unpack_number(&slice[16..]) as usize;
+        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn next_local_nonce(&self) -> PubNonceReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[20..]) as usize;
             PubNonceReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             PubNonceReader::new_unchecked(&self.as_slice()[start..])
@@ -4637,24 +4674,30 @@ impl<'r> molecule::prelude::Reader<'r> for CommitmentSignedReader<'r> {
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        PubNonceReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Byte32Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        PubNonceReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct CommitmentSignedBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) partial_signature: Byte32,
+    pub(crate) funding_tx_partial_signature: Byte32,
+    pub(crate) commitment_tx_partial_signature: Byte32,
     pub(crate) next_local_nonce: PubNonce,
 }
 impl CommitmentSignedBuilder {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 4;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
     }
-    pub fn partial_signature(mut self, v: Byte32) -> Self {
-        self.partial_signature = v;
+    pub fn funding_tx_partial_signature(mut self, v: Byte32) -> Self {
+        self.funding_tx_partial_signature = v;
+        self
+    }
+    pub fn commitment_tx_partial_signature(mut self, v: Byte32) -> Self {
+        self.commitment_tx_partial_signature = v;
         self
     }
     pub fn next_local_nonce(mut self, v: PubNonce) -> Self {
@@ -4668,7 +4711,8 @@ impl molecule::prelude::Builder for CommitmentSignedBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.partial_signature.as_slice().len()
+            + self.funding_tx_partial_signature.as_slice().len()
+            + self.commitment_tx_partial_signature.as_slice().len()
             + self.next_local_nonce.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -4677,7 +4721,9 @@ impl molecule::prelude::Builder for CommitmentSignedBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.partial_signature.as_slice().len();
+        total_size += self.funding_tx_partial_signature.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.commitment_tx_partial_signature.as_slice().len();
         offsets.push(total_size);
         total_size += self.next_local_nonce.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -4685,7 +4731,8 @@ impl molecule::prelude::Builder for CommitmentSignedBuilder {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.partial_signature.as_slice())?;
+        writer.write_all(self.funding_tx_partial_signature.as_slice())?;
+        writer.write_all(self.commitment_tx_partial_signature.as_slice())?;
         writer.write_all(self.next_local_nonce.as_slice())?;
         Ok(())
     }
