@@ -150,7 +150,6 @@ pub enum NetworkServiceEvent {
         Hash256,         /* Channel Id */
         u64,             /* Commitment number */
         TransactionView, /* Commitment transaction, not valid per se (requires other party's signature) */
-        Vec<u8>,         /* Commitment transaction witness */
     ),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
@@ -519,7 +518,7 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(
                             NetworkServiceEvent::LocalCommitmentSigned(
-                                peer_id, channel_id, version, tx, witnesses,
+                                peer_id, channel_id, version, tx,
                             ),
                         ),
                     ))

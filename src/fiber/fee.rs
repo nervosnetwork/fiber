@@ -20,18 +20,41 @@ pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
     }
 }
 
-pub(crate) fn commitment_tx_size(
-    udt_type_script: &Option<Script>,
-    shutdown_scripts: Option<(Script, Script)>,
-) -> usize {
-    let (script_a, script_b) =
-        if let Some((local_shutdown_script, remote_shutdown_script)) = shutdown_scripts {
-            (local_shutdown_script, remote_shutdown_script)
-        } else {
-            let script = get_script_by_contract(Contract::Secp256k1Lock, &[0u8; 20]);
-            (script.clone(), script)
-        };
+pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
+    let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
+    let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 
+    let (output, output_data) = if let Some(type_script) = udt_type_script {
+        let output = CellOutput::new_builder()
+            .lock(commitment_lock_script)
+            .type_(Some(type_script.clone()).pack())
+            .capacity(0.pack())
+            .build();
+        let output_data = (0_u128).to_le_bytes().pack();
+        (output, output_data)
+    } else {
+        let output = CellOutput::new_builder()
+            .capacity(0.pack())
+            .lock(commitment_lock_script)
+            .build();
+        (output, Bytes::default())
+    };
+
+    let mock_commitment_tx = TransactionBuilder::default()
+        .cell_deps(cell_deps)
+        .input(CellInput::default())
+        .output(output)
+        .output_data(output_data)
+        .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
+        .build();
+    mock_commitment_tx.data().serialized_size_in_block()
+}
+
+pub(crate) fn shutdown_tx_size(
+    udt_type_script: &Option<Script>,
+    shutdown_scripts: (Script, Script),
+) -> usize {
+    let (script_a, script_b) = shutdown_scripts;
     let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 
     let (outputs, outputs_data) = if let Some(type_script) = udt_type_script {
@@ -63,18 +86,14 @@ pub(crate) fn commitment_tx_size(
         (outputs, vec![Bytes::default(); 2])
     };
 
-    let mock_commitment_tx = TransactionBuilder::default()
+    let mock_shutdown_tx = TransactionBuilder::default()
         .cell_deps(cell_deps)
-        .input(
-            CellInput::new_builder()
-                .previous_output(OutPoint::default())
-                .build(),
-        )
+        .input(CellInput::default())
         .set_outputs(outputs.to_vec())
         .set_outputs_data(outputs_data.to_vec())
         .set_witnesses(vec![[0; FUNDING_CELL_WITNESS_LEN].pack()])
         .build();
-    mock_commitment_tx.data().serialized_size_in_block()
+    mock_shutdown_tx.data().serialized_size_in_block()
 }
 
 pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Option<Script>) -> u64 {
@@ -84,7 +103,7 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
     );
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
 
-    let tx_size = commitment_tx_size(udt_type_script, None) as u64;
+    let tx_size = commitment_tx_size(udt_type_script) as u64;
     let res = fee_rate.fee(tx_size).as_u64();
     debug!("calculate_commitment_tx_fee return: {}", res);
     res
@@ -108,7 +127,7 @@ pub(crate) fn calculate_shutdown_tx_fee(fee_rate: u64, state: &ChannelActorState
         fee_rate, udt_type_script
     );
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
-    let tx_size = commitment_tx_size(udt_type_script, Some(shutdown_scripts)) as u64;
+    let tx_size = shutdown_tx_size(udt_type_script, shutdown_scripts) as u64;
     let res = fee_rate.fee(tx_size).as_u64();
     debug!("calculate_shutdown_tx_fee return: {}", res);
     res
