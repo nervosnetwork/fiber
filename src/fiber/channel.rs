@@ -111,6 +111,7 @@ pub enum ChannelCommand {
     AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
+    Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
 }
 
 #[derive(Debug)]
@@ -139,6 +140,14 @@ pub struct ShutdownCommand {
     pub close_script: Script,
     pub fee_rate: FeeRate,
     pub force: bool,
+}
+
+#[derive(Debug)]
+pub struct UpdateCommand {
+    pub locktime_expiry_delta: Option<u64>,
+    pub tlc_minimum_value: Option<u128>,
+    pub tlc_maximum_value: Option<u128>,
+    pub fee_rate: Option<FeeRate>,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -822,6 +831,24 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
+    pub fn handle_update_command(
+        &self,
+        _state: &mut ChannelActorState,
+        command: UpdateCommand,
+    ) -> ProcessingChannelResult {
+        let UpdateCommand {
+            locktime_expiry_delta: _,
+            tlc_minimum_value: _,
+            tlc_maximum_value: _,
+            fee_rate: fee_value,
+        } = command;
+
+        if let Some(_fee_value) = fee_value {
+            // TODO: implement update fee value
+        }
+        Ok(())
+    }
+
     // This is the dual of `handle_tx_collaboration_msg`. Any logic error here is likely
     // to present in the other function as well.
     pub fn handle_tx_collaboration_command(
@@ -964,6 +991,20 @@ impl<S> ChannelActor<S> {
                     }
                     Err(err) => {
                         debug!("Error processing shutdown command: {:?}", &err);
+                        let _ = reply.send(Err(err.to_string()));
+                        Err(err)
+                    }
+                }
+            }
+            ChannelCommand::Update(command, reply) => {
+                match self.handle_update_command(state, command) {
+                    Ok(_) => {
+                        debug!("Update command processed successfully");
+                        let _ = reply.send(Ok(()));
+                        Ok(())
+                    }
+                    Err(err) => {
+                        debug!("Error processing update command: {:?}", &err);
                         let _ = reply.send(Err(err.to_string()));
                         Err(err)
                     }
