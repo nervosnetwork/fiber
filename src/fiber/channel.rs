@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-use futures::executor::block_on;
 use tracing::{debug, error, info, warn};
 
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -44,7 +43,7 @@ use crate::{
     },
     fiber::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
-        fee::{calculate_commitment_tx_fee, commitment_tx_size, shutdown_tx_size},
+        fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::emit_service_event,
         types::Shutdown,
     },
@@ -2425,6 +2424,10 @@ impl ChannelActorState {
 
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
         let tx = self.get_funding_transaction();
+        debug!(
+            "Funding transaction lock args: {:?}",
+            tx.raw().outputs().get(0).unwrap().lock().args()
+        );
         // By convention, the funding tx output for the channel is the first output.
         OutPoint::new(tx.calc_tx_hash(), 0)
     }
@@ -2490,13 +2493,9 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_lock_script(&self) -> Script {
-        let args = blake2b_256(self.get_funding_lock_script_xonly());
-        debug!(
-            "Aggregated pubkey: {:?}, hash: {:?}",
-            hex::encode(args),
-            hex::encode(&args[..20])
-        );
-        get_script_by_contract(Contract::FundingLock, &args[0..20])
+        let aggregated_pubkey = self.get_funding_lock_script_xonly();
+        let pubkey_hash = blake2b_256(&aggregated_pubkey);
+        get_script_by_contract(Contract::FundingLock, &pubkey_hash[0..20])
     }
 
     pub fn get_funding_request(&self) -> FundingRequest {
@@ -2896,7 +2895,6 @@ impl ChannelActorState {
     pub fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
         partial_signatures: [PartialSignature; 2],
-        version: u64,
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let funding_out_point = self.get_funding_transaction_outpoint();
@@ -2906,17 +2904,10 @@ impl ChannelActorState {
             "The first input of the tx must be the funding cell outpoint"
         );
 
-        let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
-        debug!(
-            "Message to sign to consume funding cell {:?} with version {:?}",
-            hex::encode(message.as_slice()),
-            version
-        );
-
         let verify_ctx = Musig2VerifyContext::from(self);
 
         let signature = aggregate_partial_signatures_for_msg(
-            message.as_slice(),
+            tx.hash().as_slice(),
             verify_ctx,
             partial_signatures,
         )?;
@@ -2942,7 +2933,6 @@ impl ChannelActorState {
 
         self.aggregate_partial_signatures_to_consume_funding_cell(
             [psct.signature, signature2],
-            psct.version,
             &psct.tx,
         )
     }
@@ -2974,19 +2964,15 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let (shutdown_tx, message) = self.build_shutdown_tx()?;
+        let shutdown_tx = self.build_shutdown_tx()?;
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
         let local_shutdown_signature = match self.local_shutdown_signature {
             Some(signature) => signature,
             None => {
-                let signature = sign_ctx.sign(message.as_slice())?;
+                let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
                 self.local_shutdown_signature = Some(signature);
-                debug!(
-                    "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
-                    &shutdown_tx, &message, &signature,
-                );
 
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -3007,7 +2993,6 @@ impl ChannelActorState {
             Some(remote_shutdown_signature) => {
                 let tx = self.aggregate_partial_signatures_to_consume_funding_cell(
                     [local_shutdown_signature, remote_shutdown_signature],
-                    u64::MAX,
                     &shutdown_tx,
                 )?;
                 assert_eq!(
@@ -3253,12 +3238,6 @@ impl ChannelActorState {
         let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
         // This is the commitment transaction that both parties signed,
         // can be broadcasted to the network if necessary
-
-        assert_eq!(
-            tx.data().serialized_size_in_block(),
-            commitment_tx_size(&self.funding_udt_type_script)
-        );
-
         let num = self.get_current_commitment_number(false);
 
         debug!(
@@ -3777,7 +3756,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
+    pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
         // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
         // This function may be called in a state where these scripts are not present.
@@ -3860,16 +3839,7 @@ impl ChannelActorState {
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(outputs_data.to_vec())
                 .build();
-            let message = get_funding_cell_message_to_sign(
-                u64::MAX,
-                self.get_funding_transaction_outpoint(),
-                &tx,
-            );
-            debug!(
-                "Building message to sign for shutdown transaction {:?}",
-                hex::encode(message.as_slice())
-            );
-            Ok((tx, message))
+            Ok(tx)
         } else {
             debug!(
                 "Final balance partition before shutting down: local {} (fee {}), remote {} (fee {})",
@@ -3897,17 +3867,7 @@ impl ChannelActorState {
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(vec![Default::default(), Default::default()])
                 .build();
-
-            let message = get_funding_cell_message_to_sign(
-                u64::MAX,
-                self.get_funding_transaction_outpoint(),
-                &tx,
-            );
-            debug!(
-                "Building message to sign for shutdown transaction {:?}",
-                hex::encode(message.as_slice())
-            );
-            Ok((tx, message))
+            Ok(tx)
         }
     }
 
@@ -3951,9 +3911,6 @@ impl ChannelActorState {
         self.get_local_commitment_witnesses(self.get_local_commitment_number() - 1)
     }
 
-    // Build the parameters for the commitment transaction. The first two elements for the
-    // returning tuple are commitment tx output and output data.
-    // The last element is the pending htlcs witness to unlock the commitment tx.
     fn build_commitment_transaction_parameters(&self, local: bool) -> (CellOutput, Bytes) {
         #[cfg(debug_assertions)]
         {
@@ -4061,10 +4018,6 @@ impl ChannelActorState {
         signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let tx = self.build_and_verify_commitment_tx(signature)?;
-        debug!(
-            "Trying to complete tx with partial remote signature {:?}",
-            &tx
-        );
         self.sign_tx_to_consume_funding_cell(&tx)
     }
 }
@@ -4194,19 +4147,6 @@ impl Musig2SignContext {
             message,
         )?)
     }
-}
-
-fn get_funding_cell_message_to_sign(
-    version: u64,
-    funding_out_point: OutPoint,
-    tx: &TransactionView,
-) -> [u8; 32] {
-    let version = version.to_le_bytes();
-    let version = version.as_ref();
-    let funding_out_point = funding_out_point.as_slice();
-    let tx_hash = tx.hash();
-    let tx_hash = tx_hash.as_slice();
-    blake2b_256([version, funding_out_point, tx_hash].concat())
 }
 
 pub fn aggregate_partial_signatures_for_msg(
@@ -5223,11 +5163,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_old_commitment_transaction() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
-
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()

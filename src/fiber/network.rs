@@ -214,7 +214,7 @@ pub enum NetworkActorEvent {
     FundingTransactionFailed(OutPoint),
 
     /// A commitment transaction is signed by us and has sent to the other party.
-    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
+    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView),
 
     /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
@@ -505,14 +505,7 @@ where
                     &channel_id, &tx_hash, &peer_id
                 );
             }
-            NetworkActorEvent::LocalCommitmentSigned(
-                peer_id,
-                channel_id,
-                version,
-                tx,
-                witnesses,
-            ) => {
-                // TODO: We should save the witnesses to the channel state.
+            NetworkActorEvent::LocalCommitmentSigned(peer_id, channel_id, version, tx) => {
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(

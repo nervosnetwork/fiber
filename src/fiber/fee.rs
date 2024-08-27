@@ -2,7 +2,7 @@ use super::channel::{ChannelActorState, FUNDING_CELL_WITNESS_LEN};
 use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
-use ckb_types::packed::{Bytes, OutPoint, Script};
+use ckb_types::packed::{Bytes, Script};
 use ckb_types::prelude::Builder;
 use ckb_types::{
     core::FeeRate,
@@ -20,7 +20,7 @@ pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
     }
 }
 
-pub(crate) fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
+fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
     let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 
