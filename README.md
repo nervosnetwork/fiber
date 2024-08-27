@@ -48,6 +48,7 @@ RUST_LOG=info ./fnn -c config.yml -d .
 
 ## Documentation
 
+* [Light Paper](./docs/light-paper.md)
 * [RPC Documentation](./src/rpc/README.md)
 * [P2P Message Protocol](./docs/specs/p2p-message.md)
 * [Invoice Protocol](./docs/specs/payment-invoice.md)
