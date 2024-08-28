@@ -36,6 +36,8 @@ pub struct ChannelInfo {
     pub features: u64,
     #[serde_as(as = "EntityHex")]
     pub channel_output: OutPoint,
+    pub funding_tx_block_number: u64,
+    pub funding_tx_index: u32,
     pub one_to_two: Option<ChannelUpdateInfo>,
     pub two_to_one: Option<ChannelUpdateInfo>,
     // Timestamp of last updated
@@ -226,6 +228,8 @@ mod tests {
             capacity: 0,
             features: 0,
             channel_output: OutPoint::default(),
+            funding_tx_block_number: 0,
+            funding_tx_index: 0,
             one_to_two: None,
             two_to_one: None,
             timestamp: 0,
@@ -327,6 +331,8 @@ mod tests {
             capacity: 0,
             features: 0,
             channel_output: channel_outpoint.clone(),
+            funding_tx_block_number: 0,
+            funding_tx_index: 0,
             one_to_two: None,
             two_to_one: None,
             timestamp: 0,

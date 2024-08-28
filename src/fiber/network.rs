@@ -926,7 +926,7 @@ where
                     return;
                 }
 
-                let tx = match call_t!(
+                let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
                     self.chain_actor,
                     CkbChainMessage::TraceTx,
                     DEFAULT_CHAIN_ACTOR_TIMEOUT,
@@ -940,9 +940,15 @@ where
                         status:
                             TxStatus {
                                 status: Status::Committed,
+                                block_number: Some(block_number),
                                 ..
                             },
-                    }) => tx,
+                    }) => (
+                        tx,
+                        block_number.into(),
+                        // tx index is not returned on older ckb version, using dummy tx index instead
+                        0u32,
+                    ),
                     _ => {
                         error!(
                             "Channel announcement transaction {:?} not found or not confirmed",
@@ -1016,6 +1022,8 @@ where
                     capacity,
                     features: channel_announcement.features,
                     ckb_signature: ckb_signature,
+                    funding_tx_block_number: block_number.into(),
+                    funding_tx_index: tx_index,
                     one_to_two: None, // wait for channel update message
                     two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
