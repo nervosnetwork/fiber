@@ -202,6 +202,73 @@ table ChannelUpdate {
     fee_value: Uint128,
 }
 
+table NodeAnnouncementQuery {
+    node_id: Pubkey,
+    flags: byte,
+}
+
+table ChannelAnnouncementQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+table ChannelUpdateQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+union BroadcastMessageQuery {
+    NodeAnnouncementQuery,
+    ChannelAnnouncementQuery,
+    ChannelUpdateQuery,
+}
+
+vector BroadcastMessageQueries <BroadcastMessageQuery>;
+
+union BroadcastMessage {
+    NodeAnnouncement,
+    ChannelAnnouncement,
+    ChannelUpdate,
+}
+
+vector BroadcastMessages <BroadcastMessage>;
+
+table GetBroadcastMessages {
+    id: Uint64,
+    queries: BroadcastMessageQueries,
+}
+
+table GetBroadcastMessagesResult {
+    id: Uint64,
+    messages: BroadcastMessages,
+}
+
+table QueryChannelsWithinBlockRange {
+    id: Uint64,
+    chain_hash: Byte32,
+    start_block: Uint64,
+    end_block: Uint64,
+}
+
+vector OutPoints <OutPoint>;
+
+table QueryChannelsWithinBlockRangeResult {
+    id: Uint64,
+    channels: OutPoints,
+}
+
+table QueryBroadcastMessagesWithinTimeRange {
+    id: Uint64,
+    chain_hash: Byte32,
+    start_time: Uint128,
+    end_time: Uint128,
+}
+
+table QueryBroadcastMessagesWithinTimeRangeResult {
+    id: Uint64,
+    queries: BroadcastMessageQueries,
+}
+
 union FiberMessage {
     OpenChannel,
     AcceptChannel,
@@ -223,4 +290,10 @@ union FiberMessage {
     NodeAnnouncement,
     ChannelAnnouncement,
     ChannelUpdate,
+    GetBroadcastMessages,
+    GetBroadcastMessagesResult,
+    QueryChannelsWithinBlockRange,
+    QueryChannelsWithinBlockRangeResult,
+    QueryBroadcastMessagesWithinTimeRange,
+    QueryBroadcastMessagesWithinTimeRangeResult,
 }
