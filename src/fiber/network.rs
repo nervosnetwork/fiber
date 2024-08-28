@@ -383,6 +383,7 @@ where
                 state
                     .send_message_to_channel_actor(channel_id, ChannelActorMessage::PeerMessage(m));
             }
+            FiberMessage::QueryInformation(_) => todo!(),
         };
         Ok(())
     }
