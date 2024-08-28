@@ -275,7 +275,7 @@ impl NetworkGraphStateStore for MemoryStore {
         self.channels_map
             .write()
             .unwrap()
-            .insert(channel.channel_output.clone(), channel);
+            .insert(channel.out_point(), channel);
     }
 
     fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {

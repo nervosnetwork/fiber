@@ -1467,7 +1467,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelAnnouncement {
     pub node_1_signature: Option<EcdsaSignature>,
     pub node_2_signature: Option<EcdsaSignature>,

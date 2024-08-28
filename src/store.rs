@@ -98,6 +98,7 @@ impl Batch {
                     [
                         CHANNEL_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
                         channel.funding_tx_block_number.to_be_bytes().as_slice(),
+                        channel.funding_tx_index.to_be_bytes().as_slice(),
                     ]
                     .concat(),
                     channel_id.as_slice(),
@@ -112,15 +113,17 @@ impl Batch {
                 )
             }
             KeyValue::NodeInfo(id, node) => {
-                // Save node announcement timestamp to index, so that we can query nodes by timestamp
-                self.put(
-                    [
-                        NODE_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
-                        node.timestamp.to_be_bytes().as_slice(),
-                    ]
-                    .concat(),
-                    id.serialize(),
-                );
+                if node.anouncement_msg.is_some() {
+                    // Save node announcement timestamp to index, so that we can query nodes by timestamp
+                    self.put(
+                        [
+                            NODE_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
+                            node.timestamp.to_be_bytes().as_slice(),
+                        ]
+                        .concat(),
+                        id.serialize(),
+                    );
+                }
 
                 let mut key = Vec::with_capacity(34);
                 key.push(NODE_INFO_PREFIX);
@@ -356,10 +359,7 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelInfo(
-            channel.channel_output.clone(),
-            channel.clone(),
-        ));
+        batch.put_kv(KeyValue::ChannelInfo(channel.out_point(), channel.clone()));
         batch.commit();
     }
 

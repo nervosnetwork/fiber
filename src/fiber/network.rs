@@ -963,7 +963,7 @@ where
 
                 let pubkey = channel_announcement.ckb_key.serialize();
                 let pubkey_hash = blake2b_256(pubkey.as_slice());
-                let capacity = match tx.inner.outputs.get(0) {
+                match tx.inner.outputs.get(0) {
                     None => {
                         error!(
                             "On-chain transaction found but no output: {:?}",
@@ -1016,15 +1016,9 @@ where
 
                 // Add the channel to the network graph.
                 let channel_info = ChannelInfo {
-                    chain_hash: channel_announcement.chain_hash,
-                    node_1: channel_announcement.node_1_id,
-                    node_2: channel_announcement.node_2_id,
-                    channel_output: channel_announcement.channel_outpoint,
-                    capacity,
-                    features: channel_announcement.features,
-                    ckb_signature: ckb_signature,
                     funding_tx_block_number: block_number.into(),
                     funding_tx_index: tx_index,
+                    announcement_msg: channel_announcement.clone(),
                     one_to_two: None, // wait for channel update message
                     two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
@@ -1049,11 +1043,11 @@ where
                 let channel = network_graph.get_channel(&channel_update.channel_outpoint);
                 if let Some(channel) = channel {
                     let pubkey = if channel_update.message_flags & 1 == 1 {
-                        &channel.node_1
+                        channel.node1()
                     } else {
-                        &channel.node_2
+                        channel.node2()
                     };
-                    if !signature.verify(pubkey, &message) {
+                    if !signature.verify(&pubkey, &message) {
                         error!(
                             "Channel update message signature verification failed: {:?}",
                             &channel_update

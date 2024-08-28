@@ -1,7 +1,6 @@
-use super::types::{ChannelUpdate, Hash256, NodeAnnouncement};
+use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use super::{serde_utils::EntityHex, types::Pubkey};
 use ckb_types::packed::OutPoint;
-use secp256k1::schnorr::Signature as SchnorrSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -24,24 +23,29 @@ pub struct NodeInfo {
     pub anouncement_msg: Option<NodeAnnouncement>,
 }
 
-#[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelInfo {
-    pub chain_hash: Hash256,
-    pub node_1: Pubkey,
-    pub node_2: Pubkey,
-    pub ckb_signature: SchnorrSignature,
-    //pub channel_id: ChannelId,
-    pub capacity: u128,
-    pub features: u64,
-    #[serde_as(as = "EntityHex")]
-    pub channel_output: OutPoint,
     pub funding_tx_block_number: u64,
     pub funding_tx_index: u32,
+    pub announcement_msg: ChannelAnnouncement,
     pub one_to_two: Option<ChannelUpdateInfo>,
     pub two_to_one: Option<ChannelUpdateInfo>,
     // Timestamp of last updated
     pub timestamp: u128,
+}
+
+impl ChannelInfo {
+    pub fn out_point(&self) -> OutPoint {
+        self.announcement_msg.channel_outpoint.clone()
+    }
+
+    pub fn node1(&self) -> Pubkey {
+        self.announcement_msg.node_1_id
+    }
+
+    pub fn node2(&self) -> Pubkey {
+        self.announcement_msg.node_2_id
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -92,8 +96,7 @@ where
     fn load_from_store(&mut self) {
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
-            self.channels
-                .insert(channel.channel_output.clone(), channel.clone());
+            self.channels.insert(channel.out_point(), channel.clone());
         }
         let nodes = self.store.get_nodes(None);
         for node in nodes.iter() {
@@ -111,8 +114,8 @@ where
     }
 
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
-        assert_ne!(channel_info.node_1, channel_info.node_2);
-        match self.channels.get(&channel_info.channel_output) {
+        assert_ne!(channel_info.node1(), channel_info.node2());
+        match self.channels.get(&channel_info.out_point()) {
             Some(channel) => {
                 // If the channel already exists, we don't need to update it
                 // FIXME: if other fields is different, we should consider it as malioucious and ban the node?
@@ -122,13 +125,13 @@ where
             }
             None => {}
         }
-        let outpoint = channel_info.channel_output.clone();
+        let outpoint = channel_info.out_point();
         self.channels.insert(outpoint.clone(), channel_info.clone());
-        if let Some(node) = self.nodes.get_mut(&channel_info.node_1) {
+        if let Some(node) = self.nodes.get_mut(&channel_info.node1()) {
             node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
-        if let Some(node) = self.nodes.get_mut(&channel_info.node_2) {
+        if let Some(node) = self.nodes.get_mut(&channel_info.node2()) {
             node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
@@ -146,7 +149,7 @@ where
     pub fn get_channels_by_peer(&self, node_id: Pubkey) -> impl Iterator<Item = &ChannelInfo> {
         self.channels
             .values()
-            .filter(move |channel| channel.node_1 == node_id || channel.node_2 == node_id)
+            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
     pub fn process_channel_update(&mut self, channel_outpoint: OutPoint, update: ChannelUpdate) {
@@ -209,7 +212,8 @@ pub trait NetworkGraphStateStore {
 mod tests {
     use super::*;
     use crate::store::Store;
-    use secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use secp256k1::schnorr::Signature as SchnorrSignature;
+    use secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
     #[test]
     fn test_graph_channel_info() {
@@ -220,14 +224,21 @@ mod tests {
         let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
         let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
 
-        let channel_info = ChannelInfo {
-            chain_hash: Hash256::default(),
-            node_1: public_key1.into(),
-            node_2: public_key2.into(),
-            ckb_signature: SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes"),
-            capacity: 0,
+        let announcement_msg = ChannelAnnouncement {
+            chain_hash: Default::default(),
+            node_1_id: public_key1.into(),
+            node_2_id: public_key2.into(),
+            channel_outpoint: OutPoint::default(),
+            node_1_signature: None,
+            node_2_signature: None,
             features: 0,
-            channel_output: OutPoint::default(),
+            capacity: 0,
+            ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
+            ckb_signature: None,
+            udt_type_script: None,
+        };
+        let channel_info = ChannelInfo {
+            announcement_msg,
             funding_tx_block_number: 0,
             funding_tx_index: 0,
             one_to_two: None,
@@ -323,14 +334,22 @@ mod tests {
         network_graph.add_node(node2.clone());
         assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
 
-        let channel_info = ChannelInfo {
-            chain_hash: Hash256::default(),
-            node_1: public_key1.into(),
-            node_2: public_key2.into(),
-            ckb_signature,
-            capacity: 0,
+        let announcement_msg = ChannelAnnouncement {
+            chain_hash: Default::default(),
+            node_1_id: public_key1.into(),
+            node_2_id: public_key2.into(),
+            channel_outpoint: channel_outpoint.clone(),
+            node_1_signature: None,
+            node_2_signature: None,
             features: 0,
-            channel_output: channel_outpoint.clone(),
+            capacity: 0,
+            ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
+            ckb_signature: Some(ckb_signature),
+            udt_type_script: None,
+        };
+
+        let channel_info = ChannelInfo {
+            announcement_msg,
             funding_tx_block_number: 0,
             funding_tx_index: 0,
             one_to_two: None,
