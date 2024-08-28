@@ -30,6 +30,9 @@ pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
 pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
     DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
+/// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
+pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u32 = 1000;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
@@ -83,6 +86,15 @@ pub struct FiberConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+    /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]
+    // tlc_fee_proportional_millionths
+    #[arg(
+        name = "FIBER_TLC_FEE_PROPORTIONAL_MILLIONTHS",
+        long = "fiber-tlc-fee-proportional-millionths",
+        env,
+        help = "The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]"
+    )]
+    pub tlc_fee_proportional_millionths: Option<u32>,
 }
 
 #[derive(PartialEq, Copy, Clone, Default)]
@@ -183,6 +195,11 @@ impl FiberConfig {
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
             .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+    }
+
+    pub fn tlc_fee_proportional_millionths(&self) -> u32 {
+        self.tlc_fee_proportional_millionths
+            .unwrap_or(DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS)
     }
 }
 

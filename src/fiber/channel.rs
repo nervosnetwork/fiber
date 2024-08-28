@@ -183,6 +183,7 @@ pub struct OpenChannelParameter {
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
+    pub inbounding_tlc_fee_proportional_millionths: u32,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_num_of_accept_tlcs: Option<u64>,
 }
@@ -190,6 +191,7 @@ pub struct OpenChannelParameter {
 pub struct AcceptChannelParameter {
     pub funding_amount: u128,
     pub reserved_ckb_amount: u64,
+    pub inbounding_tlc_fee_proportional_millionths: u32,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
@@ -1115,6 +1117,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount: my_funding_amount,
                 reserved_ckb_amount: my_reserved_ckb_amount,
+                inbounding_tlc_fee_proportional_millionths,
                 seed,
                 open_channel,
                 channel_id_sender,
@@ -1163,6 +1166,7 @@ where
                     my_reserved_ckb_amount,
                     *commitment_fee_rate,
                     *funding_fee_rate,
+                    inbounding_tlc_fee_proportional_millionths,
                     funding_udt_type_script.clone(),
                     &seed,
                     self.get_local_pubkey(),
@@ -1253,6 +1257,7 @@ where
                 channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
+                inbounding_tlc_fee_proportional_millionths,
                 max_num_of_accept_tlcs,
                 max_tlc_value_in_flight,
             }) => {
@@ -1275,6 +1280,7 @@ where
                     reserved_ckb_amount,
                     commitment_fee_rate,
                     funding_fee_rate,
+                    inbounding_tlc_fee_proportional_millionths,
                     funding_udt_type_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_num_of_accept_tlcs.unwrap_or(DEFAULT_MAX_NUM_OF_ACCEPT_TLCS),
@@ -1635,6 +1641,15 @@ pub struct ChannelActorState {
     // The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
     // if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate
     pub funding_fee_rate: u64,
+
+    // The fee rate for tlc transfers. We only have these values set when
+    // this is a public channel. Both sides may set this value differently.
+    // This is a fee that is paid by the sender of the tlc.
+    // The detailed calculation for the fee of forwarding tlcs is
+    // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
+    // TODO: consider this value while building the commitment transaction.
+    pub outbounding_tlc_fee_proportional_millionths: Option<u32>,
+    pub inbounding_tlc_fee_proportional_millionths: Option<u32>,
 
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
@@ -2021,6 +2036,7 @@ impl ChannelActorState {
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
+        inbounding_tlc_fee_proportional_millionths: u32,
         funding_udt_type_script: Option<Script>,
         seed: &[u8],
         local_pubkey: Pubkey,
@@ -2066,6 +2082,10 @@ impl ChannelActorState {
             to_remote_amount: remote_value,
             commitment_fee_rate,
             funding_fee_rate,
+            outbounding_tlc_fee_proportional_millionths: None,
+            inbounding_tlc_fee_proportional_millionths: Some(
+                inbounding_tlc_fee_proportional_millionths,
+            ),
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
@@ -2115,6 +2135,7 @@ impl ChannelActorState {
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
+        inbounding_tlc_fee_proportional_millionths: u32,
         funding_udt_type_script: Option<Script>,
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
@@ -2137,6 +2158,10 @@ impl ChannelActorState {
             to_remote_amount: 0,
             commitment_fee_rate,
             funding_fee_rate,
+            outbounding_tlc_fee_proportional_millionths: None,
+            inbounding_tlc_fee_proportional_millionths: Some(
+                inbounding_tlc_fee_proportional_millionths,
+            ),
             id: temp_channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
@@ -3391,7 +3416,6 @@ impl ChannelActorState {
         ];
 
         self.remote_channel_announcement_nonce = accept_channel.channel_announcement_nonce.clone();
-
         debug!(
             "remote channel announcement nonce: {:?}",
             &self.remote_channel_announcement_nonce
@@ -5186,6 +5210,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -5226,6 +5251,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -5303,6 +5329,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -5490,6 +5517,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -5825,6 +5853,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -6004,6 +6033,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
@@ -6125,6 +6155,7 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
                 },
