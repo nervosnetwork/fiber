@@ -1,6 +1,6 @@
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
-use rocksdb::{prelude::*, WriteBatch, DB};
+use rocksdb::{prelude::*, DBIterator, IteratorMode, WriteBatch, DB};
 use serde_json;
 use std::{path::Path, sync::Arc};
 use tentacle::{multiaddr::Multiaddr, secio::PeerId};
@@ -30,6 +30,14 @@ impl Store {
             .get(key.as_ref())
             .map(|v| v.map(|vi| vi.to_vec()))
             .expect("get should be OK")
+    }
+
+    fn get_range<K: AsRef<[u8]>>(&self, lower_bound: K, upper_bound: K) -> DBIterator {
+        let mut read_options = ReadOptions::default();
+        read_options.set_iterate_upper_bound(upper_bound.as_ref());
+        read_options.set_iterate_lower_bound(lower_bound.as_ref());
+        let mode = IteratorMode::Start;
+        self.db.get_iter(&read_options, mode)
     }
 
     fn batch(&self) -> Batch {
