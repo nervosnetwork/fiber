@@ -159,6 +159,17 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
+    pub fn get_channels_within_block_range(
+        &self,
+        start_block: u64,
+        end_block: u64,
+    ) -> impl Iterator<Item = &ChannelInfo> {
+        self.channels.values().filter(move |channel| {
+            channel.funding_tx_block_number >= start_block
+                && channel.funding_tx_block_number < end_block
+        })
+    }
+
     pub fn process_channel_update(&mut self, channel_outpoint: OutPoint, update: ChannelUpdate) {
         let channel = self.channels.get_mut(&channel_outpoint).unwrap();
         let update_info = match update.message_flags & 1 == 1 {

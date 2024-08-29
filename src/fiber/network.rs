@@ -48,7 +48,8 @@ use super::key::blake2b_hash_with_salt;
 use super::types::{
     ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery,
     FiberMessage, FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
-    NodeAnnouncement, OpenChannel, Privkey, Pubkey,
+    NodeAnnouncement, OpenChannel, Privkey, Pubkey, QueryChannelsWithinBlockRange,
+    QueryChannelsWithinBlockRangeResult,
 };
 use super::FiberConfig;
 
@@ -431,13 +432,49 @@ where
                         self.on_broadcasted_message(message).await;
                     }
                 }
-                FiberQueryInformation::QueryChannelsWithinBlockRange(_) => todo!(),
-                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(_) => todo!(),
+                FiberQueryInformation::QueryChannelsWithinBlockRange(
+                    QueryChannelsWithinBlockRange {
+                        id,
+                        chain_hash: _,
+                        start_block,
+                        end_block,
+                    },
+                ) => {
+                    let channels = self
+                        .query_channels_within_block_range(start_block, end_block)
+                        .await
+                        .into_iter()
+                        .map(|c| c.out_point())
+                        .collect();
+                    let reply = FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
+                        QueryChannelsWithinBlockRangeResult { id, channels },
+                    );
+                    state
+                        .send_message_to_peer(&peer_id, FiberMessage::QueryInformation(reply))
+                        .await?;
+                }
+                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
+                    QueryChannelsWithinBlockRangeResult { id: _, channels: _ },
+                ) => {
+                    // We should send the results to the caller here (e.g. using id above).
+                }
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(_) => todo!(),
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(_) => todo!(),
             },
         };
         Ok(())
+    }
+
+    pub async fn query_channels_within_block_range(
+        &self,
+        start_block: u64,
+        end_block: u64,
+    ) -> Vec<ChannelInfo> {
+        let network_graph = self.network_graph.read().await;
+        network_graph
+            .get_channels_within_block_range(start_block, end_block)
+            .cloned()
+            .collect()
     }
 
     pub async fn query_broadcast_message(
