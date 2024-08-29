@@ -3,7 +3,7 @@ use crate::fiber::types::Pubkey;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
     env,
@@ -88,6 +88,13 @@ pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
     .await
     .expect("start test root actor")
     .0
+}
+
+pub fn generate_pubkey() -> PublicKey {
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut rand::thread_rng());
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    public_key
 }
 
 #[derive(Debug)]

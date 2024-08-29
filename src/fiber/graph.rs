@@ -524,17 +524,15 @@ impl PaymentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fiber::test_utils::generate_pubkey;
     use crate::store::Store;
     use ckb_types::prelude::Entity;
-    use secp256k1::{rand, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+    use secp256k1::{PublicKey, XOnlyPublicKey};
 
     fn generate_keys(num: usize) -> Vec<PublicKey> {
-        let secp = Secp256k1::new();
         let mut keys = vec![];
         for _ in 0..num {
-            let secret_key = SecretKey::new(&mut rand::thread_rng());
-            let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-            keys.push(public_key);
+            keys.push(generate_pubkey());
         }
         keys
     }

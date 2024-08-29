@@ -477,6 +477,8 @@ pub enum Error {
     Musig2(String),
     #[error("Error: {0}")]
     AnyHow(#[from] anyhow::Error),
+    #[error("Invalid onion packet")]
+    OnionPacket,
 }
 
 impl From<Pubkey> for molecule_fiber::Pubkey {
@@ -2654,10 +2656,51 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(deterministically_serialize(v))
 }
 
+// TODO: replace this with real OnionPacket implementation
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OnionInfo {
+    pub payment_hash: Hash256,
+    pub amount: u128,
+    pub expiry: u64,
+    pub next_hop: Option<Pubkey>,
+}
+
+// TODO: replace this with real OnionPacket implementation
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OnionPacket {
+    pub hop_data: Vec<OnionInfo>,
+}
+
+impl OnionPacket {
+    pub fn new(hop_data: Vec<OnionInfo>) -> Self {
+        OnionPacket { hop_data }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        deterministically_serialize(self)
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
+        Ok(serde_json::from_slice(data).unwrap())
+    }
+
+    pub fn shift(&mut self) -> Result<OnionInfo, Error> {
+        if self.hop_data.len() > 0 {
+            Ok(self.hop_data.remove(0))
+        } else {
+            Err(Error::OnionPacket)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hop_data.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{secp256k1_instance, Pubkey};
-
+    use crate::fiber::test_utils::generate_pubkey;
     use secp256k1::SecretKey;
 
     #[test]
@@ -2687,5 +2730,50 @@ mod tests {
         let add_tlc_mol: super::molecule_fiber::AddTlc = add_tlc.clone().into();
         let add_tlc2 = add_tlc_mol.try_into().expect("decode");
         assert_eq!(add_tlc, add_tlc2);
+    }
+
+    #[test]
+    fn test_onion_packet() {
+        let onion_info1 = super::OnionInfo {
+            payment_hash: [1; 32].into(),
+            amount: 2,
+            expiry: 3,
+            next_hop: Some(generate_pubkey().into()),
+        };
+        let onion_info2 = super::OnionInfo {
+            payment_hash: [4; 32].into(),
+            amount: 5,
+            expiry: 6,
+            next_hop: Some(generate_pubkey().into()),
+        };
+        let mut onion_packet =
+            super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
+
+        let serialized = onion_packet.serialize();
+        let deserialized_onion_packet =
+            super::OnionPacket::deserialize(&serialized).expect("deserialize");
+
+        assert_eq!(onion_packet, deserialized_onion_packet);
+
+        let first = onion_packet.shift().expect("shift error");
+        assert_eq!(first, onion_info1);
+        let first = onion_packet.shift().expect("shift error");
+        assert_eq!(first, onion_info2);
+        let first = onion_packet.shift();
+        assert!(first.is_err());
+    }
+
+    #[test]
+    fn test_onion_packet_serde() {
+        let onion_info = super::OnionInfo {
+            payment_hash: [42; 32].into(),
+            amount: 42,
+            expiry: 42,
+            next_hop: None,
+        };
+        let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
+        let serialized = onion_packet.serialize();
+        let onion_packet2 = super::OnionPacket::deserialize(&serialized).expect("deserialize");
+        assert_eq!(onion_packet, onion_packet2);
     }
 }
