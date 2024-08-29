@@ -595,6 +595,7 @@ impl CchActor {
                                 ),
                                 expiry: LockTime::new(self.config.ckb_final_tlc_expiry_blocks),
                                 hash_algorithm: HashAlgorithm::Sha256,
+                                onion_packet: vec![],
                             },
                             rpc_reply,
                         ),

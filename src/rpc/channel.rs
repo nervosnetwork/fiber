@@ -329,6 +329,7 @@ where
                             payment_hash: Some(params.payment_hash),
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
+                            onion_packet: vec![],
                         },
                         rpc_reply,
                     ),

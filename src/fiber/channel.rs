@@ -127,6 +127,7 @@ pub struct AddTlcCommand {
     pub payment_hash: Option<Hash256>,
     pub expiry: LockTime,
     pub hash_algorithm: HashAlgorithm,
+    pub onion_packet: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -426,12 +427,12 @@ impl<S> ChannelActor<S> {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
                 let tlc = state.create_inbounding_tlc(add_tlc)?;
-                state.insert_tlc(tlc)?;
+                state.insert_tlc(tlc.clone())?;
                 if let Some(ref udt_type_script) = state.funding_udt_type_script {
                     self.subscribers
                         .pending_received_tlcs_subscribers
                         .send(TlcNotification {
-                            tlc,
+                            tlc: tlc.clone(),
                             channel_id: state.get_id(),
                             script: udt_type_script.clone(),
                         });
@@ -687,7 +688,7 @@ impl<S> ChannelActor<S> {
         debug!("handle add tlc command : {:?}", &command);
         state.check_for_tlc_update(Some(command.amount))?;
         let tlc = state.create_outbounding_tlc(command);
-        state.insert_tlc(tlc)?;
+        state.insert_tlc(tlc.clone())?;
 
         debug!("Inserted tlc into channel state: {:?}", &tlc);
         // TODO: Note that since message sending is async,
@@ -706,6 +707,7 @@ impl<S> ChannelActor<S> {
                 payment_hash: tlc.payment_hash,
                 expiry: tlc.lock_time,
                 hash_algorithm: tlc.hash_algorithm,
+                onion_packet: vec![],
             }),
         );
         debug!("Sending AddTlc message: {:?}", &msg);
@@ -2933,7 +2935,7 @@ impl ChannelActorState {
                     "Repeated processing of AddTlcCommand with id {:?}: current tlc {:?}",
                     tlc.id, current,
                 );
-                return Ok(*current);
+                return Ok(current.clone());
             } else {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                         "Trying to insert different tlcs with identical id {:?}: current tlc {:?}, new tlc {:?}",
@@ -2986,13 +2988,13 @@ impl ChannelActorState {
             self.to_remote_amount
         );
         let detailed_tlc = DetailedTLCInfo {
-            tlc,
+            tlc: tlc.clone(),
             created_at: self.get_current_commitment_numbers(),
             creation_confirmed_at: None,
             removed_at: None,
             removal_confirmed_at: None,
         };
-        self.tlcs.insert(tlc.id, detailed_tlc);
+        self.tlcs.insert(tlc.id, detailed_tlc.clone());
         if tlc.is_offered() {
             self.increment_next_offered_tlc_id();
         } else {
@@ -3026,7 +3028,7 @@ impl ChannelActorState {
                         debug!(
                             "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
                         );
-                        return Ok(*current);
+                        return Ok(current.clone());
                     }
                     Some((current_remove_reason, current_removed_at)) => {
                         return Err(ProcessingChannelError::InvalidParameter(
@@ -3057,7 +3059,7 @@ impl ChannelActorState {
                 current
             }
         };
-        Ok(*tlc)
+        Ok(tlc.clone())
     }
 
     pub fn get_local_channel_parameters(&self) -> &ChannelParametersOneParty {
@@ -3378,10 +3380,10 @@ impl ChannelActorState {
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.get_active_received_tlc_with_pubkeys(local)
-                    .map(|(tlc, local, remote)| (*tlc, local, remote))
+                    .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
                 self.get_active_offered_tlc_with_pubkeys(local)
-                    .map(|(tlc, local, remote)| (*tlc, local, remote))
+                    .map(|(tlc, local, remote)| (tlc.clone(), local, remote))
                     .collect::<Vec<_>>(),
             );
             debug!("Received tlcs: {:?}", &received_tlcs);
@@ -3513,6 +3515,7 @@ impl ChannelActorState {
             lock_time: command.expiry,
             payment_preimage: Some(preimage),
             hash_algorithm: command.hash_algorithm,
+            onion_packet: command.onion_packet,
         }
     }
 
@@ -3537,6 +3540,7 @@ impl ChannelActorState {
             lock_time: message.expiry,
             payment_preimage: None,
             hash_algorithm: message.hash_algorithm,
+            onion_packet: message.onion_packet,
         })
     }
 
@@ -4270,6 +4274,7 @@ impl ChannelActorState {
                                                     payment_hash: info.tlc.payment_hash,
                                                     expiry: info.tlc.lock_time,
                                                     hash_algorithm: info.tlc.hash_algorithm,
+                                                    onion_packet: info.tlc.onion_packet.clone(),
                                                 }),
                                             ),
                                         ),
@@ -5250,7 +5255,7 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
 type ShortHash = [u8; 20];
 
 /// A tlc output.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TLC {
     /// The id of a TLC.
     pub id: TLCId,
@@ -5264,6 +5269,8 @@ pub struct TLC {
     pub payment_preimage: Option<Hash256>,
     /// Which hash algorithm is applied on the preimage
     pub hash_algorithm: HashAlgorithm,
+    /// The onion packet which encodes the routing information for the payment.
+    pub onion_packet: Vec<u8>,
 }
 
 impl TLC {
@@ -5305,7 +5312,7 @@ impl TLC {
 /// A tlc output in a commitment transaction, including both the tlc output
 /// and the commitment_number that it first appeared (will appear) in the
 /// commitment transaction.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetailedTLCInfo {
     tlc: TLC,
     // The commitment numbers of both parties when this tlc is created
@@ -5799,6 +5806,7 @@ mod tests {
                             payment_hash: Some(digest.into()),
                             expiry: LockTime::new(100),
                             preimage: None,
+                            onion_packet: vec![],
                         },
                         rpc_reply,
                     ),
@@ -6006,6 +6014,7 @@ mod tests {
                             payment_hash: Some(digest.into()),
                             expiry: LockTime::new(100),
                             preimage: None,
+                            onion_packet: vec![],
                         },
                         rpc_reply,
                     ),
@@ -6050,6 +6059,7 @@ mod tests {
                             payment_hash: Some(digest.into()),
                             expiry: LockTime::new(100),
                             preimage: None,
+                            onion_packet: vec![],
                         },
                         rpc_reply,
                     ),
@@ -6125,6 +6135,7 @@ mod tests {
                             payment_hash: Some(digest.into()),
                             expiry: LockTime::new(100),
                             preimage: None,
+                            onion_packet: vec![],
                         },
                         rpc_reply,
                     ),

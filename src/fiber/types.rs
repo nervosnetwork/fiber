@@ -1102,6 +1102,7 @@ pub struct AddTlc {
     pub payment_hash: Hash256,
     pub expiry: LockTime,
     pub hash_algorithm: HashAlgorithm,
+    pub onion_packet: Vec<u8>,
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {
@@ -1113,6 +1114,7 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .payment_hash(add_tlc.payment_hash.into())
             .expiry(add_tlc.expiry.into())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
+            .onion_packet(add_tlc.onion_packet.pack())
             .build()
     }
 }
@@ -1127,6 +1129,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
             expiry: add_tlc.expiry().try_into()?,
+            onion_packet: add_tlc.onion_packet().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()
                 .try_into()
@@ -2679,6 +2682,7 @@ mod tests {
             payment_hash: [42; 32].into(),
             expiry: 42.into(),
             hash_algorithm: super::HashAlgorithm::Sha256,
+            onion_packet: vec![],
         };
         let add_tlc_mol: super::molecule_fiber::AddTlc = add_tlc.clone().into();
         let add_tlc2 = add_tlc_mol.try_into().expect("decode");

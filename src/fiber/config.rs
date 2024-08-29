@@ -173,6 +173,7 @@ impl std::fmt::Debug for AnnouncedNodeName {
 
 impl<'s> From<&'s str> for AnnouncedNodeName {
     fn from(value: &'s str) -> Self {
+        eprintln!("Announce value: {:?}", value);
         Self::from_str(value).expect("Valid announced node name")
     }
 }
