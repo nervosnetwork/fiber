@@ -2021,7 +2021,7 @@ impl ChannelActorState {
             .await
     }
 
-    pub fn get_channel_update_message(&self) -> Option<ChannelUpdate> {
+    pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
         let local_is_node_1 = self.local_is_node_1();
         let message_flags = if local_is_node_1 { 0 } else { 1 };
 
@@ -2050,12 +2050,6 @@ impl ChannelActorState {
                 )),
                 _ => {
                     warn!("Missing channel update parameters, cannot create channel update message: public_channel_info={:?}", info);
-                    warn!(
-                        "{:?} {:?} {:?} {:?}",                info.inbounding_tlc_locktime_expiry_delta,
-                    info.inbounding_tlc_min_value,
-                    info.inbounding_tlc_max_value,
-                    info.inbounding_tlc_fee_proportional_millionths,
-    );
                     None
                 }
             }
@@ -4134,7 +4128,7 @@ impl ChannelActorState {
     }
 
     pub async fn broadcast_channel_update(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        let mut channel_update = match self.get_channel_update_message() {
+        let mut channel_update = match self.get_unsigned_channel_update_message() {
             Some(message) => message,
             _ => {
                 warn!("Failed to generate channel update message");

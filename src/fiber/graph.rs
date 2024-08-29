@@ -6,6 +6,7 @@ use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tentacle::multiaddr::Multiaddr;
 use tentacle::secio::PeerId;
+use tracing::debug;
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,7 +124,12 @@ where
                     return;
                 }
             }
-            None => {}
+            None => {
+                debug!(
+                    "Channel not found, saving it to database {:?}",
+                    &channel_info
+                );
+            }
         }
         let outpoint = channel_info.out_point();
         self.channels.insert(outpoint.clone(), channel_info.clone());
@@ -135,6 +141,7 @@ where
             node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
+        debug!("Successfully added channel {:?}", &channel_info);
         self.store.insert_channel(channel_info);
     }
 

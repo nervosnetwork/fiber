@@ -872,6 +872,10 @@ where
             }
 
             FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                debug!(
+                    "Received channel announcement message: {:?}",
+                    &channel_announcement
+                );
                 let message = channel_announcement.message_to_sign();
                 if channel_announcement.node_1_id == channel_announcement.node_2_id {
                     error!(
@@ -1037,7 +1041,7 @@ where
                     Some(ref signature) => signature,
                     None => {
                         error!(
-                            "Channel update message signature verification failed: {:?}",
+                            "Channel update message signature verification failed (signature not found): {:?}",
                             &channel_update
                         );
                         return;
@@ -1046,25 +1050,33 @@ where
                 let mut network_graph = self.network_graph.write().await;
                 let channel = network_graph.get_channel(&channel_update.channel_outpoint);
                 if let Some(channel) = channel {
-                    let pubkey = if channel_update.message_flags & 1 == 1 {
+                    let pubkey = if channel_update.message_flags & 1 == 0 {
                         channel.node1()
                     } else {
                         channel.node2()
                     };
+                    debug!(
+                        "Verifying channel update message signature: {:?}, pubkey: {:?}, message: {:?}",
+                        &channel_update, &pubkey, &message
+                    );
                     if !signature.verify(&pubkey, &message) {
                         error!(
-                            "Channel update message signature verification failed: {:?}",
+                            "Channel update message signature verification failed (invalid signature): {:?}",
                             &channel_update
                         );
                         return;
                     }
+                    debug!(
+                        "Channel update message signature verified: {:?}",
+                        &channel_update
+                    );
                     network_graph.process_channel_update(
                         channel_update.channel_outpoint.clone(),
                         channel_update.clone(),
                     );
                 } else {
                     error!(
-                        "Channel update message signature verification failed: {:?}",
+                        "Channel update message signature verification failed (channel not found): {:?}",
                         &channel_update
                     );
                     return;

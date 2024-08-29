@@ -1652,10 +1652,6 @@ impl ChannelUpdate {
         };
         deterministically_hash(&unsigned_update)
     }
-
-    pub fn sign(&mut self, private_key: &Privkey) {
-        self.signature = Some(private_key.sign(self.message_to_sign()));
-    }
 }
 
 impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
