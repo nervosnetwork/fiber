@@ -110,8 +110,12 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Broadcast node/channel information
-    BroadcastMessage(FiberBroadcastMessage),
+    // Broadcast node/channel information.
+    // The vector of PeerId is the list of peers that should receive the message.
+    // This is useful when some peers are preferred to receive the message.
+    // e.g. the ChannelUpdate message should be received by the counterparty of the channel.
+    // This message may be broadcasted to other peers if necessary.
+    BroadcastMessage(Vec<PeerId>, FiberBroadcastMessage),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
 }
 
@@ -377,7 +381,7 @@ where
                 state
                     .network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessage(m.clone()),
+                        NetworkActorCommand::BroadcastMessage(vec![], m.clone()),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 self.on_broadcasted_message(m).await;
@@ -791,9 +795,26 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::BroadcastMessage(message) => {
+            NetworkActorCommand::BroadcastMessage(peers, message) => {
+                // Send message to peers in the list anyway.
+                for peer_id in &peers {
+                    if let Err(e) = state
+                        .send_message_to_peer(
+                            peer_id,
+                            FiberMessage::BroadcastMessage(message.clone()),
+                        )
+                        .await
+                    {
+                        error!(
+                            "Failed to broadcast message {:?} to peer {:?}: {:?}",
+                            &message, peer_id, e
+                        );
+                    }
+                }
+
                 const MAX_BROADCAST_SESSIONS: usize = 5;
-                let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS);
+                let peer_ids =
+                    state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, peers.into_iter().collect());
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1364,8 +1385,13 @@ impl NetworkActorState {
         self.peer_session_map.get(peer_id).cloned()
     }
 
-    pub fn get_n_peer_peer_ids(&self, n: usize) -> Vec<PeerId> {
-        self.peer_session_map.keys().take(n).cloned().collect()
+    pub fn get_n_peer_peer_ids(&self, n: usize, excluding: HashSet<PeerId>) -> Vec<PeerId> {
+        self.peer_session_map
+            .keys()
+            .skip_while(|x| excluding.contains(x))
+            .take(n)
+            .cloned()
+            .collect()
     }
 
     pub fn get_n_peer_sessions(&self, n: usize) -> Vec<SessionId> {
@@ -1955,9 +1981,10 @@ where
         if let Some(message) = state.get_node_announcement_message() {
             myself
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
-                        message,
-                    )),
+                    NetworkActorCommand::BroadcastMessage(
+                        vec![],
+                        FiberBroadcastMessage::NodeAnnouncement(message),
+                    ),
                 ))
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }

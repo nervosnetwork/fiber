@@ -4107,17 +4107,8 @@ impl ChannelActorState {
 
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
-                        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
-                            channel_annoucement.clone(),
-                        )),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            network
-                .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessage(
+                        vec![self.get_remote_peer_id()],
                         FiberBroadcastMessage::ChannelAnnouncement(channel_annoucement),
                     ),
                 ))
@@ -4152,20 +4143,10 @@ impl ChannelActorState {
 
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
-                    FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
-                        channel_update.clone(),
-                    )),
-                )),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
-                    channel_update,
-                )),
+                NetworkActorCommand::BroadcastMessage(
+                    vec![self.get_remote_peer_id()],
+                    FiberBroadcastMessage::ChannelUpdate(channel_update),
+                ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
