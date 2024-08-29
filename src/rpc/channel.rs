@@ -37,6 +37,12 @@ pub struct OpenChannelParams {
     pub commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
     pub funding_fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_locktime_expiry_delta: Option<u64>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_min_value: Option<u128>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_max_value: Option<u128>,
     #[serde_as(as = "Option<U32Hex>")]
     pub tlc_fee_proportional_millionths: Option<u32>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -155,7 +161,7 @@ pub struct ShutdownChannelParams {
 pub struct UpdateChannelParams {
     pub channel_id: Hash256,
     #[serde_as(as = "Option<U64Hex>")]
-    pub locktime_expiry_delta: Option<u64>,
+    pub tlc_locktime_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
     pub tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -236,6 +242,9 @@ where
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
+                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_min_value: params.tlc_min_value,
+                    tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_num_of_accept_tlcs: params.max_num_of_accept_tlcs,
@@ -390,7 +399,7 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Update(
                         UpdateCommand {
-                            locktime_expiry_delta: params.locktime_expiry_delta,
+                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,

@@ -144,7 +144,7 @@ pub struct ShutdownCommand {
 
 #[derive(Debug)]
 pub struct UpdateCommand {
-    pub locktime_expiry_delta: Option<u64>,
+    pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u32>,
@@ -178,12 +178,11 @@ pub struct TxUpdateCommand {
 pub struct OpenChannelParameter {
     pub funding_amount: u128,
     pub seed: [u8; 32],
-    pub public: bool,
+    pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
-    pub inbounding_tlc_fee_proportional_millionths: u32,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_num_of_accept_tlcs: Option<u64>,
 }
@@ -191,7 +190,7 @@ pub struct OpenChannelParameter {
 pub struct AcceptChannelParameter {
     pub funding_amount: u128,
     pub reserved_ckb_amount: u64,
-    pub inbounding_tlc_fee_proportional_millionths: u32,
+    pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
@@ -847,7 +846,7 @@ impl<S> ChannelActor<S> {
         }
 
         let UpdateCommand {
-            locktime_expiry_delta,
+            tlc_locktime_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
             tlc_fee_proportional_millionths,
@@ -855,7 +854,7 @@ impl<S> ChannelActor<S> {
 
         let mut updated = false;
 
-        if let Some(delta) = locktime_expiry_delta {
+        if let Some(delta) = tlc_locktime_expiry_delta {
             updated = updated || state.update_inbounding_locktime_expiry_delta(delta);
         }
 
@@ -1144,7 +1143,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount: my_funding_amount,
                 reserved_ckb_amount: my_reserved_ckb_amount,
-                inbounding_tlc_fee_proportional_millionths,
+                public_channel_info,
                 seed,
                 open_channel,
                 channel_id_sender,
@@ -1185,20 +1184,21 @@ where
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
                 let public = channel_flags.contains(ChannelFlags::PUBLIC);
-                if public && channel_announcement_nonce.is_none() {
+                if public && channel_announcement_nonce.is_none()
+                    || public && public_channel_info.is_none()
+                {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(
-                        "Public channel should have channel announcement nonce".to_string(),
+                        "Public channel should have channel announcement nonce and public channel info".to_string(),
                     )));
                 }
 
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
-                    public,
+                    public_channel_info,
                     my_funding_amount,
                     my_reserved_ckb_amount,
                     *commitment_fee_rate,
                     *funding_fee_rate,
-                    inbounding_tlc_fee_proportional_millionths,
                     funding_udt_type_script.clone(),
                     &seed,
                     self.get_local_pubkey(),
@@ -1284,15 +1284,15 @@ where
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
-                public,
+                public_channel_info,
                 funding_udt_type_script,
                 channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
-                inbounding_tlc_fee_proportional_millionths,
                 max_num_of_accept_tlcs,
                 max_tlc_value_in_flight,
             }) => {
+                let public = public_channel_info.is_some();
                 let peer_id = self.get_remote_peer_id();
                 info!("Trying to open a channel to {:?}", &peer_id);
 
@@ -1304,7 +1304,7 @@ where
                     self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
-                    public,
+                    public_channel_info,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
@@ -1312,7 +1312,6 @@ where
                     reserved_ckb_amount,
                     commitment_fee_rate,
                     funding_fee_rate,
-                    inbounding_tlc_fee_proportional_millionths,
                     funding_udt_type_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_num_of_accept_tlcs.unwrap_or(DEFAULT_MAX_NUM_OF_ACCEPT_TLCS),
@@ -1756,8 +1755,8 @@ pub struct PublicChannelInfo {
     pub outbounding_tlc_min_value: Option<u128>,
 
     // The locktime expiry delta. This is the number of blocks that the locktime.
-    pub inbounding_locktime_expiry_delta: Option<u64>,
-    pub outbounding_locktime_expiry_delta: Option<u64>,
+    pub inbounding_tlc_locktime_expiry_delta: Option<u64>,
+    pub outbounding_tlc_locktime_expiry_delta: Option<u64>,
 
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -1768,13 +1767,19 @@ pub struct PublicChannelInfo {
 }
 
 impl PublicChannelInfo {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn new_with_inbounding_tlc_fee_proportional_millionths(i: u32) -> Self {
+    pub fn new(
+        inbounding_locktime_expiry_delta: u64,
+        inbounding_tlc_min_value: u128,
+        inbounding_tlc_max_value: u128,
+        inbounding_tlc_fee_proportional_millionths: u32,
+    ) -> Self {
         Self {
-            inbounding_tlc_fee_proportional_millionths: Some(i),
+            inbounding_tlc_fee_proportional_millionths: Some(
+                inbounding_tlc_fee_proportional_millionths,
+            ),
+            inbounding_tlc_max_value: Some(inbounding_tlc_max_value),
+            inbounding_tlc_min_value: Some(inbounding_tlc_min_value),
+            inbounding_tlc_locktime_expiry_delta: Some(inbounding_locktime_expiry_delta),
             ..Default::default()
         }
     }
@@ -2022,7 +2027,7 @@ impl ChannelActorState {
 
         self.public_channel_info.as_ref().and_then(|info| {
             match (
-                info.inbounding_locktime_expiry_delta,
+                info.inbounding_tlc_locktime_expiry_delta,
                 info.inbounding_tlc_min_value,
                 info.inbounding_tlc_max_value,
                 info.inbounding_tlc_fee_proportional_millionths,
@@ -2044,7 +2049,13 @@ impl ChannelActorState {
                     fee_proportional_millionths.into(),
                 )),
                 _ => {
-                    warn!("Missing channel update parameters");
+                    warn!("Missing channel update parameters, cannot create channel update message: public_channel_info={:?}", info);
+                    warn!(
+                        "{:?} {:?} {:?} {:?}",                info.inbounding_tlc_locktime_expiry_delta,
+                    info.inbounding_tlc_min_value,
+                    info.inbounding_tlc_max_value,
+                    info.inbounding_tlc_fee_proportional_millionths,
+    );
                     None
                 }
             }
@@ -2053,12 +2064,11 @@ impl ChannelActorState {
 
     pub fn new_inbound_channel<'a>(
         temp_channel_id: Hash256,
-        public: bool,
+        public_channel_info: Option<PublicChannelInfo>,
         local_value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
-        inbounding_tlc_fee_proportional_millionths: u32,
         funding_udt_type_script: Option<Script>,
         seed: &[u8],
         local_pubkey: Pubkey,
@@ -2089,11 +2099,7 @@ impl ChannelActorState {
 
         let mut state = Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
-            public_channel_info: public.then_some(
-                PublicChannelInfo::new_with_inbounding_tlc_fee_proportional_millionths(
-                    inbounding_tlc_fee_proportional_millionths,
-                ),
-            ),
+            public_channel_info,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -2144,7 +2150,7 @@ impl ChannelActorState {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_outbound_channel(
-        public: bool,
+        public_channel_info: Option<PublicChannelInfo>,
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
@@ -2152,7 +2158,6 @@ impl ChannelActorState {
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
-        inbounding_tlc_fee_proportional_millionths: u32,
         funding_udt_type_script: Option<Script>,
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
@@ -2164,11 +2169,7 @@ impl ChannelActorState {
             derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
-            public_channel_info: public.then_some(
-                PublicChannelInfo::new_with_inbounding_tlc_fee_proportional_millionths(
-                    inbounding_tlc_fee_proportional_millionths,
-                ),
-            ),
+            public_channel_info,
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
@@ -2684,7 +2685,7 @@ impl ChannelActorState {
     fn get_inbounding_locktime_expiry_delta(&self) -> Option<u64> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.inbounding_locktime_expiry_delta)
+            .and_then(|state| state.inbounding_tlc_locktime_expiry_delta)
     }
 
     fn update_inbounding_locktime_expiry_delta(&mut self, value: u64) -> bool {
@@ -2693,7 +2694,7 @@ impl ChannelActorState {
             Some(old_value) if old_value == value => false,
             _ => {
                 self.public_channel_state_mut()
-                    .inbounding_locktime_expiry_delta = Some(value);
+                    .inbounding_tlc_locktime_expiry_delta = Some(value);
                 true
             }
         }
@@ -2702,7 +2703,7 @@ impl ChannelActorState {
     fn get_outbounding_locktime_expiry_delta(&self) -> Option<u64> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.outbounding_locktime_expiry_delta)
+            .and_then(|state| state.outbounding_tlc_locktime_expiry_delta)
     }
 
     fn update_outbounding_locktime_expiry_delta(&mut self, value: u64) -> bool {
@@ -2711,7 +2712,7 @@ impl ChannelActorState {
             Some(old_value) if old_value == value => false,
             _ => {
                 self.public_channel_state_mut()
-                    .outbounding_locktime_expiry_delta = Some(value);
+                    .outbounding_tlc_locktime_expiry_delta = Some(value);
                 true
             }
         }
@@ -5617,6 +5618,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -5658,6 +5662,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -5736,6 +5743,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -5924,6 +5934,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -6260,6 +6273,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -6440,6 +6456,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,
@@ -6562,6 +6581,9 @@ mod tests {
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
                     funding_fee_rate: None,
+                    tlc_locktime_expiry_delta: None,
+                    tlc_min_value: None,
+                    tlc_max_value: None,
                     tlc_fee_proportional_millionths: None,
                     max_num_of_accept_tlcs: None,
                     max_tlc_value_in_flight: None,

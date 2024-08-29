@@ -30,6 +30,15 @@ pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
 pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
     DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
+/// The locktime expiry delta to forward a tlc, in seconds. 86400 means 1 day.
+pub const DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA: u64 = 86400;
+
+/// The minimal value of a tlc. 0 means no minimal value.
+pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
+
+/// The maximal value of a tlc. 0 means no maximal value.
+pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
+
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u32 = 1000;
 
@@ -86,8 +95,34 @@ pub struct FiberConfig {
         help = "whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept"
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
+
+    /// The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]
+    #[arg(
+        name = "FIBER_TLC_LOCKTIME_EXPIRY_DELTA",
+        long = "fiber-tlc-locktime-expiry-delta",
+        env,
+        help = "The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]"
+    )]
+    pub tlc_locktime_expiry_delta: Option<u64>,
+
+    /// The minimal value of a tlc. [default: 0 (no minimal value)]
+    #[arg(
+        name = "FIBER_TLC_MIN_VALUE",
+        long = "fiber-tlc-min-value",
+        env,
+        help = "The minimal value of a tlc. [default: 0 (no minimal value)]"
+    )]
+    pub tlc_min_value: Option<u128>,
+    /// The maximal value of a tlc. [default: 0 (no maximal value)]
+    #[arg(
+        name = "FIBER_TLC_MAX_VALUE",
+        long = "fiber-tlc-max-value",
+        env,
+        help = "The maximal value of a tlc. [default: 0 (no maximal value)]"
+    )]
+    pub tlc_max_value: Option<u128>,
+
     /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]
-    // tlc_fee_proportional_millionths
     #[arg(
         name = "FIBER_TLC_FEE_PROPORTIONAL_MILLIONTHS",
         long = "fiber-tlc-fee-proportional-millionths",
@@ -195,6 +230,19 @@ impl FiberConfig {
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
             .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+    }
+
+    pub fn tlc_locktime_expiry_delta(&self) -> u64 {
+        self.tlc_locktime_expiry_delta
+            .unwrap_or(DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA)
+    }
+
+    pub fn tlc_min_value(&self) -> u128 {
+        self.tlc_min_value.unwrap_or(DEFAULT_TLC_MIN_VALUE)
+    }
+
+    pub fn tlc_max_value(&self) -> u128 {
+        self.tlc_max_value.unwrap_or(DEFAULT_TLC_MAX_VALUE)
     }
 
     pub fn tlc_fee_proportional_millionths(&self) -> u32 {

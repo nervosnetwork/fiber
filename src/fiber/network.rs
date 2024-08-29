@@ -39,7 +39,7 @@ use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
     ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
-    DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    PublicChannelInfo, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
@@ -134,6 +134,9 @@ pub struct OpenChannelCommand {
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
+    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_min_value: Option<u128>,
+    pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u32>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_num_of_accept_tlcs: Option<u64>,
@@ -1102,6 +1105,11 @@ pub struct NetworkActorState {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
+    // The default locktime expiry delta to forward tlcs.
+    tlc_locktime_expiry_delta: u64,
+    // The default tlc min and max value of tlcs to be accepted.
+    tlc_min_value: u128,
+    tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u32,
     // A hashset to store the list of all broadcasted messages.
@@ -1175,6 +1183,9 @@ impl NetworkActorState {
             funding_udt_type_script,
             commitment_fee_rate,
             funding_fee_rate,
+            tlc_locktime_expiry_delta,
+            tlc_min_value,
+            tlc_max_value,
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
             max_num_of_accept_tlcs,
@@ -1209,13 +1220,16 @@ impl NetworkActorState {
             ChannelInitializationParameter::OpenChannel(OpenChannelParameter {
                 funding_amount,
                 seed,
-                public,
+                public_channel_info: public.then_some(PublicChannelInfo::new(
+                    tlc_locktime_expiry_delta.unwrap_or(self.tlc_locktime_expiry_delta),
+                    tlc_min_value.unwrap_or(self.tlc_min_value),
+                    tlc_max_value.unwrap_or(self.tlc_max_value),
+                    tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
+                )),
                 funding_udt_type_script,
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 funding_fee_rate,
-                inbounding_tlc_fee_proportional_millionths: tlc_fee_proportional_millionths
-                    .unwrap_or(self.tlc_fee_proportional_millionths),
                 max_tlc_value_in_flight,
                 max_num_of_accept_tlcs,
             }),
@@ -1278,7 +1292,12 @@ impl NetworkActorState {
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                inbounding_tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
+                public_channel_info: Some(PublicChannelInfo::new(
+                    self.tlc_locktime_expiry_delta,
+                    self.tlc_min_value,
+                    self.tlc_max_value,
+                    self.tlc_fee_proportional_millionths,
+                )),
                 seed,
                 open_channel,
                 channel_id_sender: Some(tx),
@@ -1901,6 +1920,9 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
+            tlc_locktime_expiry_delta: config.tlc_locktime_expiry_delta(),
+            tlc_min_value: config.tlc_min_value(),
+            tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
