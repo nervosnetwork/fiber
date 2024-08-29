@@ -46,7 +46,7 @@ use crate::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
         network::{emit_service_event, sign_network_message},
-        types::{AnnouncementSignatures, ChannelUpdate, FiberBroadcastMessage, Shutdown},
+        types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
     },
     NetworkServiceEvent,
 };
@@ -1921,6 +1921,28 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
     Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
 }
 
+impl From<&ChannelActorState> for Musig2SignContext {
+    fn from(value: &ChannelActorState) -> Self {
+        Musig2SignContext {
+            key_agg_ctx: value.get_musig2_agg_context(),
+            agg_nonce: value.get_musig2_agg_pubnonce(),
+            seckey: value.signer.funding_key,
+            secnonce: value.get_local_musig2_secnonce(),
+        }
+    }
+}
+
+impl From<&ChannelActorState> for Musig2VerifyContext {
+    fn from(value: &ChannelActorState) -> Self {
+        Musig2VerifyContext {
+            key_agg_ctx: value.get_musig2_agg_context(),
+            agg_nonce: value.get_musig2_agg_pubnonce(),
+            pubkey: *value.get_remote_funding_pubkey(),
+            pubnonce: value.get_remote_nonce().clone(),
+        }
+    }
+}
+
 // Constructors for the channel actor state.
 #[allow(clippy::too_many_arguments)]
 impl ChannelActorState {
@@ -2475,10 +2497,7 @@ impl ChannelActorState {
             self.total_amount = self.to_local_amount + self.to_remote_amount;
         }
     }
-}
 
-// Properties for the channel actor state.
-impl ChannelActorState {
     pub fn get_id(&self) -> Hash256 {
         self.id
     }
@@ -3200,32 +3219,7 @@ impl ChannelActorState {
             hash_algorithm: message.hash_algorithm,
         })
     }
-}
 
-impl From<&ChannelActorState> for Musig2SignContext {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2SignContext {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            seckey: value.signer.funding_key,
-            secnonce: value.get_local_musig2_secnonce(),
-        }
-    }
-}
-
-impl From<&ChannelActorState> for Musig2VerifyContext {
-    fn from(value: &ChannelActorState) -> Self {
-        Musig2VerifyContext {
-            key_agg_ctx: value.get_musig2_agg_context(),
-            agg_nonce: value.get_musig2_agg_pubnonce(),
-            pubkey: *value.get_remote_funding_pubkey(),
-            pubnonce: value.get_remote_nonce().clone(),
-        }
-    }
-}
-
-// State transition handlers for the channel actor state.
-impl ChannelActorState {
     pub fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
