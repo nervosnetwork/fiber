@@ -1185,6 +1185,11 @@ where
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
                 let public = channel_flags.contains(ChannelFlags::PUBLIC);
+                if public && channel_announcement_nonce.is_none() {
+                    return Err(Box::new(ProcessingChannelError::InvalidParameter(
+                        "Public channel should have channel announcement nonce".to_string(),
+                    )));
+                }
 
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
@@ -2069,10 +2074,6 @@ impl ChannelActorState {
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
     ) -> Self {
-        debug!(
-            "remote channel announcement nonce {:?}",
-            remote_channel_announcement_nonce
-        );
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
 
@@ -2086,7 +2087,7 @@ impl ChannelActorState {
             &channel_id, &temp_channel_id,
         );
 
-        Self {
+        let mut state = Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
             public_channel_info: public.then_some(
                 PublicChannelInfo::new_with_inbounding_tlc_fee_proportional_millionths(
@@ -2134,7 +2135,11 @@ impl ChannelActorState {
             #[cfg(debug_assertions)]
             total_amount: local_value + remote_value,
             created_at: SystemTime::now(),
+        };
+        if let Some(nonce) = remote_channel_announcement_nonce {
+            state.update_remote_channel_announcement_nonce(&nonce);
         }
+        state
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2375,7 +2380,6 @@ impl ChannelActorState {
         } else {
             (self.remote_pubkey, self.local_pubkey)
         };
-        debug!("Creating channel announcement for channel {:?}", &self.id);
         let channel_announcement = ChannelAnnouncement::new_unsigned(
             &node_1_id,
             &node_2_id,
@@ -2389,6 +2393,11 @@ impl ChannelActorState {
             .as_mut()
             .unwrap()
             .channel_announcement = Some(channel_announcement.clone());
+        debug!(
+            "Creating channel announcement for channel {:?}: {:?}",
+            &self.get_id(),
+            &channel_announcement,
+        );
         channel_announcement
     }
 
@@ -2397,11 +2406,22 @@ impl ChannelActorState {
         channel_announcement: &ChannelAnnouncement,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelAnnouncement> {
+        debug!(
+            "Trying to complete channel announcement for channel {:?}: {:?}",
+            &self.get_id(),
+            channel_announcement,
+        );
         let mut channel_announcement = channel_announcement.clone();
 
         let local_nonce = self
             .get_channel_announcement_musig2_secnonce()
             .public_nonce();
+        debug!(
+            "Local nonce: {:?}, remote nonce: {:?}, remote signatures: {:?}",
+            &local_nonce,
+            self.get_remote_channel_announcement_nonce(),
+            self.get_remote_channel_announcement_signature()
+        );
         let remote_nonce = self.get_remote_channel_announcement_nonce()?;
         let agg_nonce =
             AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce.clone()));
@@ -2499,6 +2519,10 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        debug!(
+            "Created channel announcement signature for channel {:?}: node signature {:?}, partial signature: {:?}",
+            &channel_id, &node_signature, &partial_signature
+        );
         let result = (node_signature, partial_signature);
         self.public_channel_state_mut()
             .local_channel_announcement_signature = Some(result.clone());
