@@ -160,8 +160,8 @@ pub struct UpdateChannelParams {
     pub tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     pub tlc_maximum_value: Option<u128>,
-    #[serde_as(as = "Option<U64Hex>")]
-    pub fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U32Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u32>,
 }
 
 #[rpc(server)]
@@ -393,7 +393,7 @@ where
                             locktime_expiry_delta: params.locktime_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,
-                            fee_rate: params.fee_rate.map(FeeRate::from_u64),
+                            tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                         },
                         rpc_reply,
                     ),

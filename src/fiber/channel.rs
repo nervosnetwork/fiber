@@ -46,7 +46,7 @@ use crate::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, commitment_tx_size},
         network::{emit_service_event, sign_network_message},
-        types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
+        types::{AnnouncementSignatures, ChannelUpdate, FiberBroadcastMessage, Shutdown},
     },
     NetworkServiceEvent,
 };
@@ -147,7 +147,7 @@ pub struct UpdateCommand {
     pub locktime_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
-    pub fee_rate: Option<FeeRate>,
+    pub tlc_fee_proportional_millionths: Option<u32>,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -835,18 +835,30 @@ impl<S> ChannelActor<S> {
 
     pub fn handle_update_command(
         &self,
-        _state: &mut ChannelActorState,
+        state: &mut ChannelActorState,
         command: UpdateCommand,
     ) -> ProcessingChannelResult {
         let UpdateCommand {
             locktime_expiry_delta: _,
             tlc_minimum_value: _,
             tlc_maximum_value: _,
-            fee_rate: fee_value,
+            tlc_fee_proportional_millionths,
         } = command;
 
-        if let Some(_fee_value) = fee_value {
-            // TODO: implement update fee value
+        match tlc_fee_proportional_millionths {
+            Some(fee)
+                if tlc_fee_proportional_millionths
+                    != state.inbounding_tlc_fee_proportional_millionths =>
+            {
+                state.inbounding_tlc_fee_proportional_millionths = tlc_fee_proportional_millionths;
+                debug!(
+                    "Updated inbounding tlc fee proportional millionths to {}",
+                    fee
+                );
+            }
+            _ => {
+                debug!("No update needed for UpdateCommand {:?}", &command);
+            }
         }
         Ok(())
     }
