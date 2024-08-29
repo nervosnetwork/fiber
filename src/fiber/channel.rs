@@ -59,10 +59,10 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
-        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned,
+        CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime,
+        OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -835,7 +835,7 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
-    pub fn handle_update_command(
+    pub async fn handle_update_command(
         &self,
         state: &mut ChannelActorState,
         command: UpdateCommand,
@@ -872,7 +872,7 @@ impl<S> ChannelActor<S> {
         }
 
         if updated {
-            state.broadcast_channel_update(&self.network);
+            state.broadcast_channel_update(&self.network).await;
         }
 
         Ok(())
@@ -977,7 +977,7 @@ impl<S> ChannelActor<S> {
         Ok(())
     }
 
-    pub fn handle_command(
+    pub async fn handle_command(
         &self,
         state: &mut ChannelActorState,
         command: ChannelCommand,
@@ -1026,7 +1026,7 @@ impl<S> ChannelActor<S> {
                 }
             }
             ChannelCommand::Update(command, reply) => {
-                match self.handle_update_command(state, command) {
+                match self.handle_update_command(state, command).await {
                     Ok(_) => {
                         debug!("Update command processed successfully");
                         let _ = reply.send(Ok(()));
@@ -1483,7 +1483,7 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
-                if let Err(err) = self.handle_command(state, command) {
+                if let Err(err) = self.handle_command(state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
             }
@@ -1774,6 +1774,7 @@ impl PublicChannelInfo {
         }
     }
 }
+
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ClosedChannel {}
 
@@ -2008,6 +2009,41 @@ impl ChannelActorState {
 
         self.try_to_complete_channel_announcement_message(&channel_announcement, network)
             .await
+    }
+
+    pub fn get_channel_update_message(&self) -> Option<ChannelUpdate> {
+        let local_is_node_1 = self.local_is_node_1();
+        let message_flags = if local_is_node_1 { 0 } else { 1 };
+
+        self.public_channel_info.as_ref().and_then(|info| {
+            match (
+                info.inbounding_locktime_expiry_delta,
+                info.inbounding_tlc_min_value,
+                info.inbounding_tlc_max_value,
+                info.inbounding_tlc_fee_proportional_millionths,
+            ) {
+                (
+                    Some(locktime_expiry_delta),
+                    Some(min_value),
+                    Some(max_value),
+                    Some(fee_proportional_millionths),
+                ) => Some(ChannelUpdate::new_unsigned(
+                    Default::default(),
+                    self.get_funding_transaction_outpoint(),
+                    std::time::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+                    message_flags,
+                    0,
+                    locktime_expiry_delta,
+                    min_value,
+                    max_value,
+                    fee_proportional_millionths.into(),
+                )),
+                _ => {
+                    warn!("Missing channel update parameters");
+                    None
+                }
+            }
+        })
     }
 
     pub fn new_inbound_channel<'a>(
@@ -4049,6 +4085,17 @@ impl ChannelActorState {
                 self.get_id(),
                 &channel_annoucement,
             );
+
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
+                            channel_annoucement.clone(),
+                        )),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessage(
@@ -4056,11 +4103,52 @@ impl ChannelActorState {
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            self.broadcast_channel_update(network).await;
         }
     }
 
-    pub fn broadcast_channel_update(&mut self, _network: &ActorRef<NetworkActorMessage>) {
-        // TODO: generate channel update message and broadcast it here.
+    pub async fn broadcast_channel_update(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        let mut channel_update = match self.get_channel_update_message() {
+            Some(message) => message,
+            _ => {
+                warn!("Failed to generate channel update message");
+                return;
+            }
+        };
+
+        debug!("Generated channel update message: {:?}", &channel_update);
+
+        let node_signature =
+            sign_network_message(network.clone(), channel_update.message_to_sign())
+                .await
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        channel_update.signature = Some(node_signature);
+
+        debug!(
+            "Broadcasting channel update message to peers: {:?}",
+            &channel_update
+        );
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
+                        channel_update.clone(),
+                    )),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
+                    channel_update,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
     pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {

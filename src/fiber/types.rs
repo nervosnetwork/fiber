@@ -1612,6 +1612,31 @@ pub struct ChannelUpdate {
 }
 
 impl ChannelUpdate {
+    pub fn new_unsigned(
+        chain_hash: Hash256,
+        channel_outpoint: OutPoint,
+        timestamp: u64,
+        message_flags: u32,
+        channel_flags: u32,
+        cltv_expiry_delta: u64,
+        htlc_minimum_value: u128,
+        htlc_maximum_value: u128,
+        fee_value: u128,
+    ) -> Self {
+        Self {
+            signature: None,
+            chain_hash,
+            channel_outpoint,
+            timestamp,
+            message_flags,
+            channel_flags,
+            cltv_expiry_delta,
+            htlc_minimum_value,
+            htlc_maximum_value,
+            fee_value,
+        }
+    }
+
     pub fn message_to_sign(&self) -> [u8; 32] {
         let unsigned_update = ChannelUpdate {
             signature: None,
