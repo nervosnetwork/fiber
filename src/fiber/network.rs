@@ -8,6 +8,7 @@ use ractor::{
     RactorErr, RpcReplyPort, SupervisionEvent,
 };
 use secp256k1::Message;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,7 +163,7 @@ pub struct OpenChannelCommand {
     pub max_num_of_accept_tlcs: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
     pub target: Pubkey,

@@ -30,6 +30,7 @@ use crate::{
     FiberConfig, NetworkServiceEvent,
 };
 
+use super::graph::PaymentSession;
 use super::{
     channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
@@ -257,6 +258,7 @@ struct MemoryStore {
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
     connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
+    payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
@@ -335,6 +337,17 @@ impl NetworkGraphStateStore for MemoryStore {
             .write()
             .unwrap()
             .remove(peer_id);
+    }
+
+    fn get_payment_session(&self, id: Hash256) -> Option<PaymentSession> {
+        self.payment_sessions.read().unwrap().get(&id).cloned()
+    }
+
+    fn insert_payment_session(&self, session: PaymentSession) {
+        self.payment_sessions
+            .write()
+            .unwrap()
+            .insert(session.payment_hash(), session);
     }
 }
 

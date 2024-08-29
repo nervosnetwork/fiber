@@ -300,13 +300,30 @@ where
         self.connected_peer_addresses.clear();
     }
 
+    pub fn init_payment_session(&self, payment_request: SendPaymentCommand) -> PaymentSession {
+        let payment_session = PaymentSession::new(payment_request, 3);
+        if let Some(session) = self
+            .store
+            .get_payment_session(payment_session.payment_hash())
+        {
+            return session;
+        } else {
+            self.store.insert_payment_session(payment_session.clone());
+            payment_session
+        }
+    }
+
     pub fn send_payment(&self, payment_request: SendPaymentCommand) -> Result<(), GraphError> {
         let amount = payment_request.amount;
         if amount == 0 {
             return Err(GraphError::Graph("amount is zero".to_string()));
         }
+
+        let _payment_session = PaymentSession::new(payment_request.clone(), 3);
+
         let source = self.source;
         let target = payment_request.target;
+
         let _route = self.find_route(source, target, amount, 1000);
         eprintln!("route: {:?}", _route);
 
@@ -477,6 +494,31 @@ pub trait NetworkGraphStateStore {
     fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr);
     fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)>;
     fn remove_connected_peer(&self, peer_id: &PeerId);
+    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
+    fn insert_payment_session(&self, session: PaymentSession);
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaymentSession {
+    pub command: SendPaymentCommand,
+    pub retried_times: u32,
+    pub last_error: Option<String>,
+    pub try_limit: u32,
+}
+
+impl PaymentSession {
+    pub fn new(command: SendPaymentCommand, try_limit: u32) -> Self {
+        Self {
+            command,
+            retried_times: 0,
+            last_error: None,
+            try_limit,
+        }
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        self.command.payment_hash
+    }
 }
 
 #[cfg(test)]

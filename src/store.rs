@@ -1,18 +1,17 @@
+use crate::{
+    fiber::{
+        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
+        types::{Hash256, Pubkey},
+    },
+    invoice::{CkbInvoice, InvoiceError, InvoiceStore},
+};
 use ckb_types::packed::OutPoint;
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, IteratorMode, WriteBatch, DB};
 use serde_json;
 use std::{path::Path, sync::Arc};
 use tentacle::{multiaddr::Multiaddr, secio::PeerId};
-
-use crate::{
-    fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo},
-        types::{Hash256, Pubkey},
-    },
-    invoice::{CkbInvoice, InvoiceError, InvoiceStore},
-};
 
 #[derive(Clone)]
 pub struct Store {
@@ -185,6 +184,7 @@ impl Batch {
 /// | 128          | NodeId             | NodeInfo                 |
 /// | 129          | Timestamp          | NodeId                   |
 /// | 160          | PeerId             | MultiAddr                |
+/// | 192          | Hash256            | PaymentSession           |
 /// +--------------+--------------------+--------------------------+
 ///
 
@@ -197,6 +197,7 @@ const CHANNEL_UPDATE_INDEX_PREFIX: u8 = 98;
 const NODE_INFO_PREFIX: u8 = 128;
 const NODE_ANNOUNCEMENT_INDEX_PREFIX: u8 = 129;
 const PEER_ID_MULTIADDR_PREFIX: u8 = 160;
+const PAYMENT_SESSION_PREFIX: u8 = 192;
 
 enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
@@ -399,5 +400,22 @@ impl NetworkGraphStateStore for Store {
         for (key, _) in iter {
             self.db.delete(key).expect("delete should be OK");
         }
+    }
+
+    fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
+        let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+        self.get(prefix).map(|v| {
+            serde_json::from_slice(v.as_ref()).expect("deserialize PaymentSession should be OK")
+        })
+    }
+
+    fn insert_payment_session(&self, session: PaymentSession) {
+        let mut batch = self.batch();
+        let key = [&[PAYMENT_SESSION_PREFIX], session.payment_hash().as_ref()].concat();
+        batch.put(
+            key,
+            serde_json::to_vec(&session).expect("serialize PaymentSession should be OK"),
+        );
+        batch.commit();
     }
 }
