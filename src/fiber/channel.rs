@@ -5532,7 +5532,20 @@ mod tests {
         prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
     };
     use ractor::call;
+    use std::sync::Once;
     use tracing::debug;
+    use tracing_subscriber;
+
+    static INIT: Once = Once::new();
+
+    fn init_tracing() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .pretty()
+                .init();
+        });
+    }
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
@@ -5667,10 +5680,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_public_channel() {
-        tracing_subscriber::fmt::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
+        init_tracing();
 
         let _span = tracing::info_span!("node", node = "test").entered();
 
@@ -6217,10 +6227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_old_commitment_transaction() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
+        init_tracing();
 
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await

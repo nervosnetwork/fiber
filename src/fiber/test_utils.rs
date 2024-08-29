@@ -111,7 +111,7 @@ impl NetworkNode {
         let fiber_config = FiberConfig {
             announced_node_name: node_name
                 .as_deref()
-                .or(base_dir.as_ref().to_str())
+                .or(base_dir.as_ref().file_name().unwrap().to_str())
                 .map(Into::into),
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
