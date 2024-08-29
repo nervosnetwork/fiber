@@ -519,8 +519,11 @@ mod test_utils {
                     );
                     let status = TxStatus {
                         status,
-                        block_number: None,
-                        block_hash: None,
+                        // Some tests may require the block hash and block number to be set.
+                        block_number: Some(Default::default()),
+                        block_hash: Some(ckb_types::H256(
+                            tx.tx_hash.clone().as_slice().try_into().unwrap(),
+                        )),
                         reason: None,
                     };
                     let response = TraceTxResponse {
