@@ -46,8 +46,9 @@ use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    EcdsaSignature, FiberBroadcastMessage, FiberMessage, Hash256, NodeAnnouncement, OpenChannel,
-    Privkey, Pubkey,
+    ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery,
+    FiberMessage, FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
+    NodeAnnouncement, OpenChannel, Privkey, Pubkey,
 };
 use super::FiberConfig;
 
@@ -55,7 +56,10 @@ use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
 use crate::fiber::graph::{ChannelInfo, NodeInfo};
-use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, TxSignatures};
+use crate::fiber::types::{
+    secp256k1_instance, ChannelAnnouncementQuery, FiberChannelMessage, NodeAnnouncementQuery,
+    TxSignatures,
+};
 use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -391,9 +395,133 @@ where
                 state
                     .send_message_to_channel_actor(channel_id, ChannelActorMessage::PeerMessage(m));
             }
-            FiberMessage::QueryInformation(_) => todo!(),
+            FiberMessage::QueryInformation(q) => match q {
+                FiberQueryInformation::GetBroadcastMessages(GetBroadcastMessages {
+                    id,
+                    queries,
+                }) => {
+                    let mut messages = Vec::with_capacity(queries.len());
+                    for query in queries {
+                        let result = self.query_broadcast_message(query).await;
+                        match result {
+                            Ok(message) => {
+                                messages.push(message);
+                            }
+                            Err(e) => {
+                                error!("Failed to query broadcast message: {:?}", e);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    let reply = GetBroadcastMessagesResult { id, messages };
+                    state
+                        .send_message_to_peer(
+                            &peer_id,
+                            FiberMessage::QueryInformation(
+                                FiberQueryInformation::GetBroadcastMessagesResult(reply),
+                            ),
+                        )
+                        .await?;
+                }
+                FiberQueryInformation::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
+                    id: _,
+                    messages,
+                }) => {
+                    for message in messages {
+                        self.on_broadcasted_message(message).await;
+                    }
+                }
+                FiberQueryInformation::QueryChannelsWithinBlockRange(_) => todo!(),
+                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(_) => todo!(),
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(_) => todo!(),
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(_) => todo!(),
+            },
         };
         Ok(())
+    }
+
+    pub async fn query_broadcast_message(
+        &self,
+        query: FiberBroadcastMessageQuery,
+    ) -> Result<FiberBroadcastMessage, Error> {
+        let network_graph = self.network_graph.read().await;
+        match query {
+            FiberBroadcastMessageQuery::NodeAnnouncement(NodeAnnouncementQuery {
+                node_id,
+                flags: _,
+            }) => {
+                let node_info = network_graph.get_node(node_id.clone());
+                match node_info {
+                    Some(node_info) => {
+                        if let Some(node_announcement) = &node_info.anouncement_msg {
+                            Ok(FiberBroadcastMessage::NodeAnnouncement(
+                                node_announcement.clone(),
+                            ))
+                        } else {
+                            Err(Error::InvalidParameter(format!(
+                                "Node announcement not found: {:?}",
+                                &node_id
+                            )))
+                        }
+                    }
+                    None => Err(Error::InvalidParameter(format!(
+                        "Node not found: {:?}",
+                        &node_id
+                    ))),
+                }
+            }
+            FiberBroadcastMessageQuery::ChannelAnnouncement(ChannelAnnouncementQuery {
+                channel_outpoint,
+                flags: _,
+            }) => {
+                let channel_info = network_graph.get_channel(&channel_outpoint);
+                match channel_info {
+                    Some(channel_info) => {
+                        let channel_announcement = FiberBroadcastMessage::ChannelAnnouncement(
+                            channel_info.announcement_msg.clone(),
+                        );
+                        Ok(channel_announcement)
+                    }
+                    None => Err(Error::InvalidParameter(format!(
+                        "Channel not found: {:?}",
+                        &channel_outpoint
+                    ))),
+                }
+            }
+            FiberBroadcastMessageQuery::ChannelUpdate(ChannelUpdateQuery {
+                channel_outpoint,
+                flags,
+            }) => {
+                let channel_info = network_graph.get_channel(&channel_outpoint);
+                let is_one_to_two = flags & 1 == 0;
+                match channel_info {
+                    Some(channel_info) => {
+                        let update = if is_one_to_two {
+                            channel_info
+                                .one_to_two
+                                .as_ref()
+                                .and_then(|u| u.last_update_message.clone())
+                        } else {
+                            channel_info
+                                .two_to_one
+                                .as_ref()
+                                .and_then(|u| u.last_update_message.clone())
+                        };
+                        match update {
+                            Some(update) => Ok(FiberBroadcastMessage::ChannelUpdate(update)),
+                            None => Err(Error::InvalidParameter(format!(
+                                "Channel update not found: {:?}",
+                                &channel_outpoint
+                            ))),
+                        }
+                    }
+                    None => Err(Error::InvalidParameter(format!(
+                        "Channel not found: {:?}",
+                        &channel_outpoint
+                    ))),
+                }
+            }
+        }
     }
 
     pub async fn handle_event(
