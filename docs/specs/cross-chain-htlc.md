@@ -31,7 +31,7 @@ To understand how HTLCs can be used for cross-chain payments, let's break down t
 
 1. **Negotiating**:
    - Bob wants to receive $N_b$ amount of asset $T_b$ in the Blockchain B.
-   - Alice negotiates with Ingrid that if Alice pays $N_a$ amount of asset $T_b$ in the Blockchain A to Ingrid, Ingrid will send $N_b$ amount of asset $T_b$ to Bob in the Blockchain B.
+   - Alice negotiates with Ingrid that if Alice pays $N_a$ amount of asset $T_a$ in the Blockchain A to Ingrid, Ingrid will send $N_b$ amount of asset $T_b$ to Bob in the Blockchain B.
 
 2. **Offering HTLCs**:
    - Alice offers an HTLC with $N_a$ amount of $T_a$ on Blockchain A to Ingrid, locking her funds with a hashlock and a timelock. The hashlock is derived from a secret preimage $S$ that only Bob knows.
