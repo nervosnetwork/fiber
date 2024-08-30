@@ -48,7 +48,8 @@ use super::key::blake2b_hash_with_salt;
 use super::types::{
     ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery,
     FiberMessage, FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
-    NodeAnnouncement, OpenChannel, Privkey, Pubkey, QueryChannelsWithinBlockRange,
+    NodeAnnouncement, OpenChannel, Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
+    QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
     QueryChannelsWithinBlockRangeResult,
 };
 use super::FiberConfig;
@@ -458,8 +459,29 @@ where
                 ) => {
                     // We should send the results to the caller here (e.g. using id above).
                 }
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(_) => todo!(),
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(_) => todo!(),
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
+                    QueryBroadcastMessagesWithinTimeRange {
+                        id,
+                        chain_hash: _,
+                        start_time,
+                        end_time,
+                    },
+                ) => {
+                    let queries = self
+                        .query_broadcast_messages_within_time_range(start_time, end_time)
+                        .await?;
+                    let reply = FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
+                        QueryBroadcastMessagesWithinTimeRangeResult { id, queries },
+                    );
+                    state
+                        .send_message_to_peer(&peer_id, FiberMessage::QueryInformation(reply))
+                        .await?;
+                }
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
+                    QueryBroadcastMessagesWithinTimeRangeResult { id: _, queries: _ },
+                ) => {
+                    // We should send the results to the caller here (e.g. using id above).
+                }
             },
         };
         Ok(())
@@ -475,6 +497,64 @@ where
             .get_channels_within_block_range(start_block, end_block)
             .cloned()
             .collect()
+    }
+
+    pub async fn query_broadcast_messages_within_time_range(
+        &self,
+        start_time: u128,
+        end_time: u128,
+    ) -> Result<Vec<FiberBroadcastMessageQuery>, Error> {
+        let start_time = start_time as u64;
+        let end_time = end_time as u64;
+        let is_within_range = |timestamp: u64| timestamp >= start_time && timestamp < end_time;
+        let network_graph = self.network_graph.read().await;
+
+        let mut queries = Vec::new();
+        for node_info in network_graph.nodes() {
+            if let Some(node_announcement) = &node_info.anouncement_msg {
+                if is_within_range(node_announcement.timestamp) {
+                    queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
+                        NodeAnnouncementQuery {
+                            node_id: node_info.node_id.clone(),
+                            flags: 0,
+                        },
+                    ));
+                }
+            }
+        }
+        for channel_info in network_graph.channels() {
+            if is_within_range(channel_info.channel_annoucement_timestamp()) {
+                queries.push(FiberBroadcastMessageQuery::ChannelAnnouncement(
+                    ChannelAnnouncementQuery {
+                        channel_outpoint: channel_info.out_point(),
+                        flags: 0,
+                    },
+                ));
+            }
+
+            if let Some(t) = channel_info.channel_update_one_to_two_timestamp() {
+                if is_within_range(t) {
+                    queries.push(FiberBroadcastMessageQuery::ChannelUpdate(
+                        ChannelUpdateQuery {
+                            channel_outpoint: channel_info.out_point(),
+                            flags: channel_info.one_to_two_channel_update_flags(),
+                        },
+                    ));
+                }
+            }
+
+            if let Some(t) = channel_info.channel_update_two_to_one_timestamp() {
+                if is_within_range(t) {
+                    queries.push(FiberBroadcastMessageQuery::ChannelUpdate(
+                        ChannelUpdateQuery {
+                            channel_outpoint: channel_info.out_point(),
+                            flags: channel_info.two_to_one_channel_update_flags(),
+                        },
+                    ));
+                }
+            }
+        }
+        Ok(queries)
     }
 
     pub async fn query_broadcast_message(

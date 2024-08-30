@@ -47,6 +47,40 @@ impl ChannelInfo {
     pub fn node2(&self) -> Pubkey {
         self.announcement_msg.node_2_id
     }
+
+    pub fn channel_annoucement_timestamp(&self) -> u64 {
+        self.timestamp as u64
+    }
+
+    pub fn one_to_two_channel_update_flags(&self) -> u8 {
+        1
+    }
+
+    pub fn two_to_one_channel_update_flags(&self) -> u8 {
+        0
+    }
+
+    pub fn has_channel_update_one_to_two(&self) -> bool {
+        match &self.one_to_two {
+            Some(x) if x.last_update_message.is_some() => true,
+            _ => false,
+        }
+    }
+
+    pub fn has_channel_update_two_to_one(&self) -> bool {
+        match &self.two_to_one {
+            Some(x) if x.last_update_message.is_some() => true,
+            _ => false,
+        }
+    }
+
+    pub fn channel_update_one_to_two_timestamp(&self) -> Option<u64> {
+        self.one_to_two.as_ref().map(|x| x.last_update)
+    }
+
+    pub fn channel_update_two_to_one_timestamp(&self) -> Option<u64> {
+        self.two_to_one.as_ref().map(|x| x.last_update)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,8 +179,16 @@ where
         self.store.insert_channel(channel_info);
     }
 
+    pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
+        self.nodes.values()
+    }
+
     pub fn get_node(&self, node_id: Pubkey) -> Option<&NodeInfo> {
         self.nodes.get(&node_id)
+    }
+
+    pub fn channels(&self) -> impl Iterator<Item = &ChannelInfo> {
+        self.channels.values()
     }
 
     pub fn get_channel(&self, outpoint: &OutPoint) -> Option<&ChannelInfo> {
