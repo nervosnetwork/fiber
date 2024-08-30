@@ -196,10 +196,10 @@ table ChannelUpdate {
     timestamp: Uint64,
     message_flags: Uint32,
     channel_flags: Uint32,
-    cltv_expiry_delta: Uint64,
-    htlc_minimum_value: Uint128,
-    htlc_maximum_value: Uint128,
-    fee_value: Uint128,
+    tlc_locktime_expiry_delta: Uint64,
+    tlc_minimum_value: Uint128,
+    tlc_maximum_value: Uint128,
+    tlc_fee_proportional_millionths: Uint128,
 }
 
 table NodeAnnouncementQuery {
@@ -260,8 +260,8 @@ table QueryChannelsWithinBlockRangeResult {
 table QueryBroadcastMessagesWithinTimeRange {
     id: Uint64,
     chain_hash: Byte32,
-    start_time: Uint128,
-    end_time: Uint128,
+    start_time: Uint64,
+    end_time: Uint64,
 }
 
 table QueryBroadcastMessagesWithinTimeRangeResult {

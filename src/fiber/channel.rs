@@ -147,7 +147,7 @@ pub struct UpdateCommand {
     pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
-    pub tlc_fee_proportional_millionths: Option<u32>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
 fn get_random_preimage() -> Hash256 {
@@ -1743,8 +1743,8 @@ pub struct PublicChannelInfo {
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
     // TODO: consider this value while building the commitment transaction.
-    pub outbounding_tlc_fee_proportional_millionths: Option<u32>,
-    pub inbounding_tlc_fee_proportional_millionths: Option<u32>,
+    pub outbounding_tlc_fee_proportional_millionths: Option<u128>,
+    pub inbounding_tlc_fee_proportional_millionths: Option<u128>,
 
     // Max/min value of the tlc that we will accept.
     pub inbounding_tlc_max_value: Option<u128>,
@@ -1771,7 +1771,7 @@ impl PublicChannelInfo {
         inbounding_locktime_expiry_delta: u64,
         inbounding_tlc_min_value: u128,
         inbounding_tlc_max_value: u128,
-        inbounding_tlc_fee_proportional_millionths: u32,
+        inbounding_tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
             inbounding_tlc_fee_proportional_millionths: Some(
@@ -2560,13 +2560,13 @@ impl ChannelActorState {
             .remote_channel_announcement_signature = Some((ecdsa_signature, partial_signatures));
     }
 
-    fn get_inbounding_tlc_fee_proportional_millionths(&self) -> Option<u32> {
+    fn get_inbounding_tlc_fee_proportional_millionths(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
             .and_then(|state| state.inbounding_tlc_fee_proportional_millionths)
     }
 
-    fn update_inbounding_tlc_fee_proportional_millionths(&mut self, fee: u32) -> bool {
+    fn update_inbounding_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
         let old_fee = self.get_inbounding_tlc_fee_proportional_millionths();
         match old_fee {
             Some(old_fee) if old_fee == fee => false,
@@ -2578,13 +2578,13 @@ impl ChannelActorState {
         }
     }
 
-    fn get_outbounding_tlc_fee_proportional_millionths(&self) -> Option<u32> {
+    fn get_outbounding_tlc_fee_proportional_millionths(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
             .and_then(|state| state.outbounding_tlc_fee_proportional_millionths)
     }
 
-    fn update_outbounding_tlc_fee_proportional_millionths(&mut self, fee: u32) -> bool {
+    fn update_outbounding_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
         let old_fee = self.get_outbounding_tlc_fee_proportional_millionths();
         match old_fee {
             Some(old_fee) if old_fee == fee => false,
@@ -2595,18 +2595,6 @@ impl ChannelActorState {
             }
         }
     }
-
-    // // Max/min value of the tlc that we will accept.
-    // pub inbounding_tlc_max_value: Option<u128>,
-    // pub inbounding_tlc_min_value: Option<u128>,
-
-    // // Max/min value of the tlc that the counterparty will accept.
-    // pub outbounding_tlc_max_value: Option<u128>,
-    // pub outbounding_tlc_min_value: Option<u128>,
-
-    // // The locktime expiry delta. This is the number of blocks that the locktime.
-    // pub inbounding_locktime_expiry_delta: Option<u64>,
-    // pub outbounding_locktime_expiry_delta: Option<u64>,
 
     fn get_inbounding_tlc_max_value(&self) -> Option<u128> {
         self.public_channel_info

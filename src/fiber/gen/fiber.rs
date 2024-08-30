@@ -11351,20 +11351,20 @@ impl ::core::fmt::Display for ChannelUpdate {
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(f, ", {}: {}", "cltv_expiry_delta", self.cltv_expiry_delta())?;
         write!(
             f,
             ", {}: {}",
-            "htlc_minimum_value",
-            self.htlc_minimum_value()
+            "tlc_locktime_expiry_delta",
+            self.tlc_locktime_expiry_delta()
         )?;
+        write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
+        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
             f,
             ", {}: {}",
-            "htlc_maximum_value",
-            self.htlc_maximum_value()
+            "tlc_fee_proportional_millionths",
+            self.tlc_fee_proportional_millionths()
         )?;
-        write!(f, ", {}: {}", "fee_value", self.fee_value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -11441,25 +11441,25 @@ impl ChannelUpdate {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn cltv_expiry_delta(&self) -> Uint64 {
+    pub fn tlc_locktime_expiry_delta(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint64::new_unchecked(self.0.slice(start..end))
     }
-    pub fn htlc_minimum_value(&self) -> Uint128 {
+    pub fn tlc_minimum_value(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn htlc_maximum_value(&self) -> Uint128 {
+    pub fn tlc_maximum_value(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn fee_value(&self) -> Uint128 {
+    pub fn tlc_fee_proportional_millionths(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
@@ -11502,10 +11502,10 @@ impl molecule::prelude::Entity for ChannelUpdate {
             .timestamp(self.timestamp())
             .message_flags(self.message_flags())
             .channel_flags(self.channel_flags())
-            .cltv_expiry_delta(self.cltv_expiry_delta())
-            .htlc_minimum_value(self.htlc_minimum_value())
-            .htlc_maximum_value(self.htlc_maximum_value())
-            .fee_value(self.fee_value())
+            .tlc_locktime_expiry_delta(self.tlc_locktime_expiry_delta())
+            .tlc_minimum_value(self.tlc_minimum_value())
+            .tlc_maximum_value(self.tlc_maximum_value())
+            .tlc_fee_proportional_millionths(self.tlc_fee_proportional_millionths())
     }
 }
 #[derive(Clone, Copy)]
@@ -11533,20 +11533,20 @@ impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(f, ", {}: {}", "cltv_expiry_delta", self.cltv_expiry_delta())?;
         write!(
             f,
             ", {}: {}",
-            "htlc_minimum_value",
-            self.htlc_minimum_value()
+            "tlc_locktime_expiry_delta",
+            self.tlc_locktime_expiry_delta()
         )?;
+        write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
+        write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
             f,
             ", {}: {}",
-            "htlc_maximum_value",
-            self.htlc_maximum_value()
+            "tlc_fee_proportional_millionths",
+            self.tlc_fee_proportional_millionths()
         )?;
-        write!(f, ", {}: {}", "fee_value", self.fee_value())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -11608,25 +11608,25 @@ impl<'r> ChannelUpdateReader<'r> {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn cltv_expiry_delta(&self) -> Uint64Reader<'r> {
+    pub fn tlc_locktime_expiry_delta(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn htlc_minimum_value(&self) -> Uint128Reader<'r> {
+    pub fn tlc_minimum_value(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn htlc_maximum_value(&self) -> Uint128Reader<'r> {
+    pub fn tlc_maximum_value(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[36..]) as usize;
         let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn fee_value(&self) -> Uint128Reader<'r> {
+    pub fn tlc_fee_proportional_millionths(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         if self.has_extra_fields() {
@@ -11704,10 +11704,10 @@ pub struct ChannelUpdateBuilder {
     pub(crate) timestamp: Uint64,
     pub(crate) message_flags: Uint32,
     pub(crate) channel_flags: Uint32,
-    pub(crate) cltv_expiry_delta: Uint64,
-    pub(crate) htlc_minimum_value: Uint128,
-    pub(crate) htlc_maximum_value: Uint128,
-    pub(crate) fee_value: Uint128,
+    pub(crate) tlc_locktime_expiry_delta: Uint64,
+    pub(crate) tlc_minimum_value: Uint128,
+    pub(crate) tlc_maximum_value: Uint128,
+    pub(crate) tlc_fee_proportional_millionths: Uint128,
 }
 impl ChannelUpdateBuilder {
     pub const FIELD_COUNT: usize = 10;
@@ -11735,20 +11735,20 @@ impl ChannelUpdateBuilder {
         self.channel_flags = v;
         self
     }
-    pub fn cltv_expiry_delta(mut self, v: Uint64) -> Self {
-        self.cltv_expiry_delta = v;
+    pub fn tlc_locktime_expiry_delta(mut self, v: Uint64) -> Self {
+        self.tlc_locktime_expiry_delta = v;
         self
     }
-    pub fn htlc_minimum_value(mut self, v: Uint128) -> Self {
-        self.htlc_minimum_value = v;
+    pub fn tlc_minimum_value(mut self, v: Uint128) -> Self {
+        self.tlc_minimum_value = v;
         self
     }
-    pub fn htlc_maximum_value(mut self, v: Uint128) -> Self {
-        self.htlc_maximum_value = v;
+    pub fn tlc_maximum_value(mut self, v: Uint128) -> Self {
+        self.tlc_maximum_value = v;
         self
     }
-    pub fn fee_value(mut self, v: Uint128) -> Self {
-        self.fee_value = v;
+    pub fn tlc_fee_proportional_millionths(mut self, v: Uint128) -> Self {
+        self.tlc_fee_proportional_millionths = v;
         self
     }
 }
@@ -11763,10 +11763,10 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
             + self.timestamp.as_slice().len()
             + self.message_flags.as_slice().len()
             + self.channel_flags.as_slice().len()
-            + self.cltv_expiry_delta.as_slice().len()
-            + self.htlc_minimum_value.as_slice().len()
-            + self.htlc_maximum_value.as_slice().len()
-            + self.fee_value.as_slice().len()
+            + self.tlc_locktime_expiry_delta.as_slice().len()
+            + self.tlc_minimum_value.as_slice().len()
+            + self.tlc_maximum_value.as_slice().len()
+            + self.tlc_fee_proportional_millionths.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -11784,13 +11784,13 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         offsets.push(total_size);
         total_size += self.channel_flags.as_slice().len();
         offsets.push(total_size);
-        total_size += self.cltv_expiry_delta.as_slice().len();
+        total_size += self.tlc_locktime_expiry_delta.as_slice().len();
         offsets.push(total_size);
-        total_size += self.htlc_minimum_value.as_slice().len();
+        total_size += self.tlc_minimum_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.htlc_maximum_value.as_slice().len();
+        total_size += self.tlc_maximum_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.fee_value.as_slice().len();
+        total_size += self.tlc_fee_proportional_millionths.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -11801,10 +11801,10 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.message_flags.as_slice())?;
         writer.write_all(self.channel_flags.as_slice())?;
-        writer.write_all(self.cltv_expiry_delta.as_slice())?;
-        writer.write_all(self.htlc_minimum_value.as_slice())?;
-        writer.write_all(self.htlc_maximum_value.as_slice())?;
-        writer.write_all(self.fee_value.as_slice())?;
+        writer.write_all(self.tlc_locktime_expiry_delta.as_slice())?;
+        writer.write_all(self.tlc_minimum_value.as_slice())?;
+        writer.write_all(self.tlc_maximum_value.as_slice())?;
+        writer.write_all(self.tlc_fee_proportional_millionths.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -15448,11 +15448,10 @@ impl ::core::default::Default for QueryBroadcastMessagesWithinTimeRange {
     }
 }
 impl QueryBroadcastMessagesWithinTimeRange {
-    const DEFAULT_VALUE: [u8; 92] = [
-        92, 0, 0, 0, 20, 0, 0, 0, 28, 0, 0, 0, 60, 0, 0, 0, 76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 76] = [
+        76, 0, 0, 0, 20, 0, 0, 0, 28, 0, 0, 0, 60, 0, 0, 0, 68, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const FIELD_COUNT: usize = 4;
     pub fn total_size(&self) -> usize {
@@ -15483,20 +15482,20 @@ impl QueryBroadcastMessagesWithinTimeRange {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn start_time(&self) -> Uint128 {
+    pub fn start_time(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint128::new_unchecked(self.0.slice(start..end))
+        Uint64::new_unchecked(self.0.slice(start..end))
     }
-    pub fn end_time(&self) -> Uint128 {
+    pub fn end_time(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[20..]) as usize;
-            Uint128::new_unchecked(self.0.slice(start..end))
+            Uint64::new_unchecked(self.0.slice(start..end))
         } else {
-            Uint128::new_unchecked(self.0.slice(start..))
+            Uint64::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> QueryBroadcastMessagesWithinTimeRangeReader<'r> {
@@ -15594,20 +15593,20 @@ impl<'r> QueryBroadcastMessagesWithinTimeRangeReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn start_time(&self) -> Uint128Reader<'r> {
+    pub fn start_time(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
-        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn end_time(&self) -> Uint128Reader<'r> {
+    pub fn end_time(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
             let end = molecule::unpack_number(&slice[20..]) as usize;
-            Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Uint128Reader::new_unchecked(&self.as_slice()[start..])
+            Uint64Reader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -15659,8 +15658,8 @@ impl<'r> molecule::prelude::Reader<'r> for QueryBroadcastMessagesWithinTimeRange
         }
         Uint64Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Ok(())
     }
 }
@@ -15668,8 +15667,8 @@ impl<'r> molecule::prelude::Reader<'r> for QueryBroadcastMessagesWithinTimeRange
 pub struct QueryBroadcastMessagesWithinTimeRangeBuilder {
     pub(crate) id: Uint64,
     pub(crate) chain_hash: Byte32,
-    pub(crate) start_time: Uint128,
-    pub(crate) end_time: Uint128,
+    pub(crate) start_time: Uint64,
+    pub(crate) end_time: Uint64,
 }
 impl QueryBroadcastMessagesWithinTimeRangeBuilder {
     pub const FIELD_COUNT: usize = 4;
@@ -15681,11 +15680,11 @@ impl QueryBroadcastMessagesWithinTimeRangeBuilder {
         self.chain_hash = v;
         self
     }
-    pub fn start_time(mut self, v: Uint128) -> Self {
+    pub fn start_time(mut self, v: Uint64) -> Self {
         self.start_time = v;
         self
     }
-    pub fn end_time(mut self, v: Uint128) -> Self {
+    pub fn end_time(mut self, v: Uint64) -> Self {
         self.end_time = v;
         self
     }

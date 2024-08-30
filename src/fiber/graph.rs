@@ -221,9 +221,9 @@ where
         update_info.get_or_insert(ChannelUpdateInfo {
             last_update: update.timestamp,
             enabled: true,
-            cltv_expiry_delta: update.cltv_expiry_delta,
-            htlc_minimum_value: update.htlc_minimum_value,
-            htlc_maximum_value: update.htlc_maximum_value,
+            cltv_expiry_delta: update.tlc_locktime_expiry_delta,
+            htlc_minimum_value: update.tlc_minimum_value,
+            htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: 0,
             last_update_message: None,
         });

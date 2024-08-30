@@ -147,7 +147,7 @@ pub struct OpenChannelCommand {
     pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
     pub tlc_max_value: Option<u128>,
-    pub tlc_fee_proportional_millionths: Option<u32>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_num_of_accept_tlcs: Option<u64>,
 }
@@ -501,8 +501,8 @@ where
 
     pub async fn query_broadcast_messages_within_time_range(
         &self,
-        start_time: u128,
-        end_time: u128,
+        start_time: u64,
+        end_time: u64,
     ) -> Result<Vec<FiberBroadcastMessageQuery>, Error> {
         let start_time = start_time as u64;
         let end_time = end_time as u64;
@@ -1389,7 +1389,7 @@ pub struct NetworkActorState {
     tlc_min_value: u128,
     tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
-    tlc_fee_proportional_millionths: u32,
+    tlc_fee_proportional_millionths: u128,
     // A hashset to store the list of all broadcasted messages.
     // This is used to avoid re-broadcasting the same message over and over again
     // TODO: some more intelligent way to manage broadcasting.

@@ -1605,10 +1605,10 @@ pub struct ChannelUpdate {
     pub timestamp: u64,
     pub message_flags: u32,
     pub channel_flags: u32,
-    pub cltv_expiry_delta: u64,
-    pub htlc_minimum_value: u128,
-    pub htlc_maximum_value: u128,
-    pub fee_value: u128,
+    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_minimum_value: u128,
+    pub tlc_maximum_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
 }
 
 impl ChannelUpdate {
@@ -1618,10 +1618,10 @@ impl ChannelUpdate {
         timestamp: u64,
         message_flags: u32,
         channel_flags: u32,
-        cltv_expiry_delta: u64,
-        htlc_minimum_value: u128,
-        htlc_maximum_value: u128,
-        fee_value: u128,
+        tlc_locktime_expiry_delta: u64,
+        tlc_minimum_value: u128,
+        tlc_maximum_value: u128,
+        tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
             signature: None,
@@ -1630,10 +1630,10 @@ impl ChannelUpdate {
             timestamp,
             message_flags,
             channel_flags,
-            cltv_expiry_delta,
-            htlc_minimum_value,
-            htlc_maximum_value,
-            fee_value,
+            tlc_locktime_expiry_delta: tlc_locktime_expiry_delta,
+            tlc_minimum_value: tlc_minimum_value,
+            tlc_maximum_value: tlc_maximum_value,
+            tlc_fee_proportional_millionths: tlc_fee_proportional_millionths,
         }
     }
 
@@ -1645,10 +1645,10 @@ impl ChannelUpdate {
             timestamp: self.timestamp,
             message_flags: self.message_flags,
             channel_flags: self.channel_flags,
-            cltv_expiry_delta: self.cltv_expiry_delta,
-            htlc_minimum_value: self.htlc_minimum_value,
-            htlc_maximum_value: self.htlc_maximum_value,
-            fee_value: self.fee_value,
+            tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
+            tlc_minimum_value: self.tlc_minimum_value,
+            tlc_maximum_value: self.tlc_maximum_value,
+            tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
         };
         deterministically_hash(&unsigned_update)
     }
@@ -1668,10 +1668,10 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .timestamp(channel_update.timestamp.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
-            .cltv_expiry_delta(channel_update.cltv_expiry_delta.pack())
-            .htlc_minimum_value(channel_update.htlc_minimum_value.pack())
-            .htlc_maximum_value(channel_update.htlc_maximum_value.pack())
-            .fee_value(channel_update.fee_value.pack())
+            .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
+            .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
+            .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
+            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
             .build()
     }
 }
@@ -1687,10 +1687,12 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             timestamp: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),
-            cltv_expiry_delta: channel_update.cltv_expiry_delta().unpack(),
-            htlc_minimum_value: channel_update.htlc_minimum_value().unpack(),
-            htlc_maximum_value: channel_update.htlc_maximum_value().unpack(),
-            fee_value: channel_update.fee_value().unpack(),
+            tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),
+            tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
+            tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
+            tlc_fee_proportional_millionths: channel_update
+                .tlc_fee_proportional_millionths()
+                .unpack(),
         })
     }
 }
@@ -2256,8 +2258,8 @@ impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRangeResult>
 pub struct QueryBroadcastMessagesWithinTimeRange {
     pub id: u64,
     pub chain_hash: Hash256,
-    pub start_time: u128,
-    pub end_time: u128,
+    pub start_time: u64,
+    pub end_time: u64,
 }
 
 impl From<QueryBroadcastMessagesWithinTimeRange>

@@ -43,8 +43,8 @@ pub struct OpenChannelParams {
     pub tlc_min_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     pub tlc_max_value: Option<u128>,
-    #[serde_as(as = "Option<U32Hex>")]
-    pub tlc_fee_proportional_millionths: Option<u32>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     pub max_tlc_value_in_flight: Option<u128>,
     #[serde_as(as = "Option<U64Hex>")]
@@ -166,8 +166,8 @@ pub struct UpdateChannelParams {
     pub tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     pub tlc_maximum_value: Option<u128>,
-    #[serde_as(as = "Option<U32Hex>")]
-    pub tlc_fee_proportional_millionths: Option<u32>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
 #[rpc(server)]
