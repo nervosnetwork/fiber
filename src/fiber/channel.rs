@@ -1459,6 +1459,20 @@ where
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                // If the channel is already ready, we should notify the network actor.
+                // so that we update the network.outpoint_channel_map
+                if matches!(channel.state, ChannelState::ChannelReady()) {
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::ChannelReady(
+                                channel.get_id(),
+                                channel.get_remote_peer_id(),
+                                channel.get_funding_transaction_outpoint(),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                }
                 Ok(channel)
             }
         }
@@ -4150,7 +4164,11 @@ impl ChannelActorState {
         let peer_id = self.get_remote_peer_id();
         network
             .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelReady(self.get_id(), peer_id.clone()),
+                NetworkActorEvent::ChannelReady(
+                    self.get_id(),
+                    peer_id.clone(),
+                    self.get_funding_transaction_outpoint(),
+                ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.maybe_broadcast_announcement_signatures(network).await;

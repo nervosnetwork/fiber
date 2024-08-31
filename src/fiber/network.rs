@@ -120,6 +120,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
+    ControlFiberChannelWithOutpoint(OutPoint, ChannelCommand),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information.
@@ -263,6 +264,7 @@ pub enum NetworkActorEvent {
     /// Channel related events.
 
     /// A new channel is created and the peer id and actor reference is given here.
+    /// Note the channel_id here maybe a temporary channel id.
     ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
@@ -281,7 +283,7 @@ pub enum NetworkActorEvent {
         u64,
     ),
     /// A channel is ready to use.
-    ChannelReady(Hash256, PeerId),
+    ChannelReady(Hash256, PeerId, OutPoint),
     /// A channel is already closed.
     ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
@@ -784,11 +786,17 @@ where
                     }
                 }
             }
-            NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
+            NetworkActorEvent::ChannelReady(channel_id, peer_id, channel_outpoint) => {
                 info!(
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
                 );
+
+                // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
+                state
+                    .outpoint_channel_map
+                    .insert(channel_outpoint, channel_id);
+
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -934,6 +942,12 @@ where
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
+            }
+
+            NetworkActorCommand::ControlFiberChannelWithOutpoint(outpoint, command) => {
+                if let Some(channel_id) = state.outpoint_channel_map.get(&outpoint) {
+                    state.send_command_to_channel(*channel_id, command).await?
+                }
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
@@ -1427,6 +1441,8 @@ pub struct NetworkActorState {
     peer_pubkey_map: HashMap<PeerId, Pubkey>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
+    // Outpoint to channel id mapping.
+    outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
     to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
@@ -1850,7 +1866,7 @@ impl NetworkActorState {
 
         for channel_id in store.get_active_channel_ids_by_peer(&remote_peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
-            if let Ok((channel, _)) = Actor::spawn_linked(
+            if let Ok((_channel, _)) = Actor::spawn_linked(
                 None,
                 ChannelActor::new(
                     self.get_public_key(),
@@ -1864,7 +1880,11 @@ impl NetworkActorState {
             )
             .await
             {
-                self.on_channel_created(channel_id, remote_peer_id, channel);
+                // network actor will receive ChannelCreated event after channel is created
+                // and will add the channel to the session_channels_map, so we don't need to do it here
+                info!("channel {:x} reestablished successfully", &channel_id);
+            } else {
+                error!("Failed to reestablish channel {:x}", &channel_id);
             }
         }
     }
@@ -2252,6 +2272,7 @@ where
             peer_pubkey_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
+            outpoint_channel_map: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
             chain_actor: self.chain_actor.clone(),
@@ -2268,13 +2289,17 @@ where
 
         // load the connected peers from the network graph
 
-        let graph = self.network_graph.read().await;
+        let mut graph = self.network_graph.write().await;
         let peers = graph.get_connected_peers();
         for (_peer_id, addr) in peers {
             myself.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::ConnectPeer(addr.clone()),
             ))?;
         }
+
+        // FIXME: this is a temporary solution, will be replaced after network graph
+        // is changed into an actor.
+        graph.set_network_actor(myself.clone());
 
         // TODO: In current implementation, broadcasting node announcement message here
         // is actually useless, because we haven't connected to any peer yet.

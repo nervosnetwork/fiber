@@ -21,6 +21,21 @@ macro_rules! handle_actor_call {
             Err(e) => log_and_error!($params, e.to_string()),
         }
     };
+    ($actor:expr, $message:expr) => {
+        match call!($actor, $message) {
+            Ok(result) => match result {
+                Ok(res) => Ok(res),
+                Err(e) => {
+                    debug!("Error: {:?}", e);
+                    Err(e)
+                }
+            },
+            Err(e) => {
+                debug!("Error: {:?}", e);
+                Err(e)
+            }
+        }
+    };
 }
 
 #[macro_export]

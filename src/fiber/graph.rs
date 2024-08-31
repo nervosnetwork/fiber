@@ -2,8 +2,14 @@ use super::network::SendPaymentCommand;
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
+use crate::fiber::channel::{AddTlcCommand, ChannelCommand};
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::types::{OnionInfo, OnionPacket};
+use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use ckb_types::packed::OutPoint;
+use ractor::call;
+use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -121,6 +127,7 @@ pub struct NetworkGraph<S> {
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
+    actor: Option<ActorRef<NetworkActorMessage>>,
 }
 
 #[derive(Error, Debug)]
@@ -143,9 +150,14 @@ where
             connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: Hash256::default(),
+            actor: None,
         };
         network_graph.load_from_store();
         network_graph
+    }
+
+    pub fn set_network_actor(&mut self, actor: ActorRef<NetworkActorMessage>) {
+        self.actor = Some(actor);
     }
 
     fn load_from_store(&mut self) {
@@ -313,7 +325,10 @@ where
         }
     }
 
-    pub fn send_payment(&self, payment_request: SendPaymentCommand) -> Result<(), GraphError> {
+    pub async fn send_payment(
+        &self,
+        payment_request: SendPaymentCommand,
+    ) -> Result<(), GraphError> {
         let amount = payment_request.amount;
         if amount == 0 {
             return Err(GraphError::Graph("amount is zero".to_string()));
@@ -324,8 +339,45 @@ where
         let source = self.source;
         let target = payment_request.target;
 
-        let _route = self.find_route(source, target, amount, 1000);
-        eprintln!("route: {:?}", _route);
+        let route = self.find_route(source, target, amount, 1000)?;
+
+        let payment_hash = payment_request.payment_hash;
+        let mut onion_infos = vec![];
+        for i in route.len() - 1..0 {
+            let onion_info = OnionInfo {
+                next_hop: if i == route.len() - 1 {
+                    None
+                } else {
+                    Some(route[i + 1].0)
+                },
+                amount: amount,
+                payment_hash,
+                expiry: 0,
+            };
+            onion_infos.push(onion_info);
+        }
+        let onion_packet = OnionPacket::new(onion_infos).serialize();
+        let channel_outpoint = &route[0].1;
+        // generate a random channel id
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannelWithOutpoint(
+                channel_outpoint.clone(),
+                ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: amount,
+                        preimage: None,
+                        payment_hash: Some(payment_hash),
+                        expiry: 0.into(),
+                        hash_algorithm: HashAlgorithm::Sha256,
+                        onion_packet,
+                    },
+                    rpc_reply,
+                ),
+            ))
+        };
+
+        let res = call!(self.actor.as_ref().unwrap(), message);
+        eprintln!("route: {:?}, result: {:?}", route, res);
 
         unimplemented!();
     }
@@ -814,6 +866,45 @@ mod tests {
 
         let route = network.find_route(1, 5, 1000, 10);
         assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_find_optimal_path() {
+        let mut network = MockNetworkGraph::new(6);
+
+        // Direct path with high fee
+        network.add_edge(1, 5, Some(2000), Some(50));
+
+        // Longer path with lower total fee
+        network.add_edge(1, 2, Some(2000), Some(10));
+        network.add_edge(2, 3, Some(2000), Some(10));
+        network.add_edge(3, 4, Some(2000), Some(10));
+        network.add_edge(4, 5, Some(2000), Some(10));
+
+        // Path with insufficient capacity
+        network.add_edge(1, 6, Some(500), Some(5));
+        network.add_edge(6, 5, Some(500), Some(5));
+
+        let route = network.find_route(1, 5, 1000, 1000);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        // Check that the algorithm chose the longer path with lower fees
+        assert_eq!(route.len(), 4);
+        assert_eq!(route[0].1, network.edges[1].2);
+        assert_eq!(route[1].1, network.edges[2].2);
+        assert_eq!(route[2].1, network.edges[3].2);
+        assert_eq!(route[3].1, network.edges[4].2);
+
+        // Test with a smaller amount that allows using the direct path
+        let small_route = network.find_route(1, 5, 100, 100);
+        assert!(small_route.is_ok());
+        let small_route = small_route.unwrap();
+
+        // Check that the algorithm chose the direct path for a smaller amount
+        assert_eq!(small_route.len(), 2);
+        assert_eq!(small_route[0].1, network.edges[5].2);
+        assert_eq!(small_route[1].1, network.edges[6].2);
     }
 
     #[test]
