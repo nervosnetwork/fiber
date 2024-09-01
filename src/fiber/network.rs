@@ -1295,7 +1295,7 @@ where
                     announcement_msg: channel_announcement.clone(),
                     one_to_two: None, // wait for channel update message
                     two_to_one: None,
-                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
                 };
                 self.network_graph.write().await.add_channel(channel_info)
             }

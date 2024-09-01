@@ -32,10 +32,19 @@ impl Store {
             .expect("get should be OK")
     }
 
-    fn get_range<K: AsRef<[u8]>>(&self, lower_bound: K, upper_bound: K) -> DBIterator {
+    fn get_range<K: AsRef<[u8]>>(
+        &self,
+        lower_bound: Option<K>,
+        upper_bound: Option<K>,
+    ) -> DBIterator {
+        assert!(lower_bound.is_some() || upper_bound.is_some());
         let mut read_options = ReadOptions::default();
-        read_options.set_iterate_upper_bound(upper_bound.as_ref());
-        read_options.set_iterate_lower_bound(lower_bound.as_ref());
+        if let Some(lower_bound) = lower_bound {
+            read_options.set_iterate_lower_bound(lower_bound.as_ref());
+        }
+        if let Some(upper_bound) = upper_bound {
+            read_options.set_iterate_upper_bound(upper_bound.as_ref());
+        }
         let mode = IteratorMode::Start;
         self.db.get_iter(&read_options, mode)
     }
@@ -54,21 +63,27 @@ pub struct Batch {
 }
 
 impl Batch {
+    fn store(&self) -> Store {
+        Store {
+            db: Arc::clone(&self.db),
+        }
+    }
+
     fn put_kv(&mut self, key_value: KeyValue) {
-        let (key, value) = match key_value {
+        match key_value {
             KeyValue::ChannelActorState(id, state) => {
                 let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&state).expect("serialize ChannelActorState should be OK"),
-                )
+                );
             }
             KeyValue::CkbInvoice(id, invoice) => {
                 let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&invoice).expect("serialize CkbInvoice should be OK"),
-                )
+                );
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
                 let key = [
@@ -77,10 +92,10 @@ impl Batch {
                     channel_id.as_ref(),
                 ]
                 .concat();
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&state).expect("serialize ChannelState should be OK"),
-                )
+                );
             }
             KeyValue::ChannelInfo(channel_id, channel) => {
                 // Save channel update timestamp to index, so that we can query channels by timestamp
@@ -107,10 +122,10 @@ impl Batch {
                 let mut key = Vec::with_capacity(37);
                 key.push(CHANNEL_INFO_PREFIX);
                 key.extend_from_slice(channel_id.as_slice());
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
-                )
+                );
             }
             KeyValue::NodeInfo(id, node) => {
                 if node.anouncement_msg.is_some() {
@@ -128,20 +143,19 @@ impl Batch {
                 let mut key = Vec::with_capacity(34);
                 key.push(NODE_INFO_PREFIX);
                 key.extend_from_slice(id.serialize().as_ref());
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
-                )
+                );
             }
             KeyValue::PeerIdMultiAddr(peer_id, multiaddr) => {
                 let key = [&[PEER_ID_MULTIADDR_PREFIX], peer_id.as_bytes()].concat();
-                (
+                self.put(
                     key,
                     serde_json::to_vec(&multiaddr).expect("serialize Multiaddr should be OK"),
-                )
+                );
             }
-        };
-        self.put(key, value)
+        }
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {

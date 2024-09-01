@@ -32,7 +32,7 @@ pub struct ChannelInfo {
     pub one_to_two: Option<ChannelUpdateInfo>,
     pub two_to_one: Option<ChannelUpdateInfo>,
     // Timestamp of last updated
-    pub timestamp: u128,
+    pub timestamp: u64,
 }
 
 impl ChannelInfo {
@@ -49,7 +49,7 @@ impl ChannelInfo {
     }
 
     pub fn channel_annoucement_timestamp(&self) -> u64 {
-        self.timestamp as u64
+        self.timestamp
     }
 
     pub fn one_to_two_channel_update_flags(&self) -> u8 {
