@@ -3,6 +3,7 @@ use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use ractor::concurrency::Duration;
 use ractor::{
     async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RactorErr, RpcReplyPort, SupervisionEvent,
@@ -95,6 +96,12 @@ pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
 }
 
+/// What kind of local information should be broadcasted to the network.
+#[derive(Debug)]
+pub enum LocalInfoKind {
+    NodeAnnouncement,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -130,6 +137,8 @@ pub enum NetworkActorCommand {
     // e.g. the ChannelUpdate message should be received by the counterparty of the channel.
     // This message may be broadcasted to other peers if necessary.
     BroadcastMessage(Vec<PeerId>, FiberBroadcastMessage),
+    // Broadcast local information to the network.
+    BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
     // Payment related commands
     SendPayment(
@@ -1148,6 +1157,20 @@ where
                 let _ = self.on_send_payment(myself, payment_request).await;
                 let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
             }
+            NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
+                LocalInfoKind::NodeAnnouncement => {
+                    if let Some(message) = state.get_node_announcement_message() {
+                        myself
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::BroadcastMessage(
+                                    vec![],
+                                    FiberBroadcastMessage::NodeAnnouncement(message),
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+            },
         };
         Ok(())
     }
@@ -2381,18 +2404,13 @@ where
             ))?;
         }
 
-        // TODO: In current implementation, broadcasting node announcement message here
-        // is actually useless, because we haven't connected to any peer yet.
-        if let Some(message) = state.get_node_announcement_message() {
-            error!("debug node announcement message: {:?}", message);
-            myself
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![],
-                        FiberBroadcastMessage::NodeAnnouncement(message),
-                    ),
+        let announce_node_interval_seconds = config.announce_node_interval_seconds();
+        if announce_node_interval_seconds > 0 {
+            myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
+                NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
+                    LocalInfoKind::NodeAnnouncement,
                 ))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            });
         }
 
         Ok(state)

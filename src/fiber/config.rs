@@ -42,6 +42,9 @@ pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 
+/// The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce.
+pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 0;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
@@ -130,6 +133,17 @@ pub struct FiberConfig {
         help = "The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]"
     )]
     pub tlc_fee_proportional_millionths: Option<u128>,
+
+    // TODO: the more sensible default value for this option is a reasonable interval like one day
+    // if this node has public channels, otherwise don't reannounce (or announce) at all.
+    /// The interval to reannounce NodeAnnouncement, in seconds. [default: 0 (never reannounce)]
+    #[arg(
+        name = "FIBER_ANNOUNCE_NODE_INTERVAL_SECONDS",
+        long = "fiber-announce-node-interval-seconds",
+        env,
+        help = "The interval to reannounce NodeAnnouncement, in seconds. [default: 0 (never reannounce)]"
+    )]
+    pub(crate) announce_node_interval_seconds: Option<u64>,
 }
 
 #[derive(PartialEq, Copy, Clone, Default)]
@@ -249,6 +263,11 @@ impl FiberConfig {
     pub fn tlc_fee_proportional_millionths(&self) -> u128 {
         self.tlc_fee_proportional_millionths
             .unwrap_or(DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS)
+    }
+
+    pub fn announce_node_interval_seconds(&self) -> u64 {
+        self.announce_node_interval_seconds
+            .unwrap_or(DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS)
     }
 }
 
