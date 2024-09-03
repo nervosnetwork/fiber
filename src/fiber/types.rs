@@ -2665,7 +2665,7 @@ pub struct OnionInfo {
     pub expiry: u64,
     pub next_hop: Option<Pubkey>,
     #[serde_as(as = "Option<EntityHex>")]
-    pub next_channel_outpoint: Option<OutPoint>,
+    pub channel_outpoint: Option<OutPoint>,
 }
 
 // TODO: replace this with real OnionPacket implementation
@@ -2697,6 +2697,10 @@ impl OnionPacket {
 
     pub fn is_empty(&self) -> bool {
         self.hop_data.is_empty()
+    }
+
+    pub fn is_last(&self) -> bool {
+        self.hop_data.len() == 1
     }
 }
 
@@ -2744,14 +2748,14 @@ mod tests {
             amount: 2,
             expiry: 3,
             next_hop: Some(generate_pubkey().into()),
-            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let onion_info2 = super::OnionInfo {
             payment_hash: [4; 32].into(),
             amount: 5,
             expiry: 6,
             next_hop: Some(generate_pubkey().into()),
-            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let mut onion_packet =
             super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
@@ -2777,7 +2781,7 @@ mod tests {
             amount: 42,
             expiry: 42,
             next_hop: Some(generate_pubkey().into()),
-            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
         let serialized = onion_packet.serialize();

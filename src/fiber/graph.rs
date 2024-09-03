@@ -3,6 +3,7 @@ use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::types::OnionInfo;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -132,6 +133,12 @@ pub enum GraphError {
     PathFind(String),
     #[error("Graph other error: {0}")]
     Other(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct PathEdge {
+    pub target: Pubkey,
+    pub channel_outpoint: OutPoint,
 }
 
 impl<S> NetworkGraph<S>
@@ -321,6 +328,65 @@ where
         }
     }
 
+    pub fn build_route(
+        &self,
+        payment_request: SendPaymentCommand,
+    ) -> Result<Vec<OnionInfo>, GraphError> {
+        let source = self.get_source_pubkey();
+        let target = payment_request.target_pubkey;
+        let amount = payment_request.amount;
+        let route = self.find_route(source, target, amount, 1000)?;
+        eprintln!("route found: {:?}", route);
+        assert!(!route.is_empty());
+
+        let payment_hash = payment_request.payment_hash;
+        let mut current_amount = amount;
+        let mut current_expiry = 0;
+        let mut onion_infos = vec![];
+        let mut next_hop;
+        for i in (0..route.len() - 1).rev() {
+            next_hop = Some(route[i + 1].target);
+            let next_channel_outpoint = Some(route[i + 1].channel_outpoint.clone());
+            let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
+            eprintln!("channel_info: {:?}", channel_info);
+            let channel_update = match channel_info.node1() == route[i + 1].target {
+                true => channel_info.two_to_one.as_ref(),
+                false => channel_info.one_to_two.as_ref(),
+            }
+            .expect("channel_update is none");
+            let fee_rate = channel_update.fee_rate;
+            // FIXME(yukang): revise the fee calculation
+            let fee = ((fee_rate as f64 / 100.0) * current_amount as f64) as u128;
+            let expiry = channel_update.cltv_expiry_delta;
+
+            onion_infos.push(OnionInfo {
+                amount: current_amount,
+                payment_hash,
+                next_hop,
+                expiry: current_expiry.into(),
+                channel_outpoint: next_channel_outpoint,
+            });
+            current_amount += fee;
+            current_expiry += expiry;
+        }
+        // add the first hop so that the logic for send HTLC can be reused
+        next_hop = if route.len() >= 1 {
+            Some(route[0].target)
+        } else {
+            None
+        };
+        onion_infos.push(OnionInfo {
+            amount: current_amount,
+            payment_hash,
+            next_hop,
+            expiry: current_expiry.into(),
+            channel_outpoint: Some(route[0].channel_outpoint.clone()),
+        });
+        onion_infos.reverse();
+        assert!(onion_infos.len() == route.len());
+        Ok(onion_infos)
+    }
+
     // the algorithm works from target-to-source to find the shortest path
     pub fn find_route(
         &self,
@@ -328,7 +394,7 @@ where
         target: Pubkey,
         amount: u128,
         max_fee_amount: u128,
-    ) -> Result<Vec<(Pubkey, OutPoint)>, GraphError> {
+    ) -> Result<Vec<PathEdge>, GraphError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let mut result = vec![];
@@ -447,7 +513,10 @@ where
         while current != target {
             if let Some(elem) = distances.get(&current) {
                 let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
-                result.push(next_hop.clone());
+                result.push(PathEdge {
+                    target: next_hop.0,
+                    channel_outpoint: next_hop.1.clone(),
+                });
                 current = next_hop.0;
             } else {
                 break;
@@ -547,6 +616,11 @@ mod tests {
             let keys = generate_keys(node_num + 1);
             let public_key1 = keys[0];
             let mut graph = NetworkGraph::new(store, public_key1.into());
+            graph.add_node(NodeInfo {
+                node_id: public_key1.into(),
+                timestamp: 0,
+                anouncement_msg: None,
+            });
             for i in 1..keys.len() {
                 let node = NodeInfo {
                     node_id: keys[i].into(),
@@ -601,7 +675,7 @@ mod tests {
                 timestamp: 0,
                 message_flags: 1,
                 channel_flags: 0,
-                tlc_locktime_expiry_delta: 0,
+                tlc_locktime_expiry_delta: 144,
                 tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
                 tlc_maximum_value: 10000,
                 tlc_minimum_value: 0,
@@ -616,7 +690,7 @@ mod tests {
             target: usize,
             amount: u128,
             max_fee: u128,
-        ) -> Result<Vec<(Pubkey, OutPoint)>, GraphError> {
+        ) -> Result<Vec<PathEdge>, GraphError> {
             let source = self.keys[source].into();
             let target = self.keys[target].into();
             self.graph.find_route(source, target, amount, max_fee)
@@ -717,8 +791,8 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.len(), 1);
-        assert_eq!(route[0].0, node2.into());
-        assert_eq!(route[0].1, network.edges[1].2);
+        assert_eq!(route[0].target, node2.into());
+        assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 
         let route = network.find_route(1, 3, 10, 100);
         assert!(route.is_err());
@@ -737,26 +811,26 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.len(), 2);
-        assert_eq!(route[0].0, node2.into());
-        assert_eq!(route[1].0, node3.into());
-        assert_eq!(route[0].1, network.edges[0].2);
-        assert_eq!(route[1].1, network.edges[1].2);
+        assert_eq!(route[0].target, node2.into());
+        assert_eq!(route[1].target, node3.into());
+        assert_eq!(route[0].channel_outpoint, network.edges[0].2);
+        assert_eq!(route[1].channel_outpoint, network.edges[1].2);
 
         // Test route from node 1 to node 2
         let route = network.find_route(1, 2, 100, 1000);
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.len(), 1);
-        assert_eq!(route[0].0, node2.into());
-        assert_eq!(route[0].1, network.edges[0].2);
+        assert_eq!(route[0].target, node2.into());
+        assert_eq!(route[0].channel_outpoint, network.edges[0].2);
 
         // Test route from node 2 to node 3
         let route = network.find_route(2, 3, 100, 1000);
         assert!(route.is_ok());
         let route = route.unwrap();
         assert_eq!(route.len(), 1);
-        assert_eq!(route[0].0, node3.into());
-        assert_eq!(route[0].1, network.edges[1].2);
+        assert_eq!(route[0].target, node3.into());
+        assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 
         // Test route from node 3 to node 1 (should fail)
         let route = network.find_route(3, 1, 100, 1000);
@@ -778,8 +852,8 @@ mod tests {
         let route = route.unwrap();
 
         assert_eq!(route.len(), 2);
-        assert_eq!(route[0].1, network.edges[2].2);
-        assert_eq!(route[1].1, network.edges[3].2);
+        assert_eq!(route[0].channel_outpoint, network.edges[2].2);
+        assert_eq!(route[1].channel_outpoint, network.edges[3].2);
     }
 
     #[test]
@@ -798,10 +872,10 @@ mod tests {
         let route = route.unwrap();
 
         assert_eq!(route.len(), 4);
-        assert_eq!(route[0].1, network.edges[0].2);
-        assert_eq!(route[1].1, network.edges[1].2);
-        assert_eq!(route[2].1, network.edges[2].2);
-        assert_eq!(route[3].1, network.edges[3].2);
+        assert_eq!(route[0].channel_outpoint, network.edges[0].2);
+        assert_eq!(route[1].channel_outpoint, network.edges[1].2);
+        assert_eq!(route[2].channel_outpoint, network.edges[2].2);
+        assert_eq!(route[3].channel_outpoint, network.edges[3].2);
     }
 
     #[test]
@@ -875,10 +949,10 @@ mod tests {
 
         // Check that the algorithm chose the longer path with lower fees
         assert_eq!(route.len(), 4);
-        assert_eq!(route[0].1, network.edges[1].2);
-        assert_eq!(route[1].1, network.edges[2].2);
-        assert_eq!(route[2].1, network.edges[3].2);
-        assert_eq!(route[3].1, network.edges[4].2);
+        assert_eq!(route[0].channel_outpoint, network.edges[1].2);
+        assert_eq!(route[1].channel_outpoint, network.edges[2].2);
+        assert_eq!(route[2].channel_outpoint, network.edges[3].2);
+        assert_eq!(route[3].channel_outpoint, network.edges[4].2);
 
         // Test with a smaller amount that allows using the direct path
         let small_route = network.find_route(1, 5, 100, 100);
@@ -887,8 +961,8 @@ mod tests {
 
         // Check that the algorithm chose the direct path for a smaller amount
         assert_eq!(small_route.len(), 2);
-        assert_eq!(small_route[0].1, network.edges[5].2);
-        assert_eq!(small_route[1].1, network.edges[6].2);
+        assert_eq!(small_route[0].channel_outpoint, network.edges[5].2);
+        assert_eq!(small_route[1].channel_outpoint, network.edges[6].2);
     }
 
     #[test]
@@ -910,5 +984,40 @@ mod tests {
             .graph
             .find_route(no_exits_public_key.into(), node1.into(), 100, 1000);
         assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_build_route_three_nodes() {
+        let mut network = MockNetworkGraph::new(3);
+        network.add_edge(0, 2, Some(500), Some(2));
+        network.add_edge(2, 3, Some(500), Some(2));
+        let node0 = network.keys[0];
+        let node2 = network.keys[2];
+        let node3 = network.keys[3];
+        eprintln!(
+            "node0: {:?} \nnode2: {:?} \nnode3: {:?}\n",
+            node0, node2, node3
+        );
+
+        // Test build route from node1 to node3
+        let route = network.graph.build_route(SendPaymentCommand {
+            target_pubkey: node3.into(),
+            amount: 100,
+            payment_hash: Hash256::default(),
+            invoice: None,
+            final_cltv_delta: Some(100),
+            timeout: Some(10),
+            max_fee_amount: Some(1000),
+            max_parts: None,
+        });
+        eprintln!("return {:?}", route);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.len(), 2);
+        assert_eq!(route[0].channel_outpoint, Some(network.edges[0].2.clone()));
+        assert_eq!(route[1].channel_outpoint, Some(network.edges[1].2.clone()));
+
+        assert_eq!(route[0].next_hop, Some(node2.into()));
+        assert_eq!(route[1].next_hop, Some(node3.into()));
     }
 }

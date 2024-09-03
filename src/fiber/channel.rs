@@ -3,6 +3,7 @@ use bitflags::bitflags;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
+use crate::fiber::types::ChannelUpdate;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
@@ -19,8 +20,8 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call, Actor, ActorProcessingErr, ActorRef, OutputPort,
-    RpcReplyPort, SpawnErr,
+    async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
+    SpawnErr,
 };
 
 use serde::{Deserialize, Serialize};
@@ -59,10 +60,10 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned,
-        CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime,
-        OnionPacket, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
+        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
+        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+        TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
@@ -441,35 +442,15 @@ impl<S> ChannelActor<S> {
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
                 // this message, and our processing of this message is idempotent.
-                if add_tlc.onion_packet.len() > 0 {
-                    let mut deserilized_onion_packet =
-                        OnionPacket::deserialize(&tlc.onion_packet).unwrap();
-                    let next_hop = deserilized_onion_packet.shift();
-                    if let Ok(hop) = next_hop {
-                        if let Some(next_channel_outpoint) = hop.next_channel_outpoint {
-                            let message = |rpc_reply| -> NetworkActorMessage {
-                                NetworkActorMessage::Command(
-                                    NetworkActorCommand::ControlFiberChannelWithOutpoint(
-                                        next_channel_outpoint,
-                                        ChannelCommand::AddTlc(
-                                            AddTlcCommand {
-                                                amount: hop.amount,
-                                                preimage: None,
-                                                payment_hash: Some(hop.payment_hash),
-                                                expiry: hop.expiry.into(),
-                                                hash_algorithm: HashAlgorithm::Sha256,
-                                                onion_packet: deserilized_onion_packet.serialize(),
-                                            },
-                                            rpc_reply,
-                                        ),
-                                    ),
-                                )
-                            };
 
-                            let res = call!(self.network, message);
-                            eprintln!("add_tlc: {:?}, result: {:?}", add_tlc, res);
-                        }
-                    }
+                // If there is a next hop, we should send the AddTlc message to the next hop.
+                if add_tlc.onion_packet.len() > 0 {
+                    let message = NetworkActorMessage::Command(
+                        NetworkActorCommand::SendOnionPacket(add_tlc.onion_packet.clone()),
+                    );
+
+                    let res = self.network.send_message(message);
+                    eprintln!("add_tlc: {:?}, result: {:?}", add_tlc, res);
                 }
                 Ok(())
             }
