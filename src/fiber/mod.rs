@@ -10,6 +10,7 @@ pub use network::{
 mod fee;
 pub mod graph;
 mod key;
+mod path;
 
 pub use key::KeyPair;
 

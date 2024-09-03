@@ -32,6 +32,7 @@ impl Store {
             .expect("get should be OK")
     }
 
+    #[allow(dead_code)]
     fn get_range<K: AsRef<[u8]>>(
         &self,
         lower_bound: Option<K>,

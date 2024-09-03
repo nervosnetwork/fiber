@@ -88,6 +88,11 @@ pub struct AcceptChannelResponse {
     pub new_channel_id: Hash256,
 }
 
+#[derive(Debug)]
+pub struct SendPaymentResponse {
+    pub payment_hash: Hash256,
+}
+
 /// The struct here is used both internally and as an API to the outside world.
 /// If we want to send a reply to the caller, we need to wrap the message with
 /// a RpcReplyPort. Since outsider users have no knowledge of RpcReplyPort, we
@@ -123,6 +128,11 @@ pub enum NetworkActorCommand {
     // This message may be broadcasted to other peers if necessary.
     BroadcastMessage(Vec<PeerId>, FiberBroadcastMessage),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
+    // Payment related commands
+    SendPayment(
+        SendPaymentCommand,
+        RpcReplyPort<Result<SendPaymentResponse, String>>,
+    ),
 }
 
 pub async fn sign_network_message(
@@ -150,6 +160,34 @@ pub struct OpenChannelCommand {
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_num_of_accept_tlcs: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct SendPaymentCommand {
+    // the identifier of the payment target
+    pub target: Pubkey,
+
+    // the amount of the payment
+    pub amount: u128,
+
+    // The hash to use within the payment's HTLC
+    // FIXME: this should be optional when AMP is enabled
+    pub payment_hash: Hash256,
+
+    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    pub final_cltv_delta: Hash256,
+
+    // the encoded invoice to send to the recipient
+    pub invoice: Option<Vec<u8>>,
+
+    // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+    pub timeout: Option<u64>,
+
+    // the maximum fee amounts in shannons that the sender is willing to pay
+    pub max_fee_amount: Option<u128>,
+
+    // max parts for the payment, only used for multi-part payments
+    pub max_parts: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -328,12 +366,13 @@ where
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
+        my_pubkey: Pubkey,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
             store: store.clone(),
-            network_graph: Arc::new(RwLock::new(NetworkGraph::new(store))),
+            network_graph: Arc::new(RwLock::new(NetworkGraph::new(store, my_pubkey))),
         }
     }
 
@@ -1088,6 +1127,11 @@ where
                 let signature = state.private_key.sign(message);
                 let _ = reply.send(signature);
             }
+            NetworkActorCommand::SendPayment(payment_request, reply) => {
+                let payment_hash = payment_request.payment_hash;
+                let _ = self.on_send_payment(payment_request).await;
+                let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
+            }
         };
         Ok(())
     }
@@ -1121,7 +1165,6 @@ where
                         // Add the node to the network graph.
                         let node_info = NodeInfo {
                             node_id: node_announcement.node_id,
-                            channel_short_ids: HashSet::new(),
                             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
                             anouncement_msg: Some(node_announcement.clone()),
                         };
@@ -1336,10 +1379,13 @@ where
                         "Channel update message signature verified: {:?}",
                         &channel_update
                     );
-                    network_graph.process_channel_update(
-                        channel_update.channel_outpoint.clone(),
-                        channel_update.clone(),
-                    );
+                    let res = network_graph.process_channel_update(channel_update.clone());
+                    if res.is_err() {
+                        error!(
+                            "Channel update message processing failed: {:?} result: {:?}",
+                            &channel_update, res
+                        );
+                    }
                 } else {
                     error!(
                         "Channel update message signature verification failed (channel not found): {:?}",
@@ -1349,6 +1395,14 @@ where
                 }
             }
         }
+    }
+
+    async fn on_send_payment(&self, payment: SendPaymentCommand) {
+        let network = self.network_graph.read().await;
+        // initialize the payment session in db and begin the payment process in a statemachine to
+        // handle the payment process
+
+        let _res = network.send_payment(payment);
     }
 }
 
@@ -2422,11 +2476,12 @@ pub async fn start_network<
         .read_or_generate_secret_key()
         .expect("read or generate secret key")
         .into();
-    let my_peer_id = PeerId::from_public_key(&secio_kp.public_key());
+    let my_pubkey = secio_kp.public_key();
+    let my_peer_id = PeerId::from_public_key(&my_pubkey);
 
     let (actor, _handle) = Actor::spawn_linked(
         Some(format!("Network {}", my_peer_id)),
-        NetworkActor::new(event_sender, chain_actor, store),
+        NetworkActor::new(event_sender, chain_actor, store, my_pubkey.into()),
         NetworkActorStartArguments {
             config,
             tracker,

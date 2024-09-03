@@ -2,6 +2,8 @@ use crate::fiber::graph::{ChannelInfo, NodeInfo};
 use crate::fiber::types::Pubkey;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
+use ractor::{Actor, ActorRef};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
     env,
@@ -11,11 +13,8 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tentacle::multiaddr::Multiaddr;
-
-use ractor::{Actor, ActorRef};
-
 use tempfile::TempDir as OldTempDir;
+use tentacle::multiaddr::Multiaddr;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::{
     select,
@@ -126,9 +125,17 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
+            NetworkActor::new(
+                event_sender,
+                chain_actor.clone(),
+                MemoryStore::default(),
+                public_key.into(),
+            ),
             NetworkActorStartArguments {
                 config: fiber_config,
                 tracker: new_tokio_task_tracker(),

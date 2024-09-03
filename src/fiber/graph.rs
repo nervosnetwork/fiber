@@ -1,21 +1,24 @@
+use super::network::SendPaymentCommand;
+use super::path::NodeHeap;
+use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
-use super::{serde_utils::EntityHex, types::Pubkey};
+use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tentacle::multiaddr::Multiaddr;
 use tentacle::secio::PeerId;
+use thiserror::Error;
 use tracing::debug;
+
+const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.
 pub struct NodeInfo {
     pub node_id: Pubkey,
-    /// All valid channels a node has announced
-    #[serde_as(as = "HashSet<EntityHex>")]
-    pub channel_short_ids: HashSet<OutPoint>,
 
     /// When the last known update to the node state was issued.
     /// Value is opaque, as set in the announcement.
@@ -81,6 +84,13 @@ impl ChannelInfo {
     pub fn channel_update_two_to_one_timestamp(&self) -> Option<u64> {
         self.two_to_one.as_ref().map(|x| x.last_update)
     }
+    pub fn is_enabled(&self) -> bool {
+        self.one_to_two.is_some() && self.two_to_one.is_some()
+    }
+
+    pub fn capacity(&self) -> u128 {
+        self.announcement_msg.capacity
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -102,8 +112,9 @@ pub struct ChannelUpdateInfo {
     pub last_update_message: Option<ChannelUpdate>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct NetworkGraph<S> {
+    source: Pubkey,
     channels: HashMap<OutPoint, ChannelInfo>,
     // when we restarting a node, we will reconnect to these peers
     connected_peer_addresses: HashMap<PeerId, Multiaddr>,
@@ -112,12 +123,21 @@ pub struct NetworkGraph<S> {
     chain_hash: Hash256,
 }
 
+#[derive(Error, Debug)]
+pub enum GraphError {
+    #[error("Graph error: {0}")]
+    Graph(String),
+    #[error("PathFind error: {0}")]
+    PathFind(String),
+}
+
 impl<S> NetworkGraph<S>
 where
     S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
-    pub fn new(store: S) -> Self {
+    pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
+            source,
             channels: HashMap::new(),
             nodes: HashMap::new(),
             connected_peer_addresses: HashMap::new(),
@@ -168,11 +188,9 @@ where
         let outpoint = channel_info.out_point();
         self.channels.insert(outpoint.clone(), channel_info.clone());
         if let Some(node) = self.nodes.get_mut(&channel_info.node1()) {
-            node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
         if let Some(node) = self.nodes.get_mut(&channel_info.node2()) {
-            node.channel_short_ids.insert(outpoint.clone());
             self.store.insert_node(node.clone());
         }
         debug!("Successfully added channel {:?}", &channel_info);
@@ -212,23 +230,28 @@ where
         })
     }
 
-    pub fn process_channel_update(&mut self, channel_outpoint: OutPoint, update: ChannelUpdate) {
-        let channel = self.channels.get_mut(&channel_outpoint).unwrap();
-        let update_info = match update.message_flags & 1 == 1 {
-            true => &mut channel.one_to_two,
-            false => &mut channel.two_to_one,
+    pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
+        let channel_outpoint = update.channel_outpoint;
+        let Some(channel) = self.channels.get_mut(&channel_outpoint) else {
+            return Err(GraphError::Graph("channel not found".to_string()));
         };
+        let update_info = if update.message_flags & 1 == 1 {
+            &mut channel.one_to_two
+        } else {
+            &mut channel.two_to_one
+        };
+
         update_info.get_or_insert(ChannelUpdateInfo {
             last_update: update.timestamp,
             enabled: true,
             cltv_expiry_delta: update.tlc_locktime_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
-            fee_rate: 0,
+            fee_rate: update.tlc_fee_proportional_millionths as u64,
             last_update_message: None,
         });
         self.store.insert_channel(channel.to_owned());
-        return;
+        Ok(())
     }
 
     pub fn check_chain_hash(&self, chain_hash: Hash256) -> bool {
@@ -250,11 +273,199 @@ where
         self.store.remove_connected_peer(peer_id);
     }
 
+    pub fn get_node_inbounds(
+        &self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+        self.channels.values().filter_map(move |channel| {
+            if let Some(info) = channel.one_to_two.as_ref() {
+                if info.enabled && channel.node2() == node_id {
+                    return Some((channel.node1(), channel, info));
+                }
+            }
+
+            if let Some(info) = channel.two_to_one.as_ref() {
+                if info.enabled && channel.node1() == node_id {
+                    return Some((channel.node2(), channel, info));
+                }
+            }
+            None
+        })
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
         self.nodes.clear();
         self.connected_peer_addresses.clear();
+    }
+
+    pub fn send_payment(&self, payment_request: SendPaymentCommand) -> Result<(), GraphError> {
+        let amount = payment_request.amount;
+        if amount == 0 {
+            return Err(GraphError::Graph("amount is zero".to_string()));
+        }
+        let source = self.source;
+        let target = payment_request.target;
+        let _route = self.find_route(source, target, amount, 1000);
+        eprintln!("route: {:?}", _route);
+
+        unimplemented!();
+    }
+
+    // the algorithm works from target-to-source to find the shortest path
+    pub fn find_route(
+        &self,
+        source: Pubkey,
+        target: Pubkey,
+        amount: u128,
+        max_fee_amount: u128,
+    ) -> Result<Vec<(Pubkey, OutPoint)>, GraphError> {
+        let started_time = std::time::Instant::now();
+        let nodes_len = self.nodes.len();
+        let mut result = vec![];
+        let mut nodes_visited = 0;
+        let mut edges_expanded = 0;
+        let mut nodes_heap = NodeHeap::new(nodes_len);
+        let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+
+        if source == target {
+            return Err(GraphError::PathFind(
+                "source and target are the same".to_string(),
+            ));
+        }
+        let Some(source_node) = self.nodes.get(&source) else {
+            return Err(GraphError::PathFind("source node not found".to_string()));
+        };
+        let Some(_target_node) = self.nodes.get(&target) else {
+            return Err(GraphError::PathFind("target node not found".to_string()));
+        };
+        // initialize the target node
+        nodes_heap.push(NodeHeapElement {
+            node_id: target,
+            weight: 0,
+            distance: 0,
+            amount_received: amount,
+            fee_charged: 0,
+            probability: 1.0,
+            next_hop: None,
+            incoming_cltv_height: 0,
+        });
+        loop {
+            nodes_visited += 1;
+            let Some(cur_hop) = nodes_heap.pop() else {
+                break;
+            };
+
+            if cur_hop.node_id == source {
+                break;
+            }
+
+            for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
+                edges_expanded += 1;
+                // if charge inbound fees for exit hop
+                let fee_rate = channel_update.fee_rate;
+                let next_hop_received_amount = cur_hop.amount_received;
+                let fee = ((fee_rate as f64 / 100.0) * next_hop_received_amount as f64) as u128;
+                let amount_to_send = next_hop_received_amount + fee;
+
+                // eprintln!(
+                //     "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}",
+                //     fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount
+                // );
+
+                // if the amount to send is greater than the amount we have, skip this edge
+                if amount_to_send > amount + max_fee_amount {
+                    continue;
+                }
+                if amount_to_send > channel_info.capacity() {
+                    continue;
+                }
+                let incomming_cltv = cur_hop.incoming_cltv_height
+                    + if from == source {
+                        0
+                    } else {
+                        channel_update.cltv_expiry_delta
+                    };
+
+                let probability = cur_hop.probability
+                    * ProbabilityEvaluator::evaluate_probability(
+                        from,
+                        cur_hop.node_id,
+                        channel_info.capacity(),
+                        channel_info.capacity(),
+                    );
+
+                if probability < DEFAULT_MIN_PROBABILITY {
+                    eprintln!("probability is too low: {:?}", probability);
+                    continue;
+                }
+                eprintln!("probability: {:?}", probability);
+                let agg_weight =
+                    self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
+                let weight = cur_hop.weight + agg_weight;
+                let distance = self.calculate_distance_based_probability(probability, weight);
+                //eprintln!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
+                // TODO: update weight and distance here
+                let node_elem: NodeHeapElement = NodeHeapElement {
+                    node_id: from,
+                    weight,
+                    distance,
+                    amount_received: amount_to_send,
+                    incoming_cltv_height: incomming_cltv,
+                    fee_charged: fee,
+                    probability,
+                    next_hop: Some((cur_hop.node_id, channel_info.out_point())),
+                };
+                distances
+                    .entry(node_elem.node_id)
+                    .and_modify(|node| {
+                        if node_elem.distance < node.distance {
+                            *node = node_elem.clone();
+                        }
+                    })
+                    .or_insert(node_elem.clone());
+                nodes_heap.push_or_fix(node_elem);
+            }
+        }
+
+        let mut current = source_node.node_id;
+        while current != target {
+            if let Some(elem) = distances.get(&current) {
+                let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
+                result.push(next_hop.clone());
+                current = next_hop.0;
+            } else {
+                break;
+            }
+        }
+
+        debug!(
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
+            nodes_visited,
+            edges_expanded,
+            started_time.elapsed()
+        );
+        if result.is_empty() || current != target {
+            return Err(GraphError::PathFind("no path found".to_string()));
+        }
+        Ok(result)
+    }
+
+    fn edge_weight(&self, amount: u128, fee: u128, cltv_expiry_delta: u64) -> u128 {
+        let risk_factor: u128 = 15;
+        let time_lock_penalty = amount * cltv_expiry_delta as u128 * (risk_factor / 1000000000);
+        fee + time_lock_penalty
+    }
+
+    fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
+        // FIXME: set this to configurable parameters
+        let weight = weight as f64;
+        let probability = probability as f64;
+        let time_pref = 0.5 as f64;
+        let default_attemp_cost = 0.1 as f64;
+        let penalty = default_attemp_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
+        weight as u128 + (penalty / probability) as u128
     }
 }
 
@@ -272,49 +483,116 @@ pub trait NetworkGraphStateStore {
 mod tests {
     use super::*;
     use crate::store::Store;
-    use secp256k1::schnorr::Signature as SchnorrSignature;
-    use secp256k1::{PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
+    use ckb_types::prelude::Entity;
+    use secp256k1::{rand, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
-    #[test]
-    fn test_graph_channel_info() {
+    fn generate_keys(num: usize) -> Vec<PublicKey> {
         let secp = Secp256k1::new();
-        let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
-        let public_key1 = PublicKey::from_secret_key(&secp, &secret_key1);
+        let mut keys = vec![];
+        for _ in 0..num {
+            let secret_key = SecretKey::new(&mut rand::thread_rng());
+            let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+            keys.push(public_key);
+        }
+        keys
+    }
 
-        let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
-        let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
+    struct MockNetworkGraph {
+        pub keys: Vec<PublicKey>,
+        pub edges: Vec<(usize, usize, OutPoint)>,
+        pub graph: NetworkGraph<Store>,
+    }
 
-        let announcement_msg = ChannelAnnouncement {
-            chain_hash: Default::default(),
-            node_1_id: public_key1.into(),
-            node_2_id: public_key2.into(),
-            channel_outpoint: OutPoint::default(),
-            node_1_signature: None,
-            node_2_signature: None,
-            features: 0,
-            capacity: 0,
-            ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
-            ckb_signature: None,
-            udt_type_script: None,
-        };
-        let channel_info = ChannelInfo {
-            announcement_msg,
-            funding_tx_block_number: 0,
-            funding_tx_index: 0,
-            one_to_two: None,
-            two_to_one: None,
-            timestamp: 0,
-        };
-        let channel_info_ser = serde_json::to_string(&channel_info).unwrap();
-        let channel_info_de: ChannelInfo = serde_json::from_str(&channel_info_ser).unwrap();
-        assert_eq!(channel_info, channel_info_de);
+    impl MockNetworkGraph {
+        pub fn new(node_num: usize) -> Self {
+            let temp_path = tempfile::tempdir().unwrap();
+            let store = Store::new(temp_path.path());
+            let keys = generate_keys(node_num + 1);
+            let public_key1 = keys[0];
+            let mut graph = NetworkGraph::new(store, public_key1.into());
+            for i in 1..keys.len() {
+                let node = NodeInfo {
+                    node_id: keys[i].into(),
+                    timestamp: 0,
+                    anouncement_msg: None,
+                };
+                graph.add_node(node);
+            }
+            Self {
+                keys,
+                edges: vec![],
+                graph,
+            }
+        }
+
+        pub fn add_edge(
+            &mut self,
+            node_a: usize,
+            node_b: usize,
+            capacity: Option<u128>,
+            fee_rate: Option<u128>,
+        ) {
+            let public_key1 = self.keys[node_a];
+            let public_key2 = self.keys[node_b];
+            let idx = self.edges.len() + 1;
+            let channel_outpoint = OutPoint::from_slice(&[idx as u8; 36]).unwrap();
+            self.edges.push((node_a, node_b, channel_outpoint.clone()));
+            let channel_info = ChannelInfo {
+                funding_tx_block_number: 0,
+                funding_tx_index: 0,
+                announcement_msg: ChannelAnnouncement {
+                    chain_hash: Default::default(),
+                    node_1_id: public_key1.into(),
+                    node_2_id: public_key2.into(),
+                    channel_outpoint: channel_outpoint.clone(),
+                    node_1_signature: None,
+                    node_2_signature: None,
+                    capacity: capacity.unwrap_or(1000),
+                    ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
+                    ckb_signature: None,
+                    udt_type_script: None,
+                    features: 0,
+                },
+                timestamp: 0,
+                one_to_two: None,
+                two_to_one: None,
+            };
+            self.graph.add_channel(channel_info);
+            let channel_update = ChannelUpdate {
+                signature: None,
+                chain_hash: Hash256::default(),
+                timestamp: 0,
+                message_flags: 1,
+                channel_flags: 0,
+                tlc_locktime_expiry_delta: 0,
+                tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
+                tlc_maximum_value: 10000,
+                tlc_minimum_value: 0,
+                channel_outpoint: channel_outpoint.clone(),
+            };
+            self.graph.process_channel_update(channel_update).unwrap();
+        }
+
+        pub fn find_route(
+            &self,
+            source: usize,
+            target: usize,
+            amount: u128,
+            max_fee: u128,
+        ) -> Result<Vec<(Pubkey, OutPoint)>, GraphError> {
+            let source = self.keys[source].into();
+            let target = self.keys[target].into();
+            self.graph.find_route(source, target, amount, max_fee)
+        }
     }
 
     #[test]
     fn test_graph_connected_peers() {
         let temp_path = tempfile::tempdir().unwrap();
         let store = Store::new(temp_path.path());
-        let mut network_graph = NetworkGraph::new(store);
+        let keys = generate_keys(1);
+        let public_key1 = keys[0];
+        let mut network_graph = NetworkGraph::new(store, public_key1.into());
 
         let peer_id = PeerId::random();
         let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
@@ -344,95 +622,178 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_network_graph() {
-        use ckb_types::prelude::Entity;
+    fn test_graph_channel_info() {
+        let mut mock_network = MockNetworkGraph::new(1);
+        mock_network.add_edge(0, 1, Some(1000), Some(1));
+        for i in 1..=mock_network.edges.len() {
+            let channel_info = mock_network
+                .graph
+                .get_channel(&OutPoint::from_slice(&[i as u8; 36]).unwrap());
+            assert!(channel_info.is_some());
 
-        let temp_path = tempfile::tempdir().unwrap();
-        let store = Store::new(temp_path.path());
-        let mut network_graph = NetworkGraph::new(store);
+            let channel_info = channel_info.unwrap();
+            let channel_info_ser = serde_json::to_string(&channel_info).unwrap();
+            let channel_info_de: ChannelInfo = serde_json::from_str(&channel_info_ser).unwrap();
+            assert_eq!(*channel_info, channel_info_de);
+        }
+    }
 
-        let channel_outpoint = OutPoint::from_slice(&[0x01; 36]).unwrap();
+    #[test]
+    fn test_graph_graph_apis() {
+        let mut mock_network = MockNetworkGraph::new(4);
+        let node1 = mock_network.keys[1];
+        let node2 = mock_network.keys[2];
+        let node3 = mock_network.keys[3];
+        assert!(mock_network.graph.get_node(node1.into()).is_some());
+        assert!(mock_network.graph.get_node(node2.into()).is_some());
 
-        let secp = Secp256k1::new();
-        let secret_key1 = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
-        let public_key1 = PublicKey::from_secret_key(&secp, &secret_key1);
-
-        let secret_key2 = SecretKey::from_slice(&[0xab; 32]).expect("32 bytes, within curve order");
-        let public_key2 = PublicKey::from_secret_key(&secp, &secret_key2);
-
-        let ckb_signature = SchnorrSignature::from_slice(&[0x01; 64]).expect("64 bytes");
-
-        let node1 = NodeInfo {
-            node_id: public_key1.into(),
-            channel_short_ids: HashSet::new(),
-            timestamp: 0,
-            anouncement_msg: None,
-        };
-
-        let node2 = NodeInfo {
-            node_id: public_key2.into(),
-            channel_short_ids: HashSet::new(),
-            timestamp: 0,
-            anouncement_msg: None,
-        };
-        network_graph.add_node(node1.clone());
-        assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
-        network_graph.add_node(node2.clone());
-        assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
-
-        let node1_channels = network_graph.get_channels_by_peer(node1.node_id);
+        let node1_channels = mock_network.graph.get_channels_by_peer(node1.into());
         assert_eq!(node1_channels.count(), 0);
-        let node2_channels = network_graph.get_channels_by_peer(node2.node_id);
+        let node2_channels = mock_network.graph.get_channels_by_peer(node2.into());
         assert_eq!(node2_channels.count(), 0);
 
-        network_graph.reset();
-        assert_eq!(network_graph.get_channel(&channel_outpoint), None);
-        network_graph.load_from_store();
-
-        network_graph.add_node(node1.clone());
-        assert_eq!(network_graph.get_node(public_key1.into()), Some(&node1));
-        network_graph.add_node(node2.clone());
-        assert_eq!(network_graph.get_node(public_key2.into()), Some(&node2));
-
-        let announcement_msg = ChannelAnnouncement {
-            chain_hash: Default::default(),
-            node_1_id: public_key1.into(),
-            node_2_id: public_key2.into(),
-            channel_outpoint: channel_outpoint.clone(),
-            node_1_signature: None,
-            node_2_signature: None,
-            features: 0,
-            capacity: 0,
-            ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
-            ckb_signature: Some(ckb_signature),
-            udt_type_script: None,
-        };
-
-        let channel_info = ChannelInfo {
-            announcement_msg,
-            funding_tx_block_number: 0,
-            funding_tx_index: 0,
-            one_to_two: None,
-            two_to_one: None,
-            timestamp: 0,
-        };
-        network_graph.add_channel(channel_info.clone());
-        assert_eq!(
-            network_graph.get_channel(&channel_outpoint),
-            Some(&channel_info)
-        );
-        let node1_channels = network_graph.get_channels_by_peer(node1.node_id);
+        mock_network.add_edge(1, 2, Some(1000), Some(1));
+        let node1_channels = mock_network.graph.get_channels_by_peer(node1.into());
         assert_eq!(node1_channels.count(), 1);
-        let node2_channels = network_graph.get_channels_by_peer(node2.node_id);
+        let node2_channels = mock_network.graph.get_channels_by_peer(node2.into());
         assert_eq!(node2_channels.count(), 1);
 
-        network_graph.reset();
-        assert_eq!(network_graph.get_channel(&channel_outpoint), None);
-        network_graph.load_from_store();
+        mock_network.add_edge(1, 3, Some(1000), Some(1));
+        let node1_channels = mock_network.graph.get_channels_by_peer(node1.into());
+        assert_eq!(node1_channels.count(), 2);
 
-        assert_eq!(
-            network_graph.get_channel(&channel_outpoint),
-            Some(&channel_info)
-        );
+        let node1_channels = mock_network.graph.get_channels_by_peer(node3.into());
+        assert_eq!(node1_channels.count(), 1);
+    }
+
+    #[test]
+    fn test_graph_find_path_basic() {
+        let mut network = MockNetworkGraph::new(4);
+        network.add_edge(1, 2, Some(1), Some(2));
+        let node2 = network.keys[2];
+
+        let route = network.find_route(1, 2, 100, 1000);
+        assert!(route.is_err());
+
+        network.add_edge(1, 2, Some(120), Some(2));
+        let route = network.find_route(1, 2, 100, 1000);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.len(), 1);
+        assert_eq!(route[0].0, node2.into());
+        assert_eq!(route[0].1, network.edges[1].2);
+
+        let route = network.find_route(1, 3, 10, 100);
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_find_path_fee() {
+        let mut network = MockNetworkGraph::new(5);
+
+        network.add_edge(1, 2, Some(1000), Some(30));
+        network.add_edge(2, 4, Some(1000), Some(10));
+        network.add_edge(1, 3, Some(1000), Some(20));
+        network.add_edge(3, 4, Some(1000), Some(10));
+
+        let route = network.find_route(1, 4, 100, 1000);
+
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        assert_eq!(route.len(), 2);
+        assert_eq!(route[0].1, network.edges[2].2);
+        assert_eq!(route[1].1, network.edges[3].2);
+    }
+
+    #[test]
+    fn test_graph_find_path_direct_linear() {
+        let mut network = MockNetworkGraph::new(6);
+
+        network.add_edge(1, 2, Some(1000), Some(4));
+        network.add_edge(2, 3, Some(1000), Some(3));
+        network.add_edge(3, 4, Some(1000), Some(2));
+        network.add_edge(4, 5, Some(1000), Some(1));
+
+        let route = network.find_route(1, 5, 100, 1000);
+
+        eprintln!("{:?}", route);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        assert_eq!(route.len(), 4);
+        assert_eq!(route[0].1, network.edges[0].2);
+        assert_eq!(route[1].1, network.edges[1].2);
+        assert_eq!(route[2].1, network.edges[2].2);
+        assert_eq!(route[3].1, network.edges[3].2);
+    }
+
+    #[test]
+    fn test_graph_find_path_cycle() {
+        let mut network = MockNetworkGraph::new(6);
+
+        network.add_edge(1, 2, Some(1000), Some(4));
+        network.add_edge(2, 3, Some(1000), Some(3));
+        network.add_edge(3, 1, Some(1000), Some(2));
+
+        let route = network.find_route(1, 3, 100, 1000);
+
+        assert!(route.is_ok());
+
+        network.add_edge(3, 4, Some(1000), Some(2));
+        network.add_edge(4, 5, Some(1000), Some(1));
+
+        let route = network.find_route(1, 5, 100, 1000);
+        assert!(route.is_ok());
+    }
+
+    #[test]
+    fn test_graph_find_path_cycle_in_middle() {
+        let mut network = MockNetworkGraph::new(6);
+
+        network.add_edge(1, 2, Some(1000), Some(4));
+
+        network.add_edge(2, 3, Some(1000), Some(3));
+        network.add_edge(3, 4, Some(1000), Some(2));
+        network.add_edge(4, 2, Some(1000), Some(2));
+
+        network.add_edge(4, 5, Some(1000), Some(1));
+
+        let route = network.find_route(1, 5, 100, 1000);
+        assert!(route.is_ok());
+    }
+
+    #[test]
+    fn test_graph_find_path_amount_failed() {
+        let mut network = MockNetworkGraph::new(6);
+
+        network.add_edge(1, 2, Some(1000), Some(4));
+        network.add_edge(2, 3, Some(1000), Some(4));
+        network.add_edge(3, 4, Some(1000), Some(4));
+        network.add_edge(4, 5, Some(1000), Some(1));
+
+        let route = network.find_route(1, 5, 1000, 10);
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_find_path_err() {
+        let mut network = MockNetworkGraph::new(6);
+        let (node1, _node5) = (network.keys[1], network.keys[5]);
+
+        network.add_edge(1, 2, Some(1000), Some(4));
+        let route = network.find_route(1, 1, 100, 1000);
+        assert!(route.is_err());
+
+        let no_exits_public_key = network.keys[0];
+        let route = network
+            .graph
+            .find_route(node1.into(), no_exits_public_key.into(), 100, 1000);
+        assert!(route.is_err());
+
+        let route = network
+            .graph
+            .find_route(no_exits_public_key.into(), node1.into(), 100, 1000);
+        assert!(route.is_err());
     }
 }
