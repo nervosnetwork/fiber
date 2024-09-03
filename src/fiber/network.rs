@@ -47,9 +47,10 @@ use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery,
-    FiberMessage, FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
-    NodeAnnouncement, OpenChannel, Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
+    ChannelAnnouncementQuery, ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage,
+    FiberBroadcastMessageQuery, FiberMessage, FiberQueryInformation, GetBroadcastMessages,
+    GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
+    Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
     QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
     QueryChannelsWithinBlockRangeResult,
 };
@@ -57,11 +58,11 @@ use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
-use crate::fiber::channel::{TxCollaborationCommand, TxUpdateCommand};
-use crate::fiber::graph::{ChannelInfo, NodeInfo};
+use crate::fiber::channel::{AddTlcCommand, TxCollaborationCommand, TxUpdateCommand};
+use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
+use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{
-    secp256k1_instance, ChannelAnnouncementQuery, FiberChannelMessage, NodeAnnouncementQuery,
-    TxSignatures,
+    secp256k1_instance, FiberChannelMessage, OnionInfo, OnionPacket, TxSignatures,
 };
 use crate::{unwrap_or_return, Error};
 
@@ -1144,7 +1145,7 @@ where
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 let payment_hash = payment_request.payment_hash;
-                let _ = self.on_send_payment(payment_request).await;
+                let _ = self.on_send_payment(myself, payment_request).await;
                 let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
             }
         };
@@ -1412,13 +1413,94 @@ where
         }
     }
 
-    async fn on_send_payment(&self, payment: SendPaymentCommand) {
-        let network = self.network_graph.read().await;
+    async fn on_send_payment(
+        &self,
+        my_self: ActorRef<NetworkActorMessage>,
+        payment_request: SendPaymentCommand,
+    ) -> Result<Hash256, Error> {
+        let graph = self.network_graph.read().await;
         // initialize the payment session in db and begin the payment process in a statemachine to
         // handle the payment process
 
-        error!("send payment: {:?}", payment);
-        let _res = network.send_payment(payment).await;
+        error!("send payment: {:?}", payment_request);
+        let amount = payment_request.amount;
+
+        let payment_session = PaymentSession::new(payment_request.clone(), 3);
+
+        let source = graph.get_source_pubkey();
+        let target = payment_request.target_pubkey;
+
+        error!("source: {:?}, target: {:?}", source, target);
+        let route = graph.find_route(source, target, amount, 1000)?;
+        error!("route found: {:?}", route);
+        assert!(!route.is_empty());
+
+        let payment_hash = payment_request.payment_hash;
+        let mut current_amount = amount;
+        let mut current_expiry = 0;
+        let mut onion_infos = vec![];
+        for i in (0..route.len()).rev() {
+            let hop_amount = current_amount;
+            let next_hop = if i == route.len() - 1 {
+                None
+            } else {
+                Some(route[i + 1].0)
+            };
+            let next_channel_outpoint = if i == route.len() - 1 {
+                None
+            } else {
+                Some(route[i + 1].1.clone())
+            };
+            let (fee, expiry) = if i == route.len() - 1 {
+                (0, 0)
+            } else {
+                let channel_info = graph.get_channel(&route[i + 1].1).unwrap();
+                let channel_update = if channel_info.node1() == route[i].0 {
+                    channel_info.one_to_two.as_ref().unwrap()
+                } else {
+                    channel_info.two_to_one.as_ref().unwrap()
+                };
+                let fee_rate = channel_update.fee_rate;
+                let next_hop_received_amount = hop_amount;
+                // FIXME(yukang): revise the fee calculation
+                let fee = ((fee_rate as f64 / 100.0) * next_hop_received_amount as f64) as u128;
+                (fee, channel_update.cltv_expiry_delta)
+            };
+
+            let onion_info = OnionInfo {
+                amount: hop_amount,
+                payment_hash,
+                next_hop,
+                expiry: current_expiry.into(),
+                next_channel_outpoint,
+            };
+            current_amount += fee;
+            current_expiry += expiry;
+            onion_infos.push(onion_info);
+        }
+        error!("onion_infos: {:?}", onion_infos);
+        let onion_packet = OnionPacket::new(onion_infos).serialize();
+        let channel_outpoint = &route[0].1;
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannelWithOutpoint(
+                channel_outpoint.clone(),
+                ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: amount,
+                        preimage: None,
+                        payment_hash: Some(payment_hash),
+                        expiry: current_expiry.into(),
+                        hash_algorithm: HashAlgorithm::Sha256,
+                        onion_packet,
+                    },
+                    rpc_reply,
+                ),
+            ))
+        };
+
+        let res = call!(my_self, message);
+        error!("route: {:?}, result: {:?}", route, res);
+        Ok(payment_session.payment_hash())
     }
 }
 
@@ -2291,17 +2373,13 @@ where
 
         // load the connected peers from the network graph
 
-        let mut graph = self.network_graph.write().await;
+        let graph = self.network_graph.read().await;
         let peers = graph.get_connected_peers();
         for (_peer_id, addr) in peers {
             myself.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::ConnectPeer(addr.clone()),
             ))?;
         }
-
-        // FIXME: this is a temporary solution, will be replaced after network graph
-        // is changed into an actor.
-        graph.set_network_actor(myself.clone());
 
         // TODO: In current implementation, broadcasting node announcement message here
         // is actually useless, because we haven't connected to any peer yet.

@@ -2,14 +2,8 @@ use super::network::SendPaymentCommand;
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
-use crate::fiber::channel::{AddTlcCommand, ChannelCommand};
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
-use crate::fiber::types::{OnionInfo, OnionPacket};
-use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use ckb_types::packed::OutPoint;
-use ractor::call;
-use ractor::ActorRef;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -128,15 +122,16 @@ pub struct NetworkGraph<S> {
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
-    actor: Option<ActorRef<NetworkActorMessage>>,
 }
 
 #[derive(Error, Debug)]
 pub enum GraphError {
     #[error("Graph error: {0}")]
-    Graph(String),
+    Amount(String),
     #[error("PathFind error: {0}")]
     PathFind(String),
+    #[error("Graph other error: {0}")]
+    Other(String),
 }
 
 impl<S> NetworkGraph<S>
@@ -151,14 +146,9 @@ where
             connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: Hash256::default(),
-            actor: None,
         };
         network_graph.load_from_store();
         network_graph
-    }
-
-    pub fn set_network_actor(&mut self, actor: ActorRef<NetworkActorMessage>) {
-        self.actor = Some(actor);
     }
 
     fn load_from_store(&mut self) {
@@ -247,7 +237,7 @@ where
     pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
         let channel_outpoint = update.channel_outpoint;
         let Some(channel) = self.channels.get_mut(&channel_outpoint) else {
-            return Err(GraphError::Graph("channel not found".to_string()));
+            return Err(GraphError::Other("channel not found".to_string()));
         };
         let update_info = if update.message_flags & 1 == 1 {
             &mut channel.one_to_two
@@ -307,6 +297,10 @@ where
         })
     }
 
+    pub fn get_source_pubkey(&self) -> Pubkey {
+        self.source
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
@@ -327,94 +321,6 @@ where
         }
     }
 
-    pub async fn send_payment(
-        &self,
-        payment_request: SendPaymentCommand,
-    ) -> Result<(), GraphError> {
-        let amount = payment_request.amount;
-        if amount == 0 {
-            return Err(GraphError::Graph("amount is zero".to_string()));
-        }
-
-        let _payment_session = PaymentSession::new(payment_request.clone(), 3);
-
-        let source = self.source;
-        let target = payment_request.target_pubkey;
-
-        error!("source: {:?}, target: {:?}", source, target);
-        let route = self.find_route(source, target, amount, 1000)?;
-        error!("route found: {:?}", route);
-        assert!(!route.is_empty());
-
-        let payment_hash = payment_request.payment_hash;
-        let mut current_amount = amount;
-        let mut current_expiry = 0;
-        let mut onion_infos = vec![];
-        for i in (0..route.len()).rev() {
-            let hop_amount = current_amount;
-            let next_hop = if i == route.len() - 1 {
-                None
-            } else {
-                Some(route[i + 1].0)
-            };
-            let next_channel_outpoint = if i == route.len() - 1 {
-                None
-            } else {
-                Some(route[i + 1].1.clone())
-            };
-            let (fee, expiry) = if i == route.len() - 1 {
-                (0, 0)
-            } else {
-                let channel_info = self.get_channel(&route[i + 1].1).unwrap();
-                let channel_update = if channel_info.node1() == route[i].0 {
-                    channel_info.one_to_two.as_ref().unwrap()
-                } else {
-                    channel_info.two_to_one.as_ref().unwrap()
-                };
-                let fee_rate = channel_update.fee_rate;
-                let next_hop_received_amount = hop_amount;
-                // FIXME(yukang): revise the fee calculation
-                let fee = ((fee_rate as f64 / 100.0) * next_hop_received_amount as f64) as u128;
-                (fee, channel_update.cltv_expiry_delta)
-            };
-
-            let onion_info = OnionInfo {
-                amount: hop_amount,
-                payment_hash,
-                next_hop,
-                expiry: current_expiry.into(),
-                next_channel_outpoint,
-            };
-            current_amount += fee;
-            current_expiry += expiry;
-            onion_infos.push(onion_info);
-        }
-        error!("onion_infos: {:?}", onion_infos);
-        let onion_packet = OnionPacket::new(onion_infos).serialize();
-        let channel_outpoint = &route[0].1;
-        let message = |rpc_reply| -> NetworkActorMessage {
-            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannelWithOutpoint(
-                channel_outpoint.clone(),
-                ChannelCommand::AddTlc(
-                    AddTlcCommand {
-                        amount: amount,
-                        preimage: None,
-                        payment_hash: Some(payment_hash),
-                        expiry: current_expiry.into(),
-                        hash_algorithm: HashAlgorithm::Sha256,
-                        onion_packet,
-                    },
-                    rpc_reply,
-                ),
-            ))
-        };
-
-        let res = call!(self.actor.as_ref().unwrap(), message);
-        error!("route: {:?}, result: {:?}", route, res);
-
-        unimplemented!();
-    }
-
     // the algorithm works from target-to-source to find the shortest path
     pub fn find_route(
         &self,
@@ -430,6 +336,12 @@ where
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+
+        if amount == 0 {
+            return Err(GraphError::Amount(
+                "Amount must be greater than 0".to_string(),
+            ));
+        }
 
         if source == target {
             return Err(GraphError::PathFind(
