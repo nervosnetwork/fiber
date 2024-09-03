@@ -19,8 +19,8 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
-    SpawnErr,
+    async_trait as rasync_trait, call, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    RpcReplyPort, SpawnErr,
 };
 
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,7 @@ use super::{
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ChannelUpdate, ClosingSigned,
         CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime,
-        OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        OnionPacket, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
         RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
@@ -426,7 +426,7 @@ impl<S> ChannelActor<S> {
             FiberChannelMessage::AddTlc(add_tlc) => {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
-                let tlc = state.create_inbounding_tlc(add_tlc)?;
+                let tlc = state.create_inbounding_tlc(add_tlc.clone())?;
                 state.insert_tlc(tlc.clone())?;
                 if let Some(ref udt_type_script) = state.funding_udt_type_script {
                     self.subscribers
@@ -441,6 +441,36 @@ impl<S> ChannelActor<S> {
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
                 // this message, and our processing of this message is idempotent.
+                if add_tlc.onion_packet.len() > 0 {
+                    let mut deserilized_onion_packet =
+                        OnionPacket::deserialize(&tlc.onion_packet).unwrap();
+                    let next_hop = deserilized_onion_packet.shift();
+                    if let Ok(hop) = next_hop {
+                        if let Some(next_channel_outpoint) = hop.next_channel_outpoint {
+                            let message = |rpc_reply| -> NetworkActorMessage {
+                                NetworkActorMessage::Command(
+                                    NetworkActorCommand::ControlFiberChannelWithOutpoint(
+                                        next_channel_outpoint,
+                                        ChannelCommand::AddTlc(
+                                            AddTlcCommand {
+                                                amount: hop.amount,
+                                                preimage: None,
+                                                payment_hash: Some(hop.payment_hash),
+                                                expiry: hop.expiry.into(),
+                                                hash_algorithm: HashAlgorithm::Sha256,
+                                                onion_packet: deserilized_onion_packet.serialize(),
+                                            },
+                                            rpc_reply,
+                                        ),
+                                    ),
+                                )
+                            };
+
+                            let res = call!(self.network, message);
+                            eprintln!("add_tlc: {:?}, result: {:?}", add_tlc, res);
+                        }
+                    }
+                }
                 Ok(())
             }
             FiberChannelMessage::RemoveTlc(remove_tlc) => {
@@ -707,7 +737,7 @@ impl<S> ChannelActor<S> {
                 payment_hash: tlc.payment_hash,
                 expiry: tlc.lock_time,
                 hash_algorithm: tlc.hash_algorithm,
-                onion_packet: vec![],
+                onion_packet: tlc.onion_packet,
             }),
         );
         debug!("Sending AddTlc message: {:?}", &msg);

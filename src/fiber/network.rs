@@ -167,7 +167,7 @@ pub struct OpenChannelCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
-    pub target: Pubkey,
+    pub target_pubkey: Pubkey,
 
     // the amount of the payment
     pub amount: u128,
@@ -177,10 +177,10 @@ pub struct SendPaymentCommand {
     pub payment_hash: Hash256,
 
     // The CLTV delta from the current height that should be used to set the timelock for the final hop
-    pub final_cltv_delta: Hash256,
+    pub final_cltv_delta: Option<u64>,
 
     // the encoded invoice to send to the recipient
-    pub invoice: Option<Vec<u8>>,
+    pub invoice: Option<String>,
 
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
@@ -1417,7 +1417,8 @@ where
         // initialize the payment session in db and begin the payment process in a statemachine to
         // handle the payment process
 
-        let _res = network.send_payment(payment);
+        error!("send payment: {:?}", payment);
+        let _res = network.send_payment(payment).await;
     }
 }
 
@@ -2237,6 +2238,7 @@ where
             .await
             .expect("listen tentacle");
 
+        error!("debug secio_pk: {:?}", secio_pk);
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         listen_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
         // TODO: expand listen_addr to routable addresses,
@@ -2304,6 +2306,7 @@ where
         // TODO: In current implementation, broadcasting node announcement message here
         // is actually useless, because we haven't connected to any peer yet.
         if let Some(message) = state.get_node_announcement_message() {
+            error!("debug node announcement message: {:?}", message);
             myself
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessage(

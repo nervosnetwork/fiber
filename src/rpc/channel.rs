@@ -6,9 +6,9 @@ use crate::fiber::{
         RemoveTlcCommand, ShutdownCommand, UpdateCommand,
     },
     hash_algorithm::HashAlgorithm,
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{U128Hex, U32Hex, U64Hex},
-    types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
+    types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -170,6 +170,44 @@ pub struct UpdateChannelParams {
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendPaymentCommandParams {
+    // the identifier of the payment target
+    pub target_pubkey: Pubkey,
+
+    // the amount of the payment
+    #[serde_as(as = "U128Hex")]
+    pub amount: u128,
+
+    // The hash to use within the payment's HTLC
+    // FIXME: this should be optional when AMP is enabled
+    pub payment_hash: Hash256,
+
+    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    #[serde_as(as = "Option<U64Hex>")]
+    pub final_cltv_delta: Option<u64>,
+
+    // the encoded invoice to send to the recipient
+    pub invoice: Option<String>,
+
+    // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+    #[serde_as(as = "Option<U64Hex>")]
+    pub timeout: Option<u64>,
+
+    // the maximum fee amounts in shannons that the sender is willing to pay
+    #[serde_as(as = "Option<U128Hex>")]
+    pub max_fee_amount: Option<u128>,
+
+    // max parts for the payment, only used for multi-part payments
+    #[serde_as(as = "Option<U64Hex>")]
+    pub max_parts: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SendPaymentResult {
+    pub payment_hash: Hash256,
+}
 #[rpc(server)]
 pub trait ChannelRpc {
     #[method(name = "open_channel")]
@@ -208,6 +246,12 @@ pub trait ChannelRpc {
 
     #[method(name = "update_channel")]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "send_payment")]
+    async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<SendPaymentResult, ErrorObjectOwned>;
 }
 
 pub struct ChannelRpcServerImpl<S> {
@@ -411,5 +455,29 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params)
+    }
+
+    async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<SendPaymentResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                SendPaymentCommand {
+                    target_pubkey: params.target_pubkey,
+                    amount: params.amount,
+                    payment_hash: params.payment_hash,
+                    final_cltv_delta: params.final_cltv_delta,
+                    invoice: params.invoice.clone(),
+                    timeout: params.timeout,
+                    max_fee_amount: params.max_fee_amount,
+                    max_parts: params.max_parts,
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
+            payment_hash: response.payment_hash,
+        })
     }
 }

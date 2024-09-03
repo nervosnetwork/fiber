@@ -2657,12 +2657,15 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 }
 
 // TODO: replace this with real OnionPacket implementation
+#[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnionInfo {
     pub payment_hash: Hash256,
     pub amount: u128,
     pub expiry: u64,
     pub next_hop: Option<Pubkey>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub next_channel_outpoint: Option<OutPoint>,
 }
 
 // TODO: replace this with real OnionPacket implementation
@@ -2701,6 +2704,8 @@ impl OnionPacket {
 mod tests {
     use super::{secp256k1_instance, Pubkey};
     use crate::fiber::test_utils::generate_pubkey;
+    use ckb_types::packed::OutPointBuilder;
+    use ckb_types::prelude::Builder;
     use secp256k1::SecretKey;
 
     #[test]
@@ -2739,12 +2744,14 @@ mod tests {
             amount: 2,
             expiry: 3,
             next_hop: Some(generate_pubkey().into()),
+            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let onion_info2 = super::OnionInfo {
             payment_hash: [4; 32].into(),
             amount: 5,
             expiry: 6,
             next_hop: Some(generate_pubkey().into()),
+            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let mut onion_packet =
             super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
@@ -2769,7 +2776,8 @@ mod tests {
             payment_hash: [42; 32].into(),
             amount: 42,
             expiry: 42,
-            next_hop: None,
+            next_hop: Some(generate_pubkey().into()),
+            next_channel_outpoint: Some(OutPointBuilder::default().build().into()),
         };
         let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
         let serialized = onion_packet.serialize();

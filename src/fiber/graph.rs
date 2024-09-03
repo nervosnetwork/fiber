@@ -17,6 +17,7 @@ use tentacle::multiaddr::Multiaddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::debug;
+use tracing::log::error;
 
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
@@ -182,6 +183,7 @@ where
 
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
         assert_ne!(channel_info.node1(), channel_info.node2());
+        error!("add_channel: {:?}", channel_info);
         match self.channels.get(&channel_info.out_point()) {
             Some(channel) => {
                 // If the channel already exists, we don't need to update it
@@ -337,28 +339,59 @@ where
         let _payment_session = PaymentSession::new(payment_request.clone(), 3);
 
         let source = self.source;
-        let target = payment_request.target;
+        let target = payment_request.target_pubkey;
 
+        error!("source: {:?}, target: {:?}", source, target);
         let route = self.find_route(source, target, amount, 1000)?;
+        error!("route found: {:?}", route);
+        assert!(!route.is_empty());
 
         let payment_hash = payment_request.payment_hash;
+        let mut current_amount = amount;
+        let mut current_expiry = 0;
         let mut onion_infos = vec![];
-        for i in route.len() - 1..0 {
-            let onion_info = OnionInfo {
-                next_hop: if i == route.len() - 1 {
-                    None
-                } else {
-                    Some(route[i + 1].0)
-                },
-                amount: amount,
-                payment_hash,
-                expiry: 0,
+        for i in (0..route.len()).rev() {
+            let hop_amount = current_amount;
+            let next_hop = if i == route.len() - 1 {
+                None
+            } else {
+                Some(route[i + 1].0)
             };
+            let next_channel_outpoint = if i == route.len() - 1 {
+                None
+            } else {
+                Some(route[i + 1].1.clone())
+            };
+            let (fee, expiry) = if i == route.len() - 1 {
+                (0, 0)
+            } else {
+                let channel_info = self.get_channel(&route[i + 1].1).unwrap();
+                let channel_update = if channel_info.node1() == route[i].0 {
+                    channel_info.one_to_two.as_ref().unwrap()
+                } else {
+                    channel_info.two_to_one.as_ref().unwrap()
+                };
+                let fee_rate = channel_update.fee_rate;
+                let next_hop_received_amount = hop_amount;
+                // FIXME(yukang): revise the fee calculation
+                let fee = ((fee_rate as f64 / 100.0) * next_hop_received_amount as f64) as u128;
+                (fee, channel_update.cltv_expiry_delta)
+            };
+
+            let onion_info = OnionInfo {
+                amount: hop_amount,
+                payment_hash,
+                next_hop,
+                expiry: current_expiry.into(),
+                next_channel_outpoint,
+            };
+            current_amount += fee;
+            current_expiry += expiry;
             onion_infos.push(onion_info);
         }
+        error!("onion_infos: {:?}", onion_infos);
         let onion_packet = OnionPacket::new(onion_infos).serialize();
         let channel_outpoint = &route[0].1;
-        // generate a random channel id
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannelWithOutpoint(
                 channel_outpoint.clone(),
@@ -367,7 +400,7 @@ where
                         amount: amount,
                         preimage: None,
                         payment_hash: Some(payment_hash),
-                        expiry: 0.into(),
+                        expiry: current_expiry.into(),
                         hash_algorithm: HashAlgorithm::Sha256,
                         onion_packet,
                     },
@@ -377,7 +410,7 @@ where
         };
 
         let res = call!(self.actor.as_ref().unwrap(), message);
-        eprintln!("route: {:?}, result: {:?}", route, res);
+        error!("route: {:?}, result: {:?}", route, res);
 
         unimplemented!();
     }
@@ -776,6 +809,45 @@ mod tests {
         assert_eq!(route[0].1, network.edges[1].2);
 
         let route = network.find_route(1, 3, 10, 100);
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_find_path_three_nodes() {
+        let mut network = MockNetworkGraph::new(3);
+        network.add_edge(1, 2, Some(500), Some(2));
+        network.add_edge(2, 3, Some(500), Some(2));
+        let node2 = network.keys[2];
+        let node3 = network.keys[3];
+
+        // Test route from node 1 to node 3
+        let route = network.find_route(1, 3, 100, 1000);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.len(), 2);
+        assert_eq!(route[0].0, node2.into());
+        assert_eq!(route[1].0, node3.into());
+        assert_eq!(route[0].1, network.edges[0].2);
+        assert_eq!(route[1].1, network.edges[1].2);
+
+        // Test route from node 1 to node 2
+        let route = network.find_route(1, 2, 100, 1000);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.len(), 1);
+        assert_eq!(route[0].0, node2.into());
+        assert_eq!(route[0].1, network.edges[0].2);
+
+        // Test route from node 2 to node 3
+        let route = network.find_route(2, 3, 100, 1000);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        assert_eq!(route.len(), 1);
+        assert_eq!(route[0].0, node3.into());
+        assert_eq!(route[0].1, network.edges[1].2);
+
+        // Test route from node 3 to node 1 (should fail)
+        let route = network.find_route(3, 1, 100, 1000);
         assert!(route.is_err());
     }
 
