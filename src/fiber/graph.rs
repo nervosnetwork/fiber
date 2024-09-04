@@ -16,6 +16,13 @@ use tracing::{debug, info};
 
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
+// We assume all the channels with funding trsaction block number
+// < latest height - ASSUME_MAX_CHANNEL_HEIGHT_GAP are already synced.
+const ASSUME_MAX_CHANNEL_HEIGHT_GAP: u64 = 1000;
+// We assume all the messages with timestamp <
+// latest timestamp - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP are already synced.
+const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
+
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.
@@ -93,6 +100,10 @@ impl ChannelInfo {
     pub fn capacity(&self) -> u128 {
         self.announcement_msg.capacity
     }
+
+    pub fn funding_tx_block_number(&self) -> u64 {
+        self.funding_tx_block_number
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -118,6 +129,10 @@ pub struct ChannelUpdateInfo {
 pub struct NetworkGraph<S> {
     source: Pubkey,
     channels: HashMap<OutPoint, ChannelInfo>,
+    // This is the best height of the network graph, every time the
+    // node restarts, we will try to sync the graph from this height - ASSUME_MAX_CHANNEL_HEIGHT_GAP.
+    // We assume that we have already synced the graph up to this height - ASSUME_MAX_CHANNEL_HEIGHT_GAP.
+    best_height: u64,
     // when we restarting a node, we will reconnect to these peers
     connected_peer_addresses: HashMap<PeerId, Multiaddr>,
     nodes: HashMap<Pubkey, NodeInfo>,
@@ -148,6 +163,7 @@ where
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
             source,
+            best_height: 0u64,
             channels: HashMap::new(),
             nodes: HashMap::new(),
             connected_peer_addresses: HashMap::new(),
@@ -161,6 +177,9 @@ where
     fn load_from_store(&mut self) {
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
+            if self.best_height < channel.funding_tx_block_number() {
+                self.best_height = channel.funding_tx_block_number();
+            }
             self.channels.insert(channel.out_point(), channel.clone());
         }
         let nodes = self.store.get_nodes(None);
@@ -172,6 +191,10 @@ where
         }
     }
 
+    pub fn get_best_height(&self) -> u64 {
+        self.best_height
+    }
+
     pub fn add_node(&mut self, node_info: NodeInfo) {
         let node_id = node_info.node_id;
         self.nodes.insert(node_id, node_info.clone());
@@ -179,9 +202,16 @@ where
         self.store.insert_node(node_info);
     }
 
+    // TODO: If we are syncing with the peers for newest graph, we should
+    // not process channels here. Because if the node may restart while syncing is
+    // is still ongoing, the next time when the node starts, it may falsely believe
+    // that we have already processed channels before the height of this channel.
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
         assert_ne!(channel_info.node1(), channel_info.node2());
         error!("add_channel: {:?}", channel_info);
+        if channel_info.funding_tx_block_number > self.best_height {
+            self.best_height = channel_info.funding_tx_block_number;
+        }
         match self.channels.get(&channel_info.out_point()) {
             Some(channel) => {
                 // If the channel already exists, we don't need to update it
