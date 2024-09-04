@@ -2580,4 +2580,10 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::BroadcastLocalInfo(LocalInfoKind::NodeAnnouncement),
+        ))
+        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+
+    actor
 }

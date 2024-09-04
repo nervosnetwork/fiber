@@ -3,6 +3,7 @@
 
 fiber:
   listening_port: 8346
+  #announce_node_interval_seconds: 36000
 
 rpc:
   listening_addr: 127.0.0.1:41716
