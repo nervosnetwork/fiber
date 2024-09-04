@@ -4,6 +4,7 @@ use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
+use ckb_types::core::error;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -175,6 +176,7 @@ where
     pub fn add_node(&mut self, node_info: NodeInfo) {
         let node_id = node_info.node_id;
         self.nodes.insert(node_id, node_info.clone());
+        error!("add_node: {:?}", node_info);
         self.store.insert_node(node_info);
     }
 

@@ -1131,6 +1131,7 @@ where
             }
             NetworkActorCommand::BroadcastMessage(peers, message) => {
                 // Send message to peers in the list anyway.
+                debug!("Broadcasting message {:?} to peers {:?}", &message, &peers);
                 for peer_id in &peers {
                     if let Err(e) = state
                         .send_message_to_peer(
@@ -1932,6 +1933,17 @@ impl NetworkActorState {
         self.peer_pubkey_map
             .insert(remote_peer_id.clone(), remote_pubkey);
 
+        if let Some(message) = self.get_node_announcement_message() {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessage(
+                        vec![remote_peer_id.clone()],
+                        FiberBroadcastMessage::NodeAnnouncement(message),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
+
         for channel_id in store.get_active_channel_ids_by_peer(&remote_peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((_channel, _)) = Actor::spawn_linked(
@@ -2578,12 +2590,6 @@ pub async fn start_network<
     )
     .await
     .expect("Failed to start network actor");
-
-    actor
-        .send_message(NetworkActorMessage::new_command(
-            NetworkActorCommand::BroadcastLocalInfo(LocalInfoKind::NodeAnnouncement),
-        ))
-        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 
     actor
 }
