@@ -445,12 +445,11 @@ impl<S> ChannelActor<S> {
 
                 // If there is a next hop, we should send the AddTlc message to the next hop.
                 if add_tlc.onion_packet.len() > 0 {
-                    let message = NetworkActorMessage::Command(
-                        NetworkActorCommand::SendOnionPacket(add_tlc.onion_packet.clone()),
-                    );
-
-                    let res = self.network.send_message(message);
-                    eprintln!("add_tlc: {:?}, result: {:?}", add_tlc, res);
+                    self.network
+                        .send_message(NetworkActorMessage::Command(
+                            NetworkActorCommand::SendOnionPacket(add_tlc.onion_packet.clone()),
+                        ))
+                        .expect("network actor is alive");
                 }
                 Ok(())
             }

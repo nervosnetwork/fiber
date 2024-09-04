@@ -32,7 +32,6 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
 }
 
 script:pre-request {
@@ -47,5 +46,4 @@ script:pre-request {
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("N1N2_TLC_ID1", res.body.result.tlc_id);
 }

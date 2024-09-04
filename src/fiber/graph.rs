@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use tentacle::multiaddr::Multiaddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tracing::debug;
 use tracing::log::error;
+use tracing::{debug, info};
 
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
@@ -243,7 +243,7 @@ where
     }
 
     pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
-        let channel_outpoint = update.channel_outpoint;
+        let channel_outpoint = update.channel_outpoint.clone();
         let Some(channel) = self.channels.get_mut(&channel_outpoint) else {
             return Err(GraphError::Other("channel not found".to_string()));
         };
@@ -263,6 +263,11 @@ where
             last_update_message: None,
         });
         self.store.insert_channel(channel.to_owned());
+        tracing::info!(
+            "process_channel_update: {:?} with channel: {:?}",
+            update,
+            channel
+        );
         Ok(())
     }
 
@@ -309,6 +314,17 @@ where
         self.source
     }
 
+    pub fn calculate_fee(&self, amount: u128, fee_proportational_millionths: u128) -> u128 {
+        let fee = fee_proportational_millionths * amount;
+        let base_fee = fee / 1_000_000;
+        let remainder = fee % 1_000_000;
+        if remainder > 0 {
+            base_fee + 1
+        } else {
+            base_fee
+        }
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
@@ -337,7 +353,7 @@ where
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
         let route = self.find_route(source, target, amount, 1000)?;
-        eprintln!("route found: {:?}", route);
+        info!("route found: {:?}", route);
         assert!(!route.is_empty());
 
         let payment_hash = payment_request.payment_hash;
@@ -349,15 +365,13 @@ where
             next_hop = Some(route[i + 1].target);
             let next_channel_outpoint = Some(route[i + 1].channel_outpoint.clone());
             let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
-            eprintln!("channel_info: {:?}", channel_info);
             let channel_update = match channel_info.node1() == route[i + 1].target {
                 true => channel_info.two_to_one.as_ref(),
                 false => channel_info.one_to_two.as_ref(),
             }
             .expect("channel_update is none");
             let fee_rate = channel_update.fee_rate;
-            // FIXME(yukang): revise the fee calculation
-            let fee = ((fee_rate as f64 / 100.0) * current_amount as f64) as u128;
+            let fee = self.calculate_fee(current_amount, fee_rate as u128);
             let expiry = channel_update.cltv_expiry_delta;
 
             onion_infos.push(OnionInfo {
@@ -447,13 +461,13 @@ where
                 // if charge inbound fees for exit hop
                 let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
-                let fee = ((fee_rate as f64 / 100.0) * next_hop_received_amount as f64) as u128;
+                let fee = self.calculate_fee(next_hop_received_amount, fee_rate as u128);
                 let amount_to_send = next_hop_received_amount + fee;
 
-                // eprintln!(
-                //     "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}",
-                //     fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount
-                // );
+                info!(
+                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?}",
+                    fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity()
+                );
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if amount_to_send > amount + max_fee_amount {
@@ -478,10 +492,10 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    eprintln!("probability is too low: {:?}", probability);
+                    info!("probability is too low: {:?}", probability);
                     continue;
                 }
-                eprintln!("probability: {:?}", probability);
+                info!("probability: {:?}", probability);
                 let agg_weight =
                     self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
@@ -842,16 +856,18 @@ mod tests {
     fn test_graph_find_path_fee() {
         let mut network = MockNetworkGraph::new(5);
 
-        network.add_edge(1, 2, Some(1000), Some(30));
-        network.add_edge(2, 4, Some(1000), Some(10));
-        network.add_edge(1, 3, Some(1000), Some(20));
-        network.add_edge(3, 4, Some(1000), Some(10));
+        network.add_edge(1, 2, Some(1000), Some(30000));
+        network.add_edge(2, 4, Some(1000), Some(10000));
+
+        network.add_edge(1, 3, Some(1000), Some(20000));
+        network.add_edge(3, 4, Some(1000), Some(10000));
 
         let route = network.find_route(1, 4, 100, 1000);
 
         assert!(route.is_ok());
         let route = route.unwrap();
 
+        // make sure we choose the path with lower fees
         assert_eq!(route.len(), 2);
         assert_eq!(route[0].channel_outpoint, network.edges[2].2);
         assert_eq!(route[1].channel_outpoint, network.edges[3].2);
@@ -868,7 +884,6 @@ mod tests {
 
         let route = network.find_route(1, 5, 100, 1000);
 
-        eprintln!("{:?}", route);
         assert!(route.is_ok());
         let route = route.unwrap();
 
@@ -932,17 +947,17 @@ mod tests {
         let mut network = MockNetworkGraph::new(6);
 
         // Direct path with high fee
-        network.add_edge(1, 5, Some(2000), Some(50));
+        network.add_edge(1, 5, Some(2000), Some(50000));
 
         // Longer path with lower total fee
-        network.add_edge(1, 2, Some(2000), Some(10));
-        network.add_edge(2, 3, Some(2000), Some(10));
-        network.add_edge(3, 4, Some(2000), Some(10));
-        network.add_edge(4, 5, Some(2000), Some(10));
+        network.add_edge(1, 2, Some(2000), Some(10000));
+        network.add_edge(2, 3, Some(2000), Some(10000));
+        network.add_edge(3, 4, Some(2000), Some(10000));
+        network.add_edge(4, 5, Some(2000), Some(10000));
 
         // Path with insufficient capacity
-        network.add_edge(1, 6, Some(500), Some(5));
-        network.add_edge(6, 5, Some(500), Some(5));
+        network.add_edge(1, 6, Some(500), Some(10000));
+        network.add_edge(6, 5, Some(500), Some(10000));
 
         let route = network.find_route(1, 5, 1000, 1000);
         assert!(route.is_ok());
@@ -995,11 +1010,6 @@ mod tests {
         let node0 = network.keys[0];
         let node2 = network.keys[2];
         let node3 = network.keys[3];
-        eprintln!(
-            "node0: {:?} \nnode2: {:?} \nnode3: {:?}\n",
-            node0, node2, node3
-        );
-
         // Test build route from node1 to node3
         let route = network.graph.build_route(SendPaymentCommand {
             target_pubkey: node3.into(),

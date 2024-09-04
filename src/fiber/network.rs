@@ -59,7 +59,9 @@ use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
-use crate::fiber::channel::{AddTlcCommand, TxCollaborationCommand, TxUpdateCommand};
+use crate::fiber::channel::{
+    AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
+};
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
@@ -947,41 +949,39 @@ where
             }
 
             NetworkActorCommand::ControlFiberChannel(c) => {
+                info!("send command to channel: {:?}", c);
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
             }
 
             NetworkActorCommand::SendOnionPacket(packet) => {
-                let mut onion_packet = OnionPacket::deserialize(&packet).unwrap();
-                if let Ok(hop) = onion_packet.shift() {
-                    let channel_id = state
-                        .outpoint_channel_map
-                        .get(&hop.channel_outpoint.unwrap())
-                        .expect("channel id should exist");
-                    let message = |rpc_reply| -> NetworkActorMessage {
-                        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-                            ChannelCommandWithId {
-                                channel_id: *channel_id,
-                                command: ChannelCommand::AddTlc(
-                                    AddTlcCommand {
-                                        amount: hop.amount,
-                                        preimage: None,
-                                        payment_hash: Some(hop.payment_hash),
-                                        expiry: hop.expiry.into(),
-                                        hash_algorithm: HashAlgorithm::Sha256,
-                                        onion_packet: onion_packet.serialize(),
-                                    },
-                                    rpc_reply,
-                                ),
+                if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
+                    info!("onion packet: {:?}", onion_packet);
+                    if let Ok(hop) = onion_packet.shift() {
+                        let channel_id = state
+                            .outpoint_channel_map
+                            .get(&hop.channel_outpoint.unwrap())
+                            .expect("channel id should exist");
+                        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
+                        let rpc_reply = RpcReplyPort::from(send);
+                        let command = ChannelCommand::AddTlc(
+                            AddTlcCommand {
+                                amount: hop.amount,
+                                preimage: None,
+                                payment_hash: Some(hop.payment_hash),
+                                expiry: hop.expiry.into(),
+                                hash_algorithm: HashAlgorithm::Sha256,
+                                onion_packet: onion_packet.serialize(),
                             },
-                        ))
-                    };
-
-                    let res = call!(myself, message)
-                        .expect("network actor alive")
-                        .expect("successfully send onion packet");
-                    eprintln!("send onion packet: {:?}", res);
+                            rpc_reply,
+                        );
+                        state.send_command_to_channel(*channel_id, command).await?;
+                        let res = recv.await.expect("recv add tlc response");
+                        info!("send onion packet: {:?}", res);
+                    }
+                } else {
+                    info!("onion packet is empty, ignore it");
                 }
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
@@ -1180,7 +1180,8 @@ where
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 let payment_hash = payment_request.payment_hash;
-                let _ = self.on_send_payment(myself, payment_request).await;
+                let res = self.on_send_payment(myself, payment_request).await;
+                info!("send_payment res: {:?}", res);
                 let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
@@ -1470,22 +1471,19 @@ where
         let graph = self.network_graph.read().await;
         // initialize the payment session in db and begin the payment process in a statemachine to
         // handle the payment process
-
-        error!("send payment: {:?}", payment_request);
+        info!("send payment: {:?}", payment_request);
         let payment_session = PaymentSession::new(payment_request.clone(), 3);
 
         let onion_path = graph.build_route(payment_request)?;
         assert!(!onion_path.is_empty());
 
-        error!("onion_infos: {:?}", onion_path);
+        info!("onion_infos: {:?}", onion_path);
         let onion_packet = OnionPacket::new(onion_path).serialize();
 
-        let message = NetworkActorMessage::Command(NetworkActorCommand::SendOnionPacket(
-            onion_packet.clone(),
+        let res = my_self.send_message(NetworkActorMessage::Command(
+            NetworkActorCommand::SendOnionPacket(onion_packet.clone()),
         ));
-
-        let res = my_self.send_message(message);
-        error!("result: {:?}", res);
+        info!("result: {:?}", res);
         Ok(payment_session.payment_hash())
     }
 }
