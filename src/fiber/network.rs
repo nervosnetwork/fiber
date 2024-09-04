@@ -1332,10 +1332,10 @@ where
                         // tx index is not returned on older ckb version, using dummy tx index instead
                         0u32,
                     ),
-                    _ => {
+                    err => {
                         error!(
-                            "Channel announcement transaction {:?} not found or not confirmed",
-                            &channel_announcement.channel_outpoint.tx_hash()
+                            "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
+                            &channel_announcement.channel_outpoint.tx_hash(), err
                         );
                         return;
                     }

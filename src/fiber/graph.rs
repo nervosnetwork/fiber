@@ -4,7 +4,6 @@ use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
-use ckb_types::core::error;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;

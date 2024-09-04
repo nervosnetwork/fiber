@@ -173,7 +173,8 @@ impl Actor for CkbChainActor {
                     let tx_hash = tx_hash.clone();
                     let status = tokio::task::block_in_place(move || {
                         let ckb_client = CkbRpcClient::new(&rpc_url);
-                        match ckb_client.get_transaction_status(tx_hash.unpack()) {
+                        // FIXME: `get_transaction_status` is only called with verbosity = 1 in sdk now
+                        match ckb_client.get_only_committed_transaction(tx_hash.unpack()) {
                             Ok(resp) => match resp.tx_status.status {
                                 ckb_jsonrpc_types::Status::Committed => {
                                     match ckb_client.get_tip_block_number() {
