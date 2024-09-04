@@ -42,6 +42,9 @@ pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
 /// The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. 1000 means 0.1%.
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 
+/// Whether to automatically announce the node on startup. false means not announcing.
+pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = false;
+
 /// The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 0;
 
@@ -133,6 +136,15 @@ pub struct FiberConfig {
         help = "The fee for forwarding peer tlcs. Proportional to the amount of the forwarded tlc. The unit is millionths of the amount. [default: 1000 (0.1%)]"
     )]
     pub tlc_fee_proportional_millionths: Option<u128>,
+
+    /// Whether to automatically announce the node on startup. [default: false]
+    #[arg(
+        name = "FIBER_AUTO_ANNOUNCE_NODE",
+        long = "fiber-auto-announce-node",
+        env,
+        help = "Whether to automatically announce the node on startup. [default: false]"
+    )]
+    pub auto_announce_node: Option<bool>,
 
     // TODO: the more sensible default value for this option is a reasonable interval like one day
     // if this node has public channels, otherwise don't reannounce (or announce) at all.
@@ -263,6 +275,11 @@ impl FiberConfig {
     pub fn tlc_fee_proportional_millionths(&self) -> u128 {
         self.tlc_fee_proportional_millionths
             .unwrap_or(DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS)
+    }
+
+    pub fn auto_announce_node(&self) -> bool {
+        self.auto_announce_node
+            .unwrap_or(DEFAULT_AUTO_ANNOUNCE_NODE)
     }
 
     pub fn announce_node_interval_seconds(&self) -> u64 {

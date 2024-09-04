@@ -2378,6 +2378,16 @@ where
             ))?;
         }
 
+        if config.auto_announce_node() {
+            // We have no easy way to know when the connections to peers are established
+            // in tentacle, so we just wait for a while.
+            myself.send_after(Duration::from_secs(1), || {
+                NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
+                    LocalInfoKind::NodeAnnouncement,
+                ))
+            });
+        }
+
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
