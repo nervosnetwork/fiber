@@ -1533,9 +1533,9 @@ struct NetworkSyncState {
     starting_height: u64,
     // The timestamp we started syncing.
     starting_time: SystemTime,
-    // TODO: the list here should be dynamic.
-    // All the peers that we are going to sync with.
-    syncing_peers: Vec<(PeerId, Multiaddr)>,
+    // All the pinned peers that we are going to sync with.
+    pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
+    dynamic_syncing_peers: Vec<PeerId>,
     // Number of peers with whom we succeeded to sync.
     succeeded: usize,
     // Number of peers with whom we failed to sync.
@@ -1543,12 +1543,36 @@ struct NetworkSyncState {
 }
 
 impl NetworkSyncState {
-    fn should_sync_with_peer_id(&self, peer_id: &PeerId) -> bool {
-        self.syncing_peers.iter().any(|(id, _)| id == peer_id)
+    // Note that this function may actually change the state, this is because,
+    // when the sync to all peers failed, we actually want to start a new sync,
+    // and we want to track this peer.
+    fn should_sync_with_peer_id(&mut self, peer_id: &PeerId) -> bool {
+        // There are two possibility for the following condition to be true:
+        // 1) we don't have any pinned syncing peers.
+        // 2) we have some pinned syncing peers, and all of them failed to sync.
+        // In the first case, both self.pinned_syncing_peers.len() is always 0,
+        // and self.failed is alway greater or equal 0, so the condition is always true.
+        // In the second case, if self.failed is larger than the length of pinned_syncing_peers,
+        // then all of pinned sync peers failed to sync. This is because
+        // we will always try to sync with all the pinned syncing peers first.
+        if self.failed >= self.pinned_syncing_peers.len() {
+            // TODO: we may want more than one successful syncing.
+            if self.succeeded != 0 {
+                false
+            } else {
+                debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
+                self.dynamic_syncing_peers.push(peer_id.clone());
+                true
+            }
+        } else {
+            self.pinned_syncing_peers
+                .iter()
+                .any(|(id, _)| id == peer_id)
+        }
     }
 
     fn should_sync_with_multiaddr(&self, addr: &Multiaddr) -> bool {
-        self.syncing_peers.iter().any(|(_, a)| a == addr)
+        self.pinned_syncing_peers.iter().any(|(_, a)| a == addr)
     }
 }
 
@@ -1562,7 +1586,8 @@ impl NetworkSyncStatus {
         let state = NetworkSyncState {
             starting_height,
             starting_time: SystemTime::now(),
-            syncing_peers,
+            pinned_syncing_peers: syncing_peers,
+            dynamic_syncing_peers: Default::default(),
             succeeded: 0,
             failed: 0,
         };
@@ -2078,7 +2103,7 @@ impl NetworkActorState {
     }
 
     fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
-        if let NetworkSyncStatus::Running(ref state) = self.sync_status {
+        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
             if state.should_sync_with_peer_id(peer_id) {
                 // TODO: Start syncing now
             }
@@ -2098,7 +2123,6 @@ impl NetworkActorState {
         if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
             if state.should_sync_with_peer_id(peer_id) {
                 state.failed += 1;
-                self.maybe_finish_sync();
             }
         }
     }
@@ -2107,14 +2131,15 @@ impl NetworkActorState {
         if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
             if state.should_sync_with_multiaddr(multiaddr) {
                 state.failed += 1;
-                self.maybe_finish_sync();
             }
         }
     }
 
     fn maybe_finish_sync(&mut self) {
         if let NetworkSyncStatus::Running(state) = &self.sync_status {
-            if state.succeeded + state.failed == state.syncing_peers.len() {
+            // TODO: It is better to sync with a few more peers to make sure we have the latest data.
+            // But we may only be connected just a few nodes.
+            if state.succeeded > 1 {
                 debug!(
                     "All peers finished syncing, starting time {:?}, finishing time {:?}",
                     state.starting_time,
@@ -2494,6 +2519,10 @@ where
             .map(|(a, b)| (a.clone(), b.clone()))
             .collect();
         let height = graph.get_best_height();
+        debug!(
+            "Trying to sync network graph with peers {:?} and height {}",
+            &peers_to_sync_network_graph, &height
+        );
 
         let state = NetworkActorState {
             node_name: config.announced_node_name,
@@ -2525,7 +2554,6 @@ where
         };
 
         // load the connected peers from the network graph
-
         let peers = graph.get_connected_peers();
         // TODO: we need to bootstrap the network if no peers are connected.
         if peers.is_empty() {
