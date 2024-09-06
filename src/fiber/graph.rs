@@ -339,6 +339,10 @@ where
         self.connected_peer_addresses.iter().collect()
     }
 
+    pub fn get_peers_to_sync_network_graph(&self) -> Vec<(&PeerId, &Multiaddr)> {
+        self.connected_peer_addresses.iter().take(3).collect()
+    }
+
     pub fn remove_connected_peer(&mut self, peer_id: &PeerId) {
         self.connected_peer_addresses.remove(peer_id);
         self.store.remove_connected_peer(peer_id);

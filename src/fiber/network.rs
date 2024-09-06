@@ -697,6 +697,16 @@ where
         debug!("Handling event: {:?}", event);
         match event {
             NetworkActorEvent::NetworkServiceEvent(e) => {
+                match &e {
+                    NetworkServiceEvent::ServiceError(ServiceError::DialerError {
+                        address,
+                        error,
+                    }) => {
+                        error!("Dialer error: {:?} -> {:?}", address, error);
+                        state.maybe_mark_sync_failed_multiaddr(address)
+                    }
+                    _ => {}
+                }
                 self.on_service_event(e).await;
             }
             NetworkActorEvent::PeerConnected(id, pubkey, session) => {
@@ -1194,7 +1204,7 @@ where
                 }
             },
             NetworkActorCommand::MarkSyncingDone => {
-                state.in_sync = false;
+                state.sync_status = NetworkSyncStatus::Done;
                 let mut broadcasted_message_queue = vec![];
                 std::mem::swap(
                     &mut state.broadcasted_message_queue,
@@ -1215,7 +1225,7 @@ where
         peer_id: PeerId,
         message: FiberBroadcastMessage,
     ) {
-        if state.in_sync {
+        if state.sync_status.is_syncing() {
             debug!(
                 "Saving broadcasted message to queue as we are syncing: {:?}",
                 &message
@@ -1518,6 +1528,55 @@ where
     }
 }
 
+struct NetworkSyncState {
+    // The block number we are syncing from.
+    starting_height: u64,
+    // The timestamp we started syncing.
+    starting_time: SystemTime,
+    // TODO: the list here should be dynamic.
+    // All the peers that we are going to sync with.
+    syncing_peers: Vec<(PeerId, Multiaddr)>,
+    // Number of peers with whom we succeeded to sync.
+    succeeded: usize,
+    // Number of peers with whom we failed to sync.
+    failed: usize,
+}
+
+impl NetworkSyncState {
+    fn should_sync_with_peer_id(&self, peer_id: &PeerId) -> bool {
+        self.syncing_peers.iter().any(|(id, _)| id == peer_id)
+    }
+
+    fn should_sync_with_multiaddr(&self, addr: &Multiaddr) -> bool {
+        self.syncing_peers.iter().any(|(_, a)| a == addr)
+    }
+}
+
+enum NetworkSyncStatus {
+    Running(NetworkSyncState),
+    Done,
+}
+
+impl NetworkSyncStatus {
+    fn new(starting_height: u64, syncing_peers: Vec<(PeerId, Multiaddr)>) -> Self {
+        let state = NetworkSyncState {
+            starting_height,
+            starting_time: SystemTime::now(),
+            syncing_peers,
+            succeeded: 0,
+            failed: 0,
+        };
+        NetworkSyncStatus::Running(state)
+    }
+
+    fn is_syncing(&self) -> bool {
+        match self {
+            NetworkSyncStatus::Running(_) => true,
+            NetworkSyncStatus::Done => false,
+        }
+    }
+}
+
 pub struct NetworkActorState {
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
@@ -1571,8 +1630,8 @@ pub struct NetworkActorState {
     // message of the same type.
     broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
-    // Whether we are still syncing network messages.
-    in_sync: bool,
+    // This field holds the information about our syncing status.
+    sync_status: NetworkSyncStatus,
     // A queue of messages that are received while we are syncing network messages.
     // Need to be processed after the sync is done.
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
@@ -2000,6 +2059,7 @@ impl NetworkActorState {
                 error!("Failed to reestablish channel {:x}", &channel_id);
             }
         }
+        self.maybe_sync_network_graph(remote_peer_id);
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
@@ -2012,6 +2072,59 @@ impl NetworkActorState {
                         ));
                     }
                 }
+            }
+        }
+        self.maybe_mark_sync_failed(id);
+    }
+
+    fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
+        if let NetworkSyncStatus::Running(ref state) = self.sync_status {
+            if state.should_sync_with_peer_id(peer_id) {
+                // TODO: Start syncing now
+            }
+        }
+    }
+
+    fn maybe_mark_sync_succeeded(&mut self, peer_id: &PeerId) {
+        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
+            if state.should_sync_with_peer_id(peer_id) {
+                state.succeeded += 1;
+                self.maybe_finish_sync();
+            }
+        }
+    }
+
+    fn maybe_mark_sync_failed(&mut self, peer_id: &PeerId) {
+        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
+            if state.should_sync_with_peer_id(peer_id) {
+                state.failed += 1;
+                self.maybe_finish_sync();
+            }
+        }
+    }
+
+    fn maybe_mark_sync_failed_multiaddr(&mut self, multiaddr: &Multiaddr) {
+        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
+            if state.should_sync_with_multiaddr(multiaddr) {
+                state.failed += 1;
+                self.maybe_finish_sync();
+            }
+        }
+    }
+
+    fn maybe_finish_sync(&mut self) {
+        if let NetworkSyncStatus::Running(state) = &self.sync_status {
+            if state.succeeded + state.failed == state.syncing_peers.len() {
+                debug!(
+                    "All peers finished syncing, starting time {:?}, finishing time {:?}",
+                    state.starting_time,
+                    SystemTime::now()
+                );
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::MarkSyncingDone,
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
         }
     }
@@ -2374,6 +2487,14 @@ where
             debug!("Tentacle service shutdown");
         });
 
+        let graph = self.network_graph.read().await;
+        let peers_to_sync_network_graph = graph
+            .get_peers_to_sync_network_graph()
+            .into_iter()
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect();
+        let height = graph.get_best_height();
+
         let state = NetworkActorState {
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
@@ -2399,14 +2520,17 @@ where
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
-            in_sync: true,
+            sync_status: NetworkSyncStatus::new(height, peers_to_sync_network_graph),
             broadcasted_message_queue: Default::default(),
         };
 
         // load the connected peers from the network graph
 
-        let graph = self.network_graph.read().await;
         let peers = graph.get_connected_peers();
+        // TODO: we need to bootstrap the network if no peers are connected.
+        if peers.is_empty() {
+            warn!("No connected peers found in the network graph");
+        }
         for (_peer_id, addr) in peers {
             myself.send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::ConnectPeer(addr.clone()),
