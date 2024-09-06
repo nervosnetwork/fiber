@@ -46,6 +46,7 @@ use super::channel::{
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::graph::{NetworkGraph, NetworkGraphStateStore};
+use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     ChannelAnnouncementQuery, ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage,
@@ -145,6 +146,7 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    GetChannelsWithinBlockRangeFromPeer((PeerId, u64, u64), RpcReplyPort<EcdsaSignature>),
     MarkSyncingDone,
 }
 
@@ -325,6 +327,9 @@ pub enum NetworkActorEvent {
     /// A closing transaction has failed (either because of invalid transaction or timeout)
     ClosingTransactionFailed(PeerId, Hash256, Byte32),
 
+    // The graph syncer to the peer has exited with some reason.
+    GraphSyncerExited(PeerId, GraphSyncerExitStatus),
+
     /// Network service events to be sent to outside observers.
     /// These events may be both present at `NetworkActorEvent` and
     /// this branch of `NetworkActorEvent`. This is because some events
@@ -332,6 +337,12 @@ pub enum NetworkActorEvent {
     /// and they are also interesting to outside observers.
     /// Once we processed these events, we will send them to outside observers.
     NetworkServiceEvent(NetworkServiceEvent),
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum GraphSyncerExitStatus {
+    Succeeded,
+    Failed,
 }
 
 #[derive(Debug)]
@@ -703,7 +714,7 @@ where
                         error,
                     }) => {
                         error!("Dialer error: {:?} -> {:?}", address, error);
-                        state.maybe_mark_sync_failed_multiaddr(address)
+                        state.maybe_tell_syncer_peer_disconnected_multiaddr(address)
                     }
                     _ => {}
                 }
@@ -885,6 +896,17 @@ where
                         ),
                     ))
                     .expect("myself alive");
+            }
+            NetworkActorEvent::GraphSyncerExited(peer_id, reason) => {
+                debug!(
+                    "Graph syncer to peer {:?} has exited with reason {:?}",
+                    &peer_id, &reason
+                );
+                if let NetworkSyncStatus::Running(state) = &mut state.sync_status {
+                    if let Some(actor) = state.active_syncers.remove(&peer_id) {
+                        actor.get_cell().kill();
+                    }
+                }
             }
         }
         Ok(())
@@ -1215,6 +1237,7 @@ where
                     self.process_broadcasted_message(message).await;
                 }
             }
+            NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(_, _) => todo!(),
         };
         Ok(())
     }
@@ -1535,7 +1558,7 @@ struct NetworkSyncState {
     starting_time: SystemTime,
     // All the pinned peers that we are going to sync with.
     pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
-    dynamic_syncing_peers: Vec<PeerId>,
+    active_syncers: HashMap<PeerId, ActorRef<GraphSyncerMessage>>,
     // Number of peers with whom we succeeded to sync.
     succeeded: usize,
     // Number of peers with whom we failed to sync.
@@ -1544,9 +1567,13 @@ struct NetworkSyncState {
 
 impl NetworkSyncState {
     // Note that this function may actually change the state, this is because,
-    // when the sync to all peers failed, we actually want to start a new sync,
-    // and we want to track this peer.
-    fn should_sync_with_peer_id(&mut self, peer_id: &PeerId) -> bool {
+    // when the sync to all peers failed, we actually want to start a new syncer,
+    // and we want to track this syncer.
+    async fn maybe_create_graph_syncer(
+        &mut self,
+        peer_id: &PeerId,
+        network: ActorRef<NetworkActorMessage>,
+    ) -> Option<ActorRef<GraphSyncerMessage>> {
         // There are two possibility for the following condition to be true:
         // 1) we don't have any pinned syncing peers.
         // 2) we have some pinned syncing peers, and all of them failed to sync.
@@ -1555,24 +1582,45 @@ impl NetworkSyncState {
         // In the second case, if self.failed is larger than the length of pinned_syncing_peers,
         // then all of pinned sync peers failed to sync. This is because
         // we will always try to sync with all the pinned syncing peers first.
-        if self.failed >= self.pinned_syncing_peers.len() {
+        let should_create = if self.failed >= self.pinned_syncing_peers.len() {
             // TODO: we may want more than one successful syncing.
             if self.succeeded != 0 {
                 false
             } else {
                 debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
-                self.dynamic_syncing_peers.push(peer_id.clone());
                 true
             }
         } else {
             self.pinned_syncing_peers
                 .iter()
                 .any(|(id, _)| id == peer_id)
+        };
+
+        if should_create {
+            let graph_syncer = Actor::spawn_linked(
+                Some(format!("Graph syncer to {}", peer_id)),
+                GraphSyncer::new(
+                    network.clone(),
+                    peer_id.clone(),
+                    self.starting_height,
+                    self.starting_time,
+                ),
+                (),
+                network.get_cell(),
+            )
+            .await
+            .expect("Failed to start graph syncer actor")
+            .0;
+            self.active_syncers
+                .insert(peer_id.clone(), graph_syncer.clone());
+            Some(graph_syncer)
+        } else {
+            None
         }
     }
 
-    fn should_sync_with_multiaddr(&self, addr: &Multiaddr) -> bool {
-        self.pinned_syncing_peers.iter().any(|(_, a)| a == addr)
+    fn get_graph_syncer(&self, peer_id: &PeerId) -> Option<&ActorRef<GraphSyncerMessage>> {
+        self.active_syncers.get(peer_id)
     }
 }
 
@@ -1587,7 +1635,7 @@ impl NetworkSyncStatus {
             starting_height,
             starting_time: SystemTime::now(),
             pinned_syncing_peers: syncing_peers,
-            dynamic_syncing_peers: Default::default(),
+            active_syncers: Default::default(),
             succeeded: 0,
             failed: 0,
         };
@@ -2084,7 +2132,7 @@ impl NetworkActorState {
                 error!("Failed to reestablish channel {:x}", &channel_id);
             }
         }
-        self.maybe_sync_network_graph(remote_peer_id);
+        self.maybe_sync_network_graph(remote_peer_id).await;
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
@@ -2099,38 +2147,37 @@ impl NetworkActorState {
                 }
             }
         }
-        self.maybe_mark_sync_failed(id);
+        self.maybe_tell_syncer_peer_disconnected(id);
     }
 
-    fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
+    async fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
         if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
-            if state.should_sync_with_peer_id(peer_id) {
-                // TODO: Start syncing now
+            if let Some(_) = state
+                .maybe_create_graph_syncer(peer_id, self.network.clone())
+                .await
+            {
+                debug!("Created graph syncer to peer {:?}", peer_id);
             }
         }
     }
 
-    fn maybe_mark_sync_succeeded(&mut self, peer_id: &PeerId) {
-        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
-            if state.should_sync_with_peer_id(peer_id) {
-                state.succeeded += 1;
-                self.maybe_finish_sync();
+    fn maybe_tell_syncer_peer_disconnected(&self, peer_id: &PeerId) {
+        if let NetworkSyncStatus::Running(ref state) = self.sync_status {
+            if let Some(syncer) = state.get_graph_syncer(peer_id) {
+                let _ = syncer.send_message(GraphSyncerMessage::PeerDisConnected);
             }
         }
     }
 
-    fn maybe_mark_sync_failed(&mut self, peer_id: &PeerId) {
-        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
-            if state.should_sync_with_peer_id(peer_id) {
-                state.failed += 1;
-            }
-        }
-    }
-
-    fn maybe_mark_sync_failed_multiaddr(&mut self, multiaddr: &Multiaddr) {
-        if let NetworkSyncStatus::Running(state) = &mut self.sync_status {
-            if state.should_sync_with_multiaddr(multiaddr) {
-                state.failed += 1;
+    fn maybe_tell_syncer_peer_disconnected_multiaddr(&self, multiaddr: &Multiaddr) {
+        if let NetworkSyncStatus::Running(ref state) = self.sync_status {
+            if let Some(peer_id) = state
+                .pinned_syncing_peers
+                .iter()
+                .find(|(_p, a)| a == multiaddr)
+                .map(|x| &x.0)
+            {
+                self.maybe_tell_syncer_peer_disconnected(peer_id);
             }
         }
     }

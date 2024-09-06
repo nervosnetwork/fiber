@@ -24,5 +24,7 @@ pub mod hash_algorithm;
 
 pub mod serde_utils;
 
+mod graph_syncer;
+
 #[cfg(test)]
 pub mod test_utils;
