@@ -110,7 +110,7 @@ impl ChannelInfo {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
-    pub last_update: u64,
+    pub version: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The difference in CLTV values that you must have when routing through this channel.
@@ -135,6 +135,9 @@ pub struct NetworkGraph<S> {
     // node restarts, we will try to sync the graph from this height - ASSUME_MAX_CHANNEL_HEIGHT_GAP.
     // We assume that we have already synced the graph up to this height - ASSUME_MAX_CHANNEL_HEIGHT_GAP.
     best_height: u64,
+    // Similar to the best_height, this is the last update time of the network graph.
+    // We assume that we have already synced the graph up to this time - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP.
+    last_update_timestamp: u64,
     // when we restarting a node, we will reconnect to these peers
     connected_peer_addresses: HashMap<PeerId, Multiaddr>,
     nodes: HashMap<Pubkey, NodeInfo>,
@@ -165,7 +168,8 @@ where
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
             source,
-            best_height: 0u64,
+            best_height: 0,
+            last_update_timestamp: 0,
             channels: HashMap::new(),
             nodes: HashMap::new(),
             connected_peer_addresses: HashMap::new(),
@@ -182,10 +186,26 @@ where
             if self.best_height < channel.funding_tx_block_number() {
                 self.best_height = channel.funding_tx_block_number();
             }
+            if self.last_update_timestamp < channel.timestamp {
+                self.last_update_timestamp = channel.timestamp;
+            }
+            if let Some(channel_update) = channel.one_to_two.as_ref() {
+                if self.last_update_timestamp < channel_update.1 {
+                    self.last_update_timestamp = channel_update.1;
+                }
+            }
+            if let Some(channel_update) = channel.two_to_one.as_ref() {
+                if self.last_update_timestamp < channel_update.1 {
+                    self.last_update_timestamp = channel_update.1;
+                }
+            }
             self.channels.insert(channel.out_point(), channel.clone());
         }
         let nodes = self.store.get_nodes(None);
         for node in nodes.iter() {
+            if self.last_update_timestamp < node.timestamp {
+                self.last_update_timestamp = node.timestamp;
+            }
             self.nodes.insert(node.node_id, node.clone());
         }
         for (peer, addr) in self.store.get_connected_peer(None) {
@@ -197,16 +217,23 @@ where
         self.best_height
     }
 
+    pub fn get_last_update_timestamp(&self) -> u64 {
+        self.last_update_timestamp
+    }
+
     pub fn add_node(&mut self, node_info: NodeInfo) {
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
-            if old_node.timestamp >= node_info.timestamp {
+            if old_node.anouncement_msg.version >= node_info.anouncement_msg.version {
                 warn!(
                     "Ignoring adding an outdated node info {:?}, existing node {:?}",
                     &node_info, &old_node
                 );
                 return;
             }
+        }
+        if self.last_update_timestamp < node_info.timestamp {
+            self.last_update_timestamp = node_info.timestamp;
         }
         self.nodes.insert(node_id, node_info.clone());
         error!("add_node: {:?}", node_info);
@@ -222,6 +249,9 @@ where
         error!("add_channel: {:?}", channel_info);
         if channel_info.funding_tx_block_number > self.best_height {
             self.best_height = channel_info.funding_tx_block_number;
+        }
+        if channel_info.timestamp > self.last_update_timestamp {
+            self.last_update_timestamp = channel_info.timestamp;
         }
         match self.channels.get(&channel_info.out_point()) {
             Some(channel) => {
@@ -295,7 +325,7 @@ where
         };
 
         if let Some((info, _)) = update_info {
-            if update.timestamp <= info.last_update {
+            if update.version <= info.version {
                 warn!(
                     "Ignoring updating with an outdated channel update {:?} for channel {:?}, current update info: {:?}",
                     &update, channel_outpoint, &info
@@ -305,7 +335,7 @@ where
         }
         *update_info = Some((
             ChannelUpdateInfo {
-                last_update: update.timestamp,
+                version: update.version,
                 enabled: true,
                 cltv_expiry_delta: update.tlc_locktime_expiry_delta,
                 htlc_minimum_value: update.tlc_minimum_value,
@@ -759,7 +789,7 @@ mod tests {
             let channel_update = ChannelUpdate {
                 signature: None,
                 chain_hash: Hash256::default(),
-                timestamp: 0,
+                version: 0,
                 message_flags: 1,
                 channel_flags: 0,
                 tlc_locktime_expiry_delta: 144,

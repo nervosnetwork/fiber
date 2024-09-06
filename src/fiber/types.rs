@@ -1607,7 +1607,7 @@ pub struct ChannelUpdate {
     pub chain_hash: Hash256,
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    pub timestamp: u64,
+    pub version: u64,
     pub message_flags: u32,
     pub channel_flags: u32,
     pub tlc_locktime_expiry_delta: u64,
@@ -1632,7 +1632,7 @@ impl ChannelUpdate {
             signature: None,
             chain_hash,
             channel_outpoint,
-            timestamp,
+            version: timestamp,
             message_flags,
             channel_flags,
             tlc_locktime_expiry_delta: tlc_locktime_expiry_delta,
@@ -1647,7 +1647,7 @@ impl ChannelUpdate {
             signature: None,
             chain_hash: self.chain_hash,
             channel_outpoint: self.channel_outpoint.clone(),
-            timestamp: self.timestamp,
+            version: self.version,
             message_flags: self.message_flags,
             channel_flags: self.channel_flags,
             tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
@@ -1670,7 +1670,7 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             )
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
-            .timestamp(channel_update.timestamp.pack())
+            .timestamp(channel_update.version.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
             .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
@@ -1689,7 +1689,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             signature: Some(channel_update.signature().try_into()?),
             chain_hash: channel_update.chain_hash().into(),
             channel_outpoint: channel_update.channel_outpoint(),
-            timestamp: channel_update.timestamp().unpack(),
+            version: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),
             tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),

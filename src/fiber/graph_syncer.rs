@@ -1,8 +1,6 @@
 //! This is the main module for the graph syncer. It is responsible for
 //! syncing the graph with one specific peer.
 
-use std::time::SystemTime;
-
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use tentacle::secio::PeerId;
 
@@ -14,16 +12,16 @@ pub enum GraphSyncerMessage {
 
 pub struct GraphSyncerState {
     synced_height: u64,
-    synced_time: SystemTime,
+    synced_time: u64,
 }
 
 pub struct GraphSyncer {
     network: ActorRef<NetworkActorMessage>,
     peer_id: PeerId,
-    // The block number we are syncing from.
+    // We will only sync channels after this block number.
     starting_height: u64,
-    // The timestamp we started syncing.
-    starting_time: SystemTime,
+    // We will only sync messages after this time.
+    starting_time: u64,
 }
 
 impl GraphSyncer {
@@ -31,7 +29,7 @@ impl GraphSyncer {
         network: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         starting_height: u64,
-        starting_time: SystemTime,
+        starting_time: u64,
     ) -> Self {
         Self {
             network,

@@ -1545,7 +1545,7 @@ struct NetworkSyncState {
     // The block number we are syncing from.
     starting_height: u64,
     // The timestamp we started syncing.
-    starting_time: SystemTime,
+    starting_time: u64,
     // All the pinned peers that we are going to sync with.
     pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
     active_syncers: HashMap<PeerId, ActorRef<GraphSyncerMessage>>,
@@ -1620,10 +1620,14 @@ enum NetworkSyncStatus {
 }
 
 impl NetworkSyncStatus {
-    fn new(starting_height: u64, syncing_peers: Vec<(PeerId, Multiaddr)>) -> Self {
+    fn new(
+        starting_height: u64,
+        starting_time: u64,
+        syncing_peers: Vec<(PeerId, Multiaddr)>,
+    ) -> Self {
         let state = NetworkSyncState {
             starting_height,
-            starting_time: SystemTime::now(),
+            starting_time,
             pinned_syncing_peers: syncing_peers,
             active_syncers: Default::default(),
             succeeded: 0,
@@ -2556,9 +2560,10 @@ where
             .map(|(a, b)| (a.clone(), b.clone()))
             .collect();
         let height = graph.get_best_height();
+        let last_update = graph.get_last_update_timestamp();
         debug!(
-            "Trying to sync network graph with peers {:?} and height {}",
-            &peers_to_sync_network_graph, &height
+            "Trying to sync network graph with peers {:?} with height {} and last update {:?}",
+            &peers_to_sync_network_graph, &height, &last_update
         );
 
         let state = NetworkActorState {
@@ -2586,7 +2591,7 @@ where
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
-            sync_status: NetworkSyncStatus::new(height, peers_to_sync_network_graph),
+            sync_status: NetworkSyncStatus::new(height, last_update, peers_to_sync_network_graph),
             broadcasted_message_queue: Default::default(),
         };
 
