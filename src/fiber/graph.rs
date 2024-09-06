@@ -29,9 +29,9 @@ const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
 pub struct NodeInfo {
     pub node_id: Pubkey,
 
-    /// When the last known update to the node state was issued.
-    /// Value is opaque, as set in the announcement.
-    pub timestamp: u128,
+    // The time when the node was last updated. This is the time of processing the message,
+    // not the time of the NodeAnnouncement itself.
+    pub timestamp: u64,
 
     pub anouncement_msg: Option<NodeAnnouncement>,
 }
@@ -41,9 +41,10 @@ pub struct ChannelInfo {
     pub funding_tx_block_number: u64,
     pub funding_tx_index: u32,
     pub announcement_msg: ChannelAnnouncement,
-    pub one_to_two: Option<ChannelUpdateInfo>,
-    pub two_to_one: Option<ChannelUpdateInfo>,
-    // Timestamp of last updated
+    // The last update (with the timestamp) for the channel received from the network.
+    pub one_to_two: Option<(ChannelUpdateInfo, u64)>,
+    pub two_to_one: Option<(ChannelUpdateInfo, u64)>,
+    // The time that the channel was announced to the network.
     pub timestamp: u64,
 }
 
@@ -74,25 +75,26 @@ impl ChannelInfo {
 
     pub fn has_channel_update_one_to_two(&self) -> bool {
         match &self.one_to_two {
-            Some(x) if x.last_update_message.is_some() => true,
+            Some(x) if x.0.last_update_message.is_some() => true,
             _ => false,
         }
     }
 
     pub fn has_channel_update_two_to_one(&self) -> bool {
         match &self.two_to_one {
-            Some(x) if x.last_update_message.is_some() => true,
+            Some(x) if x.0.last_update_message.is_some() => true,
             _ => false,
         }
     }
 
     pub fn channel_update_one_to_two_timestamp(&self) -> Option<u64> {
-        self.one_to_two.as_ref().map(|x| x.last_update)
+        self.one_to_two.as_ref().map(|x| x.1)
     }
 
     pub fn channel_update_two_to_one_timestamp(&self) -> Option<u64> {
-        self.two_to_one.as_ref().map(|x| x.last_update)
+        self.two_to_one.as_ref().map(|x| x.1)
     }
+
     pub fn is_enabled(&self) -> bool {
         self.one_to_two.is_some() && self.two_to_one.is_some()
     }
@@ -283,15 +285,20 @@ where
             &mut channel.two_to_one
         };
 
-        update_info.get_or_insert(ChannelUpdateInfo {
-            last_update: update.timestamp,
-            enabled: true,
-            cltv_expiry_delta: update.tlc_locktime_expiry_delta,
-            htlc_minimum_value: update.tlc_minimum_value,
-            htlc_maximum_value: update.tlc_maximum_value,
-            fee_rate: update.tlc_fee_proportional_millionths as u64,
-            last_update_message: None,
-        });
+        // TODO: check if the update is newer than the last update.
+        update_info.get_or_insert((
+            ChannelUpdateInfo {
+                last_update: update.timestamp,
+                enabled: true,
+                cltv_expiry_delta: update.tlc_locktime_expiry_delta,
+                htlc_minimum_value: update.tlc_minimum_value,
+                htlc_maximum_value: update.tlc_maximum_value,
+                fee_rate: update.tlc_fee_proportional_millionths as u64,
+                last_update_message: None,
+            },
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+        ));
+
         self.store.insert_channel(channel.to_owned());
         tracing::info!(
             "process_channel_update: {:?} with channel: {:?}",
@@ -326,14 +333,14 @@ where
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         self.channels.values().filter_map(move |channel| {
             if let Some(info) = channel.one_to_two.as_ref() {
-                if info.enabled && channel.node2() == node_id {
-                    return Some((channel.node1(), channel, info));
+                if info.0.enabled && channel.node2() == node_id {
+                    return Some((channel.node1(), channel, &info.0));
                 }
             }
 
             if let Some(info) = channel.two_to_one.as_ref() {
-                if info.enabled && channel.node1() == node_id {
-                    return Some((channel.node2(), channel, info));
+                if info.0.enabled && channel.node1() == node_id {
+                    return Some((channel.node2(), channel, &info.0));
                 }
             }
             None
@@ -395,11 +402,12 @@ where
             next_hop = Some(route[i + 1].target);
             let next_channel_outpoint = Some(route[i + 1].channel_outpoint.clone());
             let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
-            let channel_update = match channel_info.node1() == route[i + 1].target {
+            let channel_update = &match channel_info.node1() == route[i + 1].target {
                 true => channel_info.two_to_one.as_ref(),
                 false => channel_info.one_to_two.as_ref(),
             }
-            .expect("channel_update is none");
+            .expect("channel_update is none")
+            .0;
             let fee_rate = channel_update.fee_rate;
             let fee = self.calculate_fee(current_amount, fee_rate as u128);
             let expiry = channel_update.cltv_expiry_delta;

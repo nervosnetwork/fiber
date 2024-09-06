@@ -1367,8 +1367,8 @@ pub struct NodeAnnouncement {
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
-    // Timestamp to the node announcement update, later update should have larger timestamp.
-    pub timestamp: u64,
+    // Opaque version number of the node announcement update, later update should have larger version number.
+    pub version: u64,
     pub node_id: Pubkey,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
@@ -1389,7 +1389,7 @@ impl NodeAnnouncement {
         Self {
             signature: None,
             features: Default::default(),
-            timestamp: Default::default(),
+            version: Default::default(),
             node_id,
             alias,
             chain_hash: Default::default(),
@@ -1411,7 +1411,7 @@ impl NodeAnnouncement {
         let unsigned_announcement = NodeAnnouncement {
             signature: None,
             features: self.features,
-            timestamp: self.timestamp,
+            version: self.version,
             node_id: self.node_id,
             alias: self.alias,
             chain_hash: self.chain_hash,
@@ -1431,7 +1431,7 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
                     .into(),
             )
             .features(node_announcement.features.pack())
-            .timestamp(node_announcement.timestamp.pack())
+            .timestamp(node_announcement.version.pack())
             .node_id(node_announcement.node_id.into())
             .alias(u8_32_as_byte_32(&node_announcement.alias.0))
             .chain_hash(node_announcement.chain_hash.into())
@@ -1457,7 +1457,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
         Ok(NodeAnnouncement {
             signature: Some(node_announcement.signature().try_into()?),
             features: node_announcement.features().unpack(),
-            timestamp: node_announcement.timestamp().unpack(),
+            version: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
             chain_hash: node_announcement.chain_hash().into(),
             alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())

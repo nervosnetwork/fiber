@@ -564,7 +564,7 @@ where
         let mut queries = Vec::new();
         for node_info in network_graph.nodes() {
             if let Some(node_announcement) = &node_info.anouncement_msg {
-                if is_within_range(node_announcement.timestamp) {
+                if is_within_range(node_announcement.version) {
                     queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
                         NodeAnnouncementQuery {
                             node_id: node_info.node_id.clone(),
@@ -669,12 +669,12 @@ where
                             channel_info
                                 .one_to_two
                                 .as_ref()
-                                .and_then(|u| u.last_update_message.clone())
+                                .and_then(|u| u.0.last_update_message.clone())
                         } else {
                             channel_info
                                 .two_to_one
                                 .as_ref()
-                                .and_then(|u| u.last_update_message.clone())
+                                .and_then(|u| u.0.last_update_message.clone())
                         };
                         match update {
                             Some(update) => Ok(FiberBroadcastMessage::ChannelUpdate(update)),
@@ -1231,7 +1231,7 @@ where
                         // Add the node to the network graph.
                         let node_info = NodeInfo {
                             node_id: node_announcement.node_id,
-                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
                             anouncement_msg: Some(node_announcement.clone()),
                         };
                         self.network_graph.write().await.add_node(node_info);
