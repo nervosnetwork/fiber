@@ -12,7 +12,7 @@ use tentacle::multiaddr::Multiaddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
@@ -199,6 +199,15 @@ where
 
     pub fn add_node(&mut self, node_info: NodeInfo) {
         let node_id = node_info.node_id;
+        if let Some(old_node) = self.nodes.get(&node_id) {
+            if old_node.timestamp >= node_info.timestamp {
+                warn!(
+                    "Ignoring adding an outdated node info {:?}, existing node {:?}",
+                    &node_info, &old_node
+                );
+                return;
+            }
+        }
         self.nodes.insert(node_id, node_info.clone());
         error!("add_node: {:?}", node_info);
         self.store.insert_node(node_info);
@@ -275,8 +284,8 @@ where
     }
 
     pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
-        let channel_outpoint = update.channel_outpoint.clone();
-        let Some(channel) = self.channels.get_mut(&channel_outpoint) else {
+        let channel_outpoint = &update.channel_outpoint;
+        let Some(channel) = self.channels.get_mut(channel_outpoint) else {
             return Err(GraphError::Other("channel not found".to_string()));
         };
         let update_info = if update.message_flags & 1 == 1 {
@@ -285,8 +294,16 @@ where
             &mut channel.two_to_one
         };
 
-        // TODO: check if the update is newer than the last update.
-        update_info.get_or_insert((
+        if let Some((info, _)) = update_info {
+            if update.timestamp <= info.last_update {
+                warn!(
+                    "Ignoring updating with an outdated channel update {:?} for channel {:?}, current update info: {:?}",
+                    &update, channel_outpoint, &info
+                );
+                return Ok(());
+            }
+        }
+        *update_info = Some((
             ChannelUpdateInfo {
                 last_update: update.timestamp,
                 enabled: true,
