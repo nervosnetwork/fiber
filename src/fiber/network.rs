@@ -442,7 +442,7 @@ where
                         NetworkActorCommand::BroadcastMessage(vec![], m.clone()),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                self.on_broadcasted_message(m).await;
+                self.on_broadcasted_message(state, peer_id.clone(), m).await;
             }
             FiberMessage::ChannelNormalOperation(m) => {
                 let channel_id = m.get_channel_id();
@@ -482,7 +482,8 @@ where
                     messages,
                 }) => {
                     for message in messages {
-                        self.on_broadcasted_message(message).await;
+                        self.on_broadcasted_message(state, peer_id.clone(), message)
+                            .await;
                     }
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
@@ -1202,7 +1203,20 @@ where
         Ok(())
     }
 
-    async fn on_broadcasted_message(&self, message: FiberBroadcastMessage) {
+    async fn on_broadcasted_message(
+        &self,
+        state: &mut NetworkActorState,
+        peer_id: PeerId,
+        message: FiberBroadcastMessage,
+    ) {
+        if state.in_sync {
+            debug!(
+                "Saving broadcasted message to queue as we are syncing: {:?}",
+                &message
+            );
+            state.broadcasted_message_queue.push((peer_id, message));
+            return;
+        }
         warn!("Received broadcasted message: {:?}", &message);
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
@@ -1541,6 +1555,11 @@ pub struct NetworkActorState {
     // message of the same type.
     broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
+    // Whether we are still syncing network messages.
+    in_sync: bool,
+    // A queue of messages that are received while we are syncing network messages.
+    // Need to be processed after the sync is done.
+    broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -2364,6 +2383,8 @@ where
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
+            in_sync: true,
+            broadcasted_message_queue: Default::default(),
         };
 
         // load the connected peers from the network graph
