@@ -5733,6 +5733,33 @@ mod tests {
         // FIXME: add assertion
     }
 
+    #[tokio::test]
+    async fn test_stash_broadcast_messages() {
+        init_tracing();
+
+        let _span = tracing::info_span!("node", node = "test").entered();
+
+        let node_a_funding_amount = 100000000000;
+        let node_b_funding_amount = 6200000000;
+
+        let (node_a, _node_b, _new_channel_id) = create_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+        // Mark sync done for node_a after 1 second
+        node_a
+            .network_actor
+            .send_after(ractor::concurrency::Duration::from_secs(1), || {
+                NetworkActorMessage::new_command(NetworkActorCommand::MarkSyncingDone)
+            });
+
+        // Wait for the channel announcement to be broadcasted
+        tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    }
+
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await

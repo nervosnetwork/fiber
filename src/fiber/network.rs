@@ -145,6 +145,7 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    MarkSyncingDone,
 }
 
 pub async fn sign_network_message(
@@ -435,14 +436,8 @@ where
                 }
             }
             FiberMessage::BroadcastMessage(m) => {
-                // Rebroadcast the message to other peers if necessary.
-                state
-                    .network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessage(vec![], m.clone()),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                self.on_broadcasted_message(state, peer_id.clone(), m).await;
+                self.process_or_stash_broadcasted_message(state, peer_id, m)
+                    .await;
             }
             FiberMessage::ChannelNormalOperation(m) => {
                 let channel_id = m.get_channel_id();
@@ -482,8 +477,7 @@ where
                     messages,
                 }) => {
                     for message in messages {
-                        self.on_broadcasted_message(state, peer_id.clone(), message)
-                            .await;
+                        self.process_broadcasted_message(message).await;
                     }
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
@@ -1199,11 +1193,23 @@ where
                     }
                 }
             },
+            NetworkActorCommand::MarkSyncingDone => {
+                state.in_sync = false;
+                let mut broadcasted_message_queue = vec![];
+                std::mem::swap(
+                    &mut state.broadcasted_message_queue,
+                    &mut broadcasted_message_queue,
+                );
+                for message in broadcasted_message_queue.drain(..) {
+                    let (_peer_id, message) = message;
+                    self.process_broadcasted_message(message).await;
+                }
+            }
         };
         Ok(())
     }
 
-    async fn on_broadcasted_message(
+    async fn process_or_stash_broadcasted_message(
         &self,
         state: &mut NetworkActorState,
         peer_id: PeerId,
@@ -1217,7 +1223,17 @@ where
             state.broadcasted_message_queue.push((peer_id, message));
             return;
         }
-        warn!("Received broadcasted message: {:?}", &message);
+        // Rebroadcast the message to other peers if necessary.
+        state
+            .network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::BroadcastMessage(vec![], message.clone()),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        self.process_broadcasted_message(message).await;
+    }
+
+    async fn process_broadcasted_message(&self, message: FiberBroadcastMessage) {
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
