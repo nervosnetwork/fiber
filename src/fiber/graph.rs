@@ -33,7 +33,7 @@ pub struct NodeInfo {
     // not the time of the NodeAnnouncement itself.
     pub timestamp: u64,
 
-    pub anouncement_msg: Option<NodeAnnouncement>,
+    pub anouncement_msg: NodeAnnouncement,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -664,15 +664,23 @@ impl PaymentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fiber::test_utils::generate_pubkey;
+    use crate::fiber::test_utils::{generate_keypair, generate_pubkey};
     use crate::store::Store;
     use ckb_types::prelude::Entity;
-    use secp256k1::{PublicKey, XOnlyPublicKey};
+    use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
 
     fn generate_keys(num: usize) -> Vec<PublicKey> {
         let mut keys = vec![];
         for _ in 0..num {
             keys.push(generate_pubkey());
+        }
+        keys
+    }
+
+    fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
+        let mut keys = vec![];
+        for _ in 0..num {
+            keys.push(generate_keypair());
         }
         keys
     }
@@ -687,24 +695,29 @@ mod tests {
         pub fn new(node_num: usize) -> Self {
             let temp_path = tempfile::tempdir().unwrap();
             let store = Store::new(temp_path.path());
-            let keys = generate_keys(node_num + 1);
-            let public_key1 = keys[0];
+            let keypairs = generate_key_pairs(node_num + 1);
+            let (secret_key1, public_key1) = keypairs[0];
             let mut graph = NetworkGraph::new(store, public_key1.into());
             graph.add_node(NodeInfo {
                 node_id: public_key1.into(),
                 timestamp: 0,
-                anouncement_msg: None,
+                anouncement_msg: NodeAnnouncement::new("node0".into(), vec![], &secret_key1.into()),
             });
-            for i in 1..keys.len() {
+            for i in 1..keypairs.len() {
+                let (sk, pk) = keypairs[i];
                 let node = NodeInfo {
-                    node_id: keys[i].into(),
+                    node_id: pk.into(),
                     timestamp: 0,
-                    anouncement_msg: None,
+                    anouncement_msg: NodeAnnouncement::new(
+                        format!("node{i}").as_str().into(),
+                        vec![],
+                        &sk.into(),
+                    ),
                 };
                 graph.add_node(node);
             }
             Self {
-                keys,
+                keys: keypairs.into_iter().map(|x| x.1).collect(),
                 edges: vec![],
                 graph,
             }

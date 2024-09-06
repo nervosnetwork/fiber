@@ -569,15 +569,14 @@ where
 
         let mut queries = Vec::new();
         for node_info in network_graph.nodes() {
-            if let Some(node_announcement) = &node_info.anouncement_msg {
-                if is_within_range(node_announcement.version) {
-                    queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
-                        NodeAnnouncementQuery {
-                            node_id: node_info.node_id.clone(),
-                            flags: 0,
-                        },
-                    ));
-                }
+            let node_announcement = &node_info.anouncement_msg;
+            if is_within_range(node_announcement.version) {
+                queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
+                    NodeAnnouncementQuery {
+                        node_id: node_info.node_id.clone(),
+                        flags: 0,
+                    },
+                ));
             }
         }
         for channel_info in network_graph.channels() {
@@ -627,18 +626,9 @@ where
             }) => {
                 let node_info = network_graph.get_node(node_id.clone());
                 match node_info {
-                    Some(node_info) => {
-                        if let Some(node_announcement) = &node_info.anouncement_msg {
-                            Ok(FiberBroadcastMessage::NodeAnnouncement(
-                                node_announcement.clone(),
-                            ))
-                        } else {
-                            Err(Error::InvalidParameter(format!(
-                                "Node announcement not found: {:?}",
-                                &node_id
-                            )))
-                        }
-                    }
+                    Some(node_info) => Ok(FiberBroadcastMessage::NodeAnnouncement(
+                        node_info.anouncement_msg.clone(),
+                    )),
                     None => Err(Error::InvalidParameter(format!(
                         "Node not found: {:?}",
                         &node_id
@@ -1295,7 +1285,7 @@ where
                         let node_info = NodeInfo {
                             node_id: node_announcement.node_id,
                             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-                            anouncement_msg: Some(node_announcement.clone()),
+                            anouncement_msg: node_announcement.clone(),
                         };
                         self.network_graph.write().await.add_node(node_info);
                     }
