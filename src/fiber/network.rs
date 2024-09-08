@@ -146,7 +146,10 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
-    GetChannelsWithinBlockRangeFromPeer((PeerId, u64, u64), RpcReplyPort<EcdsaSignature>),
+    GetChannelsWithinBlockRangeFromPeer(
+        (PeerId, u64, u64),
+        RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>,
+    ),
     MarkSyncingDone,
 }
 
@@ -1227,7 +1230,22 @@ where
                     self.process_broadcasted_message(message).await;
                 }
             }
-            NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(_, _) => todo!(),
+            NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(request, reply) => {
+                let (peer_id, start_block, end_block) = request;
+                let channels = self
+                    .query_channels_within_block_range(start_block, end_block)
+                    .await
+                    .into_iter()
+                    .map(|c| c.out_point())
+                    .collect();
+                let id = state.get_request_id_for_reply_port(reply);
+                let message = FiberMessage::QueryInformation(
+                    FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
+                        QueryChannelsWithinBlockRangeResult { id, channels },
+                    ),
+                );
+                state.send_message_to_peer(&peer_id, message).await?;
+            }
         };
         Ok(())
     }
@@ -1697,6 +1715,11 @@ pub struct NetworkActorState {
     // message of the same type.
     broadcasted_messages: HashSet<Hash256>,
     channel_subscribers: ChannelSubscribers,
+    // Request id for the next request.
+    next_request_id: u64,
+    // The response of these broadcast messages will be sent to the corresponding channel.
+    broadcast_message_responses:
+        HashMap<u64, RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>>,
     // This field holds the information about our syncing status.
     sync_status: NetworkSyncStatus,
     // A queue of messages that are received while we are syncing network messages.
@@ -1745,6 +1768,18 @@ impl NetworkActorState {
         let result = blake2b_hash_with_salt(&seed, b"FIBER_CHANNEL_SEED");
         self.entropy = blake2b_hash_with_salt(&result, b"FIBER_NETWORK_ENTROPY_UPDATE");
         result
+    }
+
+    // Create a channel which will receive the response from the peer.
+    // The channel will be closed after the response is received.
+    pub fn get_request_id_for_reply_port(
+        &mut self,
+        reply_port: RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>,
+    ) -> u64 {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.broadcast_message_responses.insert(id, reply_port);
+        id
     }
 
     pub async fn create_outbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
@@ -2591,6 +2626,8 @@ where
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
+            next_request_id: Default::default(),
+            broadcast_message_responses: Default::default(),
             sync_status: NetworkSyncStatus::new(height, last_update, peers_to_sync_network_graph),
             broadcasted_message_queue: Default::default(),
         };

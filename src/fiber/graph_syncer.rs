@@ -1,13 +1,33 @@
 //! This is the main module for the graph syncer. It is responsible for
 //! syncing the graph with one specific peer.
 
-use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
-use tentacle::secio::PeerId;
+use std::{cmp::max, u64};
 
-use super::{network::GraphSyncerExitStatus, NetworkActorEvent, NetworkActorMessage};
+use ractor::{async_trait as rasync_trait, call, Actor, ActorProcessingErr, ActorRef};
+use tentacle::secio::PeerId;
+use tracing::{debug, error};
+
+use super::{
+    network::GraphSyncerExitStatus, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+    ASSUME_NETWORK_ACTOR_ALIVE,
+};
+
+// We assume all the channels with funding trsaction block number
+// < latest height - ASSUME_MAX_CHANNEL_HEIGHT_GAP are already synced.
+const ASSUME_MAX_CHANNEL_HEIGHT_GAP: u64 = 1000;
+
+// We assume all the messages with timestamp <
+// latest timestamp - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP are already synced.
+const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
 
 pub enum GraphSyncerMessage {
     PeerDisConnected,
+    // The u64 is the starting height of the channels we want to sync.
+    // The ending height is left to the syncer actor to decide.
+    GetChannels(u64),
+    // The u64 is the starting time of the messages we want to sync.
+    // The ending time is left to the syncer actor to decide.I
+    GetBroadcastMessages(u64),
 }
 
 pub struct GraphSyncerState {
@@ -18,10 +38,12 @@ pub struct GraphSyncerState {
 pub struct GraphSyncer {
     network: ActorRef<NetworkActorMessage>,
     peer_id: PeerId,
-    // We will only sync channels after this block number.
+    // We will only sync channels within this block range.
     starting_height: u64,
-    // We will only sync messages after this time.
+    ending_height: u64,
+    // We will only sync messages within this time range.
     starting_time: u64,
+    ending_time: u64,
 }
 
 impl GraphSyncer {
@@ -31,11 +53,15 @@ impl GraphSyncer {
         starting_height: u64,
         starting_time: u64,
     ) -> Self {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
         Self {
             network,
             peer_id,
             starting_height,
+            // TODO: should use the actual current height.
+            ending_height: u64::MAX,
             starting_time,
+            ending_time: now,
         }
     }
 }
@@ -47,7 +73,7 @@ impl GraphSyncer {
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::GraphSyncerExited(peer_id, status),
             ))
-            .expect("Network actor must be alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 }
 
@@ -59,9 +85,15 @@ impl Actor for GraphSyncer {
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         _args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        let starting_height = if self.starting_height < ASSUME_MAX_CHANNEL_HEIGHT_GAP {
+            0
+        } else {
+            self.starting_height - ASSUME_MAX_CHANNEL_HEIGHT_GAP
+        };
+        myself.send_message(GraphSyncerMessage::GetChannels(starting_height))?;
         Ok(Self::State {
             synced_height: self.starting_height,
             synced_time: self.starting_time,
@@ -70,7 +102,7 @@ impl Actor for GraphSyncer {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -78,6 +110,41 @@ impl Actor for GraphSyncer {
             GraphSyncerMessage::PeerDisConnected => {
                 self.tell_network_we_want_to_exit(GraphSyncerExitStatus::Failed);
             }
+            GraphSyncerMessage::GetChannels(starting_height) => {
+                if starting_height > self.ending_height {
+                    panic!("Starting height to high (starting height {}, ending height {}), should have exited syncing earlier", starting_height, self.ending_height);
+                }
+                const STEP: u64 = 10;
+                let ending_height = max(starting_height + STEP, self.ending_height);
+                let request = |rpc_reply| {
+                    NetworkActorMessage::new_command(
+                        NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(
+                            (self.peer_id.clone(), starting_height, ending_height),
+                            rpc_reply,
+                        ),
+                    )
+                };
+                match call!(self.network, request).expect(ASSUME_NETWORK_ACTOR_ALIVE) {
+                    Ok(_) => {
+                        debug!("Get channels from peer successfully.");
+                        if self.ending_height == ending_height {
+                            myself.send_message(GraphSyncerMessage::GetChannels(ending_height))?;
+                        } else {
+                            debug!("Starting get broadcast messages from peer after getting channels finished");
+                            myself.send_message(GraphSyncerMessage::GetChannels(
+                                self.starting_time,
+                            ))?;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get channels from peer: {:?}", e);
+                        self.tell_network_we_want_to_exit(GraphSyncerExitStatus::Failed);
+                    }
+                }
+            }
+            GraphSyncerMessage::GetBroadcastMessages(message) => {
+                todo!();
+            },
         }
         Ok(())
     }

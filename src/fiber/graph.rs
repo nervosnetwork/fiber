@@ -16,13 +16,6 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_MIN_PROBABILITY: f64 = 0.01;
 
-// We assume all the channels with funding trsaction block number
-// < latest height - ASSUME_MAX_CHANNEL_HEIGHT_GAP are already synced.
-const ASSUME_MAX_CHANNEL_HEIGHT_GAP: u64 = 1000;
-// We assume all the messages with timestamp <
-// latest timestamp - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP are already synced.
-const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
-
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Details about a node in the network, known from the network announcement.

@@ -65,7 +65,7 @@ use super::{
         Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
         TxCollaborationMsg, TxComplete, TxUpdate,
     },
-    NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
+    NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
 
 // - `version`: 8 bytes, u64 in little-endian
@@ -78,8 +78,6 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
 // so that we can get previous commitment point/number without checking if the channel
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
-
-const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
 
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.

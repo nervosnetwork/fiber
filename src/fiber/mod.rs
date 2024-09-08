@@ -28,3 +28,5 @@ mod graph_syncer;
 
 #[cfg(test)]
 pub mod test_utils;
+
+pub(crate) const ASSUME_NETWORK_ACTOR_ALIVE: &str = "network actor must be alive";
