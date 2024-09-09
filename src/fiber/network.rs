@@ -499,14 +499,27 @@ where
                         .await?;
                 }
                 FiberQueryInformation::GetBroadcastMessagesResult(GetBroadcastMessagesResult {
-                    id: _,
+                    id,
                     messages,
                 }) => {
+                    let reply_port = match state.get_reply_port_for_request(&peer_id, id) {
+                        Some(reply_port) => reply_port,
+                        None => {
+                            error!(
+                                "No reply port for query broadcast messages with id {} from peer {:?}",
+                                id, &peer_id
+                            );
+                            return Ok(());
+                        }
+                    };
                     for message in messages {
                         if let Err(e) = self.process_broadcasted_message(message).await {
                             error!("Failed to process broadcasted message: {:?}", e);
+                            let _ = reply_port.send(Err(e));
+                            return Ok(());
                         }
                     }
+                    let _ = reply_port.send(Ok(()));
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
                     QueryChannelsWithinBlockRange {
@@ -530,9 +543,37 @@ where
                         .await?;
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                    QueryChannelsWithinBlockRangeResult { id: _, channels: _ },
+                    QueryChannelsWithinBlockRangeResult { id, channels },
                 ) => {
-                    // We should send the results to the caller here (e.g. using id above).
+                    if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
+                        let query = GetBroadcastMessages {
+                            id: new_id,
+                            queries: channels
+                                .into_iter()
+                                .map(|channel_outpoint: OutPoint| {
+                                    FiberBroadcastMessageQuery::ChannelAnnouncement(
+                                        ChannelAnnouncementQuery {
+                                            channel_outpoint,
+                                            flags: 0,
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        };
+                        state
+                            .send_message_to_peer(
+                                &peer_id,
+                                FiberMessage::QueryInformation(
+                                    FiberQueryInformation::GetBroadcastMessages(query),
+                                ),
+                            )
+                            .await?;
+                    } else {
+                        error!(
+                            "No response for query channels with id {} expected from peer {:?}",
+                            id, &peer_id
+                        );
+                    }
                 }
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
                     QueryBroadcastMessagesWithinTimeRange {
@@ -553,9 +594,27 @@ where
                         .await?;
                 }
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
-                    QueryBroadcastMessagesWithinTimeRangeResult { id: _, queries: _ },
+                    QueryBroadcastMessagesWithinTimeRangeResult { id, queries },
                 ) => {
-                    // We should send the results to the caller here (e.g. using id above).
+                    if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
+                        let query = GetBroadcastMessages {
+                            id: new_id,
+                            queries,
+                        };
+                        state
+                            .send_message_to_peer(
+                                &peer_id,
+                                FiberMessage::QueryInformation(
+                                    FiberQueryInformation::GetBroadcastMessages(query),
+                                ),
+                            )
+                            .await?;
+                    } else {
+                        error!(
+                            "No response for query broadcast messages with id {} expected from peer {:?}",
+                            id, &peer_id
+                        );
+                    }
                 }
             },
         };
@@ -1250,7 +1309,7 @@ where
             }
             NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(request, reply) => {
                 let (peer_id, start_block, end_block) = request;
-                let id = state.get_request_id_for_reply_port(reply);
+                let id = state.create_request_id_for_reply_port(&peer_id, reply);
                 let message = FiberMessage::QueryInformation(
                     FiberQueryInformation::QueryChannelsWithinBlockRange(
                         QueryChannelsWithinBlockRange {
@@ -1268,7 +1327,7 @@ where
                 reply,
             ) => {
                 let (peer_id, start_time, end_time) = request;
-                let id = state.get_request_id_for_reply_port(reply);
+                let id = state.create_request_id_for_reply_port(&peer_id, reply);
                 let message = FiberMessage::QueryInformation(
                     FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
                         QueryBroadcastMessagesWithinTimeRange {
@@ -1747,7 +1806,8 @@ pub struct NetworkActorState {
     // Request id for the next request.
     next_request_id: u64,
     // The response of these broadcast messages will be sent to the corresponding channel.
-    broadcast_message_responses: HashMap<u64, RpcReplyPort<Result<(), Error>>>,
+    broadcast_message_responses: HashMap<(PeerId, u64), RpcReplyPort<Result<(), Error>>>,
+    original_requests: HashMap<(PeerId, u64), u64>,
     // This field holds the information about our syncing status.
     sync_status: NetworkSyncStatus,
     // A queue of messages that are received while we are syncing network messages.
@@ -1800,14 +1860,43 @@ impl NetworkActorState {
 
     // Create a channel which will receive the response from the peer.
     // The channel will be closed after the response is received.
-    pub fn get_request_id_for_reply_port(
+    pub fn create_request_id_for_reply_port(
         &mut self,
+        peer_id: &PeerId,
         reply_port: RpcReplyPort<Result<(), Error>>,
     ) -> u64 {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.broadcast_message_responses.insert(id, reply_port);
+        self.broadcast_message_responses
+            .insert((peer_id.clone(), id), reply_port);
         id
+    }
+
+    pub fn get_reply_port_for_request(
+        &mut self,
+        peer_id: &PeerId,
+        request_id: u64,
+    ) -> Option<RpcReplyPort<Result<(), Error>>> {
+        let original_id = self
+            .original_requests
+            .remove(&(peer_id.clone(), request_id))?;
+
+        self.broadcast_message_responses
+            .remove(&(peer_id.clone(), original_id))
+    }
+
+    fn derive_new_request_id(&mut self, peer_id: &PeerId, old_id: u64) -> Option<u64> {
+        if self
+            .broadcast_message_responses
+            .contains_key(&(peer_id.clone(), old_id))
+        {
+            let id = self.next_request_id;
+            self.next_request_id += 1;
+            self.original_requests.insert((peer_id.clone(), id), old_id);
+            Some(id)
+        } else {
+            None
+        }
     }
 
     pub async fn create_outbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
@@ -2656,6 +2745,7 @@ where
             channel_subscribers,
             next_request_id: Default::default(),
             broadcast_message_responses: Default::default(),
+            original_requests: Default::default(),
             sync_status: NetworkSyncStatus::new(height, last_update, peers_to_sync_network_graph),
             broadcasted_message_queue: Default::default(),
         };
