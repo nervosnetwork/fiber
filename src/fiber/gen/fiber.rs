@@ -7496,12 +7496,7 @@ impl ::core::fmt::Display for RevokeAndAck {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(
-            f,
-            ", {}: {}",
-            "per_commitment_secret",
-            self.per_commitment_secret()
-        )?;
+        write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         write!(
             f,
             ", {}: {}",
@@ -7551,7 +7546,7 @@ impl RevokeAndAck {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn per_commitment_secret(&self) -> Byte32 {
+    pub fn partial_signature(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
@@ -7595,7 +7590,7 @@ impl molecule::prelude::Entity for RevokeAndAck {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .per_commitment_secret(self.per_commitment_secret())
+            .partial_signature(self.partial_signature())
             .next_per_commitment_point(self.next_per_commitment_point())
     }
 }
@@ -7619,12 +7614,7 @@ impl<'r> ::core::fmt::Display for RevokeAndAckReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(
-            f,
-            ", {}: {}",
-            "per_commitment_secret",
-            self.per_commitment_secret()
-        )?;
+        write!(f, ", {}: {}", "partial_signature", self.partial_signature())?;
         write!(
             f,
             ", {}: {}",
@@ -7662,7 +7652,7 @@ impl<'r> RevokeAndAckReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn per_commitment_secret(&self) -> Byte32Reader<'r> {
+    pub fn partial_signature(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[8..]) as usize;
         let end = molecule::unpack_number(&slice[12..]) as usize;
@@ -7734,7 +7724,7 @@ impl<'r> molecule::prelude::Reader<'r> for RevokeAndAckReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct RevokeAndAckBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) per_commitment_secret: Byte32,
+    pub(crate) partial_signature: Byte32,
     pub(crate) next_per_commitment_point: Pubkey,
 }
 impl RevokeAndAckBuilder {
@@ -7743,8 +7733,8 @@ impl RevokeAndAckBuilder {
         self.channel_id = v;
         self
     }
-    pub fn per_commitment_secret(mut self, v: Byte32) -> Self {
-        self.per_commitment_secret = v;
+    pub fn partial_signature(mut self, v: Byte32) -> Self {
+        self.partial_signature = v;
         self
     }
     pub fn next_per_commitment_point(mut self, v: Pubkey) -> Self {
@@ -7758,7 +7748,7 @@ impl molecule::prelude::Builder for RevokeAndAckBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.per_commitment_secret.as_slice().len()
+            + self.partial_signature.as_slice().len()
             + self.next_per_commitment_point.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -7767,7 +7757,7 @@ impl molecule::prelude::Builder for RevokeAndAckBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.per_commitment_secret.as_slice().len();
+        total_size += self.partial_signature.as_slice().len();
         offsets.push(total_size);
         total_size += self.next_per_commitment_point.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
@@ -7775,7 +7765,7 @@ impl molecule::prelude::Builder for RevokeAndAckBuilder {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.per_commitment_secret.as_slice())?;
+        writer.write_all(self.partial_signature.as_slice())?;
         writer.write_all(self.next_per_commitment_point.as_slice())?;
         Ok(())
     }

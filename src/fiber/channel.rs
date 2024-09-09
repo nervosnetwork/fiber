@@ -1557,6 +1557,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
 
+    pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding
@@ -1826,6 +1827,7 @@ impl ChannelActorState {
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: None,
+            previous_remote_nonce: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
             local_shutdown_signature: None,
@@ -1883,6 +1885,7 @@ impl ChannelActorState {
             max_num_of_accept_tlcs,
             max_tlc_value_in_flight,
             remote_channel_parameters: None,
+            previous_remote_nonce: None,
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
@@ -2054,26 +2057,76 @@ impl ChannelActorState {
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        // Now we should revoke previous transation by revealing preimage.
-        let (commitment_number, commitment_secret) = self.get_previous_local_commitment_secret();
+        let commitment_tx_fee =
+            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let lock_script = self.get_default_remote_funding_script();
+        let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(capacity.pack())
+                .build();
+
+            let output_data = self.total_amount.to_le_bytes().pack();
+            (output, output_data)
+        } else {
+            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .capacity(capacity.pack())
+                .build();
+            let output_data = Bytes::default();
+            (output, output_data)
+        };
+
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let key_agg_ctx = KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys");
+
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let delay_epoch = self.get_remote_channel_parameters().selected_contest_delay;
+        let commitment_number = self.get_remote_commitment_number();
+        let commitment_lock_script_args = [
+            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            commitment_number.to_be_bytes().as_slice(),
+        ]
+        .concat();
+
+        let message = blake2b_256(
+            [
+                output.as_slice(),
+                output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+        let local_nonce = self.get_local_nonce();
+        let remote_nonce = self.get_previous_remote_nonce();
+        let nonces = [local_nonce, remote_nonce];
+        let agg_nonce = AggNonce::sum(nonces);
+        let sign_ctx = Musig2SignContext {
+            key_agg_ctx,
+            agg_nonce,
+            seckey: self.signer.funding_key,
+            secnonce: self.get_local_musig2_secnonce(),
+        };
+        let signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
+
         // Note that we must update channel state here to update commitment number,
         // so that next step will obtain the correct commitmen point.
         self.update_state_on_raa_msg(false);
         let point = self.get_current_local_commitment_point();
 
-        debug!(
-            "Sending commitment secret {:?} for commitment number {} and new commitment point {:?}",
-            hex::encode(&commitment_secret),
-            commitment_number,
-            point
-        );
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
                     message: FiberMessage::RevokeAndAck(RevokeAndAck {
                         channel_id: self.get_id(),
-                        per_commitment_secret: commitment_secret.into(),
+                        partial_signature: signature,
                         next_per_commitment_point: point,
                     }),
                 }),
@@ -2196,6 +2249,10 @@ impl ChannelActorState {
 
     pub fn get_remote_nonce(&self) -> PubNonce {
         self.remote_nonce.as_ref().unwrap().clone()
+    }
+
+    pub fn get_previous_remote_nonce(&self) -> PubNonce {
+        self.previous_remote_nonce.as_ref().unwrap().clone()
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -2464,20 +2521,6 @@ impl ChannelActorState {
             commitment_point
         );
         commitment_point
-    }
-
-    fn get_previous_remote_commitment_point(&self) -> (u64, Pubkey) {
-        let commitment_number = self.get_local_commitment_number() - 1;
-        (
-            commitment_number,
-            self.get_remote_commitment_point(commitment_number),
-        )
-    }
-
-    fn get_previous_local_commitment_secret(&self) -> (u64, [u8; 32]) {
-        let commitment_number = self.get_remote_commitment_number() - 1;
-        let secret = self.signer.get_commitment_secret(commitment_number);
-        (commitment_number, secret)
     }
 
     fn get_current_local_commitment_point(&self) -> Pubkey {
@@ -3313,6 +3356,7 @@ impl ChannelActorState {
             self.get_remote_nonce(),
             &commitment_signed.next_local_nonce
         );
+        self.previous_remote_nonce = self.remote_nonce.clone();
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         self.latest_commitment_transaction = Some(tx.data());
         match flags {
@@ -3463,47 +3507,94 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
+        let commitment_tx_fee =
+            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let lock_script = self.get_default_local_funding_script();
+        let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(capacity.pack())
+                .build();
+
+            let output_data = self.total_amount.to_le_bytes().pack();
+            (output, output_data)
+        } else {
+            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .capacity(capacity.pack())
+                .build();
+            let output_data = Bytes::default();
+            (output, output_data)
+        };
+
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let key_agg_ctx = KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys");
+
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let delay_epoch = self.get_local_channel_parameters().selected_contest_delay;
+        let commitment_number = self.get_local_commitment_number();
+
+        let commitment_lock_script_args = [
+            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            commitment_number.to_be_bytes().as_slice(),
+        ]
+        .concat();
+
+        println!(
+            "handle_revoke_and_ack_message commitment_lock_script_args: {:?}",
+            commitment_lock_script_args
+        );
+
+        let message = blake2b_256(
+            [
+                output.as_slice(),
+                output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+
+        let local_nonce = self.get_local_nonce();
+        let remote_nonce = self.get_remote_nonce();
+        let nonces = [remote_nonce, local_nonce];
+        let agg_nonce = AggNonce::sum(nonces);
+
+        let verify_ctx = Musig2VerifyContext {
+            key_agg_ctx: key_agg_ctx.clone(),
+            agg_nonce: agg_nonce.clone(),
+            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubnonce: self.get_remote_nonce(),
+        };
+
         let RevokeAndAck {
             channel_id: _,
-            per_commitment_secret,
+            partial_signature,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let (commitment_number, per_commitment_point) = self.get_previous_remote_commitment_point();
-        let per_commitment_key = Privkey::from(per_commitment_secret);
-        debug!(
-            "Checking #{} commitment secret {:?} and point {:?} consistency",
-            commitment_number,
-            hex::encode(per_commitment_key.as_ref()),
-            per_commitment_point,
-        );
-        if per_commitment_point != per_commitment_key.pubkey() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
-                commitment_number, per_commitment_key, per_commitment_point
-            )));
-        }
-        let witnesses = self.get_previous_local_commitment_witnesses();
-        let hash = blake2b_256(&witnesses);
-        let script_args: &[u8] = &hash[..20];
-        debug!(
-            "Get previous commitment transaction witnesses: {:?}, hash: {:?}, script_args: {:?}",
-            hex::encode(&witnesses),
-            hex::encode(&hash),
-            hex::encode(&script_args)
-        );
+        verify_ctx.verify(partial_signature, message.as_slice())?;
+
+        let sign_ctx: Musig2SignContext = Musig2SignContext {
+            key_agg_ctx,
+            agg_nonce,
+            seckey: self.signer.funding_key,
+            secnonce: self.get_local_musig2_secnonce(),
+        };
+        let signature2 = sign_ctx.sign(message.as_slice())?;
+
+        let aggregate_signature = aggregate_partial_signatures_for_msg(
+            message.as_slice(),
+            verify_ctx,
+            [partial_signature, signature2],
+        )?;
 
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
-
-        debug!(
-            "Revocation base keys: local {:?}, remote {:?}",
-            self.local_channel_parameters.pubkeys.revocation_base_key,
-            self.remote_channel_parameters
-                .as_ref()
-                .unwrap()
-                .pubkeys
-                .revocation_base_key,
-        );
 
         emit_service_event(
             network,
@@ -3511,14 +3602,10 @@ impl ChannelActorState {
                 self.peer_id.clone(),
                 self.get_id(),
                 commitment_number,
-                per_commitment_key,
-                self.remote_channel_parameters
-                    .as_ref()
-                    .unwrap()
-                    .pubkeys
-                    .revocation_base_key,
-                witnesses,
-                next_per_commitment_point,
+                x_only_aggregated_pubkey,
+                aggregate_signature,
+                output,
+                output_data,
             ),
         );
         Ok(())
@@ -3938,7 +4025,7 @@ impl ChannelActorState {
             let funding_out_point = self.get_funding_transaction_outpoint();
             let cell_deps =
                 get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
-            let (output, output_data) = self.build_commitment_transaction_outputs(local);
+            let (output, output_data) = self.build_commitment_transaction_output(local);
 
             TransactionBuilder::default()
                 .cell_deps(cell_deps)
@@ -3975,17 +4062,7 @@ impl ChannelActorState {
         (commitment_tx, settlement_tx)
     }
 
-    fn get_local_commitment_witnesses(&self, commitment_number: u64) -> Vec<u8> {
-        debug_assert!(commitment_number < self.get_local_commitment_number());
-        // TODO: refactor this function
-        Vec::new()
-    }
-
-    fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
-        self.get_local_commitment_witnesses(self.get_local_commitment_number() - 1)
-    }
-
-    fn build_commitment_transaction_outputs(&self, local: bool) -> (CellOutput, Bytes) {
+    fn build_commitment_transaction_output(&self, local: bool) -> (CellOutput, Bytes) {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -4727,11 +4804,10 @@ mod tests {
     use ckb_jsonrpc_types::Status;
     use ckb_types::{
         core::FeeRate,
-        packed::{Bytes, CellInput, CellOutput, Script, Transaction},
-        prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
+        packed::{CellInput, Script, Transaction},
+        prelude::{AsTransactionBuilder, Builder, Entity, Pack},
     };
     use ractor::call;
-    use tracing::debug;
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
@@ -5468,28 +5544,26 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let (privkey, witnesses) = node_a
+        let (x_only_aggregated_pubkey, signature, output, output_data) = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RevokeAndAckReceived(
                     peer_id,
                     channel_id,
                     commitment_number,
-                    commitment_secret,
-                    revocation_base_pubkey,
-                    witnesses,
-                    _commitment_point,
+                    x_only_aggregated_pubkey,
+                    signature,
+                    output,
+                    output_data,
                 ) => {
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(*commitment_number, 0u64);
-                    let key = derive_private_key(&commitment_secret, &revocation_base_pubkey);
-                    debug!(
-                        "Get revocation base pubkey {:?}, commitment secret {:?}, new key {:?}",
-                        &revocation_base_pubkey,
-                        hex::encode(commitment_secret.as_ref()),
-                        hex::encode(key.as_ref())
-                    );
-                    Some((key, witnesses.clone()))
+                    assert_eq!(*commitment_number, 1u64);
+                    Some((
+                        x_only_aggregated_pubkey.clone(),
+                        signature.clone(),
+                        output.clone(),
+                        output_data.clone(),
+                    ))
                 }
                 _ => None,
             })
@@ -5500,35 +5574,32 @@ mod tests {
             Status::Committed
         );
 
-        dbg!(hex::encode(privkey.as_ref()));
-        dbg!(&commitment_tx);
+        println!("commitment_tx: {:?}", commitment_tx);
 
         let tx = Transaction::default()
             .as_advanced_builder()
             .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
             .input(
                 CellInput::new_builder()
-                    // The second output of the commitment tx is the output locked by the commitment lock.
-                    .previous_output(commitment_tx.output_pts().get(1).unwrap().clone())
+                    .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
                     .build(),
             )
-            .outputs(vec![CellOutput::new_builder()
-                .capacity((62u64 * 100_000_000).pack())
-                .lock(Script::new_builder().build())
-                .build()])
-            .outputs_data(vec![Bytes::default(); 1].pack())
+            .output(output)
+            .output_data(output_data)
             .build();
 
-        let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-        let signature = privkey.sign_ecdsa_recoverable(&message.into());
-
-        dbg!(hex::encode(&witnesses));
-
-        let witness = [witnesses.to_vec(), vec![0xFF], signature.to_vec()].concat();
+        let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+        let witness = [
+            empty_witness_args.to_vec(),
+            vec![0xFF],
+            1u64.to_be_bytes().to_vec(),
+            x_only_aggregated_pubkey.to_vec(),
+            signature.serialize().to_vec(),
+        ]
+        .concat();
 
         let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
-        dbg!(&revocation_tx);
         assert_eq!(
             node_a.submit_tx(revocation_tx.clone()).await,
             Status::Committed

@@ -999,7 +999,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
-    pub per_commitment_secret: Hash256,
+    pub partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
 }
 
@@ -1007,7 +1007,9 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
     fn from(revoke_and_ack: RevokeAndAck) -> Self {
         molecule_fiber::RevokeAndAck::new_builder()
             .channel_id(revoke_and_ack.channel_id.into())
-            .per_commitment_secret(revoke_and_ack.per_commitment_secret.into())
+            .partial_signature(partial_signature_to_molecule(
+                revoke_and_ack.partial_signature,
+            ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
             .build()
     }
@@ -1019,7 +1021,10 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
         Ok(RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
-            per_commitment_secret: revoke_and_ack.per_commitment_secret().into(),
+            partial_signature: PartialSignature::from_slice(
+                revoke_and_ack.partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
         })
     }
