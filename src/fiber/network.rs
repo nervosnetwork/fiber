@@ -458,8 +458,12 @@ where
                 }
             }
             FiberMessage::BroadcastMessage(m) => {
-                self.process_or_stash_broadcasted_message(state, peer_id, m)
-                    .await;
+                if let Err(e) = self
+                    .process_or_stash_broadcasted_message(state, peer_id, m)
+                    .await
+                {
+                    error!("Failed to process broadcasted message: {:?}", e);
+                }
             }
             FiberMessage::ChannelNormalOperation(m) => {
                 let channel_id = m.get_channel_id();
@@ -499,7 +503,9 @@ where
                     messages,
                 }) => {
                     for message in messages {
-                        self.process_broadcasted_message(message).await;
+                        if let Err(e) = self.process_broadcasted_message(message).await {
+                            error!("Failed to process broadcasted message: {:?}", e);
+                        }
                     }
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
@@ -1237,7 +1243,9 @@ where
                 );
                 for message in broadcasted_message_queue.drain(..) {
                     let (_peer_id, message) = message;
-                    self.process_broadcasted_message(message).await;
+                    if let Err(e) = self.process_broadcasted_message(message).await {
+                        error!("Failed to process broadcasted message: {:?}", e);
+                    }
                 }
             }
             NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(request, reply) => {
@@ -1282,14 +1290,14 @@ where
         state: &mut NetworkActorState,
         peer_id: PeerId,
         message: FiberBroadcastMessage,
-    ) {
+    ) -> Result<(), Error> {
         if state.sync_status.is_syncing() {
             debug!(
                 "Saving broadcasted message to queue as we are syncing: {:?}",
                 &message
             );
             state.broadcasted_message_queue.push((peer_id, message));
-            return;
+            return Ok(());
         }
         // Rebroadcast the message to other peers if necessary.
         state
@@ -1298,11 +1306,13 @@ where
                 NetworkActorCommand::BroadcastMessage(vec![], message.clone()),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        self.process_broadcasted_message(message).await;
+        self.process_broadcasted_message(message).await
     }
 
-    async fn process_broadcasted_message(&self, message: FiberBroadcastMessage) {
-        warn!("Processing broadcasted message: {:?}", &message);
+    async fn process_broadcasted_message(
+        &self,
+        message: FiberBroadcastMessage,
+    ) -> Result<(), Error> {
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
@@ -1312,11 +1322,10 @@ where
                     .await
                     .check_chain_hash(node_announcement.chain_hash)
                 {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Node announcement chain hash mismatched: {:?}",
                         &node_announcement
-                    );
-                    return;
+                    )));
                 }
                 match node_announcement.signature {
                     Some(ref signature)
@@ -1334,13 +1343,13 @@ where
                             anouncement_msg: node_announcement.clone(),
                         };
                         self.network_graph.write().await.add_node(node_info);
+                        Ok(())
                     }
                     _ => {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Node announcement message signature verification failed: {:?}",
                             &node_announcement
-                        );
-                        return;
+                        )));
                     }
                 }
             }
@@ -1352,11 +1361,10 @@ where
                 );
                 let message = channel_announcement.message_to_sign();
                 if channel_announcement.node_1_id == channel_announcement.node_2_id {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel announcement node had a channel with itself: {:?}",
                         &channel_announcement
-                    );
-                    return;
+                    )));
                 }
                 if !self
                     .network_graph
@@ -1364,11 +1372,10 @@ where
                     .await
                     .check_chain_hash(channel_announcement.chain_hash)
                 {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel announcement chain hash mismatched: {:?}",
                         &channel_announcement
-                    );
-                    return;
+                    )));
                 }
                 let (node_1_signature, node_2_signature, ckb_signature) = match (
                     channel_announcement.node_1_signature,
@@ -1379,34 +1386,31 @@ where
                         (node_1_signature, node_2_signature, ckb_signature)
                     }
                     _ => {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Channel announcement message signature verification failed, some signatures are missing: {:?}",
                             &channel_announcement
-                        );
-                        return;
+                        )));
                     }
                 };
 
                 if !node_1_signature.verify(&channel_announcement.node_1_id, &message) {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
                         &channel_announcement,
                         &message,
                         &node_1_signature,
                         &channel_announcement.node_1_id
-                    );
-                    return;
+                    )));
                 }
 
                 if !node_2_signature.verify(&channel_announcement.node_2_id, &message) {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
                         &channel_announcement,
                         &message,
                         &node_2_signature,
                         &channel_announcement.node_2_id
-                    );
-                    return;
+                    )));
                 }
 
                 let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
@@ -1433,11 +1437,11 @@ where
                         0u32,
                     ),
                     err => {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
-                            &channel_announcement.channel_outpoint.tx_hash(), err
-                        );
-                        return;
+                            &channel_announcement.channel_outpoint.tx_hash(),
+                            err
+                        )));
                     }
                 };
 
@@ -1447,29 +1451,28 @@ where
                 let pubkey_hash = blake2b_256(pubkey.as_slice());
                 match tx.inner.outputs.get(0) {
                     None => {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "On-chain transaction found but no output: {:?}",
                             &channel_announcement
-                        );
-                        return;
+                        )));
                     }
                     Some(output) => {
                         if output.lock.args.as_bytes() != pubkey_hash {
-                            error!(
+                            return Err(Error::InvalidParameter(format!(
                                 "On-chain transaction found but pubkey hash mismatched: on chain hash {:?}, pub key ({:?}) hash {:?}",
-                                &output.lock.args.as_bytes(), hex::encode(pubkey), &pubkey_hash
-                            );
-                            return;
+                                &output.lock.args.as_bytes(),
+                                hex::encode(pubkey),
+                                &pubkey_hash
+                            )));
                         }
                         let capacity: u128 = u64::from(output.capacity).into();
                         if channel_announcement.udt_type_script.is_some()
                             && capacity != channel_announcement.capacity
                         {
-                            error!(
+                            return Err(Error::InvalidParameter(format!(
                                 "On-chain transaction found but capacity mismatched: on chain capacity {:?}, channel capacity {:?}",
                                 &output.capacity, &channel_announcement.capacity
-                            );
-                            return;
+                            )));
                         }
                         capacity
                     }
@@ -1480,15 +1483,14 @@ where
                     &Message::from_digest(message),
                     &channel_announcement.ckb_key,
                 ) {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel announcement message signature verification failed for ckb: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}, error: {:?}",
                         &channel_announcement,
                         &message,
                         &ckb_signature,
                         &channel_announcement.ckb_key,
                         &err
-                    );
-                    return;
+                    )));
                 }
 
                 debug!(
@@ -1505,7 +1507,8 @@ where
                     two_to_one: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
                 };
-                self.network_graph.write().await.add_channel(channel_info)
+                self.network_graph.write().await.add_channel(channel_info);
+                Ok(())
             }
 
             FiberBroadcastMessage::ChannelUpdate(ref channel_update) => {
@@ -1514,11 +1517,10 @@ where
                 let signature = match channel_update.signature {
                     Some(ref signature) => signature,
                     None => {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Channel update message signature verification failed (signature not found): {:?}",
                             &channel_update
-                        );
-                        return;
+                        )));
                     }
                 };
                 let mut network_graph = self.network_graph.write().await;
@@ -1534,11 +1536,10 @@ where
                         &channel_update, &pubkey, &message
                     );
                     if !signature.verify(&pubkey, &message) {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Channel update message signature verification failed (invalid signature): {:?}",
                             &channel_update
-                        );
-                        return;
+                        )));
                     }
                     debug!(
                         "Channel update message signature verified: {:?}",
@@ -1546,18 +1547,18 @@ where
                     );
                     let res = network_graph.process_channel_update(channel_update.clone());
                     if res.is_err() {
-                        error!(
+                        return Err(Error::InvalidParameter(format!(
                             "Channel update message processing failed: {:?} result: {:?}",
                             &channel_update, res
-                        );
+                        )));
                     }
                 } else {
-                    error!(
+                    return Err(Error::InvalidParameter(format!(
                         "Channel update message signature verification failed (channel not found): {:?}",
                         &channel_update
-                    );
-                    return;
+                    )));
                 }
+                Ok(())
             }
         }
     }
