@@ -3,7 +3,7 @@ use bitflags::bitflags;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
-use crate::fiber::types::ChannelUpdate;
+use crate::fiber::{network::get_chain_hash, types::ChannelUpdate};
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
@@ -1184,7 +1184,7 @@ where
                     ..
                 } = &open_channel;
 
-                if *chain_hash != Hash256::default().into() {
+                if *chain_hash != get_chain_hash() {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(format!(
                         "Invalid chain hash {:?}",
                         chain_hash
@@ -1347,7 +1347,7 @@ where
                 };
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
                 let message = FiberMessage::ChannelInitialization(OpenChannel {
-                    chain_hash: Hash256::default(),
+                    chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
                     funding_amount: channel.to_local_amount,

@@ -118,7 +118,7 @@ impl Actor for GraphSyncer {
                 let ending_height = max(starting_height + STEP, self.ending_height);
                 let request = |rpc_reply| {
                     NetworkActorMessage::new_command(
-                        NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(
+                        NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(
                             (self.peer_id.clone(), starting_height, ending_height),
                             rpc_reply,
                         ),
@@ -128,12 +128,12 @@ impl Actor for GraphSyncer {
                     Ok(_) => {
                         debug!("Get channels from peer successfully.");
                         if self.ending_height == ending_height {
-                            myself.send_message(GraphSyncerMessage::GetChannels(ending_height))?;
-                        } else {
                             debug!("Starting get broadcast messages from peer after getting channels finished");
-                            myself.send_message(GraphSyncerMessage::GetChannels(
+                            myself.send_message(GraphSyncerMessage::GetBroadcastMessages(
                                 self.starting_time,
                             ))?;
+                        } else {
+                            myself.send_message(GraphSyncerMessage::GetChannels(ending_height))?;
                         }
                     }
                     Err(e) => {
@@ -142,9 +142,38 @@ impl Actor for GraphSyncer {
                     }
                 }
             }
-            GraphSyncerMessage::GetBroadcastMessages(message) => {
-                todo!();
-            },
+            GraphSyncerMessage::GetBroadcastMessages(starting_time) => {
+                if starting_time > self.ending_time {
+                    panic!("Starting time to high (starting time {}, ending time {}), should have exited syncing earlier", starting_time, self.ending_time);
+                }
+                const STEP: u64 = 10;
+                let ending_time = max(starting_time + STEP, self.ending_time);
+                let request = |rpc_reply| {
+                    NetworkActorMessage::new_command(
+                        NetworkActorCommand::GetAndProcessBroadcastMessagesWithinTimeRangeFromPeer(
+                            (self.peer_id.clone(), starting_time, ending_time),
+                            rpc_reply,
+                        ),
+                    )
+                };
+                match call!(self.network, request).expect(ASSUME_NETWORK_ACTOR_ALIVE) {
+                    Ok(_) => {
+                        debug!("Get broadcast messages from peer successfully.");
+                        if self.ending_time == ending_time {
+                            debug!("Graph syncer finished syncing with peer.");
+                            self.tell_network_we_want_to_exit(GraphSyncerExitStatus::Succeeded);
+                        } else {
+                            myself.send_message(GraphSyncerMessage::GetBroadcastMessages(
+                                ending_time,
+                            ))?;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get broadcast messages from peer: {:?}", e);
+                        self.tell_network_we_want_to_exit(GraphSyncerExitStatus::Failed);
+                    }
+                }
+            }
         }
         Ok(())
     }

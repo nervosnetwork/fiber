@@ -81,6 +81,10 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 
+pub(crate) fn get_chain_hash() -> Hash256 {
+    Default::default()
+}
+
 #[derive(Debug)]
 pub struct OpenChannelResponse {
     pub channel_id: Hash256,
@@ -146,9 +150,13 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
-    GetChannelsWithinBlockRangeFromPeer(
+    GetAndProcessChannelsWithinBlockRangeFromPeer(
         (PeerId, u64, u64),
-        RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>,
+        RpcReplyPort<Result<(), Error>>,
+    ),
+    GetAndProcessBroadcastMessagesWithinTimeRangeFromPeer(
+        (PeerId, u64, u64),
+        RpcReplyPort<Result<(), Error>>,
     ),
     MarkSyncingDone,
 }
@@ -1230,18 +1238,35 @@ where
                     self.process_broadcasted_message(message).await;
                 }
             }
-            NetworkActorCommand::GetChannelsWithinBlockRangeFromPeer(request, reply) => {
+            NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(request, reply) => {
                 let (peer_id, start_block, end_block) = request;
-                let channels = self
-                    .query_channels_within_block_range(start_block, end_block)
-                    .await
-                    .into_iter()
-                    .map(|c| c.out_point())
-                    .collect();
                 let id = state.get_request_id_for_reply_port(reply);
                 let message = FiberMessage::QueryInformation(
-                    FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                        QueryChannelsWithinBlockRangeResult { id, channels },
+                    FiberQueryInformation::QueryChannelsWithinBlockRange(
+                        QueryChannelsWithinBlockRange {
+                            id,
+                            chain_hash: get_chain_hash(),
+                            start_block,
+                            end_block,
+                        },
+                    ),
+                );
+                state.send_message_to_peer(&peer_id, message).await?;
+            }
+            NetworkActorCommand::GetAndProcessBroadcastMessagesWithinTimeRangeFromPeer(
+                request,
+                reply,
+            ) => {
+                let (peer_id, start_time, end_time) = request;
+                let id = state.get_request_id_for_reply_port(reply);
+                let message = FiberMessage::QueryInformation(
+                    FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
+                        QueryBroadcastMessagesWithinTimeRange {
+                            id,
+                            chain_hash: get_chain_hash(),
+                            start_time,
+                            end_time,
+                        },
                     ),
                 );
                 state.send_message_to_peer(&peer_id, message).await?;
@@ -1718,8 +1743,7 @@ pub struct NetworkActorState {
     // Request id for the next request.
     next_request_id: u64,
     // The response of these broadcast messages will be sent to the corresponding channel.
-    broadcast_message_responses:
-        HashMap<u64, RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>>,
+    broadcast_message_responses: HashMap<u64, RpcReplyPort<Result<(), Error>>>,
     // This field holds the information about our syncing status.
     sync_status: NetworkSyncStatus,
     // A queue of messages that are received while we are syncing network messages.
@@ -1774,7 +1798,7 @@ impl NetworkActorState {
     // The channel will be closed after the response is received.
     pub fn get_request_id_for_reply_port(
         &mut self,
-        reply_port: RpcReplyPort<Result<GetBroadcastMessagesResult, Error>>,
+        reply_port: RpcReplyPort<Result<(), Error>>,
     ) -> u64 {
         let id = self.next_request_id;
         self.next_request_id += 1;

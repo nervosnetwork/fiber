@@ -4,6 +4,7 @@ use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
+use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
@@ -1392,7 +1393,7 @@ impl NodeAnnouncement {
             version: Default::default(),
             node_id,
             alias,
-            chain_hash: Default::default(),
+            chain_hash: get_chain_hash(),
             addresses: addresses.iter().map(|a| a.to_vec()).collect(),
         }
     }

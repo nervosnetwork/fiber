@@ -1,4 +1,4 @@
-use super::network::SendPaymentCommand;
+use super::network::{get_chain_hash, SendPaymentCommand};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
@@ -167,7 +167,7 @@ where
             nodes: HashMap::new(),
             connected_peer_addresses: HashMap::new(),
             store,
-            chain_hash: Hash256::default(),
+            chain_hash: get_chain_hash(),
         };
         network_graph.load_from_store();
         network_graph
@@ -762,7 +762,7 @@ mod tests {
                 funding_tx_block_number: 0,
                 funding_tx_index: 0,
                 announcement_msg: ChannelAnnouncement {
-                    chain_hash: Default::default(),
+                    chain_hash: get_chain_hash(),
                     node_1_id: public_key1.into(),
                     node_2_id: public_key2.into(),
                     channel_outpoint: channel_outpoint.clone(),
@@ -781,7 +781,7 @@ mod tests {
             self.graph.add_channel(channel_info);
             let channel_update = ChannelUpdate {
                 signature: None,
-                chain_hash: Hash256::default(),
+                chain_hash: get_chain_hash(),
                 version: 0,
                 message_flags: 1,
                 channel_flags: 0,
