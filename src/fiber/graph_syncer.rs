@@ -52,6 +52,7 @@ impl GraphSyncer {
         network: ActorRef<NetworkActorMessage>,
         peer_id: PeerId,
         starting_height: u64,
+        ending_height: u64,
         starting_time: u64,
     ) -> Self {
         let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
@@ -59,8 +60,7 @@ impl GraphSyncer {
             network,
             peer_id,
             starting_height,
-            // TODO: should use the actual current height.
-            ending_height: u64::MAX,
+            ending_height,
             starting_time,
             ending_time: now,
         }

@@ -1664,6 +1664,10 @@ where
 struct NetworkSyncState {
     // The block number we are syncing from.
     starting_height: u64,
+    // The block number we are syncing up to.
+    // This is normally the tip block number when we startup. We will only actively sync
+    // channel announcement up to this number (other info will be broadcasted by peers).
+    ending_height: u64,
     // The timestamp we started syncing.
     starting_time: u64,
     // All the pinned peers that we are going to sync with.
@@ -1713,6 +1717,7 @@ impl NetworkSyncState {
                     network.clone(),
                     peer_id.clone(),
                     self.starting_height,
+                    self.ending_height,
                     self.starting_time,
                 ),
                 (),
@@ -1742,11 +1747,13 @@ enum NetworkSyncStatus {
 impl NetworkSyncStatus {
     fn new(
         starting_height: u64,
+        ending_height: u64,
         starting_time: u64,
         syncing_peers: Vec<(PeerId, Multiaddr)>,
     ) -> Self {
         let state = NetworkSyncState {
             starting_height,
+            ending_height,
             starting_time,
             pinned_syncing_peers: syncing_peers,
             active_syncers: Default::default(),
@@ -2345,7 +2352,7 @@ impl NetworkActorState {
     fn maybe_finish_sync(&mut self) {
         if let NetworkSyncStatus::Running(state) = &self.sync_status {
             // TODO: It is better to sync with a few more peers to make sure we have the latest data.
-            // But we may only be connected just a few nodes.
+            // But we may only be connected just one node.
             if state.succeeded >= 1 {
                 debug!(
                     "All peers finished syncing, starting time {:?}, finishing time {:?}",
@@ -2732,6 +2739,10 @@ where
             &peers_to_sync_network_graph, &height, &last_update
         );
 
+        let chain_actor = self.chain_actor.clone();
+        let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
+            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+            .expect("Get current block number from chain");
         let state = NetworkActorState {
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
@@ -2747,7 +2758,7 @@ where
             outpoint_channel_map: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
-            chain_actor: self.chain_actor.clone(),
+            chain_actor,
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
@@ -2760,7 +2771,12 @@ where
             next_request_id: Default::default(),
             broadcast_message_responses: Default::default(),
             original_requests: Default::default(),
-            sync_status: NetworkSyncStatus::new(height, last_update, peers_to_sync_network_graph),
+            sync_status: NetworkSyncStatus::new(
+                height,
+                current_block_number,
+                last_update,
+                peers_to_sync_network_graph,
+            ),
             broadcasted_message_queue: Default::default(),
         };
 

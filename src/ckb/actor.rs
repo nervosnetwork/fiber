@@ -36,6 +36,7 @@ pub enum CkbChainMessage {
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
+    GetCurrentBlockNumber((), RpcReplyPort<Result<u64, RpcError>>),
 }
 
 #[derive(Debug)]
@@ -89,8 +90,14 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::{Fund, SendTx, Sign, TraceTx};
+        use CkbChainMessage::{Fund, GetCurrentBlockNumber, SendTx, Sign, TraceTx};
         match message {
+            GetCurrentBlockNumber(_, reply) => {
+                let rpc_url = state.config.rpc_url.clone();
+                let ckb_client = CkbRpcClient::new(&rpc_url);
+                let _ = reply.send(ckb_client.get_tip_block_number().map(|x| x.value()));
+            }
+
             Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(&request);
                 if !reply_port.is_closed() {
@@ -353,6 +360,9 @@ mod test_utils {
         ) -> Result<(), ActorProcessingErr> {
             use CkbChainMessage::*;
             match message {
+                GetCurrentBlockNumber(_, reply) => {
+                    let _ = reply.send(Ok(0));
+                }
                 Fund(tx, request, reply_port) => {
                     let mut fulfilled_tx = tx.clone();
                     let outputs = fulfilled_tx
