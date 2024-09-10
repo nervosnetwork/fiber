@@ -326,10 +326,14 @@ where
 
         if let Some((info, _)) = update_info {
             if update.version <= info.version {
-                warn!(
+                // update.version == info.version happens most possibly because we received the
+                // broadcast many times. Don't emit too many logs in that case.
+                if update.version < info.version {
+                    warn!(
                     "Ignoring updating with an outdated channel update {:?} for channel {:?}, current update info: {:?}",
                     &update, channel_outpoint, &info
                 );
+                }
                 return Ok(());
             }
         }
@@ -347,10 +351,9 @@ where
         ));
 
         self.store.insert_channel(channel.to_owned());
-        tracing::info!(
-            "process_channel_update: {:?} with channel: {:?}",
-            update,
-            channel
+        debug!(
+            "Processed channel update: channel {:?}, update {:?}",
+            &channel, &update
         );
         Ok(())
     }
