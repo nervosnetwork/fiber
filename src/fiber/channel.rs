@@ -449,6 +449,7 @@ impl<S> ChannelActor<S> {
                             script: udt_type_script.clone(),
                         });
                 }
+                warn!("created tlc: {:?}", &tlc);
                 // TODO: here we didn't send any ack message to the peer.
                 // The peer may falsely believe that we have already processed this message,
                 // while we have crashed. We need a way to make sure that the peer will resend
@@ -3560,7 +3561,7 @@ impl ChannelActorState {
             onion_packet: command.onion_packet,
             previous_tlc: command
                 .previous_tlc
-                .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(id))),
+                .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
         }
     }
 
