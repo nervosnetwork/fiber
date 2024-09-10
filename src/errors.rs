@@ -40,6 +40,8 @@ pub enum Error {
     InvalidParameter(String),
     #[error("Network Graph error: {0}")]
     NetworkGraphError(#[from] GraphError),
+    #[error("Invalid peer message: {0}")]
+    InvalidPeerMessage(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

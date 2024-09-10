@@ -506,18 +506,19 @@ where
                     let reply_port = match state.get_reply_port_for_request(&peer_id, id) {
                         Some(reply_port) => reply_port,
                         None => {
-                            error!(
+                            return Err(Error::InvalidPeerMessage(format!(
                                 "No reply port for query broadcast messages with id {} from peer {:?}",
-                                id, &peer_id
-                            );
-                            return Ok(());
+                                id, &peer_id)
+                            ));
                         }
                     };
                     for message in messages {
                         if let Err(e) = self.process_broadcasted_message(message).await {
-                            error!("Failed to process broadcasted message: {:?}", e);
+                            let fail_message =
+                                format!("Failed to process broadcasted message: {:?}", &e);
+                            error!("{}", &fail_message);
                             let _ = reply_port.send(Err(e));
-                            return Ok(());
+                            return Err(Error::InvalidPeerMessage(fail_message));
                         }
                     }
                     debug!(
@@ -550,7 +551,24 @@ where
                 FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
                     QueryChannelsWithinBlockRangeResult { id, channels },
                 ) => {
-                    // TODO: if the channels returned here are empty. Then we don't have to query the peer any more.
+                    if channels.is_empty() {
+                        // No query to the peer needed, early return.
+                        match state
+                            .broadcast_message_responses
+                            .remove(&(peer_id.clone(), id))
+                        {
+                            Some(reply) => {
+                                let _ = reply.send(Ok(()));
+                                return Ok(());
+                            }
+                            _ => {
+                                return Err(Error::InvalidPeerMessage(format!(
+                                    "No response for query channels with id {} expected from peer {:?}",
+                                    id, &peer_id
+                                )));
+                            }
+                        }
+                    }
                     debug!("Received QueryChannelsWithinBlockRangeResult from peer {:?} with id {} and channels {:?}", &peer_id, id, &channels);
                     if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
                         let query = GetBroadcastMessages {
@@ -577,10 +595,10 @@ where
                             )
                             .await?;
                     } else {
-                        error!(
+                        return Err(Error::InvalidPeerMessage(format!(
                             "No response for query channels with id {} expected from peer {:?}",
                             id, &peer_id
-                        );
+                        )));
                     }
                 }
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
@@ -604,6 +622,25 @@ where
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
                     QueryBroadcastMessagesWithinTimeRangeResult { id, queries },
                 ) => {
+                    if queries.is_empty() {
+                        // No query to the peer needed, early return.
+                        match state
+                            .broadcast_message_responses
+                            .remove(&(peer_id.clone(), id))
+                        {
+                            Some(reply) => {
+                                let _ = reply.send(Ok(()));
+                                return Ok(());
+                            }
+                            _ => {
+                                return Err(Error::InvalidPeerMessage(format!(
+                                    "No response for query broadcast messages with id {} expected from peer {:?}",
+                                    id, &peer_id
+                                )));
+                            }
+                        }
+                    }
+
                     if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
                         let query = GetBroadcastMessages {
                             id: new_id,
@@ -618,10 +655,10 @@ where
                             )
                             .await?;
                     } else {
-                        error!(
+                        return Err(Error::InvalidPeerMessage(format!(
                             "No response for query broadcast messages with id {} expected from peer {:?}",
                             id, &peer_id
-                        );
+                        )));
                     }
                 }
             },
@@ -1322,6 +1359,8 @@ where
                 }
             }
             NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(request, reply) => {
+                // TODO: We need to send a reply to the caller if enough time passed,
+                // but we still do not get a reply from the peer.
                 let (peer_id, start_block, end_block) = request;
                 let id = state.create_request_id_for_reply_port(&peer_id, reply);
                 let message = FiberMessage::QueryInformation(
@@ -1340,6 +1379,8 @@ where
                 request,
                 reply,
             ) => {
+                // TODO: We need to send a reply to the caller if enough time passed,
+                // but we still do not get a reply from the peer.
                 let (peer_id, start_time, end_time) = request;
                 let id = state.create_request_id_for_reply_port(&peer_id, reply);
                 let message = FiberMessage::QueryInformation(
