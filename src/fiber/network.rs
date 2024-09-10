@@ -502,6 +502,7 @@ where
                     id,
                     messages,
                 }) => {
+                    debug!("Received GetBroadcastMessagesResult from peer {:?} with id {} and result {:?}", &peer_id, id, &messages);
                     let reply_port = match state.get_reply_port_for_request(&peer_id, id) {
                         Some(reply_port) => reply_port,
                         None => {
@@ -519,6 +520,10 @@ where
                             return Ok(());
                         }
                     }
+                    debug!(
+                        "Successfully processed all the messages from peer {:?} with id {}",
+                        &peer_id, id
+                    );
                     let _ = reply_port.send(Ok(()));
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
@@ -545,6 +550,8 @@ where
                 FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
                     QueryChannelsWithinBlockRangeResult { id, channels },
                 ) => {
+                    // TODO: if the channels returned here are empty. Then we don't have to query the peer any more.
+                    debug!("Received QueryChannelsWithinBlockRangeResult from peer {:?} with id {} and channels {:?}", &peer_id, id, &channels);
                     if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
                         let query = GetBroadcastMessages {
                             id: new_id,
@@ -560,6 +567,7 @@ where
                                 })
                                 .collect(),
                         };
+                        debug!("Trying to query peer {:?} channels {:?}", &peer_id, &query);
                         state
                             .send_message_to_peer(
                                 &peer_id,
@@ -972,7 +980,13 @@ where
                     if let Some(actor) = state.active_syncers.remove(&peer_id) {
                         actor.get_cell().kill();
                     }
+                    debug!("Changing sync succeeded/failed counter");
+                    match reason {
+                        GraphSyncerExitStatus::Succeeded => state.succeeded = state.succeeded + 1,
+                        GraphSyncerExitStatus::Failed => state.failed = state.failed + 1,
+                    }
                 }
+                state.maybe_finish_sync();
             }
         }
         Ok(())
@@ -2332,7 +2346,7 @@ impl NetworkActorState {
         if let NetworkSyncStatus::Running(state) = &self.sync_status {
             // TODO: It is better to sync with a few more peers to make sure we have the latest data.
             // But we may only be connected just a few nodes.
-            if state.succeeded > 1 {
+            if state.succeeded >= 1 {
                 debug!(
                     "All peers finished syncing, starting time {:?}, finishing time {:?}",
                     state.starting_time,

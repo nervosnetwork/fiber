@@ -20,6 +20,7 @@ const ASSUME_MAX_CHANNEL_HEIGHT_GAP: u64 = 1000;
 // latest timestamp - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP are already synced.
 const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
 
+#[derive(Debug)]
 pub enum GraphSyncerMessage {
     PeerDisConnected,
     // The u64 is the starting height of the channels we want to sync.
@@ -106,6 +107,7 @@ impl Actor for GraphSyncer {
         message: Self::Msg,
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Graph syncer handling message {:?}", &message);
         match message {
             GraphSyncerMessage::PeerDisConnected => {
                 self.tell_network_we_want_to_exit(GraphSyncerExitStatus::Failed);
