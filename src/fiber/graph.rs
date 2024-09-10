@@ -215,6 +215,7 @@ where
     }
 
     pub fn add_node(&mut self, node_info: NodeInfo) {
+        warn!("add node: {:?}", node_info);
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
             if old_node.anouncement_msg.version >= node_info.anouncement_msg.version {
@@ -261,16 +262,23 @@ where
                 );
             }
         }
-        let outpoint = channel_info.out_point();
-        self.channels.insert(outpoint.clone(), channel_info.clone());
         if let Some(node) = self.nodes.get_mut(&channel_info.node1()) {
             self.store.insert_node(node.clone());
+        } else {
+            warn!("Node1 not found for channel {:?}", &channel_info);
+            return;
         }
         if let Some(node) = self.nodes.get_mut(&channel_info.node2()) {
             self.store.insert_node(node.clone());
+        } else {
+            warn!("Node2 not found for channel {:?}", &channel_info);
+            return;
         }
-        debug!("Successfully added channel {:?}", &channel_info);
+
+        let outpoint = channel_info.out_point();
+        self.channels.insert(outpoint.clone(), channel_info.clone());
         self.store.insert_channel(channel_info);
+        debug!("Successfully added channel {:?}", outpoint);
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
@@ -431,6 +439,7 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
+        debug!("build_route source pubkey: {:?}", source);
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
         let route = self.find_route(source, target, amount, 1000)?;

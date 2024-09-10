@@ -1179,6 +1179,7 @@ where
                 const MAX_BROADCAST_SESSIONS: usize = 5;
                 let peer_ids =
                     state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, peers.into_iter().collect());
+                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1301,6 +1302,7 @@ where
     }
 
     async fn process_broadcasted_message(&self, message: FiberBroadcastMessage) {
+        warn!("Processing broadcasted message: {:?}", &message);
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
