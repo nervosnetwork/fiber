@@ -31,9 +31,12 @@ pub enum GraphSyncerMessage {
     GetBroadcastMessages(u64),
 }
 
-pub struct GraphSyncerState {
-    synced_height: u64,
-    synced_time: u64,
+pub struct GraphSyncerState {}
+
+impl GraphSyncerState {
+    fn new() -> Self {
+        Self {}
+    }
 }
 
 pub struct GraphSyncer {
@@ -95,10 +98,7 @@ impl Actor for GraphSyncer {
             self.starting_height - ASSUME_MAX_CHANNEL_HEIGHT_GAP
         };
         myself.send_message(GraphSyncerMessage::GetChannels(starting_height))?;
-        Ok(Self::State {
-            synced_height: self.starting_height,
-            synced_time: self.starting_time,
-        })
+        Ok(Self::State::new())
     }
 
     async fn handle(
