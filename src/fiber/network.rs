@@ -1,7 +1,8 @@
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
-use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
+use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
+use musig2::CompactSignature;
 use ractor::{
     async_trait as rasync_trait, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef, RactorErr,
     RpcReplyPort, SupervisionEvent,
@@ -37,7 +38,7 @@ use super::channel::{
 };
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::key::blake2b_hash_with_salt;
-use super::types::{FiberMessage, Hash256, OpenChannel, Privkey, Pubkey};
+use super::types::{FiberMessage, Hash256, OpenChannel};
 use super::FiberConfig;
 
 use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
@@ -150,20 +151,17 @@ pub enum NetworkServiceEvent {
         Hash256,         /* Channel Id */
         u64,             /* Commitment number */
         TransactionView, /* Commitment transaction, not valid per se (requires other party's signature) */
-        Vec<u8>,         /* Commitment transaction witness */
     ),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
-    // TODO: We also need transaction hash from the event `LocalCommitmentSigned` above
-    // for the watch tower to watch older transactions being broadcasted.
     RevokeAndAckReceived(
-        PeerId,  /* Peer Id */
-        Hash256, /* Channel Id */
-        u64,     /* Commitment number */
-        Privkey, /* Revocation secret */
-        Pubkey,  /* Revocation base point */
-        Vec<u8>, /* Commitment transaction witness */
-        Pubkey,  /* Next commitment point */
+        PeerId,           /* Peer Id */
+        Hash256,          /* Channel Id */
+        u64,              /* Commitment number */
+        [u8; 32],         /* Aggregated public key x-only */
+        CompactSignature, /* Aggregated signature */
+        CellOutput,
+        packed::Bytes,
     ),
     // The other party has signed a valid commitment transaction,
     // and we successfully assemble the partial signature from other party
@@ -215,7 +213,7 @@ pub enum NetworkActorEvent {
     FundingTransactionFailed(OutPoint),
 
     /// A commitment transaction is signed by us and has sent to the other party.
-    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView, Vec<u8>),
+    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView),
 
     /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
@@ -506,20 +504,13 @@ where
                     &channel_id, &tx_hash, &peer_id
                 );
             }
-            NetworkActorEvent::LocalCommitmentSigned(
-                peer_id,
-                channel_id,
-                version,
-                tx,
-                witnesses,
-            ) => {
-                // TODO: We should save the witnesses to the channel state.
+            NetworkActorEvent::LocalCommitmentSigned(peer_id, channel_id, version, tx) => {
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(
                             NetworkServiceEvent::LocalCommitmentSigned(
-                                peer_id, channel_id, version, tx, witnesses,
+                                peer_id, channel_id, version, tx,
                             ),
                         ),
                     ))

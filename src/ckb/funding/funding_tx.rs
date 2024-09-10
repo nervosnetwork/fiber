@@ -25,7 +25,7 @@ use molecule::{
 use serde::Deserialize;
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Funding transaction wrapper.
 ///
@@ -138,7 +138,6 @@ impl TxBuilder for FundingTxBuilder {
             .set_outputs_data(outputs_data)
             .set_cell_deps(cell_deps.into_iter().collect())
             .set_witnesses(vec![placeholder_witness.as_bytes().pack()]);
-        warn!("tx_builder: {:?}", tx_builder);
         let tx = tx_builder.build();
         Ok(tx)
     }
@@ -193,7 +192,7 @@ impl FundingTxBuilder {
                     .capacity(Capacity::shannons(ckb_amount).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
-                warn!("build_funding_cell debug ckb_output: {:?}", ckb_output);
+                debug!("build_funding_cell debug ckb_output: {:?}", ckb_output);
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
@@ -233,7 +232,7 @@ impl FundingTxBuilder {
                 amount_bytes.copy_from_slice(&cell.output_data.as_ref()[0..16]);
                 let cell_udt_amount = u128::from_le_bytes(amount_bytes);
                 let ckb_amount: u64 = cell.output.capacity().unpack();
-                warn!(
+                debug!(
                     "found udt cell ckb_amount: {:?} udt_amount: {:?} cell: {:?}",
                     ckb_amount, cell_udt_amount, cell
                 );
@@ -293,7 +292,7 @@ impl FundingTxBuilder {
             .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
 
-        warn!(
+        debug!(
             "request.funding_fee_rate: {}",
             self.request.funding_fee_rate
         );
@@ -324,7 +323,7 @@ impl FundingTxBuilder {
 
         let mut funding_tx = self.funding_tx;
         let tx_builder = tx.as_advanced_builder();
-        warn!("final tx_builder: {:?}", tx_builder);
+        debug!("final tx_builder: {:?}", tx_builder);
         funding_tx.update_for_self(tx)?;
         Ok(funding_tx)
     }

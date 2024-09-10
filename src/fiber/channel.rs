@@ -13,6 +13,7 @@ use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
     errors::{SigningError, VerifyError},
+    secp::Point,
     sign_partial, verify_partial, AggNonce, CompactSignature, KeyAggContext, PartialSignature,
     PubNonce, SecNonce,
 };
@@ -42,7 +43,7 @@ use crate::{
     },
     fiber::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
-        fee::{calculate_commitment_tx_fee, commitment_tx_size},
+        fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::emit_service_event,
         types::Shutdown,
     },
@@ -64,11 +65,10 @@ use super::{
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
 };
 
-// - `version`: 8 bytes, u64 in little-endian
-// - `funding_out_point`: 36 bytes, out point of the funding transaction
+// - `empty_witness_args`: 16 bytes, fixed to 0x10000000100000001000000010000000, for compatibility with the xudt
 // - `pubkey`: 32 bytes, x only aggregated public key
 // - `signature`: 64 bytes, aggregated signature
-pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 8 + 36 + 32 + 64;
+pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // Some part of the code liberally gets previous commitment number, which is
 // the current commitment number minus 1. We deliberately set initial commitment number to 1,
 // so that we can get previous commitment point/number without checking if the channel
@@ -575,16 +575,11 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
             &state.state
         );
         let PartiallySignedCommitmentTransaction {
-            tx,
-            signature,
-            witnesses,
-            msg: _,
             version,
+            commitment_tx,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         } = state.build_and_sign_commitment_tx()?;
-        debug!(
-            "Built and signed commitment tx #{}: transaction: ({:?}), partial signature: {:?}",
-            version, &tx, &signature
-        );
 
         debug!(
             "Sending next local nonce {:?} (previous nonce {:?})",
@@ -593,7 +588,8 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
         );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
-            partial_signature: signature,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
         debug!(
@@ -614,8 +610,7 @@ impl<S: ChannelActorStateStore> ChannelActor<S> {
                     state.peer_id.clone(),
                     state.get_id(),
                     version,
-                    tx,
-                    witnesses,
+                    commitment_tx,
                 )),
             ))
             .expect("myself alive");
@@ -1562,6 +1557,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
 
+    pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding
@@ -1831,6 +1827,7 @@ impl ChannelActorState {
             }),
             commitment_numbers: Default::default(),
             remote_shutdown_script: None,
+            previous_remote_nonce: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
             local_shutdown_signature: None,
@@ -1888,6 +1885,7 @@ impl ChannelActorState {
             max_num_of_accept_tlcs,
             max_tlc_value_in_flight,
             remote_channel_parameters: None,
+            previous_remote_nonce: None,
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
@@ -2059,26 +2057,76 @@ impl ChannelActorState {
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
-        // Now we should revoke previous transation by revealing preimage.
-        let (commitment_number, commitment_secret) = self.get_previous_local_commitment_secret();
+        let commitment_tx_fee =
+            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let lock_script = self.get_default_remote_funding_script();
+        let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(capacity.pack())
+                .build();
+
+            let output_data = self.total_amount.to_le_bytes().pack();
+            (output, output_data)
+        } else {
+            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .capacity(capacity.pack())
+                .build();
+            let output_data = Bytes::default();
+            (output, output_data)
+        };
+
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let key_agg_ctx = KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys");
+
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let delay_epoch = self.get_remote_channel_parameters().selected_contest_delay;
+        let commitment_number = self.get_remote_commitment_number();
+        let commitment_lock_script_args = [
+            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            commitment_number.to_be_bytes().as_slice(),
+        ]
+        .concat();
+
+        let message = blake2b_256(
+            [
+                output.as_slice(),
+                output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+        let local_nonce = self.get_local_nonce();
+        let remote_nonce = self.get_previous_remote_nonce();
+        let nonces = [local_nonce, remote_nonce];
+        let agg_nonce = AggNonce::sum(nonces);
+        let sign_ctx = Musig2SignContext {
+            key_agg_ctx,
+            agg_nonce,
+            seckey: self.signer.funding_key,
+            secnonce: self.get_local_musig2_secnonce(),
+        };
+        let signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
+
         // Note that we must update channel state here to update commitment number,
         // so that next step will obtain the correct commitmen point.
         self.update_state_on_raa_msg(false);
         let point = self.get_current_local_commitment_point();
 
-        debug!(
-            "Sending commitment secret {:?} for commitment number {} and new commitment point {:?}",
-            hex::encode(&commitment_secret),
-            commitment_number,
-            point
-        );
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
                     peer_id: self.peer_id.clone(),
                     message: FiberMessage::RevokeAndAck(RevokeAndAck {
                         channel_id: self.get_id(),
-                        per_commitment_secret: commitment_secret.into(),
+                        partial_signature: signature,
                         next_per_commitment_point: point,
                     }),
                 }),
@@ -2186,7 +2234,7 @@ impl ChannelActorState {
             .derive_musig2_nonce(self.get_local_commitment_number())
     }
 
-    pub fn get_local_nonce(&self) -> impl Borrow<PubNonce> {
+    pub fn get_local_nonce(&self) -> PubNonce {
         self.get_local_secnonce().public_nonce()
     }
 
@@ -2199,8 +2247,12 @@ impl ChannelActorState {
         self.get_next_local_secnonce().public_nonce()
     }
 
-    pub fn get_remote_nonce(&self) -> &PubNonce {
-        self.remote_nonce.as_ref().unwrap()
+    pub fn get_remote_nonce(&self) -> PubNonce {
+        self.remote_nonce.as_ref().unwrap().clone()
+    }
+
+    pub fn get_previous_remote_nonce(&self) -> PubNonce {
+        self.previous_remote_nonce.as_ref().unwrap().clone()
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -2427,6 +2479,10 @@ impl ChannelActorState {
 
     pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
         let tx = self.get_funding_transaction();
+        debug!(
+            "Funding transaction lock args: {:?}",
+            tx.raw().outputs().get(0).unwrap().lock().args()
+        );
         // By convention, the funding tx output for the channel is the first output.
         OutPoint::new(tx.calc_tx_hash(), 0)
     }
@@ -2467,37 +2523,20 @@ impl ChannelActorState {
         commitment_point
     }
 
-    fn get_previous_remote_commitment_point(&self) -> (u64, Pubkey) {
-        let commitment_number = self.get_local_commitment_number() - 1;
-        (
-            commitment_number,
-            self.get_remote_commitment_point(commitment_number),
-        )
-    }
-
-    fn get_previous_local_commitment_secret(&self) -> (u64, [u8; 32]) {
-        let commitment_number = self.get_remote_commitment_number() - 1;
-        let secret = self.signer.get_commitment_secret(commitment_number);
-        (commitment_number, secret)
-    }
-
     fn get_current_local_commitment_point(&self) -> Pubkey {
         self.get_local_commitment_point(self.get_remote_commitment_number())
     }
 
     pub fn get_funding_lock_script_xonly(&self) -> [u8; 32] {
-        let point: musig2::secp::Point = self.get_musig2_agg_context().aggregated_pubkey();
-        point.serialize_xonly()
+        self.get_musig2_agg_context()
+            .aggregated_pubkey::<Point>()
+            .serialize_xonly()
     }
 
     pub fn get_funding_lock_script(&self) -> Script {
-        let args = blake2b_256(self.get_funding_lock_script_xonly());
-        debug!(
-            "Aggregated pubkey: {:?}, hash: {:?}",
-            hex::encode(args),
-            hex::encode(&args[..20])
-        );
-        get_script_by_contract(Contract::FundingLock, args.as_slice())
+        let aggregated_pubkey = self.get_funding_lock_script_xonly();
+        let pubkey_hash = blake2b_256(&aggregated_pubkey);
+        get_script_by_contract(Contract::FundingLock, &pubkey_hash[0..20])
     }
 
     pub fn get_funding_request(&self) -> FundingRequest {
@@ -2546,15 +2585,8 @@ impl ChannelActorState {
 
     pub fn get_musig2_agg_pubnonce(&self) -> AggNonce {
         let local_nonce = self.get_local_nonce();
-        let local_nonce = local_nonce.borrow();
         let remote_nonce = self.get_remote_nonce();
         let nonces = self.order_things_for_musig2(local_nonce, remote_nonce);
-        debug!(
-            "Got agg nonces {:?} from peer {:?}: {:?}",
-            AggNonce::sum(nonces),
-            &self.peer_id,
-            nonces
-        );
         AggNonce::sum(nonces)
     }
 
@@ -2634,19 +2666,6 @@ impl ChannelActorState {
         })
     }
 
-    // The parameter local indicates whether we are interested in the value sent by the local party.
-    fn get_tlc_value_received_from_remote(&self, local_commitment: bool) -> u128 {
-        if local_commitment {
-            self.get_active_received_tlcs(local_commitment)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        } else {
-            self.get_active_offered_tlcs(local_commitment)
-                .map(|tlc| tlc.tlc.amount)
-                .sum::<u128>()
-        }
-    }
-
     // Get the pubkeys for the tlc. Tlc pubkeys are the pubkeys held by each party
     // while this tlc was created (pubkeys are derived from the commitment number
     // when this tlc was created). The pubkeys returned here are sorted.
@@ -2700,7 +2719,7 @@ impl ChannelActorState {
         })
     }
 
-    pub fn get_witness_args_for_active_tlcs(&self, local: bool) -> Vec<u8> {
+    fn get_active_htlcs(&self, local: bool) -> Vec<u8> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         debug!("All tlcs: {:?}", self.tlcs);
         let tlcs = {
@@ -2728,22 +2747,20 @@ impl ChannelActorState {
             [a, b].concat()
         };
         debug!("Sorted tlcs: {:?}", &tlcs);
-        tlcs.iter()
-            .flat_map(|(tlc, local, remote)| {
-                [
-                    vec![tlc.tlc.get_htlc_type()],
-                    tlc.tlc.amount.to_le_bytes().to_vec(),
-                    tlc.tlc.get_hash().to_vec(),
-                    local.serialize().to_vec(),
-                    remote.serialize().to_vec(),
-                    Since::from(tlc.tlc.lock_time)
-                        .value()
-                        .to_le_bytes()
-                        .to_vec(),
-                ]
-                .concat()
-            })
-            .collect()
+        if tlcs.is_empty() {
+            Vec::new()
+        } else {
+            let mut result = vec![tlcs.len() as u8];
+            for (tlc, local, remote) in tlcs {
+                result.extend_from_slice(&tlc.tlc.get_htlc_type().to_le_bytes());
+                result.extend_from_slice(&tlc.tlc.amount.to_le_bytes());
+                result.extend_from_slice(&tlc.tlc.get_hash());
+                result.extend_from_slice(&local.serialize());
+                result.extend_from_slice(&remote.serialize());
+                result.extend_from_slice(&Since::from(tlc.tlc.lock_time).value().to_le_bytes());
+            }
+            result
+        }
     }
 
     fn any_tlc_pending(&self) -> bool {
@@ -2876,13 +2893,85 @@ impl From<&ChannelActorState> for Musig2SignContext {
     }
 }
 
+impl From<(&ChannelActorState, bool)> for Musig2SignContext {
+    fn from(value: (&ChannelActorState, bool)) -> Self {
+        let (channel, local) = value;
+        let local_pubkey = channel
+            .get_local_channel_parameters()
+            .pubkeys
+            .funding_pubkey;
+        let remote_pubkey = channel
+            .get_remote_channel_parameters()
+            .pubkeys
+            .funding_pubkey;
+        let pubkeys = if local {
+            [local_pubkey, remote_pubkey]
+        } else {
+            [remote_pubkey, local_pubkey]
+        };
+        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+
+        let local_nonce = channel.get_local_nonce();
+        let remote_nonce = channel.get_remote_nonce();
+        let nonces = if local {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        };
+        let agg_nonce = AggNonce::sum(nonces);
+
+        Musig2SignContext {
+            key_agg_ctx,
+            agg_nonce,
+            seckey: channel.signer.funding_key,
+            secnonce: channel.get_local_musig2_secnonce(),
+        }
+    }
+}
+
 impl From<&ChannelActorState> for Musig2VerifyContext {
     fn from(value: &ChannelActorState) -> Self {
         Musig2VerifyContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            pubkey: *value.get_remote_funding_pubkey(),
-            pubnonce: value.get_remote_nonce().clone(),
+            pubkey: value.get_remote_funding_pubkey().clone(),
+            pubnonce: value.get_remote_nonce(),
+        }
+    }
+}
+
+impl From<(&ChannelActorState, bool)> for Musig2VerifyContext {
+    fn from(value: (&ChannelActorState, bool)) -> Self {
+        let (channel, local) = value;
+        let local_pubkey = channel
+            .get_local_channel_parameters()
+            .pubkeys
+            .funding_pubkey;
+        let remote_pubkey = channel
+            .get_remote_channel_parameters()
+            .pubkeys
+            .funding_pubkey;
+        let pubkeys = if local {
+            [local_pubkey, remote_pubkey]
+        } else {
+            [remote_pubkey, local_pubkey]
+        };
+        let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
+
+        let local_nonce = channel.get_local_nonce();
+        let remote_nonce = channel.get_remote_nonce();
+        let nonces = if local {
+            [local_nonce, remote_nonce]
+        } else {
+            [remote_nonce, local_nonce]
+        };
+        let agg_nonce = AggNonce::sum(nonces);
+
+        Musig2VerifyContext {
+            key_agg_ctx,
+            agg_nonce,
+            pubkey: channel.get_remote_funding_pubkey().clone(),
+            pubnonce: channel.get_remote_nonce(),
         }
     }
 }
@@ -2892,20 +2981,13 @@ impl ChannelActorState {
     pub fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
-        version: u64,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
-        create_witness_for_funding_cell(
-            self.get_funding_lock_script_xonly(),
-            self.get_funding_transaction_outpoint(),
-            signature,
-            version,
-        )
+        create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature)
     }
 
     pub fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
         partial_signatures: [PartialSignature; 2],
-        version: u64,
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
         let funding_out_point = self.get_funding_transaction_outpoint();
@@ -2915,22 +2997,15 @@ impl ChannelActorState {
             "The first input of the tx must be the funding cell outpoint"
         );
 
-        let message = get_funding_cell_message_to_sign(version, funding_out_point, tx);
-        debug!(
-            "Message to sign to consume funding cell {:?} with version {:?}",
-            hex::encode(message.as_slice()),
-            version
-        );
-
         let verify_ctx = Musig2VerifyContext::from(self);
 
         let signature = aggregate_partial_signatures_for_msg(
-            message.as_slice(),
+            tx.hash().as_slice(),
             verify_ctx,
             partial_signatures,
         )?;
 
-        let witness = self.create_witness_for_funding_cell(signature, version);
+        let witness = self.create_witness_for_funding_cell(signature);
         Ok(tx
             .as_advanced_builder()
             .set_witnesses(vec![witness.pack()])
@@ -2939,20 +3014,14 @@ impl ChannelActorState {
 
     pub fn sign_tx_to_consume_funding_cell(
         &self,
-        tx: &PartiallySignedCommitmentTransaction,
+        psct: &PartiallySignedCommitmentTransaction,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        debug!(
-            "Signing and verifying commitment tx with message {:?} (version {})",
-            hex::encode(tx.msg.as_slice()),
-            tx.version
-        );
         let sign_ctx = Musig2SignContext::from(self);
-        let signature2 = sign_ctx.sign(tx.msg.as_slice())?;
+        let signature2 = sign_ctx.sign(psct.commitment_tx.hash().as_slice())?;
 
         self.aggregate_partial_signatures_to_consume_funding_cell(
-            [tx.signature, signature2],
-            tx.version,
-            &tx.tx,
+            [psct.funding_tx_partial_signature, signature2],
+            &psct.commitment_tx,
         )
     }
 
@@ -2983,19 +3052,15 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let (shutdown_tx, message) = self.build_shutdown_tx()?;
+        let shutdown_tx = self.build_shutdown_tx()?;
         let sign_ctx = Musig2SignContext::from(&*self);
 
         // Create our shutdown signature if we haven't already.
         let local_shutdown_signature = match self.local_shutdown_signature {
             Some(signature) => signature,
             None => {
-                let signature = sign_ctx.sign(message.as_slice())?;
+                let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
                 self.local_shutdown_signature = Some(signature);
-                debug!(
-                    "We have signed shutdown tx ({:?}) message {:?} with signature {:?}",
-                    &shutdown_tx, &message, &signature,
-                );
 
                 network
                     .send_message(NetworkActorMessage::new_command(
@@ -3014,19 +3079,19 @@ impl ChannelActorState {
 
         match self.remote_shutdown_signature {
             Some(remote_shutdown_signature) => {
-                let tx = self.aggregate_partial_signatures_to_consume_funding_cell(
-                    [local_shutdown_signature, remote_shutdown_signature],
-                    u64::MAX,
-                    &shutdown_tx,
-                )?;
+                let tx: TransactionView = self
+                    .aggregate_partial_signatures_to_consume_funding_cell(
+                        [local_shutdown_signature, remote_shutdown_signature],
+                        &shutdown_tx,
+                    )?;
                 assert_eq!(
                     tx.data().serialized_size_in_block(),
-                    commitment_tx_size(
+                    shutdown_tx_size(
                         &self.funding_udt_type_script,
-                        Some((
+                        (
                             self.local_shutdown_script.clone().unwrap(),
                             self.remote_shutdown_script.clone().unwrap()
-                        ))
+                        )
                     )
                 );
 
@@ -3259,15 +3324,12 @@ impl ChannelActorState {
             }
         };
 
-        let tx = self.verify_and_complete_tx(commitment_signed.partial_signature)?;
+        let tx = self.verify_and_complete_tx(
+            commitment_signed.funding_tx_partial_signature,
+            commitment_signed.commitment_tx_partial_signature,
+        )?;
         // This is the commitment transaction that both parties signed,
         // can be broadcasted to the network if necessary
-
-        assert_eq!(
-            tx.data().serialized_size_in_block(),
-            commitment_tx_size(&self.funding_udt_type_script, None)
-        );
-
         let num = self.get_current_commitment_number(false);
 
         debug!(
@@ -3294,6 +3356,7 @@ impl ChannelActorState {
             self.get_remote_nonce(),
             &commitment_signed.next_local_nonce
         );
+        self.previous_remote_nonce = self.remote_nonce.clone();
         self.remote_nonce = Some(commitment_signed.next_local_nonce);
         self.latest_commitment_transaction = Some(tx.data());
         match flags {
@@ -3444,47 +3507,94 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
+        let commitment_tx_fee =
+            calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
+        let lock_script = self.get_default_local_funding_script();
+        let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(capacity.pack())
+                .build();
+
+            let output_data = self.total_amount.to_le_bytes().pack();
+            (output, output_data)
+        } else {
+            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(lock_script)
+                .capacity(capacity.pack())
+                .build();
+            let output_data = Bytes::default();
+            (output, output_data)
+        };
+
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let key_agg_ctx = KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys");
+
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let delay_epoch = self.get_local_channel_parameters().selected_contest_delay;
+        let commitment_number = self.get_local_commitment_number();
+
+        let commitment_lock_script_args = [
+            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            commitment_number.to_be_bytes().as_slice(),
+        ]
+        .concat();
+
+        println!(
+            "handle_revoke_and_ack_message commitment_lock_script_args: {:?}",
+            commitment_lock_script_args
+        );
+
+        let message = blake2b_256(
+            [
+                output.as_slice(),
+                output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+
+        let local_nonce = self.get_local_nonce();
+        let remote_nonce = self.get_remote_nonce();
+        let nonces = [remote_nonce, local_nonce];
+        let agg_nonce = AggNonce::sum(nonces);
+
+        let verify_ctx = Musig2VerifyContext {
+            key_agg_ctx: key_agg_ctx.clone(),
+            agg_nonce: agg_nonce.clone(),
+            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubnonce: self.get_remote_nonce(),
+        };
+
         let RevokeAndAck {
             channel_id: _,
-            per_commitment_secret,
+            partial_signature,
             next_per_commitment_point,
         } = revoke_and_ack;
-        let (commitment_number, per_commitment_point) = self.get_previous_remote_commitment_point();
-        let per_commitment_key = Privkey::from(per_commitment_secret);
-        debug!(
-            "Checking #{} commitment secret {:?} and point {:?} consistency",
-            commitment_number,
-            hex::encode(per_commitment_key.as_ref()),
-            per_commitment_point,
-        );
-        if per_commitment_point != per_commitment_key.pubkey() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Per commitment secret and per commitment point mismatch #{}: secret {:?}, point: {:?}",
-                commitment_number, per_commitment_key, per_commitment_point
-            )));
-        }
-        let witnesses = self.get_previous_local_commitment_witnesses();
-        let hash = blake2b_256(&witnesses);
-        let script_args: &[u8] = &hash[..20];
-        debug!(
-            "Get previous commitment transaction witnesses: {:?}, hash: {:?}, script_args: {:?}",
-            hex::encode(&witnesses),
-            hex::encode(&hash),
-            hex::encode(&script_args)
-        );
+        verify_ctx.verify(partial_signature, message.as_slice())?;
+
+        let sign_ctx: Musig2SignContext = Musig2SignContext {
+            key_agg_ctx,
+            agg_nonce,
+            seckey: self.signer.funding_key,
+            secnonce: self.get_local_musig2_secnonce(),
+        };
+        let signature2 = sign_ctx.sign(message.as_slice())?;
+
+        let aggregate_signature = aggregate_partial_signatures_for_msg(
+            message.as_slice(),
+            verify_ctx,
+            [partial_signature, signature2],
+        )?;
 
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
-
-        debug!(
-            "Revocation base keys: local {:?}, remote {:?}",
-            self.local_channel_parameters.pubkeys.revocation_base_key,
-            self.remote_channel_parameters
-                .as_ref()
-                .unwrap()
-                .pubkeys
-                .revocation_base_key,
-        );
 
         emit_service_event(
             network,
@@ -3492,14 +3602,10 @@ impl ChannelActorState {
                 self.peer_id.clone(),
                 self.get_id(),
                 commitment_number,
-                per_commitment_key,
-                self.remote_channel_parameters
-                    .as_ref()
-                    .unwrap()
-                    .pubkeys
-                    .revocation_base_key,
-                witnesses,
-                next_per_commitment_point,
+                x_only_aggregated_pubkey,
+                aggregate_signature,
+                output,
+                output_data,
             ),
         );
         Ok(())
@@ -3786,7 +3892,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<(TransactionView, [u8; 32]), ProcessingChannelError> {
+    pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
         // Don't use get_local_shutdown_script and get_remote_shutdown_script here
         // as they will panic if the scripts are not present.
         // This function may be called in a state where these scripts are not present.
@@ -3869,16 +3975,7 @@ impl ChannelActorState {
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(outputs_data.to_vec())
                 .build();
-            let message = get_funding_cell_message_to_sign(
-                u64::MAX,
-                self.get_funding_transaction_outpoint(),
-                &tx,
-            );
-            debug!(
-                "Building message to sign for shutdown transaction {:?}",
-                hex::encode(message.as_slice())
-            );
-            Ok((tx, message))
+            Ok(tx)
         } else {
             debug!(
                 "Final balance partition before shutting down: local {} (fee {}), remote {} (fee {})",
@@ -3906,17 +4003,7 @@ impl ChannelActorState {
                 .set_outputs(outputs.to_vec())
                 .set_outputs_data(vec![Default::default(), Default::default()])
                 .build();
-
-            let message = get_funding_cell_message_to_sign(
-                u64::MAX,
-                self.get_funding_transaction_outpoint(),
-                &tx,
-            );
-            debug!(
-                "Building message to sign for shutdown transaction {:?}",
-                hex::encode(message.as_slice())
-            );
-            Ok((tx, message))
+            Ok(tx)
         }
     }
 
@@ -3930,156 +4017,52 @@ impl ChannelActorState {
     // and the second element is the message to be signed by the each party,
     // so as to consume the funding cell. The last element is the witnesses for the
     // commitment transaction.
-    pub fn build_commitment_tx(&self, local: bool) -> (TransactionView, [u8; 32], Vec<u8>) {
-        let version = self.get_current_commitment_number(local);
-        debug!(
-            "Building {} commitment transaction #{} with local commtiment number {} and remote commitment number {}",
-            if local { "local" } else { "remote" }, version,
-            self.get_local_commitment_number(), self.get_remote_commitment_number()
-        );
-
-        let funding_out_point = self.get_funding_transaction_outpoint();
-        let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
-        let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
-            CellInput::new_builder()
-                .previous_output(funding_out_point.clone())
-                .build(),
-        );
-
-        let (outputs, outputs_data, witnesses) =
-            self.build_commitment_transaction_parameters(local);
-        debug!(
-            "Building {} commitment transaction #{}'s outputs: {:?}",
-            if local { "local" } else { "remote" },
-            version,
-            &outputs
-        );
-        let tx_builder = tx_builder.set_outputs(outputs);
-        let tx_builder = tx_builder.set_outputs_data(outputs_data);
-        let tx = tx_builder.build();
-        let message = get_funding_cell_message_to_sign(version, funding_out_point, &tx);
-        debug!(
-            "Built {} commitment transaction #{}: transaction: {:?}, signing message: {:?}, witnesses: {:?}",
-            if local { "local" } else { "remote" }, version,
-            &tx, hex::encode(message.as_slice()), hex::encode(&witnesses)
-        );
-        (tx, message, witnesses)
-    }
-
-    fn build_commitment_transaction_witnesses(
+    pub fn build_commitment_and_settlement_tx(
         &self,
         local: bool,
-        commitment_number: u64,
-    ) -> (Vec<u8>, [u8; 20]) {
-        debug!(
-            "Building {} commitment transaction #{}'s witnesses",
-            if local { "local" } else { "remote" },
-            commitment_number,
-        );
-        let (delayed_epoch, delayed_payment_key, revocation_key) = {
-            let (
-                commitment_point,
-                // The two fields below are used for delay payments to the broadcaster.
-                // So if we are building "local" commitment transaction, it should be
-                // the remote commitment point.
-                delay,
-                delayed_payment_base_key,
-                // The field below is used to revoke old transactions.
-                revocation_base_key,
-            ) = if local {
-                // The remote party is the one who can broadcast this transaction.
-                (
-                    self.get_remote_commitment_point(commitment_number),
-                    self.get_remote_channel_parameters().selected_contest_delay,
-                    self.get_remote_channel_parameters()
-                        .delayed_payment_base_key(),
-                    self.get_remote_channel_parameters().revocation_base_key(),
+    ) -> (TransactionView, TransactionView) {
+        let commitment_tx = {
+            let funding_out_point = self.get_funding_transaction_outpoint();
+            let cell_deps =
+                get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
+            let (output, output_data) = self.build_commitment_transaction_output(local);
+
+            TransactionBuilder::default()
+                .cell_deps(cell_deps)
+                .input(
+                    CellInput::new_builder()
+                        .previous_output(funding_out_point.clone())
+                        .build(),
                 )
-            } else {
-                (
-                    self.get_local_commitment_point(commitment_number),
-                    self.get_local_channel_parameters().selected_contest_delay,
-                    self.get_local_channel_parameters()
-                        .delayed_payment_base_key(),
-                    self.get_local_channel_parameters().revocation_base_key(),
-                )
-            };
-            debug!(
-                "Got base witness parameters: commitment_point {:?}, delayed_time: {:?}, delayed_payment_key: {:?}, revocation_key: {:?}",
-                commitment_point,
-                delay, delayed_payment_base_key,
-                revocation_base_key
+                .output(output)
+                .output_data(output_data)
+                .build()
+        };
+
+        let settlement_tx = {
+            let commtimtent_out_point = OutPoint::new(commitment_tx.hash(), 0);
+            let cell_deps = get_cell_deps(
+                vec![Contract::CommitmentLock],
+                &self.funding_udt_type_script,
             );
-            (
-                delay,
-                derive_delayed_payment_pubkey(delayed_payment_base_key, &commitment_point),
-                derive_revocation_pubkey(revocation_base_key, &commitment_point),
-            )
+            let (outputs, outputs_data) = self.build_settlement_transaction_outputs(local);
+
+            TransactionBuilder::default()
+                .cell_deps(cell_deps)
+                .input(
+                    CellInput::new_builder()
+                        .previous_output(commtimtent_out_point.clone())
+                        .build(),
+                )
+                .set_outputs(outputs.to_vec())
+                .set_outputs_data(outputs_data.to_vec())
+                .build()
         };
 
-        let delayed_payment_key_hash = blake2b_256(delayed_payment_key.serialize());
-        let revocation_key_hash = blake2b_256(revocation_key.serialize());
-
-        debug!(
-            "Parameters for witnesses: epoch {:?}, payment key: {:?} (hash: {:?}), revocation key: {:?} (hash: {:?})",
-            delayed_epoch,
-            delayed_payment_key,
-            hex::encode(&delayed_payment_key_hash),
-            revocation_key,
-            hex::encode(&revocation_key_hash)
-        );
-
-        // for xudt compatibility issue,
-        // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
-        let empty_witness_args: [u8; 16] = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
-        let witnesses = [
-            (Since::from(delayed_epoch).value()).to_le_bytes().to_vec(),
-            delayed_payment_key_hash[..20].to_vec(),
-            revocation_key_hash[..20].to_vec(),
-            self.get_witness_args_for_active_tlcs(local),
-        ]
-        .concat();
-        let hash = blake2b_256(&witnesses)[..20].try_into().unwrap();
-        let witnesses = [empty_witness_args.to_vec(), witnesses].concat();
-        debug!(
-            "Built {} commitment transaction #{}'s witnesses: {:?}, hash: {:?}",
-            if local { "local" } else { "remote" },
-            commitment_number,
-            hex::encode(&witnesses),
-            hex::encode(&hash)
-        );
-        (witnesses, hash)
+        (commitment_tx, settlement_tx)
     }
 
-    fn get_current_commitment_transaction_witnesses_with_hash(
-        &self,
-        local: bool,
-    ) -> (Vec<u8>, [u8; 20]) {
-        let commitment_number = if local {
-            self.get_local_commitment_number()
-        } else {
-            self.get_remote_commitment_number()
-        };
-        self.build_commitment_transaction_witnesses(local, commitment_number)
-    }
-
-    fn get_local_commitment_witnesses(&self, commitment_number: u64) -> Vec<u8> {
-        debug_assert!(commitment_number < self.get_local_commitment_number());
-        self.build_commitment_transaction_witnesses(true, commitment_number)
-            .0
-    }
-
-    fn get_previous_local_commitment_witnesses(&self) -> Vec<u8> {
-        self.get_local_commitment_witnesses(self.get_local_commitment_number() - 1)
-    }
-
-    // Build the parameters for the commitment transaction. The first two elements for the
-    // returning tuple are commitment outputs and commitment outputs data.
-    // The last element is the witnesses for the commitment transaction.
-    fn build_commitment_transaction_parameters(
-        &self,
-        local: bool,
-    ) -> (Vec<CellOutput>, Vec<Bytes>, Vec<u8>) {
+    fn build_commitment_transaction_output(&self, local: bool) -> (CellOutput, Bytes) {
         #[cfg(debug_assertions)]
         {
             debug_assert_eq!(
@@ -4088,168 +4071,217 @@ impl ChannelActorState {
             );
         }
 
-        // The time_locked_value is amount of assets locked by commitment-lock.
-        // Our value is always time-locked. Additionally, we need to add the value of
-        // all the TLCs that we have received from the counterparty.
-        let (time_locked_value, immediately_spendable_value) = if local {
-            (
-                self.to_local_amount + self.local_reserved_ckb_amount as u128,
-                self.to_remote_amount + self.remote_reserved_ckb_amount as u128,
-            )
+        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let pubkeys = if local {
+            [local_pubkey, remote_pubkey]
         } else {
-            (
-                self.to_remote_amount + self.remote_reserved_ckb_amount as u128,
-                self.to_local_amount + self.local_reserved_ckb_amount as u128,
-            )
+            [remote_pubkey, local_pubkey]
+        };
+        let x_only_aggregated_pubkey = KeyAggContext::new(pubkeys)
+            .expect("Valid pubkeys")
+            .aggregated_pubkey::<Point>()
+            .serialize_xonly();
+
+        let delay_epoch = if local {
+            self.get_remote_channel_parameters().selected_contest_delay
+        } else {
+            self.get_local_channel_parameters().selected_contest_delay
         };
 
-        // Only the received tlc value is added here because
-        // sent tlc value is already included in the time_locked_value.
-        let received_tlc_value = self.get_tlc_value_received_from_remote(local);
-        debug!(
-            "Got {} commitment transaction #{}'s values: time_locked_value: {}, tlc_value: {}, immediately_spendable_value: {}",
-            if local { "local" } else { "remote" },
-            self.get_current_commitment_number(local),
-            time_locked_value, received_tlc_value, immediately_spendable_value);
-        let mut time_locked_value = time_locked_value + received_tlc_value;
-        let immediately_spendable_value = immediately_spendable_value - received_tlc_value;
+        let version = self.get_current_commitment_number(local);
 
-        debug!("Building commitment transaction with time_locked_value: {}, immediately_spendable_value: {}", time_locked_value, immediately_spendable_value);
-        let immediate_payment_key = {
-            let (commitment_point, base_payment_key) = if local {
-                (
-                    // Note that we're building a local commitment transaction, so we need to use
-                    // the local commitment number.
-                    self.get_remote_commitment_point(self.get_local_commitment_number()),
-                    self.get_remote_channel_parameters().payment_base_key(),
-                )
-            } else {
-                (
-                    // Note that we're building a remote commitment transaction, so we need to use
-                    // the remote commitment number.
-                    self.get_local_commitment_point(self.get_remote_commitment_number()),
-                    self.get_local_channel_parameters().payment_base_key(),
-                )
-            };
-            derive_payment_pubkey(base_payment_key, &commitment_point)
-        };
+        let htlcs = self.get_active_htlcs(local);
 
-        let (witnesses, script_args) =
-            self.get_current_commitment_transaction_witnesses_with_hash(local);
+        let mut commitment_lock_script_args = [
+            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            version.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        if !htlcs.is_empty() {
+            commitment_lock_script_args.extend_from_slice(&blake2b_256(&htlcs)[0..20]);
+        }
 
-        let immediate_secp256k1_lock_script = get_script_by_contract(
-            Contract::Secp256k1Lock,
-            &blake2b_256(immediate_payment_key.serialize())[0..20],
-        );
-        let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &script_args);
+        let commitment_lock_script =
+            get_script_by_contract(Contract::CommitmentLock, &commitment_lock_script_args);
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
-        debug!("debug commitment_fee: {:?}", commitment_tx_fee);
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let (mut time_locked_ckb_amount, immediately_spendable_ckb_amount) = if local {
+            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+                - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(commitment_lock_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(capacity.pack())
+                .build();
+
+            let output_data = self.total_amount.to_le_bytes().pack();
+            (output, output_data)
+        } else {
+            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let output = CellOutput::new_builder()
+                .lock(commitment_lock_script)
+                .capacity(capacity.pack())
+                .build();
+            let output_data = Bytes::default();
+            (output, output_data)
+        }
+    }
+
+    fn build_settlement_transaction_outputs(&self, local: bool) -> ([CellOutput; 2], [Bytes; 2]) {
+        let received_tlc_value = self
+            .get_active_received_tlcs(local)
+            .map(|tlc| tlc.tlc.amount)
+            .sum::<u128>();
+        let offered_tlc_value = self
+            .get_active_offered_tlcs(local)
+            .map(|tlc| tlc.tlc.amount)
+            .sum::<u128>();
+
+        let to_local_value =
+            self.to_local_amount + self.local_reserved_ckb_amount as u128 - offered_tlc_value;
+        let to_remote_value =
+            self.to_remote_amount + self.remote_reserved_ckb_amount as u128 - received_tlc_value;
+
+        let to_local_output_script = self.get_default_local_funding_script();
+        let to_remote_output_script = self.get_default_remote_funding_script();
+
+        if let Some(udt_type_script) = &self.funding_udt_type_script {
+            let to_local_output = CellOutput::new_builder()
+                .lock(to_local_output_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(self.local_reserved_ckb_amount.pack())
+                .build();
+            let to_local_output_data = to_local_value.to_le_bytes().pack();
+
+            let to_remote_output = CellOutput::new_builder()
+                .lock(to_remote_output_script)
+                .type_(Some(udt_type_script.clone()).pack())
+                .capacity(self.remote_reserved_ckb_amount.pack())
+                .build();
+            let to_remote_output_data = to_remote_value.to_le_bytes().pack();
+            if local {
                 (
-                    self.local_reserved_ckb_amount,
-                    self.remote_reserved_ckb_amount,
+                    [to_local_output, to_remote_output],
+                    [to_local_output_data, to_remote_output_data],
                 )
             } else {
                 (
-                    self.remote_reserved_ckb_amount,
-                    self.local_reserved_ckb_amount,
+                    [to_remote_output, to_local_output],
+                    [to_remote_output_data, to_local_output_data],
                 )
-            };
-
-            // NOTE: we have already make sure the reserved_ckb_amount will enough for commitment tx fee
-            // commitment tx fee is paid by the side who want to submit the commitment transaction
-            time_locked_ckb_amount -= commitment_tx_fee;
-
-            let immediate_output_data = immediately_spendable_value.to_le_bytes().pack();
-            let immediate_output = CellOutput::new_builder()
-                .lock(immediate_secp256k1_lock_script)
-                .type_(Some(udt_type_script.clone()).pack())
-                .capacity(immediately_spendable_ckb_amount.pack())
-                .build();
-
-            let commitment_lock_output_data = time_locked_value.to_le_bytes().pack();
-            let commitment_lock_output = CellOutput::new_builder()
-                .lock(commitment_lock_script)
-                .type_(Some(udt_type_script.clone()).pack())
-                .capacity(time_locked_ckb_amount.pack())
-                .build();
-
-            let outputs = vec![immediate_output, commitment_lock_output];
-            let outputs_data = vec![immediate_output_data, commitment_lock_output_data];
-            (outputs, outputs_data, witnesses)
+            }
         } else {
-            let commitment_tx_fee = commitment_tx_fee as u128;
+            let to_local_output = CellOutput::new_builder()
+                .lock(to_local_output_script)
+                .capacity((to_local_value as u64).pack())
+                .build();
+            let to_local_output_data = Bytes::default();
 
-            // commitment tx fee is paid by the side who want to submit the commitment transaction
-            time_locked_value -= commitment_tx_fee;
-
-            let outputs = vec![
-                CellOutput::new_builder()
-                    .capacity((immediately_spendable_value as u64).pack())
-                    .lock(immediate_secp256k1_lock_script)
-                    .build(),
-                CellOutput::new_builder()
-                    .capacity((time_locked_value as u64).pack())
-                    .lock(commitment_lock_script)
-                    .build(),
-            ];
-            let outputs_data = vec![Bytes::default(); outputs.len()];
-            (outputs, outputs_data, witnesses)
+            let to_remote_output = CellOutput::new_builder()
+                .lock(to_remote_output_script)
+                .capacity((to_remote_value as u64).pack())
+                .build();
+            let to_remote_output_data = Bytes::default();
+            if local {
+                (
+                    [to_local_output, to_remote_output],
+                    [to_local_output_data, to_remote_output_data],
+                )
+            } else {
+                (
+                    [to_remote_output, to_local_output],
+                    [to_remote_output_data, to_local_output_data],
+                )
+            }
         }
     }
 
     pub fn build_and_verify_commitment_tx(
         &self,
-        signature: PartialSignature,
+        funding_tx_partial_signature: PartialSignature,
+        commitment_tx_partial_signature: PartialSignature,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
-        let verify_ctx = Musig2VerifyContext::from(self);
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(false);
 
-        let (tx, msg, witnesses) = self.build_commitment_tx(false);
-        debug!(
-            "Verifying partial signature ({:?}) of commitment tx ({:?}) message {:?}",
-            &signature,
-            &tx,
-            hex::encode(msg)
+        let verify_ctx = Musig2VerifyContext::from(self);
+        verify_ctx.verify(
+            funding_tx_partial_signature,
+            commitment_tx.hash().as_slice(),
+        )?;
+
+        let verify_ctx = Musig2VerifyContext::from((self, false));
+        let to_local_output = settlement_tx.outputs().get(0).unwrap();
+        let to_local_output_data = settlement_tx.outputs_data().get(0).unwrap();
+        let to_remote_output = settlement_tx.outputs().get(1).unwrap();
+        let to_remote_output_data = settlement_tx.outputs_data().get(1).unwrap();
+        let args = commitment_tx
+            .outputs()
+            .get(0)
+            .unwrap()
+            .lock()
+            .args()
+            .raw_data();
+        let message = blake2b_256(
+            [
+                to_local_output.as_slice(),
+                to_local_output_data.as_slice(),
+                to_remote_output.as_slice(),
+                to_remote_output_data.as_slice(),
+                &args[0..36],
+            ]
+            .concat(),
         );
-        verify_ctx.verify(signature, msg.as_slice())?;
+        verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
+
         Ok(PartiallySignedCommitmentTransaction {
-            msg,
             version: self.get_current_commitment_number(false),
-            tx,
-            signature,
-            witnesses,
+            commitment_tx,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         })
     }
 
     pub fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
+        let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
+
         let sign_ctx = Musig2SignContext::from(self);
+        let funding_tx_partial_signature = sign_ctx.sign(commitment_tx.hash().as_slice())?;
 
-        let (tx, msg, witnesses) = self.build_commitment_tx(true);
-
-        debug!(
-            "Signing commitment tx with message {:?}",
-            hex::encode(msg.as_slice())
+        let sign_ctx = Musig2SignContext::from((self, true));
+        let to_local_output = settlement_tx.outputs().get(0).unwrap();
+        let to_local_output_data = settlement_tx.outputs_data().get(0).unwrap();
+        let to_remote_output = settlement_tx.outputs().get(1).unwrap();
+        let to_remote_output_data = settlement_tx.outputs_data().get(1).unwrap();
+        let args = commitment_tx
+            .outputs()
+            .get(0)
+            .unwrap()
+            .lock()
+            .args()
+            .raw_data();
+        let message = blake2b_256(
+            [
+                to_local_output.as_slice(),
+                to_local_output_data.as_slice(),
+                to_remote_output.as_slice(),
+                to_remote_output_data.as_slice(),
+                &args[0..36],
+            ]
+            .concat(),
         );
-        let signature = sign_ctx.sign(msg.as_slice())?;
-        debug!(
-            "Signed commitment tx ({:?}) message {:?} with signature {:?}",
-            &tx,
-            hex::encode(msg),
-            &signature,
-        );
+        let commitment_tx_partial_signature = sign_ctx.sign(message.as_slice())?;
 
         Ok(PartiallySignedCommitmentTransaction {
-            msg,
-            tx,
-            signature,
-            witnesses,
             version: self.get_current_commitment_number(true),
+            commitment_tx,
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
         })
     }
 
@@ -4257,13 +4289,13 @@ impl ChannelActorState {
     /// with valid witnesses.
     pub fn verify_and_complete_tx(
         &self,
-        signature: PartialSignature,
+        funding_tx_partial_signature: PartialSignature,
+        commitment_tx_partial_signature: PartialSignature,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let tx = self.build_and_verify_commitment_tx(signature)?;
-        debug!(
-            "Trying to complete tx with partial remote signature {:?}",
-            &tx
-        );
+        let tx = self.build_and_verify_commitment_tx(
+            funding_tx_partial_signature,
+            commitment_tx_partial_signature,
+        )?;
         self.sign_tx_to_consume_funding_cell(&tx)
     }
 }
@@ -4297,25 +4329,19 @@ pub trait ChannelActorStateStore {
 /// the ckb transaction.
 #[derive(Clone, Debug)]
 pub struct PartiallySignedCommitmentTransaction {
-    // The message that was signed by the partial signature.
-    // This partial signature is going to be verified by the funding lock.
-    // We have to follow funding lock's rules to generate this message.
-    pub msg: [u8; 32],
     // The version number of the commitment transaction.
     pub version: u64,
     // The commitment transaction.
-    pub tx: TransactionView,
-    // The witnesses in the commitment transaction.
-    pub witnesses: Vec<u8>,
-    // The partial signature of the commitment transaction.
-    pub signature: PartialSignature,
+    pub commitment_tx: TransactionView,
+    // The partial signature to unlock the funding transaction.
+    pub funding_tx_partial_signature: PartialSignature,
+    // The partial signature to unlock the commitment transaction.
+    pub commitment_tx_partial_signature: PartialSignature,
 }
 
 pub fn create_witness_for_funding_cell(
     lock_key_xonly: [u8; 32],
-    out_point: OutPoint,
     signature: CompactSignature,
-    version: u64,
 ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
     let mut witness = Vec::with_capacity(FUNDING_CELL_WITNESS_LEN);
 
@@ -4323,19 +4349,8 @@ pub fn create_witness_for_funding_cell(
     // refer to: https://github.com/nervosnetwork/fiber-scripts/pull/5
     let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     witness.extend_from_slice(&empty_witness_args);
-    for bytes in [
-        version.to_le_bytes().as_ref(),
-        out_point.as_slice(),
-        lock_key_xonly.as_slice(),
-        signature.serialize().as_slice(),
-    ] {
-        debug!(
-            "Extending witness with {} bytes: {:?}",
-            bytes.len(),
-            hex::encode(bytes)
-        );
-        witness.extend_from_slice(bytes);
-    }
+    witness.extend_from_slice(lock_key_xonly.as_slice());
+    witness.extend_from_slice(signature.serialize().as_slice());
 
     debug!(
         "Building witnesses for transaction to consume funding cell: {:?}",
@@ -4412,19 +4427,6 @@ impl Musig2SignContext {
             message,
         )?)
     }
-}
-
-fn get_funding_cell_message_to_sign(
-    version: u64,
-    funding_out_point: OutPoint,
-    tx: &TransactionView,
-) -> [u8; 32] {
-    let version = version.to_le_bytes();
-    let version = version.as_ref();
-    let funding_out_point = funding_out_point.as_slice();
-    let tx_hash = tx.hash();
-    let tx_hash = tx_hash.as_slice();
-    blake2b_256([version, funding_out_point, tx_hash].concat())
 }
 
 pub fn aggregate_partial_signatures_for_msg(
@@ -4802,11 +4804,10 @@ mod tests {
     use ckb_jsonrpc_types::Status;
     use ckb_types::{
         core::FeeRate,
-        packed::{Bytes, CellInput, CellOutput, Script, Transaction},
-        prelude::{AsTransactionBuilder, Builder, Entity, Pack, PackVec},
+        packed::{CellInput, Script, Transaction},
+        prelude::{AsTransactionBuilder, Builder, Entity, Pack},
     };
     use ractor::call;
-    use tracing::debug;
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
@@ -5441,11 +5442,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_revoke_old_commitment_transaction() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .pretty()
-            .init();
-
         let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
             .await
             .try_into()
@@ -5548,28 +5544,26 @@ mod tests {
             ))
             .expect("node_a alive");
 
-        let (privkey, witnesses) = node_a
+        let (x_only_aggregated_pubkey, signature, output, output_data) = node_a
             .expect_to_process_event(|event| match event {
                 NetworkServiceEvent::RevokeAndAckReceived(
                     peer_id,
                     channel_id,
                     commitment_number,
-                    commitment_secret,
-                    revocation_base_pubkey,
-                    witnesses,
-                    _commitment_point,
+                    x_only_aggregated_pubkey,
+                    signature,
+                    output,
+                    output_data,
                 ) => {
                     assert_eq!(peer_id, &node_b.peer_id);
                     assert_eq!(channel_id, &new_channel_id);
-                    assert_eq!(*commitment_number, 0u64);
-                    let key = derive_private_key(&commitment_secret, &revocation_base_pubkey);
-                    debug!(
-                        "Get revocation base pubkey {:?}, commitment secret {:?}, new key {:?}",
-                        &revocation_base_pubkey,
-                        hex::encode(commitment_secret.as_ref()),
-                        hex::encode(key.as_ref())
-                    );
-                    Some((key, witnesses.clone()))
+                    assert_eq!(*commitment_number, 1u64);
+                    Some((
+                        x_only_aggregated_pubkey.clone(),
+                        signature.clone(),
+                        output.clone(),
+                        output_data.clone(),
+                    ))
                 }
                 _ => None,
             })
@@ -5580,35 +5574,32 @@ mod tests {
             Status::Committed
         );
 
-        dbg!(hex::encode(privkey.as_ref()));
-        dbg!(&commitment_tx);
+        println!("commitment_tx: {:?}", commitment_tx);
 
         let tx = Transaction::default()
             .as_advanced_builder()
             .cell_deps(get_cell_deps(vec![Contract::CommitmentLock], &None))
             .input(
                 CellInput::new_builder()
-                    // The second output of the commitment tx is the output locked by the commitment lock.
-                    .previous_output(commitment_tx.output_pts().get(1).unwrap().clone())
+                    .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
                     .build(),
             )
-            .outputs(vec![CellOutput::new_builder()
-                .capacity((62u64 * 100_000_000).pack())
-                .lock(Script::new_builder().build())
-                .build()])
-            .outputs_data(vec![Bytes::default(); 1].pack())
+            .output(output)
+            .output_data(output_data)
             .build();
 
-        let message: [u8; 32] = tx.hash().as_slice().try_into().unwrap();
-        let signature = privkey.sign_ecdsa_recoverable(&message.into());
-
-        dbg!(hex::encode(&witnesses));
-
-        let witness = [witnesses.to_vec(), vec![0xFF], signature.to_vec()].concat();
+        let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
+        let witness = [
+            empty_witness_args.to_vec(),
+            vec![0xFF],
+            1u64.to_be_bytes().to_vec(),
+            x_only_aggregated_pubkey.to_vec(),
+            signature.serialize().to_vec(),
+        ]
+        .concat();
 
         let revocation_tx = tx.as_advanced_builder().witness(witness.pack()).build();
 
-        dbg!(&revocation_tx);
         assert_eq!(
             node_a.submit_tx(revocation_tx.clone()).await,
             Status::Committed
