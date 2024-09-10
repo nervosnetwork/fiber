@@ -267,6 +267,18 @@ impl<S> ChannelActor<S> {
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> Result<(), ProcessingChannelError> {
+        if state.reestablishing {
+            match message {
+                FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
+                    state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                }
+                _ => {
+                    debug!("Ignoring message while reestablishing: {:?}", message);
+                    return Ok(());
+                }
+            }
+        }
+
         match message {
             FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                 // TODO: check announcement_signatures validity here.
@@ -553,7 +565,7 @@ impl<S> ChannelActor<S> {
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
             }
-            FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
+            FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                 state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
                 Ok(())
             }
@@ -1494,19 +1506,7 @@ where
     ) -> Result<(), ActorProcessingErr> {
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if state.reestablishing {
-                    match message {
-                        FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
-                            state.handle_reestablish_channel_message(
-                                reestablish_channel,
-                                &self.network,
-                            )?;
-                        }
-                        _ => {
-                            debug!("Ignoring message while reestablishing: {:?}", message);
-                        }
-                    }
-                } else if let Err(error) = self.handle_peer_message(state, message).await {
+                if let Err(error) = self.handle_peer_message(state, message).await {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
@@ -4263,7 +4263,7 @@ impl ChannelActorState {
 
     fn handle_reestablish_channel_message(
         &mut self,
-        reestablish_channel: ReestablishChannel,
+        reestablish_channel: &ReestablishChannel,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!(
