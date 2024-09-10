@@ -215,7 +215,7 @@ where
     }
 
     pub fn add_node(&mut self, node_info: NodeInfo) {
-        warn!("add node: {:?}", node_info);
+        debug!("Adding node to network graph: {:?}", node_info);
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
             if old_node.anouncement_msg.version >= node_info.anouncement_msg.version {
@@ -230,7 +230,6 @@ where
             self.last_update_timestamp = node_info.timestamp;
         }
         self.nodes.insert(node_id, node_info.clone());
-        error!("add_node: {:?}", node_info);
         self.store.insert_node(node_info);
     }
 
@@ -240,7 +239,7 @@ where
     // that we have already processed channels before the height of this channel.
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
         assert_ne!(channel_info.node1(), channel_info.node2());
-        error!("add_channel: {:?}", channel_info);
+        debug!("Adding channel to network graph: {:?}", channel_info);
         if channel_info.funding_tx_block_number > self.best_height {
             self.best_height = channel_info.funding_tx_block_number;
         }
@@ -265,14 +264,14 @@ where
         if let Some(node) = self.nodes.get_mut(&channel_info.node1()) {
             self.store.insert_node(node.clone());
         } else {
+            // It is possible that the node announcement is after broadcasted after the channel announcement.
+            // So don't just ignore the channel even if we didn't find the node info here.
             warn!("Node1 not found for channel {:?}", &channel_info);
-            return;
         }
         if let Some(node) = self.nodes.get_mut(&channel_info.node2()) {
             self.store.insert_node(node.clone());
         } else {
             warn!("Node2 not found for channel {:?}", &channel_info);
-            return;
         }
 
         let outpoint = channel_info.out_point();

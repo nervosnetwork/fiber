@@ -35,7 +35,7 @@ use tentacle::{
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
@@ -1627,7 +1627,7 @@ where
                     }
                 } else {
                     return Err(Error::InvalidParameter(format!(
-                        "Channel update message signature verification failed (channel not found): {:?}",
+                        "Failed to process channel update because channel not found: {:?}",
                         &channel_update
                     )));
                 }
@@ -2695,7 +2695,7 @@ where
             .await
             .expect("listen tentacle");
 
-        error!("debug secio_pk: {:?}", secio_pk);
+        trace!("debug secio_pk: {:?}", secio_pk);
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         listen_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
         // TODO: expand listen_addr to routable addresses,
