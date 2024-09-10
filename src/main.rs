@@ -1,6 +1,7 @@
 use fnn::cch::CchMessage;
 use fnn::ckb::contracts::init_contracts_context;
 use fnn::store::Store;
+use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -18,7 +19,8 @@ use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorM
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use fnn::{start_cch, start_ckb, start_ldk, start_rpc, Config};
+use fnn::{start_cch, start_ckb, start_ldk, start_rpc, watchtower, Config};
+use std::time::Duration;
 use tracing_subscriber::fmt::format;
 
 #[tokio::main]
@@ -107,6 +109,19 @@ pub async fn main() {
                     .send_message(NetworkActorMessage::new_command(command))
                     .expect("ckb actor alive")
             }
+
+            let watchtower_actor = Actor::spawn_linked(
+                Some("watchtower".to_string()),
+                WatchtowerActor {},
+                (),
+                root_actor.get_cell(),
+            )
+            .await
+            .expect("start watchtower actor")
+            .0;
+
+            watchtower_actor
+                .send_interval(Duration::from_secs(1), || WatchtowerMessage::PeriodicCheck);
 
             new_tokio_task_tracker().spawn(async move {
                 let token = new_tokio_cancellation_token();
