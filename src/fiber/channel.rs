@@ -127,6 +127,7 @@ pub struct AddTlcCommand {
     pub expiry: LockTime,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Vec<u8>,
+    pub previous_tlc: Option<(Hash256, u64)>,
 }
 
 #[derive(Debug)]
@@ -457,7 +458,10 @@ impl<S> ChannelActor<S> {
                 if add_tlc.onion_packet.len() > 0 {
                     self.network
                         .send_message(NetworkActorMessage::Command(
-                            NetworkActorCommand::SendOnionPacket(add_tlc.onion_packet.clone()),
+                            NetworkActorCommand::SendOnionPacket(
+                                add_tlc.onion_packet.clone(),
+                                Some((state.get_id(), tlc.get_id())),
+                            ),
                         ))
                         .expect("network actor is alive");
                 }
@@ -483,6 +487,22 @@ impl<S> ChannelActor<S> {
                             channel_id,
                             script: udt_type_script.clone(),
                         });
+                }
+                if let Some((previous_channel_id, previous_tlc)) = tlc_details.tlc.previous_tlc {
+                    assert!(previous_tlc.is_received());
+                    let new_remove_tlc = RemoveTlc {
+                        channel_id: previous_channel_id,
+                        tlc_id: previous_tlc.into(),
+                        reason: remove_tlc.reason,
+                    };
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                state.get_local_peer_id(),
+                                FiberMessage::remove_tlc(new_remove_tlc),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
                 Ok(())
             }
@@ -3538,6 +3558,9 @@ impl ChannelActorState {
             payment_preimage: Some(preimage),
             hash_algorithm: command.hash_algorithm,
             onion_packet: command.onion_packet,
+            previous_tlc: command
+                .previous_tlc
+                .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(id))),
         }
     }
 
@@ -3563,6 +3586,7 @@ impl ChannelActorState {
             payment_preimage: None,
             hash_algorithm: message.hash_algorithm,
             onion_packet: message.onion_packet,
+            previous_tlc: None,
         })
     }
 
@@ -5297,6 +5321,8 @@ pub struct TLC {
     pub hash_algorithm: HashAlgorithm,
     /// The onion packet which encodes the routing information for the payment.
     pub onion_packet: Vec<u8>,
+    /// The previous tlc id if this tlc is a part of a multi-tlc payment.
+    pub previous_tlc: Option<(Hash256, TLCId)>,
 }
 
 impl TLC {

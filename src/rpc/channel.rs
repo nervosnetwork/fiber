@@ -374,6 +374,7 @@ where
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: vec![],
+                            previous_tlc: None,
                         },
                         rpc_reply,
                     ),
