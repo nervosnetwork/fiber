@@ -474,6 +474,8 @@ pub enum Error {
     Secp(#[from] secp256k1::Error),
     #[error("Molecule error: {0}")]
     Molecule(#[from] molecule::error::VerificationError),
+    #[error("Tentacle multiaddr error: {0}")]
+    TentacleMultiAddr(#[from] tentacle::multiaddr::Error),
     #[error("Musig2 error: {0}")]
     Musig2(String),
     #[error("Error: {0}")]
@@ -1376,7 +1378,7 @@ pub struct NodeAnnouncement {
     // If the length is more than 32 bytes, it should be truncated.
     pub alias: AnnouncedNodeName,
     // All the reachable addresses.
-    pub addresses: Vec<Vec<u8>>,
+    pub addresses: Vec<MultiAddr>,
     // chain_hash
     pub chain_hash: Hash256,
 }
@@ -1394,7 +1396,7 @@ impl NodeAnnouncement {
             node_id,
             alias,
             chain_hash: get_chain_hash(),
-            addresses: addresses.iter().map(|a| a.to_vec()).collect(),
+            addresses,
         }
     }
 
@@ -1442,7 +1444,7 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
                         node_announcement
                             .addresses
                             .into_iter()
-                            .map(|address| address.pack())
+                            .map(|address| address.to_vec().pack())
                             .collect(),
                     )
                     .build(),
@@ -1466,8 +1468,8 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
             addresses: node_announcement
                 .address()
                 .into_iter()
-                .map(|address| address.unpack())
-                .collect(),
+                .map(|address| MultiAddr::try_from(address.as_bytes()))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }
