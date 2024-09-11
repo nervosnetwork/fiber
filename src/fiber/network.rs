@@ -65,7 +65,6 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
-use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
 use crate::invoice::InvoiceStore;
 use crate::{unwrap_or_return, Error};
@@ -1142,7 +1141,7 @@ where
                                 preimage: None,
                                 payment_hash: Some(hop.payment_hash),
                                 expiry: hop.expiry.into(),
-                                hash_algorithm: HashAlgorithm::Sha256,
+                                hash_algorithm: hop.tlc_hash_algorithm,
                                 onion_packet: onion_packet.serialize(),
                                 previous_tlc,
                             },

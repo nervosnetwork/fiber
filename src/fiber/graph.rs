@@ -4,6 +4,7 @@ use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
+use crate::invoice::CkbInvoice;
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -449,6 +450,14 @@ where
         let source = self.get_source_pubkey();
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
+        let invoice = payment_request
+            .invoice
+            .map(|x| x.parse::<CkbInvoice>().unwrap());
+        let hash_algorithm = invoice
+            .as_ref()
+            .and_then(|x| x.hash_algorithm().copied())
+            .unwrap_or_default();
+
         let route = self.find_route(source, target, amount, 1000)?;
         info!("route found: {:?}", route);
         assert!(!route.is_empty());
@@ -489,6 +498,7 @@ where
                 amount: current_amount,
                 payment_hash,
                 next_hop,
+                tlc_hash_algorithm: hash_algorithm,
                 expiry: current_expiry.into(),
                 channel_outpoint: next_channel_outpoint,
             });
@@ -505,6 +515,7 @@ where
             amount: current_amount,
             payment_hash,
             next_hop,
+            tlc_hash_algorithm: hash_algorithm,
             expiry: current_expiry.into(),
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
         });

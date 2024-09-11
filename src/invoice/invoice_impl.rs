@@ -271,6 +271,7 @@ impl CkbInvoice {
         u64
     );
     attr_getter!(fallback_address, FallbackAddr, String);
+    attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 }
 
 /// Recoverable signature

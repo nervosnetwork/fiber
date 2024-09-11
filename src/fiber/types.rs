@@ -2699,6 +2699,7 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnionInfo {
     pub payment_hash: Hash256,
+    pub tlc_hash_algorithm: HashAlgorithm,
     pub amount: u128,
     pub expiry: u64,
     pub next_hop: Option<Pubkey>,

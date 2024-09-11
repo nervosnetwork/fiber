@@ -1,5 +1,4 @@
 use bitflags::bitflags;
-
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
@@ -363,6 +362,7 @@ where
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
+                self.try_to_settle_down_tlc(state);
                 Ok(())
             }
             FiberChannelMessage::TxSignatures(tx_signatures) => {
@@ -496,30 +496,6 @@ where
                             ),
                         ))
                         .expect("network actor is alive");
-                } else {
-                    if let Some(preimage) = self.store.get_invoice_preimage(&add_tlc.payment_hash) {
-                        let remove_tlc = RemoveTlc {
-                            channel_id: state.get_id(),
-                            tlc_id: tlc.get_id(),
-                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                                payment_preimage: preimage,
-                            }),
-                        };
-                        self.network
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                    state.get_local_peer_id(),
-                                    FiberMessage::remove_tlc(remove_tlc),
-                                )),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        info!("try to settle down tlc: {:?}", &tlc);
-                    } else {
-                        warn!(
-                            "Payment preimage not found for payment hash: {:?}",
-                            add_tlc.payment_hash
-                        );
-                    }
                 }
                 Ok(())
             }
@@ -546,19 +522,28 @@ where
                 }
                 if let Some((previous_channel_id, previous_tlc)) = tlc_details.tlc.previous_tlc {
                     assert!(previous_tlc.is_received());
-                    let new_remove_tlc = RemoveTlc {
-                        channel_id: previous_channel_id,
-                        tlc_id: previous_tlc.into(),
-                        reason: remove_tlc.reason,
-                    };
+                    info!(
+                        "begin to remove tlc from previous channel: {:?}",
+                        &previous_tlc
+                    );
+                    let (send, recv) = oneshot::channel::<Result<(), String>>();
+                    let port = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                                state.get_local_peer_id(),
-                                FiberMessage::remove_tlc(new_remove_tlc),
-                            )),
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: previous_channel_id,
+                                command: ChannelCommand::RemoveTlc(
+                                    RemoveTlcCommand {
+                                        id: previous_tlc.into(),
+                                        reason: remove_tlc.reason,
+                                    },
+                                    port,
+                                ),
+                            }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    let res = recv.await.expect("network actor is alive");
+                    info!("remove tlc from previous channel: {:?}", &res);
                 }
                 Ok(())
             }
@@ -650,6 +635,26 @@ where
             | FiberChannelMessage::TxAckRBF(_) => {
                 warn!("Received unsupported message: {:?}", &message);
                 Ok(())
+            }
+        }
+    }
+
+    fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
+        let tlcs = state.get_tlcs_for_settle_down();
+        info!("try_to_settle_down_tlc get tlcs: {:?}", &tlcs);
+        for tlc_info in tlcs {
+            let tlc = tlc_info.tlc.clone();
+            if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
+                let command = RemoveTlcCommand {
+                    id: tlc.get_id(),
+                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage: preimage,
+                    }),
+                };
+                let result = self.handle_remove_tlc_command(state, command);
+                info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+                // we only handle one tlc at a time.
+                break;
             }
         }
     }
@@ -2830,6 +2835,16 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
+    fn get_tlcs_for_settle_down(&self) -> Vec<DetailedTLCInfo> {
+        self.tlcs
+            .values()
+            .filter(|tlc| {
+                !tlc.is_offered() && tlc.creation_confirmed_at.is_some() && tlc.removed_at.is_none()
+            })
+            .map(|tlc| tlc.clone())
+            .collect()
+    }
+
     // After sending or receiving a RevokeAndAck message, all messages before
     // are considered confirmed by both parties. These messages include
     // AddTlc and RemoveTlc to operate on TLCs.
@@ -3135,8 +3150,8 @@ impl ChannelActorState {
                     }
                     None => {
                         debug!(
-                            "Inserting remove reason {:?} at commitment number {:?} for tlc {:?}",
-                            reason, removed_at, current
+                            "Inserting remove reason {:?} at commitment number {:?} for tlc {:?} hash_algorithm: {:?}",
+                            reason, removed_at, current, current.tlc.hash_algorithm
                         );
                         if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
                             let filled_payment_hash: Hash256 = current
