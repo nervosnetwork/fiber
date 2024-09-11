@@ -2687,7 +2687,7 @@ impl OnionPacket {
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        Ok(serde_json::from_slice(data).unwrap())
+        serde_json::from_slice(data).map_err(|_| Error::OnionPacket)
     }
 
     pub fn shift(&mut self) -> Result<OnionInfo, Error> {

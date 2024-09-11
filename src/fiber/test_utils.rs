@@ -287,6 +287,8 @@ struct MemoryStore {
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
     connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
+    invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
+    invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
@@ -445,20 +447,32 @@ impl ChannelActorStateStore for MemoryStore {
 }
 
 impl InvoiceStore for MemoryStore {
-    fn get_invoice(&self, _id: &Hash256) -> Option<CkbInvoice> {
-        unimplemented!()
+    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
+        self.invoice_store.read().unwrap().get(id).cloned()
     }
 
     fn insert_invoice(
         &self,
-        _invoice: CkbInvoice,
-        _preimage: Option<Hash256>,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
-        unimplemented!()
+        let id = invoice.payment_hash();
+        if let Some(preimage) = preimage {
+            self.invoice_hash_to_preimage
+                .write()
+                .unwrap()
+                .insert(*id, preimage);
+        }
+        self.invoice_store.write().unwrap().insert(*id, invoice);
+        Ok(())
     }
 
-    fn get_invoice_preimage(&self, _hash: &Hash256) -> Option<Hash256> {
-        unimplemented!()
+    fn get_invoice_preimage(&self, hash: &Hash256) -> Option<Hash256> {
+        self.invoice_hash_to_preimage
+            .read()
+            .unwrap()
+            .get(hash)
+            .cloned()
     }
 }
 
