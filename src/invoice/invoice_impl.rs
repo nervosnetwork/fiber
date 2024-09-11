@@ -546,7 +546,7 @@ impl InvoiceBuilder {
         self
     }
 
-    fn add_attr(mut self, attr: Attribute) -> Self {
+    pub fn add_attr(mut self, attr: Attribute) -> Self {
         self.attrs.push(attr);
         self
     }

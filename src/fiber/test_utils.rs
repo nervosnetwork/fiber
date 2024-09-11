@@ -3,6 +3,7 @@ use crate::fiber::types::Pubkey;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
+use rand::Rng;
 use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
@@ -106,6 +107,13 @@ pub fn generate_pubkey() -> PublicKey {
     let secret_key = SecretKey::new(&mut rand::thread_rng());
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
     public_key
+}
+
+pub fn gen_sha256_hash() -> Hash256 {
+    let mut rng = rand::thread_rng();
+    let mut result = [0u8; 32];
+    rng.fill(&mut result[..]);
+    result.into()
 }
 
 #[derive(Debug)]

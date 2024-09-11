@@ -85,6 +85,13 @@ impl Batch {
                     serde_json::to_vec(&invoice).expect("serialize CkbInvoice should be OK"),
                 );
             }
+            KeyValue::CkbInvoicePreimage(id, preimage) => {
+                let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&preimage).expect("serialize Hash256 should be OK"),
+                );
+            }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
                 let key = [
                     &[PEER_ID_CHANNEL_ID_PREFIX],
@@ -188,6 +195,7 @@ impl Batch {
 
 const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
 const CKB_INVOICE_PREFIX: u8 = 32;
+const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
 const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
 const CHANNEL_INFO_PREFIX: u8 = 96;
 const CHANNEL_ANNOUNCEMENT_INDEX_PREFIX: u8 = 97;
@@ -200,6 +208,7 @@ const PAYMENT_SESSION_PREFIX: u8 = 192;
 enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
+    CkbInvoicePreimage(Hash256, Hash256),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     PeerIdMultiAddr(PeerId, Multiaddr),
     NodeInfo(Pubkey, NodeInfo),
@@ -293,15 +302,31 @@ impl InvoiceStore for Store {
         })
     }
 
-    fn insert_invoice(&self, invoice: CkbInvoice) -> Result<(), InvoiceError> {
+    fn insert_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
         let mut batch = self.batch();
         let hash = invoice.payment_hash();
         if self.get_invoice(hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
         }
+        if let Some(preimage) = preimage {
+            batch.put_kv(KeyValue::CkbInvoicePreimage(*hash, preimage));
+        }
         batch.put_kv(KeyValue::CkbInvoice(*invoice.payment_hash(), invoice));
         batch.commit();
         return Ok(());
+    }
+
+    fn get_invoice_preimage(&self, id: &Hash256) -> Option<Hash256> {
+        let mut key = Vec::with_capacity(33);
+        key.extend_from_slice(&[CKB_INVOICE_PREIMAGE_PREFIX]);
+        key.extend_from_slice(id.as_ref());
+
+        self.get(key)
+            .map(|v| serde_json::from_slice(v.as_ref()).expect("deserialize Hash256 should be OK"))
     }
 }
 
@@ -415,5 +440,60 @@ impl NetworkGraphStateStore for Store {
             serde_json::to_vec(&session).expect("serialize PaymentSession should be OK"),
         );
         batch.commit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fiber::test_utils::gen_sha256_hash;
+    use crate::invoice::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_invoice_store() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invoice_store");
+        let store = Store::new(&path);
+
+        let preimage = gen_sha256_hash();
+        let invoice = InvoiceBuilder::new(Currency::Fibb)
+            .amount(Some(1280))
+            .payment_preimage(preimage)
+            .fallback_address("address".to_string())
+            .add_attr(Attribute::FinalHtlcTimeout(5))
+            .build()
+            .unwrap();
+        let payment_hash = invoice.payment_hash();
+
+        // let payment_hash = rand_sha256_hash();
+        // let preimage = rand_sha256_hash();
+        // let (public_key, private_key) = gen_rand_keypair();
+
+        // let invoice = InvoiceBuilder::new(Currency::Fibb)
+        //     .amount(Some(1280))
+        //     .payment_hash(payment_hash)
+        //     .payment_preimage(preimage)
+        //     .fallback_address("address".to_string())
+        //     .expiry_time(Duration::from_secs(1024))
+        //     .payee_pub_key(public_key)
+        //     .add_attr(Attribute::FinalHtlcTimeout(5))
+        //     .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        //     .add_attr(Attribute::Description("description".to_string()))
+        //     .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
+        //     .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        //     .unwrap();
+
+        // let address = invoice.to_string();
+
+        let hash = invoice.payment_hash();
+        store
+            .insert_invoice(invoice.clone(), Some(preimage))
+            .unwrap();
+        assert_eq!(store.get_invoice(&hash), Some(invoice.clone()));
+        assert_eq!(store.get_invoice_preimage(&hash), Some(preimage));
+
+        let invalid_hash = gen_sha256_hash();
+        assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
     }
 }
