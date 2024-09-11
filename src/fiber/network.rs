@@ -1769,27 +1769,28 @@ impl NetworkSyncState {
         peer_id: &PeerId,
         network: ActorRef<NetworkActorMessage>,
     ) -> Option<ActorRef<GraphSyncerMessage>> {
-        // There are two possibility for the following condition to be true:
-        // 1) we don't have any pinned syncing peers.
-        // 2) we have some pinned syncing peers, and all of them failed to sync.
-        // In the first case, both self.pinned_syncing_peers.len() is always 0,
-        // and self.failed is alway greater or equal 0, so the condition is always true.
-        // In the second case, if self.failed is larger than the length of pinned_syncing_peers,
-        // then all of pinned sync peers failed to sync. This is because
-        // we will always try to sync with all the pinned syncing peers first.
-        let should_create = if self.failed >= self.pinned_syncing_peers.len() {
-            // TODO: we may want more than one successful syncing.
-            if self.succeeded != 0 {
-                false
+        let should_create = !self.active_syncers.contains_key(peer_id)
+            && if self.failed >= self.pinned_syncing_peers.len() {
+                // There are two possibility for the above condition to be true:
+                // 1) we don't have any pinned syncing peers.
+                // 2) we have some pinned syncing peers, and all of them failed to sync.
+                // In the first case, both self.pinned_syncing_peers.len() is always 0,
+                // and self.failed is alway greater or equal 0, so the condition is always true.
+                // In the second case, if self.failed is larger than the length of pinned_syncing_peers,
+                // then all of pinned sync peers failed to sync. This is because
+                // we will always try to sync with all the pinned syncing peers first.
+                if self.succeeded != 0 {
+                    // TODO: we may want more than one successful syncing.
+                    false
+                } else {
+                    debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
+                    true
+                }
             } else {
-                debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
-                true
-            }
-        } else {
-            self.pinned_syncing_peers
-                .iter()
-                .any(|(id, _)| id == peer_id)
-        };
+                self.pinned_syncing_peers
+                    .iter()
+                    .any(|(id, _)| id == peer_id)
+            };
 
         if should_create {
             let graph_syncer = Actor::spawn_linked(
