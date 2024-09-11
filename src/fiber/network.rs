@@ -514,7 +514,10 @@ where
                         }
                     };
                     for message in messages {
-                        if let Err(e) = self.process_broadcasted_message(message).await {
+                        if let Err(e) = self
+                            .process_broadcasted_message(&state.network, message)
+                            .await
+                        {
                             let fail_message =
                                 format!("Failed to process broadcasted message: {:?}", &e);
                             error!("{}", &fail_message);
@@ -1354,7 +1357,10 @@ where
                 );
                 for message in broadcasted_message_queue.drain(..) {
                     let (_peer_id, message) = message;
-                    if let Err(e) = self.process_broadcasted_message(message).await {
+                    if let Err(e) = self
+                        .process_broadcasted_message(&state.network, message)
+                        .await
+                    {
                         error!("Failed to process broadcasted message: {:?}", e);
                     }
                 }
@@ -1421,11 +1427,13 @@ where
                 NetworkActorCommand::BroadcastMessage(vec![], message.clone()),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        self.process_broadcasted_message(message).await
+        self.process_broadcasted_message(&state.network, message)
+            .await
     }
 
     async fn process_broadcasted_message(
         &self,
+        network: &ActorRef<NetworkActorMessage>,
         message: FiberBroadcastMessage,
     ) -> Result<(), Error> {
         match message {
@@ -1458,6 +1466,13 @@ where
                             anouncement_msg: node_announcement.clone(),
                         };
                         self.network_graph.write().await.add_node(node_info);
+
+                        // TODO: bookkeeping how many nodes we have connected to. Stop connnecting once we surpass a threshold.
+                        for addr in &node_announcement.addresses {
+                            network.send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.clone()),
+                            ))?;
+                        }
                         Ok(())
                     }
                     _ => {
