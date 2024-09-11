@@ -729,7 +729,7 @@ where
             if is_within_range(node_info.timestamp) {
                 queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
                     NodeAnnouncementQuery {
-                        node_id: node_info.node_id.clone(),
+                        node_id: node_info.node_id,
                         flags: 0,
                     },
                 ));
@@ -771,7 +771,7 @@ where
                 node_id,
                 flags: _,
             }) => {
-                let node_info = network_graph.get_node(node_id.clone());
+                let node_info = network_graph.get_node(node_id);
                 match node_info {
                     Some(node_info) => Ok(FiberBroadcastMessage::NodeAnnouncement(
                         node_info.anouncement_msg.clone(),
@@ -1045,8 +1045,8 @@ where
                     }
                     debug!("Changing sync succeeded/failed counter");
                     match reason {
-                        GraphSyncerExitStatus::Succeeded => state.succeeded = state.succeeded + 1,
-                        GraphSyncerExitStatus::Failed => state.failed = state.failed + 1,
+                        GraphSyncerExitStatus::Succeeded => state.succeeded += 1,
+                        GraphSyncerExitStatus::Failed => state.failed += 1,
                     }
                 }
                 state.maybe_finish_sync();
@@ -1602,7 +1602,7 @@ where
 
                 let pubkey = channel_announcement.ckb_key.serialize();
                 let pubkey_hash = blake2b_256(pubkey.as_slice());
-                match tx.inner.outputs.get(0) {
+                match tx.inner.outputs.first() {
                     None => {
                         return Err(Error::InvalidParameter(format!(
                             "On-chain transaction found but no output: {:?}",
@@ -1653,7 +1653,7 @@ where
 
                 // Add the channel to the network graph.
                 let channel_info = ChannelInfo {
-                    funding_tx_block_number: block_number.into(),
+                    funding_tx_block_number: block_number,
                     funding_tx_index: tx_index,
                     announcement_msg: channel_announcement.clone(),
                     one_to_two: None, // wait for channel update message
@@ -2419,7 +2419,7 @@ impl NetworkActorState {
                 .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         }
 
-        for channel_id in store.get_active_channel_ids_by_peer(&remote_peer_id) {
+        for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
             if let Ok((_channel, _)) = Actor::spawn_linked(
                 None,
@@ -2576,10 +2576,10 @@ impl NetworkActorState {
         channel_id: &Hash256,
         tx_hash: Byte32,
     ) {
-        self.channels.remove(&channel_id);
-        if let Some(session) = self.get_peer_session(&peer_id) {
+        self.channels.remove(channel_id);
+        if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(&channel_id);
+                set.remove(channel_id);
             }
         }
         self.send_message_to_channel_actor(
@@ -2827,8 +2827,7 @@ where
             .expect("read or generate secret key");
         let private_key = <[u8; 32]>::try_from(kp.as_ref())
             .expect("valid length for key")
-            .try_into()
-            .expect("valid secret key");
+            .into();
         let entropy = blake2b_hash_with_salt(
             [kp.as_ref(), now.as_nanos().to_le_bytes().as_ref()]
                 .concat()

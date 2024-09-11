@@ -448,7 +448,7 @@ mod tests {
     fn test_invoice_store() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("invoice_store");
-        let store = Store::new(&path);
+        let store = Store::new(path);
 
         let preimage = gen_sha256_hash();
         let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -463,8 +463,8 @@ mod tests {
         store
             .insert_invoice(invoice.clone(), Some(preimage))
             .unwrap();
-        assert_eq!(store.get_invoice(&hash), Some(invoice.clone()));
-        assert_eq!(store.get_invoice_preimage(&hash), Some(preimage));
+        assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
+        assert_eq!(store.get_invoice_preimage(hash), Some(preimage));
 
         let invalid_hash = gen_sha256_hash();
         assert_eq!(store.get_invoice_preimage(&invalid_hash), None);

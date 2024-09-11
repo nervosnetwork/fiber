@@ -433,7 +433,7 @@ impl Pubkey {
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
-        let pubkey = self.clone().into();
+        let pubkey = (*self).into();
         PeerId::from_public_key(&pubkey)
     }
 }
@@ -1515,9 +1515,9 @@ impl ChannelAnnouncement {
             features: Default::default(),
             chain_hash,
             channel_outpoint,
-            node_1_id: node_1_pubkey.clone(),
-            node_2_id: node_2_pubkey.clone(),
-            ckb_key: ckb_pubkey.clone(),
+            node_1_id: *node_1_pubkey,
+            node_2_id: *node_2_pubkey,
+            ckb_key: *ckb_pubkey,
             capacity,
             udt_type_script,
         }
@@ -1638,10 +1638,10 @@ impl ChannelUpdate {
             version: timestamp,
             message_flags,
             channel_flags,
-            tlc_locktime_expiry_delta: tlc_locktime_expiry_delta,
-            tlc_minimum_value: tlc_minimum_value,
-            tlc_maximum_value: tlc_maximum_value,
-            tlc_fee_proportional_millionths: tlc_fee_proportional_millionths,
+            tlc_locktime_expiry_delta,
+            tlc_minimum_value,
+            tlc_maximum_value,
+            tlc_fee_proportional_millionths,
         }
     }
 
@@ -2245,7 +2245,7 @@ impl From<QueryChannelsWithinBlockRangeResult>
                         query_channels_within_block_range_result
                             .channels
                             .into_iter()
-                            .map(|channel| channel.into())
+                            .map(|channel| channel)
                             .collect(),
                     )
                     .build(),
@@ -2395,7 +2395,7 @@ impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult>
 
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
     fn from(fiber_message: FiberMessage) -> Self {
-        let fiber_message_union = match fiber_message {
+        match fiber_message {
             FiberMessage::ChannelInitialization(open_channel) => {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
@@ -2500,8 +2500,7 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                     )
                 }
             },
-        };
-        fiber_message_union
+        }
     }
 }
 
@@ -2727,7 +2726,7 @@ impl OnionPacket {
     }
 
     pub fn shift(&mut self) -> Result<OnionInfo, Error> {
-        if self.hop_data.len() > 0 {
+        if !self.hop_data.is_empty() {
             Ok(self.hop_data.remove(0))
         } else {
             Err(Error::OnionPacket)
@@ -2735,7 +2734,7 @@ impl OnionPacket {
     }
 
     pub fn peek(&self) -> Option<&OnionInfo> {
-        if self.hop_data.len() > 0 {
+        if !self.hop_data.is_empty() {
             Some(&self.hop_data[0])
         } else {
             None

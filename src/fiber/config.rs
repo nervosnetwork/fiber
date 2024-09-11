@@ -15,7 +15,7 @@ pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied
 pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
 
 /// By default, listen to any tcp port allocated by the kernel.
-pub const DEFAULT_LISTENING_ADDR: &'static str = "/ip4/0.0.0.0/tcp/0";
+pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 
 /// 62 CKB minimal channel amount, at any time a partner should keep at least
 /// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,

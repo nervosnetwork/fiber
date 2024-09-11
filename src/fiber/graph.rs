@@ -499,14 +499,14 @@ where
                 payment_hash,
                 next_hop,
                 tlc_hash_algorithm: hash_algorithm,
-                expiry: current_expiry.into(),
+                expiry: current_expiry,
                 channel_outpoint: next_channel_outpoint,
             });
             current_amount += fee;
             current_expiry += expiry;
         }
         // add the first hop so that the logic for send HTLC can be reused
-        let next_hop = if route.len() >= 1 {
+        let next_hop = if !route.is_empty() {
             Some(route[0].target)
         } else {
             None
@@ -516,7 +516,7 @@ where
             payment_hash,
             next_hop,
             tlc_hash_algorithm: hash_algorithm,
-            expiry: current_expiry.into(),
+            expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
         });
         onion_infos.reverse();
@@ -682,9 +682,8 @@ where
     fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
-        let probability = probability as f64;
-        let time_pref = 0.5 as f64;
-        let default_attemp_cost = 0.1 as f64;
+        let time_pref = 0.5_f64;
+        let default_attemp_cost = 0.1_f64;
         let penalty = default_attemp_cost * (1.0 / (0.5 - time_pref / 2.0) - 1.0);
         weight as u128 + (penalty / probability) as u128
     }

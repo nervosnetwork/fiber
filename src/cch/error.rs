@@ -52,12 +52,12 @@ pub enum CchError {
 
 pub type CchResult<T> = std::result::Result<T, CchError>;
 
-impl Into<ErrorObjectOwned> for CchError {
-    fn into(self) -> ErrorObjectOwned {
+impl From<CchError> for ErrorObjectOwned {
+    fn from(val: CchError) -> Self {
         // TODO: categorize error codes
         ErrorObjectOwned::owned(
             CALL_EXECUTION_FAILED_CODE,
-            self.to_string(),
+            val.to_string(),
             Option::<()>::None,
         )
     }

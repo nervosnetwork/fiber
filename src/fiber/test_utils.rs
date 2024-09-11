@@ -423,11 +423,7 @@ impl ChannelActorStateStore for MemoryStore {
             Some(peer_id) => values
                 .filter_map(|state| {
                     if peer_id == state.get_remote_peer_id() {
-                        Some((
-                            state.get_remote_peer_id(),
-                            state.id.clone(),
-                            state.state.clone(),
-                        ))
+                        Some((state.get_remote_peer_id(), state.id, state.state.clone()))
                     } else {
                         None
                     }

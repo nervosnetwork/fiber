@@ -260,11 +260,11 @@ where
     }
 
     pub fn get_local_pubkey(&self) -> Pubkey {
-        self.local_pubkey.clone()
+        self.local_pubkey
     }
 
     pub fn get_remote_pubkey(&self) -> Pubkey {
-        self.remote_pubkey.clone()
+        self.remote_pubkey
     }
 
     pub fn get_remote_peer_id(&self) -> PeerId {
@@ -2151,7 +2151,7 @@ impl ChannelActorState {
                     locktime_expiry_delta,
                     min_value,
                     max_value,
-                    fee_proportional_millionths.into(),
+                    fee_proportional_millionths,
                 )),
                 _ => {
                     warn!("Missing channel update parameters, cannot create channel update message: public_channel_info={:?}", info);
@@ -2576,7 +2576,7 @@ impl ChannelActorState {
             .as_ref()
             .and_then(|state| state.local_channel_announcement_signature)
         {
-            Some(x) => return x.clone(),
+            Some(x) => return x,
             _ => {}
         };
 
@@ -2595,7 +2595,7 @@ impl ChannelActorState {
             self.signer.funding_key,
             local_secnonce,
             &agg_nonce,
-            &message,
+            message,
         )
         .expect("Partial sign channel announcement");
 
@@ -2613,8 +2613,8 @@ impl ChannelActorState {
                     FiberMessage::announcement_signatures(AnnouncementSignatures {
                         channel_id,
                         channel_outpoint,
-                        partial_signature: partial_signature.clone(),
-                        node_signature: node_signature.clone(),
+                        partial_signature: partial_signature,
+                        node_signature: node_signature,
                     }),
                 )),
             ))
@@ -2625,7 +2625,7 @@ impl ChannelActorState {
         );
         let result = (node_signature, partial_signature);
         self.public_channel_state_mut()
-            .local_channel_announcement_signature = Some(result.clone());
+            .local_channel_announcement_signature = Some(result);
         result
     }
 
@@ -2650,7 +2650,7 @@ impl ChannelActorState {
     ) -> Option<(EcdsaSignature, PartialSignature)> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.remote_channel_announcement_signature.clone())
+            .and_then(|state| state.remote_channel_announcement_signature)
     }
 
     fn update_remote_channel_announcement_signature(
@@ -2817,7 +2817,7 @@ impl ChannelActorState {
 
         debug!(
             "Sending commitment secret {:?} for commitment number {} and new commitment point {:?}",
-            hex::encode(&commitment_secret),
+            hex::encode(commitment_secret),
             commitment_number,
             point
         );
@@ -2841,7 +2841,7 @@ impl ChannelActorState {
             .filter(|tlc| {
                 !tlc.is_offered() && tlc.creation_confirmed_at.is_some() && tlc.removed_at.is_none()
             })
-            .map(|tlc| tlc.clone())
+            .cloned()
             .collect()
     }
 
@@ -3556,7 +3556,7 @@ impl ChannelActorState {
         if remote_fee_rate < self.commitment_fee_rate {
             return false;
         }
-        let fee = calculate_shutdown_tx_fee(remote_fee_rate, &self);
+        let fee = calculate_shutdown_tx_fee(remote_fee_rate, self);
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
@@ -3590,7 +3590,7 @@ impl ChannelActorState {
             if self
                 .get_active_received_tlcs(true)
                 .chain(self.get_active_offered_tlcs(true))
-                .fold(0 as u128, |sum, tlc| sum + tlc.tlc.amount)
+                .fold(0_u128, |sum, tlc| sum + tlc.tlc.amount)
                 + add_amount
                 > self.max_tlc_value_in_flight
             {
@@ -4320,8 +4320,8 @@ impl ChannelActorState {
         debug!(
             "Get previous commitment transaction witnesses: {:?}, hash: {:?}, script_args: {:?}",
             hex::encode(&witnesses),
-            hex::encode(&hash),
-            hex::encode(&script_args)
+            hex::encode(hash),
+            hex::encode(script_args)
         );
 
         self.update_state_on_raa_msg(true);
@@ -4661,8 +4661,8 @@ impl ChannelActorState {
             ) => (
                 local_shutdown_script,
                 remote_shutdown_script,
-                calculate_shutdown_tx_fee(local_shutdown_fee_rate, &self),
-                calculate_shutdown_tx_fee(remote_shutdown_fee_rate, &self),
+                calculate_shutdown_tx_fee(local_shutdown_fee_rate, self),
+                calculate_shutdown_tx_fee(remote_shutdown_fee_rate, self),
             ),
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
@@ -4876,9 +4876,9 @@ impl ChannelActorState {
             "Parameters for witnesses: epoch {:?}, payment key: {:?} (hash: {:?}), revocation key: {:?} (hash: {:?})",
             delayed_epoch,
             delayed_payment_key,
-            hex::encode(&delayed_payment_key_hash),
+            hex::encode(delayed_payment_key_hash),
             revocation_key,
-            hex::encode(&revocation_key_hash)
+            hex::encode(revocation_key_hash)
         );
 
         // for xudt compatibility issue,
@@ -4898,7 +4898,7 @@ impl ChannelActorState {
             if local { "local" } else { "remote" },
             commitment_number,
             hex::encode(&witnesses),
-            hex::encode(&hash)
+            hex::encode(hash)
         );
         (witnesses, hash)
     }
