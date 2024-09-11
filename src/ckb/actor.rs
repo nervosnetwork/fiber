@@ -93,9 +93,13 @@ impl Actor for CkbChainActor {
         use CkbChainMessage::{Fund, GetCurrentBlockNumber, SendTx, Sign, TraceTx};
         match message {
             GetCurrentBlockNumber(_, reply) => {
-                let rpc_url = state.config.rpc_url.clone();
-                let ckb_client = CkbRpcClient::new(&rpc_url);
-                let _ = reply.send(ckb_client.get_tip_block_number().map(|x| x.value()));
+                // Have to use block_in_place here, see https://github.com/seanmonstar/reqwest/issues/1017.
+                let result = tokio::task::block_in_place(move || {
+                    CkbRpcClient::new(&state.config.rpc_url)
+                        .get_tip_block_number()
+                        .map(|x| x.value())
+                });
+                let _ = reply.send(result);
             }
 
             Fund(tx, request, reply_port) => {
