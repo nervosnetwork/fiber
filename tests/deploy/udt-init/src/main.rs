@@ -227,18 +227,19 @@ fn genrate_nodes_config() {
         "# this is generated from nodes/deployer/config.yml, any changes will not be checked in",
         "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh` to regenerate"
     );
-    for i in 1..=3 {
+    let config_dirs = vec!["bootnode", "1", "2", "3"];
+    for (i, config_dir) in config_dirs.iter().enumerate() {
         let mut data = data.clone();
         data["fiber"]["listening_addr"] =
-            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", 8344 + i - 1));
+            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", 8343 + i));
         data["fiber"]["announced_addrs"] =
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(format!(
                 "/ip4/127.0.0.1/tcp/{}",
-                8344 + i - 1
+                8343 + i
             ))]);
         data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
         data["rpc"]["listening_addr"] =
-            serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
+            serde_yaml::Value::String(format!("127.0.0.1:{}", 41713 + i));
         data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
 
         // Node 3 acts as a CCH node.
@@ -250,7 +251,7 @@ fn genrate_nodes_config() {
         }
 
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
-        let config_path = format!("{}/{}/config.yml", nodes_dir, i);
+        let config_path = format!("{}/{}/config.yml", nodes_dir, config_dir);
         std::fs::write(config_path, new_yaml).expect("write failed");
     }
 }
