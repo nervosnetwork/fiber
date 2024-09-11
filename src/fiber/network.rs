@@ -12,11 +12,12 @@ use secp256k1::Message;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
-use tentacle::multiaddr::Protocol;
+use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -236,7 +237,7 @@ impl NetworkActorMessage {
 pub enum NetworkServiceEvent {
     ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
-    NetworkStarted(PeerId, Vec<Multiaddr>),
+    NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
@@ -1816,7 +1817,7 @@ pub struct NetworkActorState {
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
-    listen_addrs: Vec<Multiaddr>,
+    announced_addrs: Vec<Multiaddr>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
     // This is the entropy used to generate various random values.
@@ -1892,7 +1893,7 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
 impl NetworkActorState {
     pub fn get_node_announcement_message(&self) -> Option<NodeAnnouncement> {
         let alias = self.node_name?;
-        let addresses = self.listen_addrs.clone();
+        let addresses = self.announced_addrs.clone();
         Some(NodeAnnouncement::new(alias, addresses, &self.private_key))
     }
 
@@ -2734,22 +2735,31 @@ where
             .insert_protocol(handle.clone().create_meta(FIBER_PROTOCOL_ID))
             .handshake_type(secio_kp.into())
             .build(handle);
-        let mut listen_addr = service
+        let mut listening_addr = service
             .listen(
-                format!("/ip4/0.0.0.0/tcp/{}", config.listening_port)
-                    .parse()
-                    .expect("valid tentacle address"),
+                MultiAddr::from_str(config.listening_addr())
+                    .expect("valid tentacle listening address"),
             )
             .await
             .expect("listen tentacle");
 
         trace!("debug secio_pk: {:?}", secio_pk);
         let my_peer_id: PeerId = PeerId::from(secio_pk);
-        listen_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
-        // TODO: expand listen_addr to routable addresses,
-        // e.g. 0.0.0.0 should be reachable from all the ip addresses of the machine.
-        let listen_addrs = vec![listen_addr];
-        info!("Started listening tentacle on {:?}", &listen_addrs);
+        listening_addr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+        let mut announced_addrs = Vec::with_capacity(config.announced_addrs.len() + 1);
+        if config.announce_listening_addr() {
+            announced_addrs.push(listening_addr.clone());
+        }
+        for listen_addr in &config.announced_addrs {
+            let mut multiaddr =
+                MultiAddr::from_str(listen_addr.as_str()).expect("valid announced listen addr");
+            multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
+            announced_addrs.push(multiaddr);
+        }
+        info!(
+            "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
+            &listening_addr, &my_peer_id, &announced_addrs
+        );
 
         let control = service.control().to_owned();
 
@@ -2757,7 +2767,8 @@ where
             .send_message(NetworkActorMessage::new_event(
                 NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::NetworkStarted(
                     my_peer_id.clone(),
-                    listen_addrs.clone(),
+                    listening_addr.clone(),
+                    announced_addrs.clone(),
                 )),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -2787,7 +2798,7 @@ where
         let state = NetworkActorState {
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
-            listen_addrs,
+            announced_addrs,
             private_key,
             entropy,
             network: myself.clone(),

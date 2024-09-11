@@ -139,6 +139,7 @@ impl NetworkNode {
                 .as_deref()
                 .or(base_dir.as_ref().file_name().unwrap().to_str())
                 .map(Into::into),
+            announce_listening_addr: Some(true),
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
             ..Default::default()
@@ -175,10 +176,10 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (peer_id, listening_addrs) = loop {
+        let (peer_id, _listening_addr, announced_addrs) = loop {
             select! {
-                Some(NetworkServiceEvent::NetworkStarted(peer_id, multiaddr)) = event_receiver.recv() => {
-                    break (peer_id, multiaddr);
+                Some(NetworkServiceEvent::NetworkStarted(peer_id, listening_addr, announced_addrs)) = event_receiver.recv() => {
+                    break (peer_id, listening_addr, announced_addrs);
                 }
                 _ = sleep(Duration::from_secs(5)) => {
                     panic!("Failed to start network actor");
@@ -194,7 +195,7 @@ impl NetworkNode {
 
         Self {
             base_dir,
-            listening_addrs,
+            listening_addrs: announced_addrs,
             network_actor,
             chain_actor,
             peer_id,

@@ -14,6 +14,9 @@ pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for sh
 pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
 pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
 
+/// By default, listen to any tcp port allocated by the kernel.
+pub const DEFAULT_LISTENING_ADDR: &'static str = "/ip4/0.0.0.0/tcp/0";
+
 /// 62 CKB minimal channel amount, at any time a partner should keep at least
 /// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,
 /// to make sure he can build a valid shutdown transaction and pay proper fee.
@@ -61,13 +64,21 @@ pub struct FiberConfig {
     )]
     pub(crate) base_dir: Option<PathBuf>,
 
-    /// listening port for fiber network
-    #[arg(name = "FIBER_LISTENING_PORT", long = "fiber-listening-port", env)]
-    pub(crate) listening_port: u16,
+    /// listening address for fiber network [default: "/ip4/0.0.0.0/tcp/0" (random tcp port)]
+    #[arg(name = "FIBER_LISTENING_ADDR", long = "fiber-listening-addr", env)]
+    pub(crate) listening_addr: Option<String>,
+
+    /// whether to announce listening address [default: false]
+    #[arg(
+        name = "FIBER_ANNOUNCE_LISTENING_ADDR",
+        long = "fiber-announce-listening-addr",
+        env
+    )]
+    pub(crate) announce_listening_addr: Option<bool>,
 
     /// addresses to be announced to fiber network (separated by `,`)
-    #[arg(name = "FIBER_ANNOUNCED_LISTEN_ADDRS", long = "fiber-announced-listen-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
-    pub(crate) announced_listen_addrs: Vec<String>,
+    #[arg(name = "FIBER_ANNOUNCED_ADDRS", long = "fiber-announced-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    pub(crate) announced_addrs: Vec<String>,
 
     /// bootstrap node addresses to be connected at startup (separated by `,`)
     #[arg(name = "FIBER_BOOTNODES_ADDRS", long = "fiber-bootnodes-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
@@ -246,6 +257,16 @@ impl FiberConfig {
             fs::create_dir_all(&path).expect("create store directory");
         }
         path
+    }
+
+    pub fn listening_addr(&self) -> &str {
+        self.listening_addr
+            .as_deref()
+            .unwrap_or(DEFAULT_LISTENING_ADDR)
+    }
+
+    pub fn announce_listening_addr(&self) -> bool {
+        self.announce_listening_addr.unwrap_or(false)
     }
 
     pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
