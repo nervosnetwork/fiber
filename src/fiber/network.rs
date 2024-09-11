@@ -1356,6 +1356,7 @@ where
                 }
             },
             NetworkActorCommand::MarkSyncingDone => {
+                info!("Syncing network information finished");
                 state.sync_status = NetworkSyncStatus::Done;
                 let mut broadcasted_message_queue = vec![];
                 std::mem::swap(

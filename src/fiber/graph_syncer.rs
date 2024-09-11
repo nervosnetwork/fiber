@@ -18,7 +18,8 @@ const ASSUME_MAX_CHANNEL_HEIGHT_GAP: u64 = 1000;
 
 // We assume all the messages with timestamp <
 // latest timestamp - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP are already synced.
-const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000;
+// The gap is currently set to 12 hours.
+const ASSUME_MAX_MESSAGE_TIMESTAMP_GAP: u64 = 1000 * 3600 * 12;
 
 #[derive(Debug)]
 pub enum GraphSyncerMessage {
@@ -131,8 +132,14 @@ impl Actor for GraphSyncer {
                         debug!("Get channels from peer successfully.");
                         if self.ending_height == ending_height {
                             debug!("Starting get broadcast messages from peer after getting channels finished");
+                            let starting_time =
+                                if self.starting_time < ASSUME_MAX_MESSAGE_TIMESTAMP_GAP {
+                                    0
+                                } else {
+                                    self.starting_time - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP
+                                };
                             myself.send_message(GraphSyncerMessage::GetBroadcastMessages(
-                                self.starting_time,
+                                starting_time,
                             ))?;
                         } else {
                             myself.send_message(GraphSyncerMessage::GetChannels(ending_height))?;
@@ -148,7 +155,10 @@ impl Actor for GraphSyncer {
                 if starting_time > self.ending_time {
                     panic!("Starting time to high (starting time {}, ending time {}), should have exited syncing earlier", starting_time, self.ending_time);
                 }
-                const STEP: u64 = 10;
+                // Syncing at most 10 minutes of information for now.
+                // TODO: it is unreasonable to use 10 minutes as the interval for every requests.
+                // because in this way, syncing from EPOCH to now takes "forever".
+                const STEP: u64 = 10 * 60 * 1000;
                 let ending_time = max(starting_time + STEP, self.ending_time);
                 let request = |rpc_reply| {
                     NetworkActorMessage::new_command(
