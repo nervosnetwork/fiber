@@ -1468,7 +1468,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
             addresses: node_announcement
                 .address()
                 .into_iter()
-                .map(|address| MultiAddr::try_from(address.as_bytes()))
+                .map(|address| MultiAddr::try_from(address.raw_data()))
                 .collect::<Result<Vec<_>, _>>()?,
         })
     }
