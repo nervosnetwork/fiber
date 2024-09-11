@@ -6,6 +6,7 @@ array SchnorrXOnlyPubkey [byte; 32];
 array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
+option Uint64Opt (Uint64);
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -248,12 +249,20 @@ table QueryChannelsWithinBlockRange {
     chain_hash: Byte32,
     start_block: Uint64,
     end_block: Uint64,
+    // Maximal number of channels to return.
+    count: Uint64Opt,
 }
 
 vector OutPoints <OutPoint>;
 
 table QueryChannelsWithinBlockRangeResult {
     id: Uint64,
+    // TODO: Using end block as the parameter for next query may result
+    // in repeatedly send the same data in this block. We may want to
+    // either enforce channels in the same block are always sent in the same batch
+    // or use some offset/cursor for pagination.
+    next_block: Uint64,
+    is_finished: byte,
     channels: OutPoints,
 }
 
@@ -262,10 +271,18 @@ table QueryBroadcastMessagesWithinTimeRange {
     chain_hash: Byte32,
     start_time: Uint64,
     end_time: Uint64,
+    // Maximal number of messages to return.
+    count: Uint64,
 }
 
 table QueryBroadcastMessagesWithinTimeRangeResult {
     id: Uint64,
+    // TODO: Using end time as the parameter for next query may result
+    // in repeatedly send the same data with this timestampe. We may want to
+    // either enforce messages with the same timestamp are always sent in the same batch
+    // or use some offset/cursor for pagination.
+    next_time: Uint64,
+    is_finished: byte,
     queries: BroadcastMessageQueries,
 }
 

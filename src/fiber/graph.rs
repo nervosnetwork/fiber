@@ -306,11 +306,17 @@ where
         &self,
         start_block: u64,
         end_block: u64,
-    ) -> impl Iterator<Item = &ChannelInfo> {
-        self.channels.values().filter(move |channel| {
-            channel.funding_tx_block_number >= start_block
-                && channel.funding_tx_block_number < end_block
-        })
+    ) -> (impl Iterator<Item = &ChannelInfo>, u64, bool) {
+        (
+            self.channels.values().filter(move |channel| {
+                channel.funding_tx_block_number >= start_block
+                    && channel.funding_tx_block_number < end_block
+            }),
+            end_block,
+            self.channels
+                .values()
+                .any(|channel| channel.funding_tx_block_number >= end_block),
+        )
     }
 
     pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {

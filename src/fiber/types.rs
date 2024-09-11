@@ -2219,6 +2219,8 @@ impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRange> for QueryChannelsWit
 #[derive(Debug, Clone)]
 pub struct QueryChannelsWithinBlockRangeResult {
     pub id: u64,
+    pub next_block: u64,
+    pub is_finished: bool,
     pub channels: Vec<OutPoint>,
 }
 
@@ -2228,6 +2230,15 @@ impl From<QueryChannelsWithinBlockRangeResult>
     fn from(query_channels_within_block_range_result: QueryChannelsWithinBlockRangeResult) -> Self {
         molecule_fiber::QueryChannelsWithinBlockRangeResult::new_builder()
             .id(query_channels_within_block_range_result.id.pack())
+            .next_block(query_channels_within_block_range_result.next_block.pack())
+            .is_finished(
+                (if query_channels_within_block_range_result.is_finished {
+                    1u8
+                } else {
+                    0
+                })
+                .into(),
+            )
             .channels(
                 molecule_fiber::OutPoints::new_builder()
                     .set(
@@ -2253,6 +2264,10 @@ impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRangeResult>
     ) -> Result<Self, Self::Error> {
         Ok(QueryChannelsWithinBlockRangeResult {
             id: query_channels_within_block_range_result.id().unpack(),
+            next_block: query_channels_within_block_range_result
+                .next_block()
+                .unpack(),
+            is_finished: u8::from(query_channels_within_block_range_result.is_finished()) != 0u8,
             channels: query_channels_within_block_range_result
                 .channels()
                 .into_iter()
@@ -2311,6 +2326,8 @@ impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRange>
 #[derive(Debug, Clone)]
 pub struct QueryBroadcastMessagesWithinTimeRangeResult {
     pub id: u64,
+    pub next_time: u64,
+    pub is_finished: bool,
     pub queries: Vec<FiberBroadcastMessageQuery>,
 }
 
@@ -2322,6 +2339,19 @@ impl From<QueryBroadcastMessagesWithinTimeRangeResult>
     ) -> Self {
         molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult::new_builder()
             .id(query_broadcast_messages_within_time_range_result.id.pack())
+            .next_time(
+                query_broadcast_messages_within_time_range_result
+                    .next_time
+                    .pack(),
+            )
+            .is_finished(
+                (if query_broadcast_messages_within_time_range_result.is_finished {
+                    1u8
+                } else {
+                    0
+                })
+                .into(),
+            )
             .queries(
                 molecule_fiber::BroadcastMessageQueries::new_builder()
                     .set(
@@ -2349,6 +2379,11 @@ impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult>
             id: query_broadcast_messages_within_time_range_result
                 .id()
                 .unpack(),
+            next_time: query_broadcast_messages_within_time_range_result
+                .next_time()
+                .unpack(),
+            is_finished: u8::from(query_broadcast_messages_within_time_range_result.is_finished())
+                != 0,
             queries: query_broadcast_messages_within_time_range_result
                 .queries()
                 .into_iter()

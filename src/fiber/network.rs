@@ -154,11 +154,11 @@ pub enum NetworkActorCommand {
     ),
     GetAndProcessChannelsWithinBlockRangeFromPeer(
         (PeerId, u64, u64),
-        RpcReplyPort<Result<(), Error>>,
+        RpcReplyPort<Result<(u64, bool), Error>>,
     ),
     GetAndProcessBroadcastMessagesWithinTimeRangeFromPeer(
         (PeerId, u64, u64),
-        RpcReplyPort<Result<(), Error>>,
+        RpcReplyPort<Result<(u64, bool), Error>>,
     ),
     MarkSyncingDone,
 }
@@ -511,11 +511,11 @@ where
                     messages,
                 }) => {
                     debug!("Received GetBroadcastMessagesResult from peer {:?} with id {} and result {:?}", &peer_id, id, &messages);
-                    let reply_port = match state.get_reply_port_for_request(&peer_id, id) {
-                        Some(reply_port) => reply_port,
+                    let original_id = match state.get_original_request_id(&peer_id, id) {
+                        Some(id) => id,
                         None => {
                             return Err(Error::InvalidPeerMessage(format!(
-                                "No reply port for query broadcast messages with id {} from peer {:?}",
+                                "No original request for query broadcast messages with id {} from peer {:?}",
                                 id, &peer_id)
                             ));
                         }
@@ -528,7 +528,7 @@ where
                             let fail_message =
                                 format!("Failed to process broadcasted message: {:?}", &e);
                             error!("{}", &fail_message);
-                            let _ = reply_port.send(Err(e));
+                            state.mark_request_failed(&peer_id, original_id, e);
                             return Err(Error::InvalidPeerMessage(fail_message));
                         }
                     }
@@ -536,7 +536,7 @@ where
                         "Successfully processed all the messages from peer {:?} with id {}",
                         &peer_id, id
                     );
-                    let _ = reply_port.send(Ok(()));
+                    state.mark_request_finished(&peer_id, original_id);
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRange(
                     QueryChannelsWithinBlockRange {
@@ -546,21 +546,34 @@ where
                         end_block,
                     },
                 ) => {
-                    let channels = self
+                    let (channels, next_offset, is_finished) = self
                         .query_channels_within_block_range(start_block, end_block)
-                        .await
-                        .into_iter()
-                        .map(|c| c.out_point())
-                        .collect();
+                        .await;
+                    debug!(
+                        "Query channels within block range: {:?}, {:?}, {:?}",
+                        &channels, next_offset, is_finished
+                    );
+
+                    let channels = channels.into_iter().map(|c| c.out_point()).collect();
                     let reply = FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                        QueryChannelsWithinBlockRangeResult { id, channels },
+                        QueryChannelsWithinBlockRangeResult {
+                            id,
+                            channels,
+                            next_block: next_offset,
+                            is_finished,
+                        },
                     );
                     state
                         .send_message_to_peer(&peer_id, FiberMessage::QueryInformation(reply))
                         .await?;
                 }
                 FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                    QueryChannelsWithinBlockRangeResult { id, channels },
+                    QueryChannelsWithinBlockRangeResult {
+                        id,
+                        next_block,
+                        is_finished,
+                        channels,
+                    },
                 ) => {
                     if channels.is_empty() {
                         // No query to the peer needed, early return.
@@ -569,7 +582,7 @@ where
                             .remove(&(peer_id.clone(), id))
                         {
                             Some(reply) => {
-                                let _ = reply.send(Ok(()));
+                                let _ = reply.1.send(Ok((next_block, is_finished)));
                                 return Ok(());
                             }
                             _ => {
@@ -581,7 +594,9 @@ where
                         }
                     }
                     debug!("Received QueryChannelsWithinBlockRangeResult from peer {:?} with id {} and channels {:?}", &peer_id, id, &channels);
-                    if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
+                    if let Some(new_id) =
+                        state.record_request_result(&peer_id, id, next_block, is_finished)
+                    {
                         let query = GetBroadcastMessages {
                             id: new_id,
                             queries: channels
@@ -620,18 +635,28 @@ where
                         end_time,
                     },
                 ) => {
-                    let queries = self
+                    let (queries, next_time, is_finished) = self
                         .query_broadcast_messages_within_time_range(start_time, end_time)
                         .await?;
                     let reply = FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
-                        QueryBroadcastMessagesWithinTimeRangeResult { id, queries },
+                        QueryBroadcastMessagesWithinTimeRangeResult {
+                            id,
+                            queries,
+                            next_time,
+                            is_finished,
+                        },
                     );
                     state
                         .send_message_to_peer(&peer_id, FiberMessage::QueryInformation(reply))
                         .await?;
                 }
                 FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
-                    QueryBroadcastMessagesWithinTimeRangeResult { id, queries },
+                    QueryBroadcastMessagesWithinTimeRangeResult {
+                        id,
+                        next_time,
+                        is_finished,
+                        queries,
+                    },
                 ) => {
                     if queries.is_empty() {
                         // No query to the peer needed, early return.
@@ -640,7 +665,7 @@ where
                             .remove(&(peer_id.clone(), id))
                         {
                             Some(reply) => {
-                                let _ = reply.send(Ok(()));
+                                let _ = reply.1.send(Ok((next_time, is_finished)));
                                 return Ok(());
                             }
                             _ => {
@@ -652,7 +677,9 @@ where
                         }
                     }
 
-                    if let Some(new_id) = state.derive_new_request_id(&peer_id, id) {
+                    if let Some(new_id) =
+                        state.record_request_result(&peer_id, id, next_time, is_finished)
+                    {
                         let query = GetBroadcastMessages {
                             id: new_id,
                             queries,
@@ -681,28 +708,26 @@ where
         &self,
         start_block: u64,
         end_block: u64,
-    ) -> Vec<ChannelInfo> {
+    ) -> (Vec<ChannelInfo>, u64, bool) {
         let network_graph = self.network_graph.read().await;
-        network_graph
-            .get_channels_within_block_range(start_block, end_block)
-            .cloned()
-            .collect()
+        let (channels, next_offset, is_finished) =
+            network_graph.get_channels_within_block_range(start_block, end_block);
+        (channels.cloned().collect(), next_offset, is_finished)
     }
 
+    // TODO: set a upper limit for the number of message to send.
     pub async fn query_broadcast_messages_within_time_range(
         &self,
         start_time: u64,
         end_time: u64,
-    ) -> Result<Vec<FiberBroadcastMessageQuery>, Error> {
-        let start_time = start_time as u64;
-        let end_time = end_time as u64;
+    ) -> Result<(Vec<FiberBroadcastMessageQuery>, u64, bool), Error> {
         let is_within_range = |timestamp: u64| timestamp >= start_time && timestamp < end_time;
+
         let network_graph = self.network_graph.read().await;
 
         let mut queries = Vec::new();
         for node_info in network_graph.nodes() {
-            let node_announcement = &node_info.anouncement_msg;
-            if is_within_range(node_announcement.version) {
+            if is_within_range(node_info.timestamp) {
                 queries.push(FiberBroadcastMessageQuery::NodeAnnouncement(
                     NodeAnnouncementQuery {
                         node_id: node_info.node_id.clone(),
@@ -712,15 +737,6 @@ where
             }
         }
         for channel_info in network_graph.channels() {
-            if is_within_range(channel_info.channel_annoucement_timestamp()) {
-                queries.push(FiberBroadcastMessageQuery::ChannelAnnouncement(
-                    ChannelAnnouncementQuery {
-                        channel_outpoint: channel_info.out_point(),
-                        flags: 0,
-                    },
-                ));
-            }
-
             if let Some(t) = channel_info.channel_update_one_to_two_timestamp() {
                 if is_within_range(t) {
                     queries.push(FiberBroadcastMessageQuery::ChannelUpdate(
@@ -743,7 +759,7 @@ where
                 }
             }
         }
-        Ok(queries)
+        Ok((queries, end_time, true))
     }
 
     pub async fn query_broadcast_message(
@@ -1836,6 +1852,12 @@ impl NetworkSyncStatus {
     }
 }
 
+#[derive(Debug)]
+enum RequestState {
+    RequestSent,
+    RequestReturned(u64, bool),
+}
+
 pub struct NetworkActorState {
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
@@ -1892,7 +1914,10 @@ pub struct NetworkActorState {
     // Request id for the next request.
     next_request_id: u64,
     // The response of these broadcast messages will be sent to the corresponding channel.
-    broadcast_message_responses: HashMap<(PeerId, u64), RpcReplyPort<Result<(), Error>>>,
+    // The first parameter is the next offset of the request, and the second parameter
+    // indicates whether the previous query is already fulfilled without additional results.
+    broadcast_message_responses:
+        HashMap<(PeerId, u64), (RequestState, RpcReplyPort<Result<(u64, bool), Error>>)>,
     original_requests: HashMap<(PeerId, u64), u64>,
     // This field holds the information about our syncing status.
     sync_status: NetworkSyncStatus,
@@ -1949,40 +1974,83 @@ impl NetworkActorState {
     pub fn create_request_id_for_reply_port(
         &mut self,
         peer_id: &PeerId,
-        reply_port: RpcReplyPort<Result<(), Error>>,
+        reply_port: RpcReplyPort<Result<(u64, bool), Error>>,
     ) -> u64 {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.broadcast_message_responses
-            .insert((peer_id.clone(), id), reply_port);
+        self.broadcast_message_responses.insert(
+            (peer_id.clone(), id),
+            (RequestState::RequestSent, reply_port),
+        );
         id
     }
 
-    pub fn get_reply_port_for_request(
-        &mut self,
-        peer_id: &PeerId,
-        request_id: u64,
-    ) -> Option<RpcReplyPort<Result<(), Error>>> {
-        let original_id = self
-            .original_requests
-            .remove(&(peer_id.clone(), request_id))?;
-
-        self.broadcast_message_responses
-            .remove(&(peer_id.clone(), original_id))
+    pub fn mark_request_finished(&mut self, peer_id: &PeerId, id: u64) {
+        match self
+            .broadcast_message_responses
+            .remove(&(peer_id.clone(), id))
+        {
+            None => {
+                error!(
+                    "Invalid request id {} for peer {:?}, original request not found",
+                    id, peer_id
+                );
+            }
+            Some((RequestState::RequestReturned(next_offset, is_finished), reply)) => {
+                let _ = reply.send(Ok((next_offset, is_finished)));
+            }
+            Some(state) => {
+                error!(
+                    "Invalid state for request id {} from peer {}: {:?}",
+                    id, peer_id, &state
+                );
+            }
+        }
     }
 
-    fn derive_new_request_id(&mut self, peer_id: &PeerId, old_id: u64) -> Option<u64> {
-        if self
+    pub fn mark_request_failed(&mut self, peer_id: &PeerId, id: u64, error: Error) {
+        match self
+            .broadcast_message_responses
+            .remove(&(peer_id.clone(), id))
+        {
+            None => {
+                error!(
+                    "Invalid request id {} for peer {:?}, original request not found",
+                    id, peer_id
+                );
+            }
+            Some((_state, reply)) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    pub fn get_original_request_id(&mut self, peer_id: &PeerId, request_id: u64) -> Option<u64> {
+        self.original_requests
+            .remove(&(peer_id.clone(), request_id))
+    }
+
+    fn record_request_result(
+        &mut self,
+        peer_id: &PeerId,
+        old_id: u64,
+        next_offset: u64,
+        is_finished: bool,
+    ) -> Option<u64> {
+        if !self
             .broadcast_message_responses
             .contains_key(&(peer_id.clone(), old_id))
         {
-            let id = self.next_request_id;
-            self.next_request_id += 1;
-            self.original_requests.insert((peer_id.clone(), id), old_id);
-            Some(id)
-        } else {
-            None
+            return None;
         }
+        self.broadcast_message_responses
+            .get_mut(&(peer_id.clone(), old_id))
+            .unwrap()
+            .0 = RequestState::RequestReturned(next_offset, is_finished);
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.original_requests.insert((peer_id.clone(), id), old_id);
+        Some(id)
     }
 
     pub async fn create_outbound_channel<
