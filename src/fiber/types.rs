@@ -2796,6 +2796,7 @@ mod tests {
             expiry: 3,
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
         };
         let onion_info2 = super::OnionInfo {
             payment_hash: [4; 32].into(),
@@ -2803,6 +2804,7 @@ mod tests {
             expiry: 6,
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
         };
         let mut onion_packet =
             super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
@@ -2829,6 +2831,7 @@ mod tests {
             expiry: 42,
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
         };
         let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
         let serialized = onion_packet.serialize();
