@@ -166,8 +166,7 @@ fn generate_udt_type_script(udt_kind: &str, address: &str) -> ckb_types::packed:
 fn get_nodes_info(node: &str) -> (String, H256) {
     let nodes_dir = std::env::var("NODES_DIR").expect("env var");
     let node_dir = format!("{}/{}", nodes_dir, node);
-    let wallet =
-        std::fs::read_to_string(format!("{}/ckb/wallet", node_dir)).expect("read failed");
+    let wallet = std::fs::read_to_string(format!("{}/ckb/wallet", node_dir)).expect("read failed");
     let key = std::fs::read_to_string(format!("{}/ckb/key", node_dir)).expect("read failed");
     (wallet, H256::from_str(key.trim()).expect("parse hex"))
 }
@@ -230,8 +229,8 @@ fn genrate_nodes_config() {
     );
     for i in 1..=3 {
         let mut data = data.clone();
-        data["fiber"]["listening_port"] =
-            serde_yaml::Value::Number(serde_yaml::Number::from(8344 + i - 1));
+        data["fiber"]["listening_addr"] =
+            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", 8344 + i - 1));
         data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
         data["rpc"]["listening_addr"] =
             serde_yaml::Value::String(format!("127.0.0.1:{}", 41714 + i - 1));
