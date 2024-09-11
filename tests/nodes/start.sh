@@ -5,6 +5,7 @@ export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
+should_start_bootnode="${START_BOOTNODE:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
@@ -47,6 +48,13 @@ start() {
 }
 
 if [ "$#" -ne 1 ]; then
+    if [[ -n "$should_start_bootnode" ]]; then
+        LOG_PREFIX=$'[boot node]' start -d bootnode &
+        # sleep some time to ensure bootnode started
+        # while other nodes try to connect to it.
+        sleep 5
+    fi
+    export FIBER_BOOTNODES_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     LOG_PREFIX=$'[node 1]' start -d 1 &
     LOG_PREFIX=$'[node 2]' start -d 2 &
     LOG_PREFIX=$'[node 3]' start -d 3 &

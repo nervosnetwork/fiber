@@ -61,6 +61,9 @@ jobs:
           # Prebuild the program so that we can run the following script faster
           cargo build
           cd tests/deploy/udt-init && cargo build && cd -
+          if [ ${{ matrix.workflow }} = "router-pay" ]; then
+            export START_BOOTNODE=y
+          fi
           ./tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time
