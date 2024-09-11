@@ -86,7 +86,7 @@ pub struct FiberConfig {
 
     /// node name to be announced to fiber network
     #[arg(
-        name = "fiber_ANNOUNCED_NODE_NAME",
+        name = "FIBER_ANNOUNCED_NODE_NAME",
         long = "fiber-announced-node-name",
         env
     )]
