@@ -441,7 +441,6 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        debug!("build_route source pubkey: {:?}", source);
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
         let route = self.find_route(source, target, amount, 1000)?;
@@ -452,21 +451,34 @@ where
         let mut current_amount = amount;
         let mut current_expiry = 0;
         let mut onion_infos = vec![];
-        let mut next_hop;
-        for i in (0..route.len() - 1).rev() {
-            next_hop = Some(route[i + 1].target);
-            let next_channel_outpoint = Some(route[i + 1].channel_outpoint.clone());
-            let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
-            let channel_update = &match channel_info.node1() == route[i + 1].target {
-                true => channel_info.two_to_one.as_ref(),
-                false => channel_info.one_to_two.as_ref(),
-            }
-            .expect("channel_update is none")
-            .0;
-            let fee_rate = channel_update.fee_rate;
-            let fee = self.calculate_fee(current_amount, fee_rate as u128);
-            let expiry = channel_update.cltv_expiry_delta;
+        for i in (0..route.len()).rev() {
+            let is_last = i == route.len() - 1;
+            let (next_hop, next_channel_outpoint) = if is_last {
+                (None, None)
+            } else {
+                (
+                    Some(route[i + 1].target),
+                    Some(route[i + 1].channel_outpoint.clone()),
+                )
+            };
+            let (fee, expiry) = if is_last {
+                (0, 0)
+            } else {
+                let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
+                let channel_update = &match channel_info.node1() == route[i + 1].target {
+                    true => channel_info.two_to_one.as_ref(),
+                    false => channel_info.one_to_two.as_ref(),
+                }
+                .expect("channel_update is none")
+                .0;
+                let fee_rate = channel_update.fee_rate;
+                let fee = self.calculate_fee(current_amount, fee_rate as u128);
+                let expiry = channel_update.cltv_expiry_delta;
+                (fee, expiry)
+            };
 
+            // make sure the final hop's amount is the same as the payment amount
+            // the last hop will check the amount from TLC and the amount from the onion packet
             onion_infos.push(OnionInfo {
                 amount: current_amount,
                 payment_hash,
@@ -478,7 +490,7 @@ where
             current_expiry += expiry;
         }
         // add the first hop so that the logic for send HTLC can be reused
-        next_hop = if route.len() >= 1 {
+        let next_hop = if route.len() >= 1 {
             Some(route[0].target)
         } else {
             None
@@ -491,7 +503,8 @@ where
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
         });
         onion_infos.reverse();
-        assert!(onion_infos.len() == route.len());
+        assert_eq!(onion_infos.len(), route.len() + 1);
+        assert_eq!(onion_infos[route.len()].amount, amount);
         Ok(onion_infos)
     }
 
@@ -1130,11 +1143,16 @@ mod tests {
         eprintln!("return {:?}", route);
         assert!(route.is_ok());
         let route = route.unwrap();
-        assert_eq!(route.len(), 2);
+        assert_eq!(route.len(), 3);
         assert_eq!(route[0].channel_outpoint, Some(network.edges[0].2.clone()));
         assert_eq!(route[1].channel_outpoint, Some(network.edges[1].2.clone()));
 
         assert_eq!(route[0].next_hop, Some(node2.into()));
         assert_eq!(route[1].next_hop, Some(node3.into()));
+        assert_eq!(route[2].next_hop, None);
+
+        assert_eq!(route[0].amount, 101);
+        assert_eq!(route[1].amount, 100);
+        assert_eq!(route[2].amount, 100);
     }
 }

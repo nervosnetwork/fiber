@@ -63,12 +63,6 @@ pub struct Batch {
 }
 
 impl Batch {
-    fn store(&self) -> Store {
-        Store {
-            db: Arc::clone(&self.db),
-        }
-    }
-
     fn put_kv(&mut self, key_value: KeyValue) {
         match key_value {
             KeyValue::ChannelActorState(id, state) => {
@@ -464,27 +458,6 @@ mod tests {
             .add_attr(Attribute::FinalHtlcTimeout(5))
             .build()
             .unwrap();
-        let payment_hash = invoice.payment_hash();
-
-        // let payment_hash = rand_sha256_hash();
-        // let preimage = rand_sha256_hash();
-        // let (public_key, private_key) = gen_rand_keypair();
-
-        // let invoice = InvoiceBuilder::new(Currency::Fibb)
-        //     .amount(Some(1280))
-        //     .payment_hash(payment_hash)
-        //     .payment_preimage(preimage)
-        //     .fallback_address("address".to_string())
-        //     .expiry_time(Duration::from_secs(1024))
-        //     .payee_pub_key(public_key)
-        //     .add_attr(Attribute::FinalHtlcTimeout(5))
-        //     .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
-        //     .add_attr(Attribute::Description("description".to_string()))
-        //     .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
-        //     .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
-        //     .unwrap();
-
-        // let address = invoice.to_string();
 
         let hash = invoice.payment_hash();
         store

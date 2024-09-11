@@ -2698,6 +2698,14 @@ impl OnionPacket {
         }
     }
 
+    pub fn peek(&self) -> Option<&OnionInfo> {
+        if self.hop_data.len() > 0 {
+            Some(&self.hop_data[0])
+        } else {
+            None
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.hop_data.is_empty()
     }

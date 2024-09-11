@@ -1,5 +1,6 @@
 use crate::fiber::graph::{ChannelInfo, NodeInfo};
 use crate::fiber::types::Pubkey;
+use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
@@ -440,6 +441,24 @@ impl ChannelActorStateStore for MemoryStore {
                 })
                 .collect(),
         }
+    }
+}
+
+impl InvoiceStore for MemoryStore {
+    fn get_invoice(&self, _id: &Hash256) -> Option<CkbInvoice> {
+        unimplemented!()
+    }
+
+    fn insert_invoice(
+        &self,
+        _invoice: CkbInvoice,
+        _preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        unimplemented!()
+    }
+
+    fn get_invoice_preimage(&self, _hash: &Hash256) -> Option<Hash256> {
+        unimplemented!()
     }
 }
 

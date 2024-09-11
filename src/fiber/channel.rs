@@ -3,7 +3,13 @@ use bitflags::bitflags;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
-use crate::fiber::{network::get_chain_hash, types::ChannelUpdate};
+use crate::{
+    fiber::{
+        network::get_chain_hash,
+        types::{ChannelUpdate, OnionPacket},
+    },
+    invoice::InvoiceStore,
+};
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
 use ckb_types::{
@@ -234,7 +240,10 @@ pub struct ChannelActor<S> {
     subscribers: ChannelSubscribers,
 }
 
-impl<S> ChannelActor<S> {
+impl<S> ChannelActor<S>
+where
+    S: InvoiceStore,
+{
     pub fn new(
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
@@ -438,6 +447,29 @@ impl<S> ChannelActor<S> {
             FiberChannelMessage::AddTlc(add_tlc) => {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
+                // check the onion_packet is valid or not, if not, we should return an error.
+                // If there is a next hop, we should send the AddTlc message to the next hop.
+                // If this is the last hop, we should check the payment hash and amount and then
+                // try to fulfill the payment, find the corresponding payment preimage from payment hash.
+                let mut forward_to_next_hop = false;
+                if let Ok(onion_packet) = OnionPacket::deserialize(&add_tlc.onion_packet) {
+                    if let Some(onion_info) = onion_packet.peek() {
+                        if onion_info.next_hop.is_some() {
+                            forward_to_next_hop = true;
+                        } else {
+                            // check the payment hash and amount
+                            if onion_info.payment_hash != add_tlc.payment_hash
+                                || onion_info.amount != add_tlc.amount
+                            {
+                                return Err(ProcessingChannelError::InvalidParameter(
+                                    "Payment hash or amount mismatch".to_string(),
+                                ));
+                            }
+                            // TODO: check the expiry time, if expired, we should return an error.
+                        }
+                    }
+                }
+
                 let tlc = state.create_inbounding_tlc(add_tlc.clone())?;
                 state.insert_tlc(tlc.clone())?;
                 if let Some(ref udt_type_script) = state.funding_udt_type_script {
@@ -455,8 +487,7 @@ impl<S> ChannelActor<S> {
                 // while we have crashed. We need a way to make sure that the peer will resend
                 // this message, and our processing of this message is idempotent.
 
-                // If there is a next hop, we should send the AddTlc message to the next hop.
-                if add_tlc.onion_packet.len() > 0 {
+                if forward_to_next_hop {
                     self.network
                         .send_message(NetworkActorMessage::Command(
                             NetworkActorCommand::SendOnionPacket(
@@ -465,6 +496,30 @@ impl<S> ChannelActor<S> {
                             ),
                         ))
                         .expect("network actor is alive");
+                } else {
+                    if let Some(preimage) = self.store.get_invoice_preimage(&add_tlc.payment_hash) {
+                        let remove_tlc = RemoveTlc {
+                            channel_id: state.get_id(),
+                            tlc_id: tlc.get_id(),
+                            reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                                payment_preimage: preimage,
+                            }),
+                        };
+                        self.network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                    state.get_local_peer_id(),
+                                    FiberMessage::remove_tlc(remove_tlc),
+                                )),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        info!("try to settle down tlc: {:?}", &tlc);
+                    } else {
+                        warn!(
+                            "Payment preimage not found for payment hash: {:?}",
+                            add_tlc.payment_hash
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -1170,7 +1225,7 @@ impl<S> ChannelActor<S> {
 #[rasync_trait]
 impl<S> Actor for ChannelActor<S>
 where
-    S: ChannelActorStateStore + Send + Sync + 'static,
+    S: ChannelActorStateStore + InvoiceStore + Send + Sync + 'static,
 {
     type Msg = ChannelActorMessage;
     type State = ChannelActorState;

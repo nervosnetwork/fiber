@@ -67,6 +67,7 @@ use crate::fiber::channel::{
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
+use crate::invoice::InvoiceStore;
 use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -397,7 +398,13 @@ pub struct NetworkActor<S> {
 
 impl<S> NetworkActor<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     pub fn new(
         event_sender: mpsc::Sender<NetworkServiceEvent>,
@@ -1977,7 +1984,9 @@ impl NetworkActorState {
         }
     }
 
-    pub async fn create_outbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
+    pub async fn create_outbound_channel<
+        S: ChannelActorStateStore + InvoiceStore + Sync + Send + 'static,
+    >(
         &mut self,
         open_channel: OpenChannelCommand,
         store: S,
@@ -2048,7 +2057,9 @@ impl NetworkActorState {
         Ok((channel, temp_channel_id))
     }
 
-    pub async fn create_inbound_channel<S: ChannelActorStateStore + Sync + Send + 'static>(
+    pub async fn create_inbound_channel<
+        S: ChannelActorStateStore + InvoiceStore + Sync + Send + 'static,
+    >(
         &mut self,
         accept_channel: AcceptChannelCommand,
         store: S,
@@ -2309,7 +2320,13 @@ impl NetworkActorState {
     }
 
     async fn on_peer_connected<
-        S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+        S: ChannelActorStateStore
+            + NetworkGraphStateStore
+            + InvoiceStore
+            + Clone
+            + Send
+            + Sync
+            + 'static,
     >(
         &mut self,
         remote_peer_id: &PeerId,
@@ -2711,7 +2728,13 @@ pub struct NetworkActorStartArguments {
 #[rasync_trait]
 impl<S> Actor for NetworkActor<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     type Msg = NetworkActorMessage;
     type State = NetworkActorState;
@@ -3052,7 +3075,7 @@ pub(crate) fn emit_service_event(
 }
 
 pub async fn start_network<
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + InvoiceStore + Clone + Send + Sync + 'static,
 >(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
