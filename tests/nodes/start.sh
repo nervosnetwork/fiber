@@ -53,8 +53,9 @@ if [ "$#" -ne 1 ]; then
         # sleep some time to ensure bootnode started
         # while other nodes try to connect to it.
         sleep 5
+        # export the environment variable so that other nodes can connect to the bootnode.
+        export FIBER_BOOTNODES_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     fi
-    export FIBER_BOOTNODES_ADDRS=/ip4/127.0.0.1/tcp/8343/p2p/Qmbyc4rhwEwxxSQXd5B4Ej4XkKZL6XLipa3iJrnPL9cjGR
     LOG_PREFIX=$'[node 1]' start -d 1 &
     LOG_PREFIX=$'[node 2]' start -d 2 &
     LOG_PREFIX=$'[node 3]' start -d 3 &
