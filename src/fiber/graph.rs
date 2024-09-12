@@ -35,9 +35,8 @@ pub struct ChannelInfo {
     pub funding_tx_block_number: u64,
     pub funding_tx_index: u32,
     pub announcement_msg: ChannelAnnouncement,
-    // The last update (with the timestamp) for the channel received from the network.
-    pub one_to_two: Option<(ChannelUpdateInfo, u64)>,
-    pub two_to_one: Option<(ChannelUpdateInfo, u64)>,
+    pub one_to_two: Option<ChannelUpdateInfo>,
+    pub two_to_one: Option<ChannelUpdateInfo>,
     // The time that the channel was announced to the network.
     pub timestamp: u64,
 }
@@ -69,24 +68,24 @@ impl ChannelInfo {
 
     pub fn has_channel_update_one_to_two(&self) -> bool {
         match &self.one_to_two {
-            Some(x) if x.0.last_update_message.is_some() => true,
+            Some(x) if x.last_update_message.is_some() => true,
             _ => false,
         }
     }
 
     pub fn has_channel_update_two_to_one(&self) -> bool {
         match &self.two_to_one {
-            Some(x) if x.0.last_update_message.is_some() => true,
+            Some(x) if x.last_update_message.is_some() => true,
             _ => false,
         }
     }
 
     pub fn channel_update_one_to_two_timestamp(&self) -> Option<u64> {
-        self.one_to_two.as_ref().map(|x| x.1)
+        self.one_to_two.as_ref().map(|x| x.timestamp)
     }
 
     pub fn channel_update_two_to_one_timestamp(&self) -> Option<u64> {
-        self.two_to_one.as_ref().map(|x| x.1)
+        self.two_to_one.as_ref().map(|x| x.timestamp)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -104,7 +103,11 @@ impl ChannelInfo {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChannelUpdateInfo {
+    // The version is a number that represents the newness of the channel update.
+    // It is set by the node that sends the channel update. Larger number means newer update.
     pub version: u64,
+    // The timestamp is the time when the channel update was received by the node.
+    pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The difference in CLTV values that you must have when routing through this channel.
@@ -184,13 +187,13 @@ where
                 self.last_update_timestamp = channel.timestamp;
             }
             if let Some(channel_update) = channel.one_to_two.as_ref() {
-                if self.last_update_timestamp < channel_update.1 {
-                    self.last_update_timestamp = channel_update.1;
+                if self.last_update_timestamp < channel_update.timestamp {
+                    self.last_update_timestamp = channel_update.timestamp;
                 }
             }
             if let Some(channel_update) = channel.two_to_one.as_ref() {
-                if self.last_update_timestamp < channel_update.1 {
-                    self.last_update_timestamp = channel_update.1;
+                if self.last_update_timestamp < channel_update.timestamp {
+                    self.last_update_timestamp = channel_update.timestamp;
                 }
             }
             self.channels.insert(channel.out_point(), channel.clone());
@@ -331,7 +334,7 @@ where
             &mut channel.two_to_one
         };
 
-        if let Some((info, _)) = update_info {
+        if let Some(info) = update_info {
             if update.version <= info.version {
                 // update.version == info.version happens most possibly because we received the
                 // broadcast many times. Don't emit too many logs in that case.
@@ -344,18 +347,16 @@ where
                 return Ok(());
             }
         }
-        *update_info = Some((
-            ChannelUpdateInfo {
-                version: update.version,
-                enabled: true,
-                cltv_expiry_delta: update.tlc_locktime_expiry_delta,
-                htlc_minimum_value: update.tlc_minimum_value,
-                htlc_maximum_value: update.tlc_maximum_value,
-                fee_rate: update.tlc_fee_proportional_millionths as u64,
-                last_update_message: None,
-            },
-            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-        ));
+        *update_info = Some(ChannelUpdateInfo {
+            version: update.version,
+            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            enabled: true,
+            cltv_expiry_delta: update.tlc_locktime_expiry_delta,
+            htlc_minimum_value: update.tlc_minimum_value,
+            htlc_maximum_value: update.tlc_maximum_value,
+            fee_rate: update.tlc_fee_proportional_millionths as u64,
+            last_update_message: None,
+        });
 
         self.store.insert_channel(channel.to_owned());
         debug!(
@@ -394,14 +395,14 @@ where
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         self.channels.values().filter_map(move |channel| {
             if let Some(info) = channel.one_to_two.as_ref() {
-                if info.0.enabled && channel.node2() == node_id {
-                    return Some((channel.node1(), channel, &info.0));
+                if info.enabled && channel.node2() == node_id {
+                    return Some((channel.node1(), channel, info));
                 }
             }
 
             if let Some(info) = channel.two_to_one.as_ref() {
-                if info.0.enabled && channel.node1() == node_id {
-                    return Some((channel.node2(), channel, &info.0));
+                if info.enabled && channel.node1() == node_id {
+                    return Some((channel.node2(), channel, info));
                 }
             }
             None
@@ -496,8 +497,7 @@ where
                 } else {
                     channel_info.one_to_two.as_ref()
                 }
-                .expect("channel_update is none")
-                .0;
+                .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = self.calculate_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.cltv_expiry_delta;
