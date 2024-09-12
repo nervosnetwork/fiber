@@ -1,7 +1,7 @@
 meta {
-  name: send shutdown from NODE1
+  name: remove tlc from NODE1
   type: http
-  seq: 15
+  seq: 12
 }
 
 post {
@@ -19,16 +19,14 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "shutdown_channel",
+    "method": "remove_tlc",
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "close_script": {
-          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
-          "hash_type": "data",
-          "args": "0x0101010101010101010101010101010101010101"
-        },
-        "fee_rate": "0x3FC"
+        "tlc_id": "{{TLC_ID1}}",
+        "reason": {
+          "error_code": "0x2a"
+        }
       }
     ]
   }
@@ -39,7 +37,12 @@ assert {
   res.body.result: isNull
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 1000));
+}
+
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+  console.log("remove tlc response: ", res.body);
 }

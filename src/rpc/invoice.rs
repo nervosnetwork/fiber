@@ -103,7 +103,10 @@ where
         };
 
         match invoice_builder.build() {
-            Ok(invoice) => match self.store.insert_invoice(invoice.clone()) {
+            Ok(invoice) => match self
+                .store
+                .insert_invoice(invoice.clone(), Some(params.payment_preimage))
+            {
                 Ok(_) => Ok(NewInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice,

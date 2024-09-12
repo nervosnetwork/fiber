@@ -3,12 +3,12 @@ use std::cmp::Reverse;
 use crate::fiber::{
     channel::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
-        RemoveTlcCommand, ShutdownCommand,
+        RemoveTlcCommand, ShutdownCommand, UpdateCommand,
     },
     hash_algorithm::HashAlgorithm,
-    network::{AcceptChannelCommand, OpenChannelCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{U128Hex, U32Hex, U64Hex},
-    types::{Hash256, LockTime, RemoveTlcFail, RemoveTlcFulfill},
+    types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -31,11 +31,20 @@ pub struct OpenChannelParams {
     pub peer_id: PeerId,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub public: Option<bool>,
     pub funding_udt_type_script: Option<Script>,
     #[serde_as(as = "Option<U64Hex>")]
     pub commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
     pub funding_fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_locktime_expiry_delta: Option<u64>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_min_value: Option<u128>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_max_value: Option<u128>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     pub max_tlc_value_in_flight: Option<u128>,
     #[serde_as(as = "Option<U64Hex>")]
@@ -147,6 +156,58 @@ pub struct ShutdownChannelParams {
     pub fee_rate: u64,
 }
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UpdateChannelParams {
+    pub channel_id: Hash256,
+    #[serde_as(as = "Option<U64Hex>")]
+    pub tlc_locktime_expiry_delta: Option<u64>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_minimum_value: Option<u128>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_maximum_value: Option<u128>,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub tlc_fee_proportional_millionths: Option<u128>,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendPaymentCommandParams {
+    // the identifier of the payment target
+    pub target_pubkey: Pubkey,
+
+    // the amount of the payment
+    #[serde_as(as = "U128Hex")]
+    pub amount: u128,
+
+    // The hash to use within the payment's HTLC
+    // FIXME: this should be optional when AMP is enabled
+    pub payment_hash: Hash256,
+
+    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    #[serde_as(as = "Option<U64Hex>")]
+    pub final_cltv_delta: Option<u64>,
+
+    // the encoded invoice to send to the recipient
+    pub invoice: Option<String>,
+
+    // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+    #[serde_as(as = "Option<U64Hex>")]
+    pub timeout: Option<u64>,
+
+    // the maximum fee amounts in shannons that the sender is willing to pay
+    #[serde_as(as = "Option<U128Hex>")]
+    pub max_fee_amount: Option<u128>,
+
+    // max parts for the payment, only used for multi-part payments
+    #[serde_as(as = "Option<U64Hex>")]
+    pub max_parts: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SendPaymentResult {
+    pub payment_hash: Hash256,
+}
 #[rpc(server)]
 pub trait ChannelRpc {
     #[method(name = "open_channel")]
@@ -182,6 +243,15 @@ pub trait ChannelRpc {
     #[method(name = "shutdown_channel")]
     async fn shutdown_channel(&self, params: ShutdownChannelParams)
         -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "update_channel")]
+    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
+
+    #[method(name = "send_payment")]
+    async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<SendPaymentResult, ErrorObjectOwned>;
 }
 
 pub struct ChannelRpcServerImpl<S> {
@@ -209,12 +279,17 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
+                    public: params.public.unwrap_or(false),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
+                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_min_value: params.tlc_min_value,
+                    tlc_max_value: params.tlc_max_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_num_of_accept_tlcs: params.max_num_of_accept_tlcs,
                 },
@@ -298,6 +373,8 @@ where
                             payment_hash: Some(params.payment_hash),
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
+                            onion_packet: vec![],
+                            previous_tlc: None,
                         },
                         rpc_reply,
                     ),
@@ -359,5 +436,49 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params)
+    }
+
+    async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: params.channel_id,
+                    command: ChannelCommand::Update(
+                        UpdateCommand {
+                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                            tlc_minimum_value: params.tlc_minimum_value,
+                            tlc_maximum_value: params.tlc_maximum_value,
+                            tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                        },
+                        rpc_reply,
+                    ),
+                },
+            ))
+        };
+        handle_actor_call!(self.actor, message, params)
+    }
+
+    async fn send_payment(
+        &self,
+        params: SendPaymentCommandParams,
+    ) -> Result<SendPaymentResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+                SendPaymentCommand {
+                    target_pubkey: params.target_pubkey,
+                    amount: params.amount,
+                    payment_hash: params.payment_hash,
+                    final_cltv_delta: params.final_cltv_delta,
+                    invoice: params.invoice.clone(),
+                    timeout: params.timeout,
+                    max_fee_amount: params.max_fee_amount,
+                    max_parts: params.max_parts,
+                },
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
+            payment_hash: response.payment_hash,
+        })
     }
 }

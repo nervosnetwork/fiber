@@ -1,8 +1,12 @@
 import blockchain;
 
-array Signature [byte; 64];
+vector EcdsaSignature <byte>;
+array SchnorrSignature [byte; 64];
+array SchnorrXOnlyPubkey [byte; 32];
 array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
+option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
+option Uint64Opt (Uint64);
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -23,6 +27,7 @@ table OpenChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
+    channel_annoucement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
     channel_flags:               byte,
 }
@@ -42,6 +47,7 @@ table AcceptChannel {
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
     second_per_commitment_point: Pubkey,
+    channel_annoucement_nonce:   PubNonceOpt,
     next_local_nonce:            PubNonce,
 }
 
@@ -104,6 +110,9 @@ table AddTlc {
     payment_hash:   Byte32,
     expiry:         Uint64,
     hash_algorithm: byte,
+    // This is the packet each hops need to decrypt and determine
+    // which nodes to forward (or accept the tlc if it is the final node).
+    onion_packet:   Bytes,
 }
 
 table RevokeAndAck {
@@ -137,6 +146,147 @@ table ReestablishChannel {
     remote_commitment_number: Uint64,
 }
 
+table AnnouncementSignatures {
+    channel_id: Byte32,
+    channel_outpoint: OutPoint,
+    node_signature: EcdsaSignature,
+    partial_signature: Byte32,
+}
+
+table NodeAnnouncement {
+    // Signature to this message.
+    signature: EcdsaSignature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/features.rs#L448-L457
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    // Timestamp to the node announcement update, later update should have larger timestamp.
+    timestamp: Uint64,
+    node_id: Pubkey,
+    // Must be a valid utf-8 string of length maximal length 32 bytes.
+    alias: Byte32,
+    // All the reachable addresses.
+    address: BytesVec,
+    // Chain hash
+    chain_hash: Byte32,
+}
+
+table ChannelAnnouncement {
+    node_signature_1: EcdsaSignature,
+    node_signature_2: EcdsaSignature,
+    // Signature signed by the funding transaction output public key.
+    ckb_signature: SchnorrSignature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/msgs.rs#L1200-L1200
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    chain_hash: Byte32,
+    channel_outpoint: OutPoint,
+    node_1_id: Pubkey,
+    node_2_id: Pubkey,
+    // The aggregated public key of the funding transaction output.
+    ckb_key: SchnorrXOnlyPubkey,
+    capacity: Uint128,
+    udt_type_script: ScriptOpt,
+}
+
+table ChannelUpdate {
+    // Signature of the node that wants to update the channel information.
+    signature: EcdsaSignature,
+    chain_hash: Byte32,
+    channel_outpoint: OutPoint,
+    timestamp: Uint64,
+    message_flags: Uint32,
+    channel_flags: Uint32,
+    tlc_locktime_expiry_delta: Uint64,
+    tlc_minimum_value: Uint128,
+    tlc_maximum_value: Uint128,
+    tlc_fee_proportional_millionths: Uint128,
+}
+
+table NodeAnnouncementQuery {
+    node_id: Pubkey,
+    flags: byte,
+}
+
+table ChannelAnnouncementQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+table ChannelUpdateQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+union BroadcastMessageQuery {
+    NodeAnnouncementQuery,
+    ChannelAnnouncementQuery,
+    ChannelUpdateQuery,
+}
+
+vector BroadcastMessageQueries <BroadcastMessageQuery>;
+
+union BroadcastMessage {
+    NodeAnnouncement,
+    ChannelAnnouncement,
+    ChannelUpdate,
+}
+
+vector BroadcastMessages <BroadcastMessage>;
+
+table GetBroadcastMessages {
+    id: Uint64,
+    queries: BroadcastMessageQueries,
+}
+
+table GetBroadcastMessagesResult {
+    id: Uint64,
+    messages: BroadcastMessages,
+}
+
+table QueryChannelsWithinBlockRange {
+    id: Uint64,
+    chain_hash: Byte32,
+    start_block: Uint64,
+    end_block: Uint64,
+    // Maximal number of channels to return.
+    count: Uint64Opt,
+}
+
+vector OutPoints <OutPoint>;
+
+table QueryChannelsWithinBlockRangeResult {
+    id: Uint64,
+    // TODO: Using end block as the parameter for next query may result
+    // in repeatedly send the same data in this block. We may want to
+    // either enforce channels in the same block are always sent in the same batch
+    // or use some offset/cursor for pagination.
+    next_block: Uint64,
+    is_finished: byte,
+    channels: OutPoints,
+}
+
+table QueryBroadcastMessagesWithinTimeRange {
+    id: Uint64,
+    chain_hash: Byte32,
+    start_time: Uint64,
+    end_time: Uint64,
+    // Maximal number of messages to return.
+    count: Uint64,
+}
+
+table QueryBroadcastMessagesWithinTimeRangeResult {
+    id: Uint64,
+    // TODO: Using end time as the parameter for next query may result
+    // in repeatedly send the same data with this timestampe. We may want to
+    // either enforce messages with the same timestamp are always sent in the same batch
+    // or use some offset/cursor for pagination.
+    next_time: Uint64,
+    is_finished: byte,
+    queries: BroadcastMessageQueries,
+}
+
 union FiberMessage {
     OpenChannel,
     AcceptChannel,
@@ -154,4 +304,14 @@ union FiberMessage {
     Shutdown,
     ClosingSigned,
     ReestablishChannel,
+    AnnouncementSignatures,
+    NodeAnnouncement,
+    ChannelAnnouncement,
+    ChannelUpdate,
+    GetBroadcastMessages,
+    GetBroadcastMessagesResult,
+    QueryChannelsWithinBlockRange,
+    QueryChannelsWithinBlockRangeResult,
+    QueryBroadcastMessagesWithinTimeRange,
+    QueryBroadcastMessagesWithinTimeRangeResult,
 }

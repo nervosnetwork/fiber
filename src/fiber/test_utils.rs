@@ -1,3 +1,11 @@
+use crate::fiber::graph::{ChannelInfo, NodeInfo};
+use crate::fiber::types::Pubkey;
+use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
+use ckb_types::packed::OutPoint;
+use ckb_types::{core::TransactionView, packed::Byte32};
+use ractor::{Actor, ActorRef};
+use rand::Rng;
+use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
     env,
@@ -7,12 +15,8 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
-
-use ckb_types::{core::TransactionView, packed::Byte32};
-
-use ractor::{Actor, ActorRef};
-
 use tempfile::TempDir as OldTempDir;
+use tentacle::multiaddr::Multiaddr;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::{
     select,
@@ -28,11 +32,13 @@ use crate::{
     FiberConfig, NetworkServiceEvent,
 };
 
+use super::graph::PaymentSession;
 use super::{
     channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
+use crate::fiber::graph::NetworkGraphStateStore;
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -86,11 +92,36 @@ pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
     .0
 }
 
+pub fn generate_keypair() -> (SecretKey, PublicKey) {
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut rand::thread_rng());
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    (secret_key, public_key)
+}
+
+pub fn generate_seckey() -> SecretKey {
+    SecretKey::new(&mut rand::thread_rng())
+}
+
+pub fn generate_pubkey() -> PublicKey {
+    let secp = Secp256k1::new();
+    let secret_key = SecretKey::new(&mut rand::thread_rng());
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    public_key
+}
+
+pub fn gen_sha256_hash() -> Hash256 {
+    let mut rng = rand::thread_rng();
+    let mut result = [0u8; 32];
+    rng.fill(&mut result[..]);
+    result.into()
+}
+
 #[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: TempDir,
-    pub listening_addr: MultiAddr,
+    pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
@@ -99,8 +130,17 @@ pub struct NetworkNode {
 
 impl NetworkNode {
     pub async fn new() -> Self {
+        Self::new_with_node_name(None).await
+    }
+
+    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
         let base_dir = TempDir::new("fnn-test");
         let fiber_config = FiberConfig {
+            announced_node_name: node_name
+                .as_deref()
+                .or(base_dir.as_ref().file_name().unwrap().to_str())
+                .map(Into::into),
+            announce_listening_addr: Some(true),
             base_dir: Some(PathBuf::from(base_dir.as_ref())),
             auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
             ..Default::default()
@@ -114,9 +154,17 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
+        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
-            NetworkActor::new(event_sender, chain_actor.clone(), MemoryStore::default()),
+            NetworkActor::new(
+                event_sender,
+                chain_actor.clone(),
+                MemoryStore::default(),
+                public_key.into(),
+            ),
             NetworkActorStartArguments {
                 config: fiber_config,
                 tracker: new_tokio_task_tracker(),
@@ -129,10 +177,10 @@ impl NetworkNode {
         .0;
 
         #[allow(clippy::never_loop)]
-        let (peer_id, listening_addr) = loop {
+        let (peer_id, _listening_addr, announced_addrs) = loop {
             select! {
-                Some(NetworkServiceEvent::NetworkStarted(peer_id, multiaddr)) = event_receiver.recv() => {
-                    break (peer_id, multiaddr);
+                Some(NetworkServiceEvent::NetworkStarted(peer_id, listening_addr, announced_addrs)) = event_receiver.recv() => {
+                    break (peer_id, listening_addr, announced_addrs);
                 }
                 _ = sleep(Duration::from_secs(5)) => {
                     panic!("Failed to start network actor");
@@ -148,7 +196,7 @@ impl NetworkNode {
 
         Self {
             base_dir,
-            listening_addr,
+            listening_addrs: announced_addrs,
             network_actor,
             chain_actor,
             peer_id,
@@ -158,8 +206,8 @@ impl NetworkNode {
 
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let new = Self::new().await;
+        for i in 0..n {
+            let new = Self::new_with_node_name(Some(format!("Node {i}"))).await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
@@ -169,11 +217,11 @@ impl NetworkNode {
     }
 
     pub async fn connect_to(&mut self, other: &Self) {
-        let peer_addr = other.listening_addr.clone();
+        let peer_addr = other.listening_addrs[0].clone();
         let peer_id = other.peer_id.clone();
         println!(
             "Trying to connect to {:?} from {:?}",
-            other.listening_addr, &self.listening_addr
+            other.listening_addrs, &self.listening_addrs
         );
 
         self.network_actor
@@ -235,6 +283,102 @@ impl NetworkNode {
 #[derive(Clone, Default)]
 struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
+    channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
+    nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
+    connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
+    payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
+    invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
+    invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
+}
+
+impl NetworkGraphStateStore for MemoryStore {
+    fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo> {
+        if let Some(outpoint) = outpoint {
+            let mut res = vec![];
+
+            if let Some(channel) = self.channels_map.read().unwrap().get(&outpoint) {
+                res.push(channel.clone());
+            }
+            res
+        } else {
+            self.channels_map
+                .read()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn insert_channel(&self, channel: ChannelInfo) {
+        self.channels_map
+            .write()
+            .unwrap()
+            .insert(channel.out_point(), channel);
+    }
+
+    fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
+        if let Some(node_id) = node_id {
+            let mut res = vec![];
+
+            if let Some(node) = self.nodes_map.read().unwrap().get(&node_id) {
+                res.push(node.clone());
+            }
+            res
+        } else {
+            self.nodes_map.read().unwrap().values().cloned().collect()
+        }
+    }
+
+    fn insert_node(&self, node: NodeInfo) {
+        self.nodes_map
+            .write()
+            .unwrap()
+            .insert(node.node_id.clone(), node);
+    }
+
+    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr) {
+        self.connected_peer_addresses
+            .write()
+            .unwrap()
+            .insert(peer_id, multiaddr);
+    }
+
+    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
+        if let Some(peer_id) = peer_id {
+            let mut res = vec![];
+
+            if let Some(addr) = self.connected_peer_addresses.read().unwrap().get(&peer_id) {
+                res.push((peer_id, addr.clone()));
+            }
+            res
+        } else {
+            self.connected_peer_addresses
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(peer_id, addr)| (peer_id.clone(), addr.clone()))
+                .collect()
+        }
+    }
+
+    fn remove_connected_peer(&self, peer_id: &PeerId) {
+        self.connected_peer_addresses
+            .write()
+            .unwrap()
+            .remove(peer_id);
+    }
+
+    fn get_payment_session(&self, id: Hash256) -> Option<PaymentSession> {
+        self.payment_sessions.read().unwrap().get(&id).cloned()
+    }
+
+    fn insert_payment_session(&self, session: PaymentSession) {
+        self.payment_sessions
+            .write()
+            .unwrap()
+            .insert(session.payment_hash(), session);
+    }
 }
 
 impl ChannelActorStateStore for MemoryStore {
@@ -263,8 +407,8 @@ impl ChannelActorStateStore for MemoryStore {
             .unwrap()
             .values()
             .filter_map(|state| {
-                if peer_id == &state.peer_id {
-                    Some(state.id)
+                if peer_id == &state.get_remote_peer_id() {
+                    Some(state.id.clone())
                 } else {
                     None
                 }
@@ -278,17 +422,53 @@ impl ChannelActorStateStore for MemoryStore {
         match peer_id {
             Some(peer_id) => values
                 .filter_map(|state| {
-                    if peer_id == state.peer_id {
-                        Some((state.peer_id.clone(), state.id, state.state))
+                    if peer_id == state.get_remote_peer_id() {
+                        Some((state.get_remote_peer_id(), state.id, state.state.clone()))
                     } else {
                         None
                     }
                 })
                 .collect(),
             None => values
-                .map(|state| (state.peer_id.clone(), state.id, state.state))
+                .map(|state| {
+                    (
+                        state.get_remote_peer_id(),
+                        state.id.clone(),
+                        state.state.clone(),
+                    )
+                })
                 .collect(),
         }
+    }
+}
+
+impl InvoiceStore for MemoryStore {
+    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
+        self.invoice_store.read().unwrap().get(id).cloned()
+    }
+
+    fn insert_invoice(
+        &self,
+        invoice: CkbInvoice,
+        preimage: Option<Hash256>,
+    ) -> Result<(), InvoiceError> {
+        let id = invoice.payment_hash();
+        if let Some(preimage) = preimage {
+            self.invoice_hash_to_preimage
+                .write()
+                .unwrap()
+                .insert(*id, preimage);
+        }
+        self.invoice_store.write().unwrap().insert(*id, invoice);
+        Ok(())
+    }
+
+    fn get_invoice_preimage(&self, hash: &Hash256) -> Option<Hash256> {
+        self.invoice_hash_to_preimage
+            .read()
+            .unwrap()
+            .get(hash)
+            .cloned()
     }
 }
 

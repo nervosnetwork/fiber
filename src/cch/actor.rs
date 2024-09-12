@@ -295,8 +295,7 @@ impl CchActor {
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
             Contract::SimpleUDT,
             hex::decode(
-                &self
-                    .config
+                self.config
                     .wrapped_btc_type_script_args
                     .trim_start_matches("0x"),
             )
@@ -489,10 +488,10 @@ impl CchActor {
         receive_btc: ReceiveBTC,
     ) -> Result<ReceiveBTCOrder, CchError> {
         let duration_since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
-        let hash_bin = hex::decode(&receive_btc.payment_hash.trim_start_matches("0x"))
+        let hash_bin = hex::decode(receive_btc.payment_hash.trim_start_matches("0x"))
             .map_err(|_| CchError::HexDecodingError(receive_btc.payment_hash.clone()))?;
 
-        let amount_sats = receive_btc.amount_sats as u128;
+        let amount_sats = receive_btc.amount_sats;
         let fee_sats = amount_sats * (self.config.fee_rate_per_million_sats as u128)
             / 1_000_000u128
             + (self.config.base_fee_sats as u128);
@@ -521,8 +520,7 @@ impl CchActor {
         let wrapped_btc_type_script: ckb_jsonrpc_types::Script = get_script_by_contract(
             Contract::SimpleUDT,
             hex::decode(
-                &self
-                    .config
+                self.config
                     .wrapped_btc_type_script_args
                     .trim_start_matches("0x"),
             )
@@ -595,6 +593,8 @@ impl CchActor {
                                 ),
                                 expiry: LockTime::new(self.config.ckb_final_tlc_expiry_blocks),
                                 hash_algorithm: HashAlgorithm::Sha256,
+                                onion_packet: vec![],
+                                previous_tlc: None,
                             },
                             rpc_reply,
                         ),

@@ -5,7 +5,7 @@ pub mod ckb;
 pub mod ldk;
 pub use ldk::{start_ldk, LdkConfig};
 pub mod fiber;
-pub use fiber::{start_ckb, FiberConfig, NetworkServiceEvent};
+pub use fiber::{start_network, FiberConfig, NetworkServiceEvent};
 pub mod cch;
 pub use cch::{start_cch, CchActor, CchConfig};
 

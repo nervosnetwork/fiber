@@ -271,6 +271,7 @@ impl CkbInvoice {
         u64
     );
     attr_getter!(fallback_address, FallbackAddr, String);
+    attr_getter!(hash_algorithm, HashAlgorithm, HashAlgorithm);
 }
 
 /// Recoverable signature
@@ -546,7 +547,7 @@ impl InvoiceBuilder {
         self
     }
 
-    fn add_attr(mut self, attr: Attribute) -> Self {
+    pub fn add_attr(mut self, attr: Attribute) -> Self {
         self.attrs.push(attr);
         self
     }

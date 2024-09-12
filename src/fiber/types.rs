@@ -1,12 +1,14 @@
-use std::str::FromStr;
-
-use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66};
+use super::channel::ChannelFlags;
+use super::config::AnnouncedNodeName;
+use super::gen::fiber::{self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::serde_utils::SliceHex;
+use super::network::get_chain_hash;
+use super::r#gen::fiber::PubNonceOpt;
+use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
 use ckb_sdk::{Since, SinceType};
 use ckb_types::core::FeeRate;
-use ckb_types::packed::Uint64;
+use ckb_types::packed::{OutPoint, Uint64};
 use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
@@ -16,10 +18,18 @@ use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
-use secp256k1::{ecdsa::Signature as Secp256k1Signature, All, PublicKey, Secp256k1, SecretKey};
+use secp256k1::XOnlyPublicKey;
+use secp256k1::{
+    ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
+    Secp256k1, SecretKey,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::str::FromStr;
+use tentacle::multiaddr::MultiAddr;
+use tentacle::secio::PeerId;
 use thiserror::Error;
+use tracing::debug;
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
@@ -252,6 +262,19 @@ impl From<MByte32> for Hash256 {
     }
 }
 
+fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
+    MByte32::new_builder()
+        .set(
+            value
+                .iter()
+                .map(|v| Byte::new(*v))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .build()
+}
+
 impl ::core::fmt::LowerHex for Hash256 {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         if f.alternate() {
@@ -327,6 +350,19 @@ impl Privkey {
         result[64] = rec_id.to_i32() as u8;
         result
     }
+
+    pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
+        let message = secp256k1::Message::from_digest(message);
+        let sig = secp256k1_instance().sign_ecdsa(&message, &self.0);
+        debug!(
+            "Signing message {:?} with private key {:?} (pub key {:?}), Signature: {:?}",
+            message,
+            self,
+            self.pubkey(),
+            EcdsaSignature::from(sig)
+        );
+        EcdsaSignature::from(sig)
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -368,6 +404,20 @@ impl From<Point> for Pubkey {
     }
 }
 
+impl From<tentacle::secio::PublicKey> for Pubkey {
+    fn from(pk: tentacle::secio::PublicKey) -> Self {
+        secp256k1::PublicKey::from_slice(pk.inner_ref())
+            .expect("valid tentacle pubkey can be converted to secp pubkey")
+            .into()
+    }
+}
+
+impl From<Pubkey> for tentacle::secio::PublicKey {
+    fn from(pk: Pubkey) -> Self {
+        tentacle::secio::PublicKey::from_raw_key(pk.serialize().to_vec())
+    }
+}
+
 impl Pubkey {
     pub fn serialize(&self) -> [u8; 33] {
         PublicKey::from(self).serialize()
@@ -380,18 +430,36 @@ impl Pubkey {
         let result = Point::from(self) + scalar.base_point_mul();
         PublicKey::from(result.unwrap()).into()
     }
+
+    pub fn tentacle_peer_id(&self) -> PeerId {
+        let pubkey = (*self).into();
+        PeerId::from_public_key(&pubkey)
+    }
 }
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
-pub struct Signature(pub Secp256k1Signature);
+pub struct EcdsaSignature(pub Secp256k1Signature);
 
-impl From<Signature> for Secp256k1Signature {
-    fn from(sig: Signature) -> Self {
+impl EcdsaSignature {
+    pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
+        let message = secp256k1::Message::from_digest(*message);
+        debug!(
+            "Verifying message {:?} with pubkey {:?} and signature {:?}",
+            message, pubkey, self
+        );
+        secp256k1_instance()
+            .verify_ecdsa(&message, &self.0, &pubkey.0)
+            .is_ok()
+    }
+}
+
+impl From<EcdsaSignature> for Secp256k1Signature {
+    fn from(sig: EcdsaSignature) -> Self {
         sig.0
     }
 }
 
-impl From<Secp256k1Signature> for Signature {
+impl From<Secp256k1Signature> for EcdsaSignature {
     fn from(sig: Secp256k1Signature) -> Self {
         Self(sig)
     }
@@ -405,10 +473,14 @@ pub enum Error {
     Secp(#[from] secp256k1::Error),
     #[error("Molecule error: {0}")]
     Molecule(#[from] molecule::error::VerificationError),
+    #[error("Tentacle multiaddr error: {0}")]
+    TentacleMultiAddr(#[from] tentacle::multiaddr::Error),
     #[error("Musig2 error: {0}")]
     Musig2(String),
     #[error("Error: {0}")]
     AnyHow(#[from] anyhow::Error),
+    #[error("Invalid onion packet")]
+    OnionPacket,
 }
 
 impl From<Pubkey> for molecule_fiber::Pubkey {
@@ -437,9 +509,9 @@ impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
     }
 }
 
-impl From<Signature> for molecule_fiber::Signature {
-    fn from(signature: Signature) -> molecule_fiber::Signature {
-        molecule_fiber::Signature::new_builder()
+impl From<EcdsaSignature> for molecule_fiber::EcdsaSignature {
+    fn from(signature: EcdsaSignature) -> molecule_fiber::EcdsaSignature {
+        molecule_fiber::EcdsaSignature::new_builder()
             .set(
                 signature
                     .0
@@ -454,12 +526,63 @@ impl From<Signature> for molecule_fiber::Signature {
     }
 }
 
-impl TryFrom<molecule_fiber::Signature> for Signature {
+impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
     type Error = Error;
 
-    fn try_from(signature: molecule_fiber::Signature) -> Result<Self, Self::Error> {
+    fn try_from(signature: molecule_fiber::EcdsaSignature) -> Result<Self, Self::Error> {
+        let signature = signature.raw_data();
+        Secp256k1Signature::from_compact(&signature)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+}
+
+impl From<XOnlyPublicKey> for molecule_fiber::SchnorrXOnlyPubkey {
+    fn from(pk: XOnlyPublicKey) -> molecule_fiber::SchnorrXOnlyPubkey {
+        molecule_fiber::SchnorrXOnlyPubkey::new_builder()
+            .set(
+                pk.serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Public serialized to corrent length"),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::SchnorrXOnlyPubkey> for XOnlyPublicKey {
+    type Error = Error;
+
+    fn try_from(pubkey: molecule_fiber::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
+        let pubkey = pubkey.as_slice();
+        XOnlyPublicKey::from_slice(pubkey).map_err(Into::into)
+    }
+}
+
+impl From<SchnorrSignature> for molecule_fiber::SchnorrSignature {
+    fn from(signature: SchnorrSignature) -> molecule_fiber::SchnorrSignature {
+        molecule_fiber::SchnorrSignature::new_builder()
+            .set(
+                signature
+                    .serialize()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<Byte>>()
+                    .try_into()
+                    .expect("Signature serialized to corrent length"),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::SchnorrSignature> for SchnorrSignature {
+    type Error = Error;
+
+    fn try_from(signature: molecule_fiber::SchnorrSignature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
-        Secp256k1Signature::from_compact(signature)
+        SchnorrSignature::from_slice(signature)
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -493,8 +616,9 @@ pub struct OpenChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
     pub next_local_nonce: PubNonce,
-    pub channel_flags: u8,
+    pub channel_flags: ChannelFlags,
 }
 
 impl OpenChannel {
@@ -529,7 +653,12 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
             .next_local_nonce((&open_channel.next_local_nonce).into())
-            .channel_flags(open_channel.channel_flags.into())
+            .channel_annoucement_nonce(
+                PubNonceOpt::new_builder()
+                    .set(open_channel.channel_announcement_nonce.map(|x| (&x).into()))
+                    .build(),
+            )
+            .channel_flags(open_channel.channel_flags.bits().into())
             .build()
     }
 }
@@ -561,7 +690,15 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
                 .next_local_nonce()
                 .try_into()
                 .map_err(|err| Error::Musig2(format!("{err}")))?,
-            channel_flags: open_channel.channel_flags().into(),
+            channel_announcement_nonce: open_channel
+                .channel_annoucement_nonce()
+                .to_opt()
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
+            channel_flags: ChannelFlags::from_bits(open_channel.channel_flags().into()).ok_or(
+                anyhow!("Invalid channel flags: {}", open_channel.channel_flags()),
+            )?,
         })
     }
 }
@@ -582,6 +719,7 @@ pub struct AcceptChannel {
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
+    pub channel_announcement_nonce: Option<PubNonce>,
     pub next_local_nonce: PubNonce,
 }
 
@@ -602,6 +740,15 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
+            .channel_annoucement_nonce(
+                PubNonceOpt::new_builder()
+                    .set(
+                        accept_channel
+                            .channel_announcement_nonce
+                            .map(|x| (&x).into()),
+                    )
+                    .build(),
+            )
             .next_local_nonce((&accept_channel.next_local_nonce).into())
             .build()
     }
@@ -626,6 +773,12 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
+            channel_announcement_nonce: accept_channel
+                .channel_annoucement_nonce()
+                .to_opt()
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|err| Error::Musig2(format!("{err}")))?,
             next_local_nonce: accept_channel
                 .next_local_nonce()
                 .try_into()
@@ -963,6 +1116,7 @@ pub struct AddTlc {
     pub payment_hash: Hash256,
     pub expiry: LockTime,
     pub hash_algorithm: HashAlgorithm,
+    pub onion_packet: Vec<u8>,
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {
@@ -974,6 +1128,7 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .payment_hash(add_tlc.payment_hash.into())
             .expiry(add_tlc.expiry.into())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
+            .onion_packet(add_tlc.onion_packet.pack())
             .build()
     }
 }
@@ -988,6 +1143,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
             expiry: add_tlc.expiry().try_into()?,
+            onion_packet: add_tlc.onion_packet().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()
                 .try_into()
@@ -1183,8 +1339,496 @@ impl TryFrom<molecule_fiber::ReestablishChannel> for ReestablishChannel {
 }
 
 #[derive(Debug, Clone)]
+pub struct AnnouncementSignatures {
+    pub channel_id: Hash256,
+    pub channel_outpoint: OutPoint,
+    pub node_signature: EcdsaSignature,
+    pub partial_signature: PartialSignature,
+}
+
+impl From<AnnouncementSignatures> for molecule_fiber::AnnouncementSignatures {
+    fn from(announcement_signatures: AnnouncementSignatures) -> Self {
+        molecule_fiber::AnnouncementSignatures::new_builder()
+            .channel_id(announcement_signatures.channel_id.into())
+            .channel_outpoint(announcement_signatures.channel_outpoint)
+            .node_signature(announcement_signatures.node_signature.into())
+            .partial_signature(partial_signature_to_molecule(
+                announcement_signatures.partial_signature,
+            ))
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures {
+    type Error = Error;
+
+    fn try_from(
+        announcement_signatures: molecule_fiber::AnnouncementSignatures,
+    ) -> Result<Self, Self::Error> {
+        Ok(AnnouncementSignatures {
+            channel_id: announcement_signatures.channel_id().into(),
+            channel_outpoint: announcement_signatures.channel_outpoint(),
+            node_signature: announcement_signatures.node_signature().try_into()?,
+            partial_signature: PartialSignature::from_slice(
+                announcement_signatures.partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeAnnouncement {
+    // Signature to this message, may be empty the message is not signed yet.
+    pub signature: Option<EcdsaSignature>,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // rust-lightning uses a Vec<u8> here.
+    pub features: u64,
+    // Opaque version number of the node announcement update, later update should have larger version number.
+    pub version: u64,
+    pub node_id: Pubkey,
+    // Must be a valid utf-8 string of length maximal length 32 bytes.
+    // If the length is less than 32 bytes, it will be padded with 0.
+    // If the length is more than 32 bytes, it should be truncated.
+    pub alias: AnnouncedNodeName,
+    // All the reachable addresses.
+    pub addresses: Vec<MultiAddr>,
+    // chain_hash
+    pub chain_hash: Hash256,
+}
+
+impl NodeAnnouncement {
+    pub fn new_unsigned(
+        alias: AnnouncedNodeName,
+        addresses: Vec<MultiAddr>,
+        node_id: Pubkey,
+    ) -> Self {
+        Self {
+            signature: None,
+            features: Default::default(),
+            version: Default::default(),
+            node_id,
+            alias,
+            chain_hash: get_chain_hash(),
+            addresses,
+        }
+    }
+
+    pub fn new(
+        alias: AnnouncedNodeName,
+        addresses: Vec<MultiAddr>,
+        private_key: &Privkey,
+    ) -> NodeAnnouncement {
+        let mut unsigned = NodeAnnouncement::new_unsigned(alias, addresses, private_key.pubkey());
+        unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
+        unsigned
+    }
+
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = NodeAnnouncement {
+            signature: None,
+            features: self.features,
+            version: self.version,
+            node_id: self.node_id,
+            alias: self.alias,
+            chain_hash: self.chain_hash,
+            addresses: self.addresses.clone(),
+        };
+        deterministically_hash(&unsigned_announcement)
+    }
+}
+
+impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
+    fn from(node_announcement: NodeAnnouncement) -> Self {
+        molecule_fiber::NodeAnnouncement::new_builder()
+            .signature(
+                node_announcement
+                    .signature
+                    .expect("node announcement signed")
+                    .into(),
+            )
+            .features(node_announcement.features.pack())
+            .timestamp(node_announcement.version.pack())
+            .node_id(node_announcement.node_id.into())
+            .alias(u8_32_as_byte_32(&node_announcement.alias.0))
+            .chain_hash(node_announcement.chain_hash.into())
+            .address(
+                BytesVec::new_builder()
+                    .set(
+                        node_announcement
+                            .addresses
+                            .into_iter()
+                            .map(|address| address.to_vec().pack())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
+    type Error = Error;
+
+    fn try_from(node_announcement: molecule_fiber::NodeAnnouncement) -> Result<Self, Self::Error> {
+        Ok(NodeAnnouncement {
+            signature: Some(node_announcement.signature().try_into()?),
+            features: node_announcement.features().unpack(),
+            version: node_announcement.timestamp().unpack(),
+            node_id: node_announcement.node_id().try_into()?,
+            chain_hash: node_announcement.chain_hash().into(),
+            alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
+                .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
+            addresses: node_announcement
+                .address()
+                .into_iter()
+                .map(|address| MultiAddr::try_from(address.raw_data()))
+                .collect::<Result<Vec<_>, _>>()?,
+        })
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelAnnouncement {
+    pub node_1_signature: Option<EcdsaSignature>,
+    pub node_2_signature: Option<EcdsaSignature>,
+    // Signature signed by the funding transaction output public key.
+    pub ckb_signature: Option<SchnorrSignature>,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // rust-lightning uses a Vec<u8> here.
+    pub features: u64,
+    pub chain_hash: Hash256,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+    pub node_1_id: Pubkey,
+    pub node_2_id: Pubkey,
+    // The aggregated public key of the funding transaction output.
+    pub ckb_key: XOnlyPublicKey,
+    // The total capacity of the channel.
+    pub capacity: u128,
+    // UDT script
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+}
+
+impl ChannelAnnouncement {
+    pub fn new_unsigned(
+        node_1_pubkey: &Pubkey,
+        node_2_pubkey: &Pubkey,
+        channel_outpoint: OutPoint,
+        chain_hash: Hash256,
+        ckb_pubkey: &XOnlyPublicKey,
+        capacity: u128,
+        udt_type_script: Option<Script>,
+    ) -> Self {
+        Self {
+            node_1_signature: None,
+            node_2_signature: None,
+            ckb_signature: None,
+            features: Default::default(),
+            chain_hash,
+            channel_outpoint,
+            node_1_id: *node_1_pubkey,
+            node_2_id: *node_2_pubkey,
+            ckb_key: *ckb_pubkey,
+            capacity,
+            udt_type_script,
+        }
+    }
+
+    pub fn is_signed(&self) -> bool {
+        self.node_1_signature.is_some()
+            && self.node_2_signature.is_some()
+            && self.ckb_signature.is_some()
+    }
+
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_announcement = Self {
+            node_1_signature: None,
+            node_2_signature: None,
+            ckb_signature: None,
+            features: self.features,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            node_1_id: self.node_1_id,
+            node_2_id: self.node_2_id,
+            ckb_key: self.ckb_key,
+            capacity: self.capacity,
+            udt_type_script: self.udt_type_script.clone(),
+        };
+        deterministically_hash(&unsigned_announcement)
+    }
+}
+
+impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
+    fn from(channel_announcement: ChannelAnnouncement) -> Self {
+        molecule_fiber::ChannelAnnouncement::new_builder()
+            .node_signature_1(
+                channel_announcement
+                    .node_1_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .node_signature_2(
+                channel_announcement
+                    .node_2_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .ckb_signature(
+                channel_announcement
+                    .ckb_signature
+                    .expect("channel announcement signed")
+                    .into(),
+            )
+            .features(channel_announcement.features.pack())
+            .chain_hash(channel_announcement.chain_hash.into())
+            .channel_outpoint(channel_announcement.channel_outpoint)
+            .node_1_id(channel_announcement.node_1_id.into())
+            .node_2_id(channel_announcement.node_2_id.into())
+            .capacity(channel_announcement.capacity.pack())
+            .udt_type_script(channel_announcement.udt_type_script.pack())
+            .ckb_key(channel_announcement.ckb_key.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
+    type Error = Error;
+
+    fn try_from(
+        channel_announcement: molecule_fiber::ChannelAnnouncement,
+    ) -> Result<Self, Self::Error> {
+        Ok(ChannelAnnouncement {
+            node_1_signature: Some(channel_announcement.node_signature_1().try_into()?),
+            node_2_signature: Some(channel_announcement.node_signature_2().try_into()?),
+            ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
+            features: channel_announcement.features().unpack(),
+            capacity: channel_announcement.capacity().unpack(),
+            chain_hash: channel_announcement.chain_hash().into(),
+            channel_outpoint: channel_announcement.channel_outpoint(),
+            udt_type_script: channel_announcement.udt_type_script().to_opt(),
+            node_1_id: channel_announcement.node_1_id().try_into()?,
+            node_2_id: channel_announcement.node_2_id().try_into()?,
+            ckb_key: channel_announcement.ckb_key().try_into()?,
+        })
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelUpdate {
+    // Signature of the node that wants to update the channel information.
+    pub signature: Option<EcdsaSignature>,
+    pub chain_hash: Hash256,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+    pub version: u64,
+    pub message_flags: u32,
+    pub channel_flags: u32,
+    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_minimum_value: u128,
+    pub tlc_maximum_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+}
+
+impl ChannelUpdate {
+    pub fn new_unsigned(
+        chain_hash: Hash256,
+        channel_outpoint: OutPoint,
+        timestamp: u64,
+        message_flags: u32,
+        channel_flags: u32,
+        tlc_locktime_expiry_delta: u64,
+        tlc_minimum_value: u128,
+        tlc_maximum_value: u128,
+        tlc_fee_proportional_millionths: u128,
+    ) -> Self {
+        Self {
+            signature: None,
+            chain_hash,
+            channel_outpoint,
+            version: timestamp,
+            message_flags,
+            channel_flags,
+            tlc_locktime_expiry_delta,
+            tlc_minimum_value,
+            tlc_maximum_value,
+            tlc_fee_proportional_millionths,
+        }
+    }
+
+    pub fn message_to_sign(&self) -> [u8; 32] {
+        let unsigned_update = ChannelUpdate {
+            signature: None,
+            chain_hash: self.chain_hash,
+            channel_outpoint: self.channel_outpoint.clone(),
+            version: self.version,
+            message_flags: self.message_flags,
+            channel_flags: self.channel_flags,
+            tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
+            tlc_minimum_value: self.tlc_minimum_value,
+            tlc_maximum_value: self.tlc_maximum_value,
+            tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
+        };
+        deterministically_hash(&unsigned_update)
+    }
+}
+
+impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
+    fn from(channel_update: ChannelUpdate) -> Self {
+        molecule_fiber::ChannelUpdate::new_builder()
+            .signature(
+                channel_update
+                    .signature
+                    .expect("channel update signed")
+                    .into(),
+            )
+            .chain_hash(channel_update.chain_hash.into())
+            .channel_outpoint(channel_update.channel_outpoint)
+            .timestamp(channel_update.version.pack())
+            .message_flags(channel_update.message_flags.pack())
+            .channel_flags(channel_update.channel_flags.pack())
+            .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
+            .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
+            .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
+            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
+    type Error = Error;
+
+    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
+        Ok(ChannelUpdate {
+            signature: Some(channel_update.signature().try_into()?),
+            chain_hash: channel_update.chain_hash().into(),
+            channel_outpoint: channel_update.channel_outpoint(),
+            version: channel_update.timestamp().unpack(),
+            message_flags: channel_update.message_flags().unpack(),
+            channel_flags: channel_update.channel_flags().unpack(),
+            tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),
+            tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
+            tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
+            tlc_fee_proportional_millionths: channel_update
+                .tlc_fee_proportional_millionths()
+                .unpack(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FiberQueryInformation {
+    GetBroadcastMessages(GetBroadcastMessages),
+    GetBroadcastMessagesResult(GetBroadcastMessagesResult),
+    QueryChannelsWithinBlockRange(QueryChannelsWithinBlockRange),
+    QueryChannelsWithinBlockRangeResult(QueryChannelsWithinBlockRangeResult),
+    QueryBroadcastMessagesWithinTimeRange(QueryBroadcastMessagesWithinTimeRange),
+    QueryBroadcastMessagesWithinTimeRangeResult(QueryBroadcastMessagesWithinTimeRangeResult),
+}
+
+#[derive(Debug, Clone)]
 pub enum FiberMessage {
-    OpenChannel(OpenChannel),
+    ChannelInitialization(OpenChannel),
+    ChannelNormalOperation(FiberChannelMessage),
+    BroadcastMessage(FiberBroadcastMessage),
+    QueryInformation(FiberQueryInformation),
+}
+
+impl FiberMessage {
+    pub fn open_channel(open_channel: OpenChannel) -> Self {
+        FiberMessage::ChannelInitialization(open_channel)
+    }
+
+    pub fn accept_channel(accept_channel: AcceptChannel) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(accept_channel))
+    }
+
+    pub fn commitment_signed(commitment_signed: CommitmentSigned) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
+            commitment_signed,
+        ))
+    }
+
+    pub fn tx_signatures(tx_signatures: TxSignatures) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(tx_signatures))
+    }
+
+    pub fn channel_ready(channel_ready: ChannelReady) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(channel_ready))
+    }
+
+    pub fn tx_update(tx_update: TxUpdate) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(tx_update))
+    }
+
+    pub fn tx_complete(tx_complete: TxComplete) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(tx_complete))
+    }
+
+    pub fn tx_abort(tx_abort: TxAbort) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(tx_abort))
+    }
+
+    pub fn tx_init_rbf(tx_init_rbf: TxInitRBF) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxInitRBF(tx_init_rbf))
+    }
+
+    pub fn tx_ack_rbf(tx_ack_rbf: TxAckRBF) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAckRBF(tx_ack_rbf))
+    }
+
+    pub fn shutdown(shutdown: Shutdown) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(shutdown))
+    }
+
+    pub fn closing_signed(closing_signed: ClosingSigned) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(closing_signed))
+    }
+
+    pub fn add_tlc(add_tlc: AddTlc) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(add_tlc))
+    }
+
+    pub fn revoke_and_ack(revoke_and_ack: RevokeAndAck) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(revoke_and_ack))
+    }
+
+    pub fn remove_tlc(remove_tlc: RemoveTlc) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(remove_tlc))
+    }
+
+    pub fn reestablish_channel(reestablish_channel: ReestablishChannel) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
+            reestablish_channel,
+        ))
+    }
+
+    pub fn announcement_signatures(announcement_signatures: AnnouncementSignatures) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+            announcement_signatures,
+        ))
+    }
+
+    pub fn node_announcement(node_announcement: NodeAnnouncement) -> Self {
+        FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(node_announcement))
+    }
+
+    pub fn channel_announcement(channel_announcement: ChannelAnnouncement) -> Self {
+        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
+            channel_announcement,
+        ))
+    }
+
+    pub fn channel_update(channel_update: ChannelUpdate) -> Self {
+        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(channel_update))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FiberChannelMessage {
     AcceptChannel(AcceptChannel),
     CommitmentSigned(CommitmentSigned),
     TxSignatures(TxSignatures),
@@ -1200,83 +1844,822 @@ pub enum FiberMessage {
     RevokeAndAck(RevokeAndAck),
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
+    AnnouncementSignatures(AnnouncementSignatures),
 }
 
-impl FiberMessage {
+impl FiberChannelMessage {
     pub fn get_channel_id(&self) -> Hash256 {
-        match &self {
-            FiberMessage::OpenChannel(open_channel) => open_channel.channel_id,
-            FiberMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
-            FiberMessage::CommitmentSigned(commitment_signed) => commitment_signed.channel_id,
-            FiberMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
-            FiberMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
-            FiberMessage::TxUpdate(tx_update) => tx_update.channel_id,
-            FiberMessage::TxComplete(tx_complete) => tx_complete.channel_id,
-            FiberMessage::TxAbort(tx_abort) => tx_abort.channel_id,
-            FiberMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
-            FiberMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
-            FiberMessage::Shutdown(shutdown) => shutdown.channel_id,
-            FiberMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
-            FiberMessage::AddTlc(add_tlc) => add_tlc.channel_id,
-            FiberMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
-            FiberMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            FiberMessage::ReestablishChannel(reestablish_channel) => reestablish_channel.channel_id,
+        match self {
+            FiberChannelMessage::AcceptChannel(accept_channel) => accept_channel.channel_id,
+            FiberChannelMessage::CommitmentSigned(commitment_signed) => {
+                commitment_signed.channel_id
+            }
+            FiberChannelMessage::TxSignatures(tx_signatures) => tx_signatures.channel_id,
+            FiberChannelMessage::ChannelReady(channel_ready) => channel_ready.channel_id,
+            FiberChannelMessage::TxUpdate(tx_update) => tx_update.channel_id,
+            FiberChannelMessage::TxComplete(tx_complete) => tx_complete.channel_id,
+            FiberChannelMessage::TxAbort(tx_abort) => tx_abort.channel_id,
+            FiberChannelMessage::TxInitRBF(tx_init_rbf) => tx_init_rbf.channel_id,
+            FiberChannelMessage::TxAckRBF(tx_ack_rbf) => tx_ack_rbf.channel_id,
+            FiberChannelMessage::Shutdown(shutdown) => shutdown.channel_id,
+            FiberChannelMessage::ClosingSigned(closing_signed) => closing_signed.channel_id,
+            FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
+            FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
+            FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+            FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
+                reestablish_channel.channel_id
+            }
+            FiberChannelMessage::AnnouncementSignatures(annoucement_signatures) => {
+                annoucement_signatures.channel_id
+            }
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FiberBroadcastMessage {
+    NodeAnnouncement(NodeAnnouncement),
+    ChannelAnnouncement(ChannelAnnouncement),
+    ChannelUpdate(ChannelUpdate),
+}
+
+impl From<FiberBroadcastMessage> for molecule_fiber::BroadcastMessageUnion {
+    fn from(fiber_broadcast_message: FiberBroadcastMessage) -> Self {
+        match fiber_broadcast_message {
+            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
+                molecule_fiber::BroadcastMessageUnion::NodeAnnouncement(node_announcement.into())
+            }
+            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                molecule_fiber::BroadcastMessageUnion::ChannelAnnouncement(
+                    channel_announcement.into(),
+                )
+            }
+            FiberBroadcastMessage::ChannelUpdate(channel_update) => {
+                molecule_fiber::BroadcastMessageUnion::ChannelUpdate(channel_update.into())
+            }
+        }
+    }
+}
+
+impl TryFrom<molecule_fiber::BroadcastMessageUnion> for FiberBroadcastMessage {
+    type Error = Error;
+
+    fn try_from(
+        fiber_broadcast_message: molecule_fiber::BroadcastMessageUnion,
+    ) -> Result<Self, Self::Error> {
+        match fiber_broadcast_message {
+            molecule_fiber::BroadcastMessageUnion::NodeAnnouncement(node_announcement) => Ok(
+                FiberBroadcastMessage::NodeAnnouncement(node_announcement.try_into()?),
+            ),
+            molecule_fiber::BroadcastMessageUnion::ChannelAnnouncement(channel_announcement) => Ok(
+                FiberBroadcastMessage::ChannelAnnouncement(channel_announcement.try_into()?),
+            ),
+            molecule_fiber::BroadcastMessageUnion::ChannelUpdate(channel_update) => Ok(
+                FiberBroadcastMessage::ChannelUpdate(channel_update.try_into()?),
+            ),
+        }
+    }
+}
+
+impl From<FiberBroadcastMessage> for molecule_fiber::BroadcastMessage {
+    fn from(fiber_broadcast_message: FiberBroadcastMessage) -> Self {
+        molecule_fiber::BroadcastMessage::new_builder()
+            .set(fiber_broadcast_message)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::BroadcastMessage> for FiberBroadcastMessage {
+    type Error = Error;
+
+    fn try_from(
+        fiber_broadcast_message: molecule_fiber::BroadcastMessage,
+    ) -> Result<Self, Self::Error> {
+        fiber_broadcast_message.to_enum().try_into()
+    }
+}
+
+impl FiberBroadcastMessage {
+    pub fn id(&self) -> Hash256 {
+        match self {
+            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
+                deterministically_hash(node_announcement).into()
+            }
+            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                deterministically_hash(channel_announcement).into()
+            }
+            FiberBroadcastMessage::ChannelUpdate(channel_update) => {
+                deterministically_hash(channel_update).into()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeAnnouncementQuery {
+    pub node_id: Pubkey,
+    pub flags: u8,
+}
+
+impl From<NodeAnnouncementQuery> for molecule_fiber::NodeAnnouncementQuery {
+    fn from(node_announcement_query: NodeAnnouncementQuery) -> Self {
+        molecule_fiber::NodeAnnouncementQuery::new_builder()
+            .node_id(node_announcement_query.node_id.into())
+            .flags(node_announcement_query.flags.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::NodeAnnouncementQuery> for NodeAnnouncementQuery {
+    type Error = Error;
+
+    fn try_from(
+        node_announcement_query: molecule_fiber::NodeAnnouncementQuery,
+    ) -> Result<Self, Self::Error> {
+        Ok(NodeAnnouncementQuery {
+            node_id: node_announcement_query.node_id().try_into()?,
+            flags: node_announcement_query.flags().into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelAnnouncementQuery {
+    pub channel_outpoint: OutPoint,
+    pub flags: u8,
+}
+
+impl From<ChannelAnnouncementQuery> for molecule_fiber::ChannelAnnouncementQuery {
+    fn from(channel_announcement_query: ChannelAnnouncementQuery) -> Self {
+        molecule_fiber::ChannelAnnouncementQuery::new_builder()
+            .channel_outpoint(channel_announcement_query.channel_outpoint)
+            .flags(channel_announcement_query.flags.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelAnnouncementQuery> for ChannelAnnouncementQuery {
+    type Error = Error;
+
+    fn try_from(
+        channel_announcement_query: molecule_fiber::ChannelAnnouncementQuery,
+    ) -> Result<Self, Self::Error> {
+        Ok(ChannelAnnouncementQuery {
+            channel_outpoint: channel_announcement_query.channel_outpoint(),
+            flags: channel_announcement_query.flags().into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelUpdateQuery {
+    pub channel_outpoint: OutPoint,
+    pub flags: u8,
+}
+
+impl From<ChannelUpdateQuery> for molecule_fiber::ChannelUpdateQuery {
+    fn from(channel_update_query: ChannelUpdateQuery) -> Self {
+        molecule_fiber::ChannelUpdateQuery::new_builder()
+            .channel_outpoint(channel_update_query.channel_outpoint)
+            .flags(channel_update_query.flags.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelUpdateQuery> for ChannelUpdateQuery {
+    type Error = Error;
+
+    fn try_from(
+        channel_update_query: molecule_fiber::ChannelUpdateQuery,
+    ) -> Result<Self, Self::Error> {
+        Ok(ChannelUpdateQuery {
+            channel_outpoint: channel_update_query.channel_outpoint(),
+            flags: channel_update_query.flags().into(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FiberBroadcastMessageQuery {
+    NodeAnnouncement(NodeAnnouncementQuery),
+    ChannelAnnouncement(ChannelAnnouncementQuery),
+    ChannelUpdate(ChannelUpdateQuery),
+}
+
+impl From<FiberBroadcastMessageQuery> for molecule_fiber::BroadcastMessageQuery {
+    fn from(fiber_broadcast_message_query: FiberBroadcastMessageQuery) -> Self {
+        molecule_fiber::BroadcastMessageQuery::new_builder()
+            .set(fiber_broadcast_message_query)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::BroadcastMessageQuery> for FiberBroadcastMessageQuery {
+    type Error = Error;
+
+    fn try_from(
+        fiber_broadcast_message_query: molecule_fiber::BroadcastMessageQuery,
+    ) -> Result<Self, Self::Error> {
+        fiber_broadcast_message_query.to_enum().try_into()
+    }
+}
+
+impl From<FiberBroadcastMessageQuery> for molecule_fiber::BroadcastMessageQueryUnion {
+    fn from(fiber_broadcast_message_query: FiberBroadcastMessageQuery) -> Self {
+        match fiber_broadcast_message_query {
+            FiberBroadcastMessageQuery::NodeAnnouncement(node_announcement_query) => {
+                molecule_fiber::BroadcastMessageQueryUnion::NodeAnnouncementQuery(
+                    node_announcement_query.into(),
+                )
+            }
+            FiberBroadcastMessageQuery::ChannelAnnouncement(channel_announcement_query) => {
+                molecule_fiber::BroadcastMessageQueryUnion::ChannelAnnouncementQuery(
+                    channel_announcement_query.into(),
+                )
+            }
+            FiberBroadcastMessageQuery::ChannelUpdate(channel_update_query) => {
+                molecule_fiber::BroadcastMessageQueryUnion::ChannelUpdateQuery(
+                    channel_update_query.into(),
+                )
+            }
+        }
+    }
+}
+
+impl TryFrom<molecule_fiber::BroadcastMessageQueryUnion> for FiberBroadcastMessageQuery {
+    type Error = Error;
+
+    fn try_from(
+        fiber_broadcast_message_query: molecule_fiber::BroadcastMessageQueryUnion,
+    ) -> Result<Self, Self::Error> {
+        match fiber_broadcast_message_query {
+            molecule_fiber::BroadcastMessageQueryUnion::NodeAnnouncementQuery(
+                node_announcement_query,
+            ) => Ok(FiberBroadcastMessageQuery::NodeAnnouncement(
+                node_announcement_query.try_into()?,
+            )),
+            molecule_fiber::BroadcastMessageQueryUnion::ChannelAnnouncementQuery(
+                channel_announcement_query,
+            ) => Ok(FiberBroadcastMessageQuery::ChannelAnnouncement(
+                channel_announcement_query.try_into()?,
+            )),
+            molecule_fiber::BroadcastMessageQueryUnion::ChannelUpdateQuery(
+                channel_update_query,
+            ) => Ok(FiberBroadcastMessageQuery::ChannelUpdate(
+                channel_update_query.try_into()?,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetBroadcastMessages {
+    pub id: u64,
+    pub queries: Vec<FiberBroadcastMessageQuery>,
+}
+
+impl From<GetBroadcastMessages> for molecule_fiber::GetBroadcastMessages {
+    fn from(get_broadcast_messages: GetBroadcastMessages) -> Self {
+        molecule_fiber::GetBroadcastMessages::new_builder()
+            .id(get_broadcast_messages.id.pack())
+            .queries(
+                BroadcastMessageQueries::new_builder()
+                    .set(
+                        get_broadcast_messages
+                            .queries
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::GetBroadcastMessages> for GetBroadcastMessages {
+    type Error = Error;
+
+    fn try_from(
+        get_broadcast_messages: molecule_fiber::GetBroadcastMessages,
+    ) -> Result<Self, Self::Error> {
+        Ok(GetBroadcastMessages {
+            id: get_broadcast_messages.id().unpack(),
+            queries: get_broadcast_messages
+                .queries()
+                .into_iter()
+                .map(|query| query.try_into())
+                .collect::<Result<Vec<FiberBroadcastMessageQuery>, Error>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetBroadcastMessagesResult {
+    pub id: u64,
+    pub messages: Vec<FiberBroadcastMessage>,
+}
+
+impl From<GetBroadcastMessagesResult> for molecule_fiber::GetBroadcastMessagesResult {
+    fn from(get_broadcast_messages_result: GetBroadcastMessagesResult) -> Self {
+        molecule_fiber::GetBroadcastMessagesResult::new_builder()
+            .id(get_broadcast_messages_result.id.pack())
+            .messages(
+                molecule_fiber::BroadcastMessages::new_builder()
+                    .set(
+                        get_broadcast_messages_result
+                            .messages
+                            .into_iter()
+                            .map(|message| message.into())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::GetBroadcastMessagesResult> for GetBroadcastMessagesResult {
+    type Error = Error;
+
+    fn try_from(
+        get_broadcast_messages_result: molecule_fiber::GetBroadcastMessagesResult,
+    ) -> Result<Self, Self::Error> {
+        Ok(GetBroadcastMessagesResult {
+            id: get_broadcast_messages_result.id().unpack(),
+            messages: get_broadcast_messages_result
+                .messages()
+                .into_iter()
+                .map(|message| message.try_into())
+                .collect::<Result<Vec<FiberBroadcastMessage>, Error>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryChannelsWithinBlockRange {
+    pub id: u64,
+    pub chain_hash: Hash256,
+    pub start_block: u64,
+    pub end_block: u64,
+}
+
+impl From<QueryChannelsWithinBlockRange> for molecule_fiber::QueryChannelsWithinBlockRange {
+    fn from(query_channels_within_block_range: QueryChannelsWithinBlockRange) -> Self {
+        molecule_fiber::QueryChannelsWithinBlockRange::new_builder()
+            .id(query_channels_within_block_range.id.pack())
+            .chain_hash(query_channels_within_block_range.chain_hash.into())
+            .start_block(query_channels_within_block_range.start_block.pack())
+            .end_block(query_channels_within_block_range.end_block.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRange> for QueryChannelsWithinBlockRange {
+    type Error = Error;
+
+    fn try_from(
+        query_channels_within_block_range: molecule_fiber::QueryChannelsWithinBlockRange,
+    ) -> Result<Self, Self::Error> {
+        Ok(QueryChannelsWithinBlockRange {
+            id: query_channels_within_block_range.id().unpack(),
+            chain_hash: query_channels_within_block_range.chain_hash().into(),
+            start_block: query_channels_within_block_range.start_block().unpack(),
+            end_block: query_channels_within_block_range.end_block().unpack(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryChannelsWithinBlockRangeResult {
+    pub id: u64,
+    pub next_block: u64,
+    pub is_finished: bool,
+    pub channels: Vec<OutPoint>,
+}
+
+impl From<QueryChannelsWithinBlockRangeResult>
+    for molecule_fiber::QueryChannelsWithinBlockRangeResult
+{
+    fn from(query_channels_within_block_range_result: QueryChannelsWithinBlockRangeResult) -> Self {
+        molecule_fiber::QueryChannelsWithinBlockRangeResult::new_builder()
+            .id(query_channels_within_block_range_result.id.pack())
+            .next_block(query_channels_within_block_range_result.next_block.pack())
+            .is_finished(
+                (if query_channels_within_block_range_result.is_finished {
+                    1u8
+                } else {
+                    0
+                })
+                .into(),
+            )
+            .channels(
+                molecule_fiber::OutPoints::new_builder()
+                    .set(
+                        query_channels_within_block_range_result
+                            .channels
+                            .into_iter()
+                            .map(|channel| channel)
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRangeResult>
+    for QueryChannelsWithinBlockRangeResult
+{
+    type Error = Error;
+
+    fn try_from(
+        query_channels_within_block_range_result: molecule_fiber::QueryChannelsWithinBlockRangeResult,
+    ) -> Result<Self, Self::Error> {
+        Ok(QueryChannelsWithinBlockRangeResult {
+            id: query_channels_within_block_range_result.id().unpack(),
+            next_block: query_channels_within_block_range_result
+                .next_block()
+                .unpack(),
+            is_finished: u8::from(query_channels_within_block_range_result.is_finished()) != 0u8,
+            channels: query_channels_within_block_range_result
+                .channels()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryBroadcastMessagesWithinTimeRange {
+    pub id: u64,
+    pub chain_hash: Hash256,
+    pub start_time: u64,
+    pub end_time: u64,
+}
+
+impl From<QueryBroadcastMessagesWithinTimeRange>
+    for molecule_fiber::QueryBroadcastMessagesWithinTimeRange
+{
+    fn from(
+        query_broadcast_messages_within_time_range: QueryBroadcastMessagesWithinTimeRange,
+    ) -> Self {
+        molecule_fiber::QueryBroadcastMessagesWithinTimeRange::new_builder()
+            .id(query_broadcast_messages_within_time_range.id.pack())
+            .chain_hash(query_broadcast_messages_within_time_range.chain_hash.into())
+            .start_time(query_broadcast_messages_within_time_range.start_time.pack())
+            .end_time(query_broadcast_messages_within_time_range.end_time.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRange>
+    for QueryBroadcastMessagesWithinTimeRange
+{
+    type Error = Error;
+
+    fn try_from(
+        query_broadcast_messages_within_time_range: molecule_fiber::QueryBroadcastMessagesWithinTimeRange,
+    ) -> Result<Self, Self::Error> {
+        Ok(QueryBroadcastMessagesWithinTimeRange {
+            id: query_broadcast_messages_within_time_range.id().unpack(),
+            chain_hash: query_broadcast_messages_within_time_range
+                .chain_hash()
+                .into(),
+            start_time: query_broadcast_messages_within_time_range
+                .start_time()
+                .unpack(),
+            end_time: query_broadcast_messages_within_time_range
+                .end_time()
+                .unpack(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryBroadcastMessagesWithinTimeRangeResult {
+    pub id: u64,
+    pub next_time: u64,
+    pub is_finished: bool,
+    pub queries: Vec<FiberBroadcastMessageQuery>,
+}
+
+impl From<QueryBroadcastMessagesWithinTimeRangeResult>
+    for molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult
+{
+    fn from(
+        query_broadcast_messages_within_time_range_result: QueryBroadcastMessagesWithinTimeRangeResult,
+    ) -> Self {
+        molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult::new_builder()
+            .id(query_broadcast_messages_within_time_range_result.id.pack())
+            .next_time(
+                query_broadcast_messages_within_time_range_result
+                    .next_time
+                    .pack(),
+            )
+            .is_finished(
+                (if query_broadcast_messages_within_time_range_result.is_finished {
+                    1u8
+                } else {
+                    0
+                })
+                .into(),
+            )
+            .queries(
+                molecule_fiber::BroadcastMessageQueries::new_builder()
+                    .set(
+                        query_broadcast_messages_within_time_range_result
+                            .queries
+                            .into_iter()
+                            .map(|query| query.into())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult>
+    for QueryBroadcastMessagesWithinTimeRangeResult
+{
+    type Error = Error;
+
+    fn try_from(
+        query_broadcast_messages_within_time_range_result: molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult,
+    ) -> Result<Self, Self::Error> {
+        Ok(QueryBroadcastMessagesWithinTimeRangeResult {
+            id: query_broadcast_messages_within_time_range_result
+                .id()
+                .unpack(),
+            next_time: query_broadcast_messages_within_time_range_result
+                .next_time()
+                .unpack(),
+            is_finished: u8::from(query_broadcast_messages_within_time_range_result.is_finished())
+                != 0,
+            queries: query_broadcast_messages_within_time_range_result
+                .queries()
+                .into_iter()
+                .map(|message| message.try_into())
+                .collect::<Result<Vec<_>, Error>>()?,
+        })
     }
 }
 
 impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
     fn from(fiber_message: FiberMessage) -> Self {
         match fiber_message {
-            FiberMessage::OpenChannel(open_channel) => {
+            FiberMessage::ChannelInitialization(open_channel) => {
                 molecule_fiber::FiberMessageUnion::OpenChannel(open_channel.into())
             }
-            FiberMessage::AcceptChannel(accept_channel) => {
-                molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
-            }
-            FiberMessage::CommitmentSigned(commitment_signed) => {
-                molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed.into())
-            }
-            FiberMessage::TxSignatures(tx_signatures) => {
-                molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures.into())
-            }
-            FiberMessage::ChannelReady(channel_ready) => {
-                molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready.into())
-            }
-            FiberMessage::TxUpdate(tx_update) => {
-                molecule_fiber::FiberMessageUnion::TxUpdate(tx_update.into())
-            }
-            FiberMessage::TxComplete(tx_complete) => {
-                molecule_fiber::FiberMessageUnion::TxComplete(tx_complete.into())
-            }
-            FiberMessage::TxAbort(tx_abort) => {
-                molecule_fiber::FiberMessageUnion::TxAbort(tx_abort.into())
-            }
-            FiberMessage::TxInitRBF(tx_init_rbf) => {
-                molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf.into())
-            }
-            FiberMessage::TxAckRBF(tx_ack_rbf) => {
-                molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf.into())
-            }
-            FiberMessage::Shutdown(shutdown) => {
-                molecule_fiber::FiberMessageUnion::Shutdown(shutdown.into())
-            }
-            FiberMessage::ClosingSigned(closing_signed) => {
-                molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
-            }
-            FiberMessage::AddTlc(add_tlc) => {
-                molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
-            }
-            FiberMessage::RemoveTlc(remove_tlc) => {
-                molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
-            }
-            FiberMessage::RevokeAndAck(revoke_and_ack) => {
-                molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack.into())
-            }
-            FiberMessage::ReestablishChannel(reestablish_channel) => {
-                molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel.into())
-            }
+            FiberMessage::ChannelNormalOperation(m) => match m {
+                FiberChannelMessage::AcceptChannel(accept_channel) => {
+                    molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel.into())
+                }
+                FiberChannelMessage::CommitmentSigned(commitment_signed) => {
+                    molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed.into())
+                }
+                FiberChannelMessage::TxSignatures(tx_signatures) => {
+                    molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures.into())
+                }
+                FiberChannelMessage::ChannelReady(channel_ready) => {
+                    molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready.into())
+                }
+                FiberChannelMessage::TxUpdate(tx_update) => {
+                    molecule_fiber::FiberMessageUnion::TxUpdate(tx_update.into())
+                }
+                FiberChannelMessage::TxComplete(tx_complete) => {
+                    molecule_fiber::FiberMessageUnion::TxComplete(tx_complete.into())
+                }
+                FiberChannelMessage::TxAbort(tx_abort) => {
+                    molecule_fiber::FiberMessageUnion::TxAbort(tx_abort.into())
+                }
+                FiberChannelMessage::TxInitRBF(tx_init_rbf) => {
+                    molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf.into())
+                }
+                FiberChannelMessage::TxAckRBF(tx_ack_rbf) => {
+                    molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf.into())
+                }
+                FiberChannelMessage::Shutdown(shutdown) => {
+                    molecule_fiber::FiberMessageUnion::Shutdown(shutdown.into())
+                }
+                FiberChannelMessage::ClosingSigned(closing_signed) => {
+                    molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed.into())
+                }
+                FiberChannelMessage::AddTlc(add_tlc) => {
+                    molecule_fiber::FiberMessageUnion::AddTlc(add_tlc.into())
+                }
+                FiberChannelMessage::RemoveTlc(remove_tlc) => {
+                    molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc.into())
+                }
+                FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
+                    molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack.into())
+                }
+                FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
+                    molecule_fiber::FiberMessageUnion::ReestablishChannel(
+                        reestablish_channel.into(),
+                    )
+                }
+                FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                    molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
+                        announcement_signatures.into(),
+                    )
+                }
+            },
+            FiberMessage::BroadcastMessage(m) => match m {
+                FiberBroadcastMessage::NodeAnnouncement(node_annoucement) => {
+                    molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_annoucement.into())
+                }
+                FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                    molecule_fiber::FiberMessageUnion::ChannelAnnouncement(
+                        channel_announcement.into(),
+                    )
+                }
+                FiberBroadcastMessage::ChannelUpdate(channel_update) => {
+                    molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update.into())
+                }
+            },
+            FiberMessage::QueryInformation(query) => match query {
+                FiberQueryInformation::GetBroadcastMessages(get_broadcast_messages) => {
+                    molecule_fiber::FiberMessageUnion::GetBroadcastMessages(
+                        get_broadcast_messages.into(),
+                    )
+                }
+                FiberQueryInformation::GetBroadcastMessagesResult(
+                    get_broadcast_messages_result,
+                ) => molecule_fiber::FiberMessageUnion::GetBroadcastMessagesResult(
+                    get_broadcast_messages_result.into(),
+                ),
+                FiberQueryInformation::QueryChannelsWithinBlockRange(
+                    query_channels_within_block_range,
+                ) => molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRange(
+                    query_channels_within_block_range.into(),
+                ),
+                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
+                    query_channels_within_block_range_result,
+                ) => molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRangeResult(
+                    query_channels_within_block_range_result.into(),
+                ),
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
+                    query_broadcast_messages_within_time_range,
+                ) => molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(
+                    query_broadcast_messages_within_time_range.into(),
+                ),
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
+                    query_broadcast_messages_within_time_range_result,
+                ) => {
+                    molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(
+                        query_broadcast_messages_within_time_range_result.into(),
+                    )
+                }
+            },
         }
+    }
+}
+
+impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
+    type Error = Error;
+
+    fn try_from(fiber_message: molecule_fiber::FiberMessageUnion) -> Result<Self, Self::Error> {
+        Ok(match fiber_message {
+            molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
+                FiberMessage::ChannelInitialization(open_channel.try_into()?)
+            }
+            molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AcceptChannel(
+                    accept_channel.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::CommitmentSigned(
+                    commitment_signed.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxSignatures(
+                    tx_signatures.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelReady(
+                    channel_ready.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxUpdate(tx_update) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxUpdate(
+                    tx_update.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxComplete(tx_complete) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxComplete(
+                    tx_complete.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxAbort(tx_abort) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAbort(
+                    tx_abort.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxInitRBF(
+                    tx_init_rbf.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::TxAckRBF(
+                    tx_ack_rbf.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::Shutdown(shutdown) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::Shutdown(
+                    shutdown.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ClosingSigned(
+                    closing_signed.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AddTlc(
+                    add_tlc.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RemoveTlc(
+                    remove_tlc.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::RevokeAndAck(
+                    revoke_and_ack.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ReestablishChannel(
+                    reestablish_channel.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::AnnouncementSignatures(announcement_signatures) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::AnnouncementSignatures(
+                    announcement_signatures.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_announcement) => {
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    node_announcement.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ChannelAnnouncement(channel_announcement) => {
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
+                    channel_announcement.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update) => {
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
+                    channel_update.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::GetBroadcastMessages(get_broadcast_messages) => {
+                FiberMessage::QueryInformation(FiberQueryInformation::GetBroadcastMessages(
+                    get_broadcast_messages.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::GetBroadcastMessagesResult(
+                get_broadcast_messages_result,
+            ) => FiberMessage::QueryInformation(FiberQueryInformation::GetBroadcastMessagesResult(
+                get_broadcast_messages_result.try_into()?,
+            )),
+            molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRange(
+                query_channels_within_block_range,
+            ) => FiberMessage::QueryInformation(
+                FiberQueryInformation::QueryChannelsWithinBlockRange(
+                    query_channels_within_block_range.try_into()?,
+                ),
+            ),
+            molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRangeResult(
+                query_channels_within_block_range_result,
+            ) => FiberMessage::QueryInformation(
+                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
+                    query_channels_within_block_range_result.try_into()?,
+                ),
+            ),
+            molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(
+                query_broadcast_messages_within_time_range,
+            ) => FiberMessage::QueryInformation(
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
+                    query_broadcast_messages_within_time_range.try_into()?,
+                ),
+            ),
+            molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(
+                query_broadcast_messages_within_time_range_result,
+            ) => FiberMessage::QueryInformation(
+                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
+                    query_broadcast_messages_within_time_range_result.try_into()?,
+                ),
+            ),
+        })
     }
 }
 
@@ -1292,56 +2675,7 @@ impl TryFrom<molecule_fiber::FiberMessage> for FiberMessage {
     type Error = Error;
 
     fn try_from(fiber_message: molecule_fiber::FiberMessage) -> Result<Self, Self::Error> {
-        Ok(match fiber_message.to_enum() {
-            molecule_fiber::FiberMessageUnion::OpenChannel(open_channel) => {
-                FiberMessage::OpenChannel(open_channel.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::AcceptChannel(accept_channel) => {
-                FiberMessage::AcceptChannel(accept_channel.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::CommitmentSigned(commitment_signed) => {
-                FiberMessage::CommitmentSigned(commitment_signed.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxSignatures(tx_signatures) => {
-                FiberMessage::TxSignatures(tx_signatures.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::ChannelReady(channel_ready) => {
-                FiberMessage::ChannelReady(channel_ready.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxUpdate(tx_update) => {
-                FiberMessage::TxUpdate(tx_update.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxComplete(tx_complete) => {
-                FiberMessage::TxComplete(tx_complete.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxAbort(tx_abort) => {
-                FiberMessage::TxAbort(tx_abort.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxInitRBF(tx_init_rbf) => {
-                FiberMessage::TxInitRBF(tx_init_rbf.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::TxAckRBF(tx_ack_rbf) => {
-                FiberMessage::TxAckRBF(tx_ack_rbf.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::Shutdown(shutdown) => {
-                FiberMessage::Shutdown(shutdown.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::ClosingSigned(closing_signed) => {
-                FiberMessage::ClosingSigned(closing_signed.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::AddTlc(add_tlc) => {
-                FiberMessage::AddTlc(add_tlc.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::RemoveTlc(remove_tlc) => {
-                FiberMessage::RemoveTlc(remove_tlc.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::RevokeAndAck(revoke_and_ack) => {
-                FiberMessage::RevokeAndAck(revoke_and_ack.try_into()?)
-            }
-            molecule_fiber::FiberMessageUnion::ReestablishChannel(reestablish_channel) => {
-                FiberMessage::ReestablishChannel(reestablish_channel.try_into()?)
-            }
-        })
+        fiber_message.to_enum().try_into()
     }
 }
 
@@ -1365,10 +2699,73 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
+pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
+    serde_json::to_vec_pretty(v).expect("serialize value")
+}
+
+pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
+    ckb_hash::blake2b_256(deterministically_serialize(v))
+}
+
+// TODO: replace this with real OnionPacket implementation
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OnionInfo {
+    pub payment_hash: Hash256,
+    pub tlc_hash_algorithm: HashAlgorithm,
+    pub amount: u128,
+    pub expiry: u64,
+    pub next_hop: Option<Pubkey>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub channel_outpoint: Option<OutPoint>,
+}
+
+// TODO: replace this with real OnionPacket implementation
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OnionPacket {
+    pub hop_data: Vec<OnionInfo>,
+}
+
+impl OnionPacket {
+    pub fn new(hop_data: Vec<OnionInfo>) -> Self {
+        OnionPacket { hop_data }
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        deterministically_serialize(self)
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
+        serde_json::from_slice(data).map_err(|_| Error::OnionPacket)
+    }
+
+    pub fn shift(&mut self) -> Result<OnionInfo, Error> {
+        if !self.hop_data.is_empty() {
+            Ok(self.hop_data.remove(0))
+        } else {
+            Err(Error::OnionPacket)
+        }
+    }
+
+    pub fn peek(&self) -> Option<&OnionInfo> {
+        if !self.hop_data.is_empty() {
+            Some(&self.hop_data[0])
+        } else {
+            None
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hop_data.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{secp256k1_instance, Pubkey};
-
+    use crate::fiber::test_utils::generate_pubkey;
+    use ckb_types::packed::OutPointBuilder;
+    use ckb_types::prelude::Builder;
     use secp256k1::SecretKey;
 
     #[test]
@@ -1393,9 +2790,61 @@ mod tests {
             payment_hash: [42; 32].into(),
             expiry: 42.into(),
             hash_algorithm: super::HashAlgorithm::Sha256,
+            onion_packet: vec![],
         };
         let add_tlc_mol: super::molecule_fiber::AddTlc = add_tlc.clone().into();
         let add_tlc2 = add_tlc_mol.try_into().expect("decode");
         assert_eq!(add_tlc, add_tlc2);
+    }
+
+    #[test]
+    fn test_onion_packet() {
+        let onion_info1 = super::OnionInfo {
+            payment_hash: [1; 32].into(),
+            amount: 2,
+            expiry: 3,
+            next_hop: Some(generate_pubkey().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+        };
+        let onion_info2 = super::OnionInfo {
+            payment_hash: [4; 32].into(),
+            amount: 5,
+            expiry: 6,
+            next_hop: Some(generate_pubkey().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+        };
+        let mut onion_packet =
+            super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
+
+        let serialized = onion_packet.serialize();
+        let deserialized_onion_packet =
+            super::OnionPacket::deserialize(&serialized).expect("deserialize");
+
+        assert_eq!(onion_packet, deserialized_onion_packet);
+
+        let first = onion_packet.shift().expect("shift error");
+        assert_eq!(first, onion_info1);
+        let first = onion_packet.shift().expect("shift error");
+        assert_eq!(first, onion_info2);
+        let first = onion_packet.shift();
+        assert!(first.is_err());
+    }
+
+    #[test]
+    fn test_onion_packet_serde() {
+        let onion_info = super::OnionInfo {
+            payment_hash: [42; 32].into(),
+            amount: 42,
+            expiry: 42,
+            next_hop: Some(generate_pubkey().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+        };
+        let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
+        let serialized = onion_packet.serialize();
+        let onion_packet2 = super::OnionPacket::deserialize(&serialized).expect("deserialize");
+        assert_eq!(onion_packet, onion_packet2);
     }
 }

@@ -6,6 +6,7 @@ use crate::{
     ckb::FundingError,
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
+        graph::GraphError,
         types::Hash256,
         NetworkActorMessage,
     },
@@ -37,6 +38,10 @@ pub enum Error {
     FundingError(#[from] FundingError),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
+    #[error("Network Graph error: {0}")]
+    NetworkGraphError(#[from] GraphError),
+    #[error("Invalid peer message: {0}")]
+    InvalidPeerMessage(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

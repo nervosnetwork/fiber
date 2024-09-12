@@ -1,11 +1,11 @@
 meta {
-  name: send shutdown from NODE3
+  name: remove tlc from NODE1
   type: http
-  seq: 16
+  seq: 19
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,16 +19,14 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "shutdown_channel",
+    "method": "remove_tlc",
     "params": [
       {
         "channel_id": "{{CHANNEL_ID}}",
-        "close_script": {
-          "code_hash": "0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
-          "hash_type": "data",
-          "args": "0x0202020202020202020202020202020202020202"
-        },
-        "fee_rate": "0x3FC"
+        "tlc_id": "{{TLC_ID5}}",
+        "reason": {
+          "payment_preimage": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        }
       }
     ]
   }
