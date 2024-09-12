@@ -284,9 +284,9 @@ where
                 }
                 _ => {
                     debug!("Ignoring message while reestablishing: {:?}", message);
-                    return Ok(());
                 }
             }
+            return Ok(());
         }
 
         match message {
