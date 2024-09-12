@@ -423,7 +423,7 @@ where
 
     pub async fn handle_peer_message(
         &self,
-        state: &mut NetworkActorState,
+        state: &mut NetworkActorState<S>,
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
@@ -452,9 +452,7 @@ where
                                 funding_amount: state.auto_accept_channel_ckb_funding_amount
                                     as u128,
                             };
-                            state
-                                .create_inbound_channel(accept_channel, self.store.clone())
-                                .await?;
+                            state.create_inbound_channel(accept_channel).await?;
                         }
                     }
                     Err(err) => {
@@ -837,7 +835,7 @@ where
     pub async fn handle_event(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState,
+        state: &mut NetworkActorState<S>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
         debug!("Handling event: {:?}", event);
@@ -860,9 +858,7 @@ where
                     .write()
                     .await
                     .add_connected_peer(&id, session.address.clone());
-                state
-                    .on_peer_connected(&id, pubkey, &session, self.store.clone())
-                    .await;
+                state.on_peer_connected(&id, pubkey, &session).await;
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
@@ -1049,7 +1045,7 @@ where
     pub async fn handle_command(
         &self,
         myself: ActorRef<NetworkActorMessage>,
-        state: &mut NetworkActorState,
+        state: &mut NetworkActorState<S>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
         debug!("Handling command: {:?}", command);
@@ -1078,10 +1074,7 @@ where
             }
 
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
-                match state
-                    .create_outbound_channel(open_channel, self.store.clone())
-                    .await
-                {
+                match state.create_outbound_channel(open_channel).await {
                     Ok((_, channel_id)) => {
                         let _ = reply.send(Ok(OpenChannelResponse { channel_id }));
                     }
@@ -1092,10 +1085,7 @@ where
                 }
             }
             NetworkActorCommand::AcceptChannel(accept_channel, reply) => {
-                match state
-                    .create_inbound_channel(accept_channel, self.store.clone())
-                    .await
-                {
+                match state.create_inbound_channel(accept_channel).await {
                     Ok((_, old_channel_id, new_channel_id)) => {
                         let _ = reply.send(Ok(AcceptChannelResponse {
                             old_channel_id,
@@ -1422,7 +1412,7 @@ where
 
     async fn process_or_stash_broadcasted_message(
         &self,
-        state: &mut NetworkActorState,
+        state: &mut NetworkActorState<S>,
         peer_id: PeerId,
         message: FiberBroadcastMessage,
     ) -> Result<(), Error> {
@@ -1846,7 +1836,8 @@ enum RequestState {
     RequestReturned(u64, bool),
 }
 
-pub struct NetworkActorState {
+pub struct NetworkActorState<S> {
+    store: S,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
@@ -1926,7 +1917,16 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
     )
 }
 
-impl NetworkActorState {
+impl<S> NetworkActorState<S>
+where
+    S: ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     pub fn get_node_announcement_message(&self) -> Option<NodeAnnouncement> {
         let alias = self.node_name?;
         let addresses = self.announced_addrs.clone();
@@ -2041,13 +2041,11 @@ impl NetworkActorState {
         Some(id)
     }
 
-    pub async fn create_outbound_channel<
-        S: ChannelActorStateStore + InvoiceStore + Sync + Send + 'static,
-    >(
+    pub async fn create_outbound_channel(
         &mut self,
         open_channel: OpenChannelCommand,
-        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256), ProcessingChannelError> {
+        let store = self.store.clone();
         let network = self.network.clone();
         let OpenChannelCommand {
             peer_id,
@@ -2114,13 +2112,11 @@ impl NetworkActorState {
         Ok((channel, temp_channel_id))
     }
 
-    pub async fn create_inbound_channel<
-        S: ChannelActorStateStore + InvoiceStore + Sync + Send + 'static,
-    >(
+    pub async fn create_inbound_channel(
         &mut self,
         accept_channel: AcceptChannelCommand,
-        store: S,
     ) -> Result<(ActorRef<ChannelActorMessage>, Hash256, Hash256), ProcessingChannelError> {
+        let store = self.store.clone();
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
@@ -2376,21 +2372,13 @@ impl NetworkActorState {
         }
     }
 
-    async fn on_peer_connected<
-        S: ChannelActorStateStore
-            + NetworkGraphStateStore
-            + InvoiceStore
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-    >(
+    async fn on_peer_connected(
         &mut self,
         remote_peer_id: &PeerId,
         remote_pubkey: Pubkey,
         session: &SessionContext,
-        store: S,
     ) {
+        let store = self.store.clone();
         self.peer_session_map
             .insert(remote_peer_id.clone(), session.id);
         self.peer_pubkey_map
@@ -2794,7 +2782,7 @@ where
         + 'static,
 {
     type Msg = NetworkActorMessage;
-    type State = NetworkActorState;
+    type State = NetworkActorState<S>;
     type Arguments = NetworkActorStartArguments;
 
     async fn pre_start(
@@ -2890,6 +2878,7 @@ where
             .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
             .expect("Get current block number from chain");
         let state = NetworkActorState {
+            store: self.store.clone(),
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
