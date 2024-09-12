@@ -84,6 +84,7 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
+#[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
     /// It is normally generated from a user request.

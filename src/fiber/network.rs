@@ -2765,8 +2765,8 @@ impl NetworkActorState {
         match self.channels.get(&channel_id) {
             None => {
                 error!(
-                    "Failed to send message to channel actor: channel {:?} not found",
-                    &channel_id
+                    "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
+                    &channel_id, message,
                 );
             }
             Some(actor) => {
