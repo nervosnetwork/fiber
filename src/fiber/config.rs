@@ -192,7 +192,8 @@ impl AnnouncedNodeName {
     }
 
     pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.0).expect("valid utf8 string")
+        let end = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
+        std::str::from_utf8(&self.0[..end]).expect("valid utf8 string")
     }
 }
 
