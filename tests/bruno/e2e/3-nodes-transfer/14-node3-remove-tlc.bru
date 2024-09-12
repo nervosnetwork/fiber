@@ -37,6 +37,11 @@ assert {
   res.body.result: isUndefined
 }
 
+script:pre-request {
+  // waiting auto remove tlc is finished
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
