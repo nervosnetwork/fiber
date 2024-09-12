@@ -211,7 +211,7 @@ pub struct SendPaymentCommand {
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
 
-    // the maximum fee amounts in shannons that the sender is willing to pay
+    // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
     pub max_fee_amount: Option<u128>,
 
     // max parts for the payment, only used for multi-part payments
@@ -1116,23 +1116,23 @@ where
                     .await?
             }
 
+            // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
             NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
                 if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
-                    info!("onion packet: {:?}", onion_packet);
-                    if let Ok(hop) = onion_packet.shift() {
+                    if let Ok(info) = onion_packet.shift() {
                         let channel_id = state
                             .outpoint_channel_map
-                            .get(&hop.channel_outpoint.unwrap())
+                            .get(&info.channel_outpoint.unwrap())
                             .expect("channel id should exist");
                         let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
                         let rpc_reply = RpcReplyPort::from(send);
                         let command = ChannelCommand::AddTlc(
                             AddTlcCommand {
-                                amount: hop.amount,
+                                amount: info.amount,
                                 preimage: None,
-                                payment_hash: Some(hop.payment_hash),
-                                expiry: hop.expiry.into(),
-                                hash_algorithm: hop.tlc_hash_algorithm,
+                                payment_hash: Some(info.payment_hash),
+                                expiry: info.expiry.into(),
+                                hash_algorithm: info.tlc_hash_algorithm,
                                 onion_packet: onion_packet.serialize(),
                                 previous_tlc,
                             },
@@ -1715,19 +1715,16 @@ where
         let graph = self.network_graph.read().await;
         // initialize the payment session in db and begin the payment process in a statemachine to
         // handle the payment process
-        info!("send payment: {:?}", payment_request);
         let payment_session = PaymentSession::new(payment_request.clone(), 3);
 
-        let onion_path = graph.build_route(payment_request)?;
+        let onion_path = graph.build_route(payment_request.clone())?;
         assert!(!onion_path.is_empty());
-
-        info!("onion_infos: {:?}", onion_path);
         let onion_packet = OnionPacket::new(onion_path).serialize();
 
         let res = my_self.send_message(NetworkActorMessage::Command(
             NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
         ));
-        info!("result: {:?}", res);
+        info!("send_payment: {:?} => result: {:?}", payment_request, res);
         Ok(payment_session.payment_hash())
     }
 }

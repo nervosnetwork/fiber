@@ -450,6 +450,7 @@ where
         let source = self.get_source_pubkey();
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
+        let payment_hash = payment_request.payment_hash;
         let invoice = payment_request
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
@@ -458,11 +459,19 @@ where
             .and_then(|x| x.hash_algorithm().copied())
             .unwrap_or_default();
 
-        let route = self.find_route(source, target, amount, 1000)?;
-        info!("route found: {:?}", route);
+        if let Some(invoice) = invoice {
+            if *invoice.payment_hash() != payment_hash {
+                return Err(GraphError::Amount(
+                    "payment hash in the invoice does not match the payment hash in the command"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let max_fee_amount = payment_request.max_fee_amount.unwrap_or(1000);
+        let route = self.find_route(source, target, amount, max_fee_amount)?;
         assert!(!route.is_empty());
 
-        let payment_hash = payment_request.payment_hash;
         let mut current_amount = amount;
         let mut current_expiry = 0;
         let mut onion_infos = vec![];
@@ -479,10 +488,13 @@ where
             let (fee, expiry) = if is_last {
                 (0, 0)
             } else {
-                let channel_info = self.get_channel(&route[i + 1].channel_outpoint).unwrap();
-                let channel_update = &match channel_info.node1() == route[i + 1].target {
-                    true => channel_info.two_to_one.as_ref(),
-                    false => channel_info.one_to_two.as_ref(),
+                let channel_info = self
+                    .get_channel(&route[i + 1].channel_outpoint)
+                    .expect("channel not found");
+                let channel_update = &if channel_info.node1() == route[i + 1].target {
+                    channel_info.two_to_one.as_ref()
+                } else {
+                    channel_info.one_to_two.as_ref()
                 }
                 .expect("channel_update is none")
                 .0;
@@ -596,7 +608,13 @@ where
                 if amount_to_send > amount + max_fee_amount {
                     continue;
                 }
-                if amount_to_send > channel_info.capacity() {
+                // check to make sure the current hop can send the amount
+                if amount_to_send > channel_info.capacity()
+                    || amount_to_send > channel_update.htlc_maximum_value
+                {
+                    continue;
+                }
+                if amount_to_send < channel_update.htlc_minimum_value {
                     continue;
                 }
                 let incomming_cltv = cur_hop.incoming_cltv_height
@@ -786,12 +804,14 @@ mod tests {
             }
         }
 
-        pub fn add_edge(
+        pub fn add_edge_with_limit(
             &mut self,
             node_a: usize,
             node_b: usize,
             capacity: Option<u128>,
             fee_rate: Option<u128>,
+            min_htlc_value: Option<u128>,
+            max_htlc_value: Option<u128>,
         ) {
             let public_key1 = self.keys[node_a];
             let public_key2 = self.keys[node_b];
@@ -827,11 +847,21 @@ mod tests {
                 channel_flags: 0,
                 tlc_locktime_expiry_delta: 144,
                 tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
-                tlc_maximum_value: 10000,
-                tlc_minimum_value: 0,
+                tlc_maximum_value: max_htlc_value.unwrap_or(10000),
+                tlc_minimum_value: min_htlc_value.unwrap_or(0),
                 channel_outpoint: channel_outpoint.clone(),
             };
             self.graph.process_channel_update(channel_update).unwrap();
+        }
+
+        pub fn add_edge(
+            &mut self,
+            node_a: usize,
+            node_b: usize,
+            capacity: Option<u128>,
+            fee_rate: Option<u128>,
+        ) {
+            self.add_edge_with_limit(node_a, node_b, capacity, fee_rate, Some(0), Some(10000));
         }
 
         pub fn find_route(
@@ -1142,7 +1172,7 @@ mod tests {
         let mut network = MockNetworkGraph::new(3);
         network.add_edge(0, 2, Some(500), Some(2));
         network.add_edge(2, 3, Some(500), Some(2));
-        let node0 = network.keys[0];
+        let _node0 = network.keys[0];
         let node2 = network.keys[2];
         let node3 = network.keys[3];
         // Test build route from node1 to node3
@@ -1170,5 +1200,49 @@ mod tests {
         assert_eq!(route[0].amount, 101);
         assert_eq!(route[1].amount, 100);
         assert_eq!(route[2].amount, 100);
+    }
+
+    #[test]
+    fn test_graph_build_route_exceed_max_htlc_value() {
+        let mut network = MockNetworkGraph::new(3);
+        // Add edges with max_htlc_value set to 50
+        network.add_edge_with_limit(0, 2, Some(500), Some(2), None, Some(50));
+        network.add_edge_with_limit(2, 3, Some(500), Some(2), None, Some(50));
+        let node3 = network.keys[3];
+
+        // Test build route from node1 to node3 with amount exceeding max_htlc_value
+        let route = network.graph.build_route(SendPaymentCommand {
+            target_pubkey: node3.into(),
+            amount: 100, // Exceeds max_htlc_value of 50
+            payment_hash: Hash256::default(),
+            invoice: None,
+            final_cltv_delta: Some(100),
+            timeout: Some(10),
+            max_fee_amount: Some(1000),
+            max_parts: None,
+        });
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_build_route_below_min_htlc_value() {
+        let mut network = MockNetworkGraph::new(3);
+        // Add edges with min_htlc_value set to 50
+        network.add_edge_with_limit(0, 2, Some(500), Some(2), Some(50), None);
+        network.add_edge_with_limit(2, 3, Some(500), Some(2), Some(50), None);
+        let node3 = network.keys[3];
+
+        // Test build route from node1 to node3 with amount below min_htlc_value
+        let route = network.graph.build_route(SendPaymentCommand {
+            target_pubkey: node3.into(),
+            amount: 10, // Below min_htlc_value of 50
+            payment_hash: Hash256::default(),
+            invoice: None,
+            final_cltv_delta: Some(100),
+            timeout: Some(10),
+            max_fee_amount: Some(1000),
+            max_parts: None,
+        });
+        assert!(route.is_err());
     }
 }
