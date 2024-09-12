@@ -1903,6 +1903,9 @@ pub struct NetworkActorState<S> {
     // A queue of messages that are received while we are syncing network messages.
     // Need to be processed after the sync is done.
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
+    // A queue of messages that are received from a peer for a channel, but
+    // the channel is not created yet.
+    channel_message_queue: HashMap<Hash256, Vec<FiberChannelMessage>>,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -2494,11 +2497,18 @@ where
         actor: ActorRef<ChannelActorMessage>,
     ) {
         if let Some(session) = self.get_peer_session(peer_id) {
-            self.channels.insert(id, actor);
+            self.channels.insert(id, actor.clone());
             self.session_channels_map
                 .entry(session)
                 .or_default()
                 .insert(id);
+        }
+        if let Some(messages) = self.channel_message_queue.remove(&id) {
+            for message in messages {
+                actor
+                    .send_message(ChannelActorMessage::PeerMessage(message))
+                    .expect("channel actor alive");
+            }
         }
     }
 
@@ -2749,7 +2759,7 @@ where
         );
     }
 
-    fn send_message_to_channel_actor(&self, channel_id: Hash256, message: ChannelActorMessage) {
+    fn send_message_to_channel_actor(&mut self, channel_id: Hash256, message: ChannelActorMessage) {
         match self.channels.get(&channel_id) {
             None => match message {
                 // There is some chance that the peer send a message related to a channel that is not created yet,
@@ -2757,10 +2767,14 @@ where
                 // no reference to that channel yet.
                 // We should stash the message and process it later.
                 // TODO: ban the adversary who constantly send messages related to non-existing channels.
-                ChannelActorMessage::PeerMessage(_)
+                ChannelActorMessage::PeerMessage(m)
                     if self.store.get_channel_actor_state(&channel_id).is_some() =>
                 {
-                    warn!("Channel actor {:?} not found, but state found", &channel_id);
+                    debug!("Channel actor {:?} not found, but state found", &channel_id);
+                    self.channel_message_queue
+                        .entry(channel_id)
+                        .or_default()
+                        .push(m);
                 }
                 _ => {
                     error!(
@@ -2925,6 +2939,7 @@ where
                 peers_to_sync_network_graph,
             ),
             broadcasted_message_queue: Default::default(),
+            channel_message_queue: Default::default(),
         };
 
         // load the connected peers from the network graph
