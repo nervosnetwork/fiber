@@ -46,10 +46,10 @@ pub const DEFAULT_TLC_MAX_VALUE: u128 = 0;
 pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 
 /// Whether to automatically announce the node on startup. false means not announcing.
-pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = false;
+pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 
 /// The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce.
-pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 0;
+pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
