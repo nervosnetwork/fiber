@@ -3298,13 +3298,13 @@ impl ChannelActorState {
     }
 
     pub fn get_default_local_funding_script(&self) -> Script {
-        let pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
+        let pubkey = self.local_pubkey;
         let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
         get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
     }
 
     pub fn get_default_remote_funding_script(&self) -> Script {
-        let pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let pubkey = self.remote_pubkey;
         let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
         get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
     }
