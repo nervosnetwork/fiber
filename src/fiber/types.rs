@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66};
@@ -27,6 +25,7 @@ use secp256k1::{
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::str::FromStr;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -2758,10 +2757,6 @@ impl OnionPacket {
 
     pub fn is_empty(&self) -> bool {
         self.hop_data.is_empty()
-    }
-
-    pub fn is_last(&self) -> bool {
-        self.hop_data.len() == 1
     }
 }
 

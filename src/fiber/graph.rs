@@ -241,10 +241,10 @@ where
     pub fn add_channel(&mut self, channel_info: ChannelInfo) {
         assert_ne!(channel_info.node1(), channel_info.node2());
         debug!("Adding channel to network graph: {:?}", channel_info);
-        if channel_info.funding_tx_block_number > self.best_height {
+        if self.best_height < channel_info.funding_tx_block_number {
             self.best_height = channel_info.funding_tx_block_number;
         }
-        if channel_info.timestamp > self.last_update_timestamp {
+        if self.last_update_timestamp < channel_info.timestamp {
             self.last_update_timestamp = channel_info.timestamp;
         }
         match self.channels.get(&channel_info.out_point()) {
