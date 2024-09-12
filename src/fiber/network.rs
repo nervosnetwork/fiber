@@ -2751,12 +2751,24 @@ where
 
     fn send_message_to_channel_actor(&self, channel_id: Hash256, message: ChannelActorMessage) {
         match self.channels.get(&channel_id) {
-            None => {
-                error!(
-                    "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
-                    &channel_id, message,
-                );
-            }
+            None => match message {
+                // There is some chance that the peer send a message related to a channel that is not created yet,
+                // e.g. when we just started trying to reestablish channel, we may have
+                // no reference to that channel yet.
+                // We should stash the message and process it later.
+                // TODO: ban the adversary who constantly send messages related to non-existing channels.
+                ChannelActorMessage::PeerMessage(_)
+                    if self.store.get_channel_actor_state(&channel_id).is_some() =>
+                {
+                    warn!("Channel actor {:?} not found, but state found", &channel_id);
+                }
+                _ => {
+                    error!(
+                            "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
+                            &channel_id, message,
+                        );
+                }
+            },
             Some(actor) => {
                 actor.send_message(message).expect("channel actor alive");
             }
