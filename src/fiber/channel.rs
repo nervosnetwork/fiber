@@ -953,19 +953,19 @@ where
         let mut updated = false;
 
         if let Some(delta) = tlc_locktime_expiry_delta {
-            updated = updated || state.update_inbounding_locktime_expiry_delta(delta);
+            updated = updated || state.update_our_locktime_expiry_delta(delta);
         }
 
         if let Some(value) = tlc_minimum_value {
-            updated = updated || state.update_inbounding_tlc_min_value(value);
+            updated = updated || state.update_our_tlc_min_value(value);
         }
 
         if let Some(value) = tlc_maximum_value {
-            updated = updated || state.update_inbounding_tlc_max_value(value);
+            updated = updated || state.update_our_tlc_max_value(value);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {
-            updated = updated || state.update_inbounding_tlc_fee_proportional_millionths(fee);
+            updated = updated || state.update_our_tlc_fee_proportional_millionths(fee);
         }
 
         if updated {
@@ -1836,6 +1836,12 @@ pub struct ChannelActorState {
     pub created_at: SystemTime,
 }
 
+// This struct holds the channel information that are only relevant when the channel
+// is public. The information includes signatures to the channel announcement message,
+// our config for the channel that will be published to the network (via ChannelUpdate).
+// For ChannelUpdate config, only information on our side are saved here because we have no
+// control to the config on the counterparty side. And they will publish
+// the config to the network via another ChannelUpdate message.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
     // The fee rate for tlc transfers. We only have these values set when
@@ -1844,20 +1850,12 @@ pub struct PublicChannelInfo {
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
     // TODO: consider this value while building the commitment transaction.
-    pub outbounding_tlc_fee_proportional_millionths: Option<u128>,
-    pub inbounding_tlc_fee_proportional_millionths: Option<u128>,
-
+    pub tlc_fee_proportional_millionths: Option<u128>,
     // Max/min value of the tlc that we will accept.
-    pub inbounding_tlc_max_value: Option<u128>,
-    pub inbounding_tlc_min_value: Option<u128>,
-
-    // Max/min value of the tlc that the counterparty will accept.
-    pub outbounding_tlc_max_value: Option<u128>,
-    pub outbounding_tlc_min_value: Option<u128>,
-
+    pub tlc_max_value: Option<u128>,
+    pub tlc_min_value: Option<u128>,
     // The locktime expiry delta. This is the number of blocks that the locktime.
-    pub inbounding_tlc_locktime_expiry_delta: Option<u64>,
-    pub outbounding_tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_locktime_expiry_delta: Option<u64>,
 
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -1869,18 +1867,16 @@ pub struct PublicChannelInfo {
 
 impl PublicChannelInfo {
     pub fn new(
-        inbounding_locktime_expiry_delta: u64,
-        inbounding_tlc_min_value: u128,
-        inbounding_tlc_max_value: u128,
-        inbounding_tlc_fee_proportional_millionths: u128,
+        tlc_locktime_expiry_delta: u64,
+        tlc_min_value: u128,
+        tlc_max_value: u128,
+        tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
-            inbounding_tlc_fee_proportional_millionths: Some(
-                inbounding_tlc_fee_proportional_millionths,
-            ),
-            inbounding_tlc_max_value: Some(inbounding_tlc_max_value),
-            inbounding_tlc_min_value: Some(inbounding_tlc_min_value),
-            inbounding_tlc_locktime_expiry_delta: Some(inbounding_locktime_expiry_delta),
+            tlc_fee_proportional_millionths: Some(tlc_fee_proportional_millionths),
+            tlc_max_value: Some(tlc_max_value),
+            tlc_min_value: Some(tlc_min_value),
+            tlc_locktime_expiry_delta: Some(tlc_locktime_expiry_delta),
             ..Default::default()
         }
     }
@@ -2200,10 +2196,10 @@ impl ChannelActorState {
 
         self.public_channel_info.as_ref().and_then(|info| {
             match (
-                info.inbounding_tlc_locktime_expiry_delta,
-                info.inbounding_tlc_min_value,
-                info.inbounding_tlc_max_value,
-                info.inbounding_tlc_fee_proportional_millionths,
+                info.tlc_locktime_expiry_delta,
+                info.tlc_min_value,
+                info.tlc_max_value,
+                info.tlc_fee_proportional_millionths,
             ) {
                 (
                     Some(locktime_expiry_delta),
@@ -2735,141 +2731,70 @@ impl ChannelActorState {
             .remote_channel_announcement_signature = Some((ecdsa_signature, partial_signatures));
     }
 
-    fn get_inbounding_tlc_fee_proportional_millionths(&self) -> Option<u128> {
+    fn get_our_tlc_fee_proportional_millionths(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.inbounding_tlc_fee_proportional_millionths)
+            .and_then(|state| state.tlc_fee_proportional_millionths)
     }
 
-    fn update_inbounding_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
-        let old_fee = self.get_inbounding_tlc_fee_proportional_millionths();
+    fn update_our_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
+        let old_fee = self.get_our_tlc_fee_proportional_millionths();
         match old_fee {
             Some(old_fee) if old_fee == fee => false,
             _ => {
                 self.public_channel_state_mut()
-                    .inbounding_tlc_fee_proportional_millionths = Some(fee);
+                    .tlc_fee_proportional_millionths = Some(fee);
                 true
             }
         }
     }
 
-    fn get_outbounding_tlc_fee_proportional_millionths(&self) -> Option<u128> {
+    fn get_our_tlc_max_value(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.outbounding_tlc_fee_proportional_millionths)
+            .and_then(|state| state.tlc_max_value)
     }
 
-    fn update_outbounding_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
-        let old_fee = self.get_outbounding_tlc_fee_proportional_millionths();
-        match old_fee {
-            Some(old_fee) if old_fee == fee => false,
-            _ => {
-                self.public_channel_state_mut()
-                    .outbounding_tlc_fee_proportional_millionths = Some(fee);
-                true
-            }
-        }
-    }
-
-    fn get_inbounding_tlc_max_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.inbounding_tlc_max_value)
-    }
-
-    fn update_inbounding_tlc_max_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_inbounding_tlc_max_value();
+    fn update_our_tlc_max_value(&mut self, value: u128) -> bool {
+        let old_value = self.get_our_tlc_max_value();
         match old_value {
             Some(old_value) if old_value == value => false,
             _ => {
-                self.public_channel_state_mut().inbounding_tlc_max_value = Some(value);
+                self.public_channel_state_mut().tlc_max_value = Some(value);
                 true
             }
         }
     }
 
-    fn get_inbounding_tlc_min_value(&self) -> Option<u128> {
+    fn get_our_tlc_min_value(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.inbounding_tlc_min_value)
+            .and_then(|state| state.tlc_min_value)
     }
 
-    fn update_inbounding_tlc_min_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_inbounding_tlc_min_value();
+    fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
+        let old_value = self.get_our_tlc_min_value();
         match old_value {
             Some(old_value) if old_value == value => false,
             _ => {
-                self.public_channel_state_mut().inbounding_tlc_min_value = Some(value);
+                self.public_channel_state_mut().tlc_min_value = Some(value);
                 true
             }
         }
     }
 
-    fn get_outbounding_tlc_max_value(&self) -> Option<u128> {
+    fn get_our_locktime_expiry_delta(&self) -> Option<u64> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.outbounding_tlc_max_value)
+            .and_then(|state| state.tlc_locktime_expiry_delta)
     }
 
-    fn update_outbounding_tlc_max_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_outbounding_tlc_max_value();
+    fn update_our_locktime_expiry_delta(&mut self, value: u64) -> bool {
+        let old_value = self.get_our_locktime_expiry_delta();
         match old_value {
             Some(old_value) if old_value == value => false,
             _ => {
-                self.public_channel_state_mut().outbounding_tlc_max_value = Some(value);
-                true
-            }
-        }
-    }
-
-    fn get_outbounding_tlc_min_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.outbounding_tlc_min_value)
-    }
-
-    fn update_outbounding_tlc_min_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_outbounding_tlc_min_value();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().outbounding_tlc_min_value = Some(value);
-                true
-            }
-        }
-    }
-
-    fn get_inbounding_locktime_expiry_delta(&self) -> Option<u64> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.inbounding_tlc_locktime_expiry_delta)
-    }
-
-    fn update_inbounding_locktime_expiry_delta(&mut self, value: u64) -> bool {
-        let old_value = self.get_inbounding_locktime_expiry_delta();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut()
-                    .inbounding_tlc_locktime_expiry_delta = Some(value);
-                true
-            }
-        }
-    }
-
-    fn get_outbounding_locktime_expiry_delta(&self) -> Option<u64> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.outbounding_tlc_locktime_expiry_delta)
-    }
-
-    fn update_outbounding_locktime_expiry_delta(&mut self, value: u64) -> bool {
-        let old_value = self.get_outbounding_locktime_expiry_delta();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut()
-                    .outbounding_tlc_locktime_expiry_delta = Some(value);
+                self.public_channel_state_mut().tlc_locktime_expiry_delta = Some(value);
                 true
             }
         }
