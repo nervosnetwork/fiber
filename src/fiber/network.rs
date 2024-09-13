@@ -286,9 +286,6 @@ pub enum NetworkActorEvent {
 
     /// Channel related events.
 
-    /// A new channel is created and the peer id and actor reference is given here.
-    /// Note the channel_id here maybe a temporary channel id.
-    ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
@@ -877,17 +874,6 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(
                             NetworkServiceEvent::PeerDisConnected(id, session.address),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-            NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
-                state.on_channel_created(channel_id, &peer_id, actor);
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::NetworkServiceEvent(
-                            NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
                         ),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -2113,6 +2099,7 @@ where
         .await?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
+        self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
         Ok((channel, temp_channel_id))
     }
 
@@ -2182,6 +2169,7 @@ where
         .await?
         .0;
         let new_id = rx.await.expect("msg received");
+        self.on_channel_created(new_id, &peer_id, channel.clone());
         Ok((channel, temp_channel_id, new_id))
     }
 
@@ -2401,7 +2389,7 @@ where
 
         for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
             debug!("Reestablishing channel {:x}", &channel_id);
-            if let Ok((_channel, _)) = Actor::spawn_linked(
+            if let Ok((channel, _)) = Actor::spawn_linked(
                 None,
                 ChannelActor::new(
                     self.get_public_key(),
@@ -2415,9 +2403,8 @@ where
             )
             .await
             {
-                // network actor will receive ChannelCreated event after channel is created
-                // and will add the channel to the session_channels_map, so we don't need to do it here
                 info!("channel {:x} reestablished successfully", &channel_id);
+                self.on_channel_created(channel_id, remote_peer_id, channel);
             } else {
                 error!("Failed to reestablish channel {:x}", &channel_id);
             }
@@ -2511,6 +2498,16 @@ where
                     .expect("channel actor alive");
             }
         }
+        info!("Channel {:x} created", &id);
+        // Notify outside observers.
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelCreated(
+                    peer_id.clone(),
+                    id,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
     }
 
     async fn on_closing_transaction_pending(
