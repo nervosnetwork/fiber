@@ -20,6 +20,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `add_tlc`](#add_tlc)
         * [Method `remove_tlc`](#remove_tlc)
         * [Method `shutdown_channel`](#shutdown_channel)
+        * [Method `send_payment`](#send_payment)
 
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#new_invoice)
@@ -140,6 +141,26 @@ Attempts to close the channel mutually.
 ###### Returns
 
 Returns null when the request is successful. Otherwise, returns an error message.
+
+<a id="send_payment"></a>
+#### Method `send_payment`
+
+Sends a payment to a peer.
+
+###### Params
+
+- `target_pubkey` (type: `Pubkey`): The identifier of the payment target.
+- `amount` (type: `u128`): The amount of the payment.
+- `payment_hash` (type: `Hash256`): The hash to use within the payment's HTLC.
+- `final_cltv_delta` (type: `Option<u64>`): The CLTV delta from the current height that should be used to set the timelock for the final hop.
+- `invoice` (type: `Option<String>`): The encoded invoice to send to the recipient.
+- `timeout` (type: `Option<u64>`): The payment timeout in seconds. If the payment is not completed within this time, it will be cancelled.
+- `max_fee_amount` (type: `Option<u128>`): The maximum fee amounts in shannons that the sender is willing to pay.
+- `max_parts` (type: `Option<u64>`): Max parts for the payment, only used for multi-part payments.
+
+###### Returns
+
+Returns the `payment_hash` when the request is successful. Otherwise, returns an error message.
 
 ### Module `Invoice`
 

@@ -1,5 +1,3 @@
-use std::cmp::Reverse;
-
 use crate::fiber::{
     channel::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
@@ -22,6 +20,7 @@ use jsonrpsee::{
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use std::cmp::Reverse;
 use tentacle::secio::PeerId;
 
 #[serde_as]
