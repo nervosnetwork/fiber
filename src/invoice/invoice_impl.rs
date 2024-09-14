@@ -7,22 +7,19 @@ use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::Hash256;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
-use bitcoin::hashes::sha256::Hash as Sha256;
-use bitcoin::hashes::Hash;
-use bitcoin::{
-    key::Secp256k1,
-    secp256k1::{
-        self,
-        ecdsa::{RecoverableSignature, RecoveryId},
-        Message, PublicKey,
-    },
-};
+use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
 use ckb_types::{
     packed::{Byte, Script},
     prelude::{Pack, Unpack},
 };
 use core::time::Duration;
 use molecule::prelude::{Builder, Entity};
+use secp256k1::{
+    self,
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, PublicKey, Secp256k1,
+};
+
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
@@ -182,7 +179,7 @@ impl CkbInvoice {
             .or(recovered_pub_key.as_ref())
             .expect("One is always present");
 
-        let hash = Message::from_slice(&self.hash()[..])
+        let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
         let secp_context = Secp256k1::new();
@@ -199,7 +196,7 @@ impl CkbInvoice {
         F: FnOnce(&Message) -> RecoverableSignature,
     {
         let hash = self.hash();
-        let message = Message::from_slice(&hash).unwrap();
+        let message = Message::from_digest_slice(&hash).unwrap();
         let signature = sign_function(&message);
         self.signature = Some(InvoiceSignature(signature));
         self.check_signature()?;
@@ -208,7 +205,7 @@ impl CkbInvoice {
 
     /// Recovers the public key used for signing the invoice from the recoverable signature.
     pub fn recover_payee_pub_key(&self) -> Result<PublicKey, secp256k1::Error> {
-        let hash = Message::from_slice(&self.hash()[..])
+        let hash = Message::from_digest_slice(&self.hash()[..])
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
         let res = secp256k1::Secp256k1::new()
@@ -730,28 +727,25 @@ impl TryFrom<gen_invoice::RawInvoiceData> for InvoiceData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{
-        key::{KeyPair, Secp256k1},
-        secp256k1::SecretKey,
-    };
     use ckb_hash::blake2b_256;
+    use secp256k1::{Keypair, SecretKey};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn gen_rand_public_key() -> PublicKey {
         let secp = Secp256k1::new();
-        let key_pair = KeyPair::new(&secp, &mut rand::thread_rng());
+        let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
         PublicKey::from_keypair(&key_pair)
     }
 
     fn gen_rand_private_key() -> SecretKey {
         let secp = Secp256k1::new();
-        let key_pair = KeyPair::new(&secp, &mut rand::thread_rng());
+        let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
         SecretKey::from_keypair(&key_pair)
     }
 
     fn gen_rand_keypair() -> (PublicKey, SecretKey) {
         let secp = Secp256k1::new();
-        let key_pair = KeyPair::new(&secp, &mut rand::thread_rng());
+        let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
         (
             PublicKey::from_keypair(&key_pair),
             SecretKey::from_keypair(&key_pair),
@@ -790,8 +784,10 @@ mod tests {
     #[test]
     fn test_signature() {
         let private_key = gen_rand_private_key();
-        let signature = Secp256k1::new()
-            .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
+        let signature = Secp256k1::new().sign_ecdsa_recoverable(
+            &Message::from_digest_slice(&[0u8; 32]).unwrap(),
+            &private_key,
+        );
         let signature = InvoiceSignature(signature);
         let base32 = signature.to_base32();
         assert_eq!(base32.len(), SIGNATURE_U5_SIZE);
@@ -870,8 +866,10 @@ mod tests {
     #[test]
     fn test_invoice_bc32m_not_same() {
         let private_key = gen_rand_private_key();
-        let signature = Secp256k1::new()
-            .sign_ecdsa_recoverable(&Message::from_slice(&[0u8; 32]).unwrap(), &private_key);
+        let signature = Secp256k1::new().sign_ecdsa_recoverable(
+            &Message::from_digest_slice(&[0u8; 32]).unwrap(),
+            &private_key,
+        );
         let invoice = CkbInvoice {
             currency: Currency::Fibb,
             amount: Some(1280),

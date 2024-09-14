@@ -173,15 +173,15 @@ pub struct UpdateChannelParams {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommandParams {
     // the identifier of the payment target
-    pub target_pubkey: Pubkey,
+    pub target_pubkey: Option<Pubkey>,
 
     // the amount of the payment
-    #[serde_as(as = "U128Hex")]
-    pub amount: u128,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub amount: Option<u128>,
 
     // The hash to use within the payment's HTLC
     // FIXME: this should be optional when AMP is enabled
-    pub payment_hash: Hash256,
+    pub payment_hash: Option<Hash256>,
 
     // The CLTV delta from the current height that should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]

@@ -67,7 +67,7 @@ use crate::fiber::channel::{
 };
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
-use crate::invoice::InvoiceStore;
+use crate::invoice::{CkbInvoice, InvoiceStore};
 use crate::{unwrap_or_return, Error};
 
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
@@ -193,29 +193,79 @@ pub struct OpenChannelCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
-    pub target_pubkey: Pubkey,
-
+    pub target_pubkey: Option<Pubkey>,
     // the amount of the payment
-    pub amount: u128,
-
+    pub amount: Option<u128>,
     // The hash to use within the payment's HTLC
     // FIXME: this should be optional when AMP is enabled
-    pub payment_hash: Hash256,
-
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
-    pub final_cltv_delta: Option<u64>,
-
+    pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-
+    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    pub final_cltv_delta: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
-
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
     pub max_fee_amount: Option<u128>,
-
     // max parts for the payment, only used for multi-part payments
     pub max_parts: Option<u64>,
+}
+
+impl SendPaymentCommand {
+    pub fn check_valid(&self) -> Result<(Pubkey, u128, Hash256), String> {
+        let invoice = self
+            .invoice
+            .as_ref()
+            .map(|invoice| invoice.parse::<CkbInvoice>())
+            .transpose()
+            .map_err(|_| "invoice is invalid".to_string())?;
+
+        fn validate_field<T: PartialEq + Clone>(
+            field: Option<T>,
+            invoice_field: Option<T>,
+            field_name: &str,
+        ) -> Result<T, String> {
+            match (field, invoice_field) {
+                (Some(f), Some(i)) => {
+                    if f != i {
+                        return Err(format!("{} does not match the invoice", field_name));
+                    }
+                    Ok(f)
+                }
+                (Some(f), None) => Ok(f),
+                (None, Some(i)) => Ok(i),
+                (None, None) => Err(format!("{} is missing", field_name)),
+            }
+        }
+
+        let target = validate_field(
+            self.target_pubkey,
+            invoice
+                .as_ref()
+                .and_then(|i| i.payee_pub_key().cloned().map(|k| Pubkey::from(k))),
+            "target_pubkey",
+        )?;
+
+        let amount = validate_field(
+            self.amount,
+            invoice.as_ref().and_then(|i| i.amount()),
+            "amount",
+        )?;
+
+        let payment_hash = validate_field(
+            self.payment_hash,
+            invoice.as_ref().map(|i| i.payment_hash().clone()),
+            "payment_hash",
+        )?;
+
+        Ok((target, amount, payment_hash))
+    }
+
+    pub fn payment_hash(&self) -> Hash256 {
+        let (_target, _amount, payment_hash) =
+            self.check_valid().expect("valid SendPaymentCommand");
+        payment_hash
+    }
 }
 
 #[derive(Debug)]
@@ -1332,10 +1382,15 @@ where
                 let _ = reply.send(signature);
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
-                let payment_hash = payment_request.payment_hash;
-                let res = self.on_send_payment(myself, payment_request).await;
-                info!("send_payment res: {:?}", res);
-                let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
+                match self.on_send_payment(myself, payment_request).await {
+                    Ok(payment_hash) => {
+                        let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
+                    }
+                    Err(e) => {
+                        error!("Failed to send payment: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {

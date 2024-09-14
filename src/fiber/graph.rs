@@ -449,9 +449,9 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        let target = payment_request.target_pubkey;
-        let amount = payment_request.amount;
-        let payment_hash = payment_request.payment_hash;
+        let (target, amount, payment_hash) = payment_request
+            .check_valid()
+            .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
         let invoice = payment_request
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
@@ -460,14 +460,10 @@ where
             .and_then(|x| x.hash_algorithm().copied())
             .unwrap_or_default();
 
-        if let Some(invoice) = invoice {
-            if *invoice.payment_hash() != payment_hash {
-                return Err(GraphError::Amount(
-                    "payment hash in the invoice does not match the payment hash in the command"
-                        .to_string(),
-                ));
-            }
-        }
+        info!(
+            "build_route source: {:?} target: {:?} amount: {:?}, payment_hash: {:?}",
+            source, target, amount, payment_hash
+        );
 
         let max_fee_amount = payment_request.max_fee_amount.unwrap_or(1000);
         let route = self.find_route(source, target, amount, max_fee_amount)?;
@@ -738,7 +734,7 @@ impl PaymentSession {
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        self.command.payment_hash
+        self.command.payment_hash()
     }
 }
 
@@ -1177,9 +1173,9 @@ mod tests {
         let node3 = network.keys[3];
         // Test build route from node1 to node3
         let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: node3.into(),
-            amount: 100,
-            payment_hash: Hash256::default(),
+            target_pubkey: Some(node3.into()),
+            amount: Some(100),
+            payment_hash: Some(Hash256::default()),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
@@ -1212,9 +1208,9 @@ mod tests {
 
         // Test build route from node1 to node3 with amount exceeding max_htlc_value
         let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: node3.into(),
-            amount: 100, // Exceeds max_htlc_value of 50
-            payment_hash: Hash256::default(),
+            target_pubkey: Some(node3.into()),
+            amount: Some(100), // Exceeds max_htlc_value of 50
+            payment_hash: Some(Hash256::default()),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
@@ -1234,9 +1230,9 @@ mod tests {
 
         // Test build route from node1 to node3 with amount below min_htlc_value
         let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: node3.into(),
-            amount: 10, // Below min_htlc_value of 50
-            payment_hash: Hash256::default(),
+            target_pubkey: Some(node3.into()),
+            amount: Some(10), // Below min_htlc_value of 50
+            payment_hash: Some(Hash256::default()),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
