@@ -13,6 +13,7 @@ pub mod rpc;
 pub use rpc::{start_rpc, RpcConfig};
 pub mod invoice;
 pub mod store;
+pub mod watchtower;
 
 mod errors;
 pub use errors::{Error, Result};

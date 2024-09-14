@@ -1829,11 +1829,6 @@ pub struct ChannelActorState {
     // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
 
-    // A redundant field to record the total amount of the channel.
-    // Used only for debugging purposes.
-    #[cfg(debug_assertions)]
-    pub total_amount: u128,
-
     pub created_at: SystemTime,
 }
 
@@ -2302,9 +2297,6 @@ impl ChannelActorState {
             max_num_of_accept_tlcs,
 
             reestablishing: false,
-
-            #[cfg(debug_assertions)]
-            total_amount: local_value + remote_value,
             created_at: SystemTime::now(),
         };
         if let Some(nonce) = remote_channel_announcement_nonce {
@@ -2371,9 +2363,6 @@ impl ChannelActorState {
 
             reestablishing: false,
             created_at: SystemTime::now(),
-
-            #[cfg(debug_assertions)]
-            total_amount: value,
         }
     }
 
@@ -2816,10 +2805,13 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = self.total_amount.to_le_bytes().pack();
+            let output_data = (self.to_local_amount + self.to_remote_amount)
+                .to_le_bytes()
+                .pack();
             (output, output_data)
         } else {
-            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let capacity =
+                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .capacity(capacity.pack())
@@ -2898,11 +2890,6 @@ impl ChannelActorState {
     // This may fill in the creation_confirmed_at and removal_confirmed_at fields
     // of the tlcs. And update the to_local_amount and to_remote_amount.
     fn update_state_on_raa_msg(&mut self, is_received: bool) {
-        #[cfg(debug_assertions)]
-        {
-            self.total_amount = self.to_local_amount + self.to_remote_amount;
-        }
-
         if is_received {
             self.increment_local_commitment_number();
         } else {
@@ -2973,10 +2960,6 @@ impl ChannelActorState {
         self.to_remote_amount = to_remote_amount;
         debug!("Updated local state on revoke_and_ack message {}: current commitment number: {:?}, to_local_amount: {}, to_remote_amount: {}",
         if is_received { "received" } else { "sent" }, commitment_numbers, to_local_amount, to_remote_amount);
-        #[cfg(debug_assertions)]
-        {
-            self.total_amount = self.to_local_amount + self.to_remote_amount;
-        }
     }
 
     pub fn get_id(&self) -> Hash256 {
@@ -3832,11 +3815,6 @@ impl ChannelActorState {
         self.to_remote_amount = accept_channel.funding_amount;
         self.remote_reserved_ckb_amount = accept_channel.reserved_ckb_amount;
 
-        #[cfg(debug_assertions)]
-        {
-            self.total_amount = self.to_local_amount + self.to_remote_amount;
-        }
-
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_parameters = Some(ChannelParametersOneParty {
@@ -4291,10 +4269,13 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = self.total_amount.to_le_bytes().pack();
+            let output_data = (self.to_local_amount + self.to_remote_amount)
+                .to_le_bytes()
+                .pack();
             (output, output_data)
         } else {
-            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let capacity =
+                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .capacity(capacity.pack())
@@ -4836,14 +4817,6 @@ impl ChannelActorState {
     }
 
     fn build_commitment_transaction_output(&self, local: bool) -> (CellOutput, Bytes) {
-        #[cfg(debug_assertions)]
-        {
-            debug_assert_eq!(
-                self.total_amount,
-                self.to_local_amount + self.to_remote_amount
-            );
-        }
-
         let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
         let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
         let pubkeys = if local {
@@ -4891,10 +4864,13 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = self.total_amount.to_le_bytes().pack();
+            let output_data = (self.to_local_amount + self.to_remote_amount)
+                .to_le_bytes()
+                .pack();
             (output, output_data)
         } else {
-            let capacity = self.total_amount as u64 - commitment_tx_fee;
+            let capacity =
+                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .capacity(capacity.pack())
@@ -5835,7 +5811,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5850,7 +5826,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6028,7 +6004,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6043,7 +6019,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6385,7 +6361,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6400,7 +6376,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6578,7 +6554,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -6593,7 +6569,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
