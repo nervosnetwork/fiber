@@ -19,7 +19,7 @@ use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorM
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use fnn::{start_cch, start_ckb, start_ldk, start_rpc, watchtower, Config};
+use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
 use std::time::Duration;
 use tracing_subscriber::fmt::format;
 
@@ -78,7 +78,7 @@ pub async fn main() {
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
                 CkbChainActor {},
-                ckb_config,
+                ckb_config.clone(),
                 root_actor.get_cell(),
             )
             .await
@@ -91,7 +91,7 @@ pub async fn main() {
             let bootnodes = fiber_config.bootnode_addrs.clone();
 
             info!("Starting fiber");
-            let network_actor = start_ckb(
+            let network_actor = start_network(
                 fiber_config,
                 ckb_actor,
                 event_sender,
@@ -112,8 +112,8 @@ pub async fn main() {
 
             let watchtower_actor = Actor::spawn_linked(
                 Some("watchtower".to_string()),
-                WatchtowerActor {},
-                (),
+                WatchtowerActor::new(store.clone()),
+                ckb_config,
                 root_actor.get_cell(),
             )
             .await
@@ -134,7 +134,7 @@ pub async fn main() {
                                     break;
                                 }
                                 Some(event) => {
-                                    trace!("Received event from ckb service: {:?}", event);
+                                    let _ = watchtower_actor.send_message(WatchtowerMessage::NetworkServiceEvent(event));
                                 }
                             }
                         }

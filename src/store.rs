@@ -10,6 +10,7 @@ use crate::{
         types::Hash256,
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
+    watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
 
 #[derive(Clone)]
@@ -183,5 +184,23 @@ impl InvoiceStore for Store {
         batch.put_kv(KeyValue::CkbInvoice(*invoice.payment_hash(), invoice));
         batch.commit();
         return Ok(());
+    }
+}
+
+impl WatchtowerStore for Store {
+    fn get_channels(&self) -> Vec<ChannelData> {
+        todo!()
+    }
+
+    fn insert_channel(&self, channel_id: Hash256, funding_tx_lock: ckb_types::packed::Script) {
+        todo!()
+    }
+
+    fn remove_channel(&self, channel_id: Hash256) {
+        todo!()
+    }
+
+    fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
+        todo!()
     }
 }

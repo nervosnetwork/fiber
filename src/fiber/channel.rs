@@ -3464,7 +3464,11 @@ impl ChannelActorState {
         self.increment_remote_commitment_number();
         network
             .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::ChannelReady(self.get_id(), self.peer_id.clone()),
+                NetworkActorEvent::ChannelReady(
+                    self.get_id(),
+                    self.peer_id.clone(),
+                    self.get_funding_transaction().calc_tx_hash(),
+                ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
@@ -4961,7 +4965,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -4976,7 +4980,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5146,7 +5150,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5161,7 +5165,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5484,7 +5488,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5499,7 +5503,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5672,7 +5676,7 @@ mod tests {
 
         node_a
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id
@@ -5687,7 +5691,7 @@ mod tests {
 
         node_b
             .expect_event(|event| match event {
-                NetworkServiceEvent::ChannelReady(peer_id, channel_id) => {
+                NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
                     println!(
                         "A channel ({:?}) to {:?} is now ready",
                         &channel_id, &peer_id

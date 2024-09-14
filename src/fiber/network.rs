@@ -141,7 +141,7 @@ pub enum NetworkServiceEvent {
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
-    ChannelReady(PeerId, Hash256),
+    ChannelReady(PeerId, Hash256, Byte32),
     ChannelClosed(PeerId, Hash256, Byte32),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
@@ -199,7 +199,7 @@ pub enum NetworkActorEvent {
         u64,
     ),
     /// A channel is ready to use.
-    ChannelReady(Hash256, PeerId),
+    ChannelReady(Hash256, PeerId, Byte32),
     /// A channel is already closed.
     ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
@@ -444,7 +444,7 @@ where
                     }
                 }
             }
-            NetworkActorEvent::ChannelReady(channel_id, peer_id) => {
+            NetworkActorEvent::ChannelReady(channel_id, peer_id, funding_tx_hash) => {
                 info!(
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
@@ -453,7 +453,9 @@ where
                 myself
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelReady(
-                            peer_id, channel_id,
+                            peer_id,
+                            channel_id,
+                            funding_tx_hash,
                         )),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -1623,7 +1625,7 @@ pub(crate) fn emit_service_event(
         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
 }
 
-pub async fn start_ckb<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
+pub async fn start_network<S: ChannelActorStateStore + Clone + Send + Sync + 'static>(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
     event_sender: mpsc::Sender<NetworkServiceEvent>,
