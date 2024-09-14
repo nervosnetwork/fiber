@@ -1,9 +1,12 @@
 fiber:
-  listening_port: 8228
+  listening_addr: "/ip4/127.0.0.1/tcp/8228"
   network: "Testnet"
+  bootnode_addrs:
+    - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
+    - "/ip4/54.179.226.154/tcp/18228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
 
 rpc:
-  listening_addr: 127.0.0.1:8227
+  listening_addr: "127.0.0.1:8227"
 
 ckb:
   rpc_url: "https://testnet.ckbapp.dev/"
