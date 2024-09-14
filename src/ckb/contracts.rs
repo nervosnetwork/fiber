@@ -366,7 +366,7 @@ impl ContractsContext {
                     (
                         Contract::FundingLock,
                         (
-                            "0x9ee173a4bc10f61ead2979f5f875049c1656a995ca28d037269c75c0438eae53",
+                            "0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43",
                             0,
                             DepType::Code,
                         ),
@@ -374,7 +374,7 @@ impl ContractsContext {
                     (
                         Contract::CommitmentLock,
                         (
-                            "0x9ee173a4bc10f61ead2979f5f875049c1656a995ca28d037269c75c0438eae53",
+                            "0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43",
                             1,
                             DepType::Code,
                         ),
