@@ -1638,7 +1638,7 @@ where
                 debug!("Channel announcement transaction found: {:?}", &tx);
 
                 let pubkey = channel_announcement.ckb_key.serialize();
-                let pubkey_hash = blake2b_256(pubkey.as_slice());
+                let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
                 match tx.inner.outputs.first() {
                     None => {
                         return Err(Error::InvalidParameter(format!(
