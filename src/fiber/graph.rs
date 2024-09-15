@@ -596,8 +596,8 @@ where
                 let amount_to_send = next_hop_received_amount + fee;
 
                 info!(
-                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?}",
-                    fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity()
+                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?} htlc_max_value: {:?}",
+                    fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity(), channel_update.htlc_maximum_value
                 );
 
                 // if the amount to send is greater than the amount we have, skip this edge
@@ -605,12 +605,24 @@ where
                     continue;
                 }
                 // check to make sure the current hop can send the amount
+                // if `htlc_maximum_value` equals 0, it means there is no limit
                 if amount_to_send > channel_info.capacity()
-                    || amount_to_send > channel_update.htlc_maximum_value
+                    || (channel_update.htlc_maximum_value != 0
+                        && amount_to_send > channel_update.htlc_maximum_value)
                 {
+                    info!(
+                        "amount_to_send is greater than channel capacity: {:?} capacity: {:?}, htlc_max_value: {:?}",
+                        amount_to_send,
+                        channel_info.capacity(),
+                        channel_update.htlc_maximum_value
+                    );
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
+                    info!(
+                        "amount_to_send is less than htlc_minimum_value: {:?} min_value: {:?}",
+                        amount_to_send, channel_update.htlc_minimum_value
+                    );
                     continue;
                 }
                 let incomming_cltv = cur_hop.incoming_cltv_height
