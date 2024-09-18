@@ -201,6 +201,9 @@ pub struct SendPaymentCommandParams {
     // max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
     pub max_parts: Option<u64>,
+
+    // keysend payment
+    pub keysend: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -472,6 +475,7 @@ where
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
+                    keysend: params.keysend,
                 },
                 rpc_reply,
             ))

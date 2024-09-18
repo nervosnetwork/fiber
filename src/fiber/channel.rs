@@ -453,6 +453,7 @@ where
                 // If this is the last hop, we should check the payment hash and amount and then
                 // try to fulfill the payment, find the corresponding payment preimage from payment hash.
                 let mut forward_to_next_hop = false;
+                let mut preimage = None;
                 if let Ok(onion_packet) = OnionPacket::deserialize(&add_tlc.onion_packet) {
                     if let Some(onion_info) = onion_packet.peek() {
                         if onion_info.next_hop.is_some() {
@@ -467,11 +468,14 @@ where
                                 ));
                             }
                             // TODO: check the expiry time, if expired, we should return an error.
+
+                            // if this is the last hop, store the preimage.
+                            preimage = onion_info.preimage;
                         }
                     }
                 }
 
-                let tlc = state.create_inbounding_tlc(add_tlc.clone())?;
+                let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
                 state.insert_tlc(tlc.clone())?;
                 if let Some(ref udt_type_script) = state.funding_udt_type_script {
                     self.subscribers
@@ -645,18 +649,23 @@ where
         info!("try_to_settle_down_tlc get tlcs: {:?}", &tlcs);
         for tlc_info in tlcs {
             let tlc = tlc_info.tlc.clone();
-            if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
-                let command = RemoveTlcCommand {
-                    id: tlc.get_id(),
-                    reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
-                        payment_preimage: preimage,
-                    }),
-                };
-                let result = self.handle_remove_tlc_command(state, command);
-                info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
-                // we only handle one tlc at a time.
-                break;
-            }
+            let preimage = if let Some(preimage) = tlc.payment_preimage {
+                preimage
+            } else if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
+                preimage
+            } else {
+                continue;
+            };
+            let command = RemoveTlcCommand {
+                id: tlc.get_id(),
+                reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                    payment_preimage: preimage,
+                }),
+            };
+            let result = self.handle_remove_tlc_command(state, command);
+            info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+            // we only handle one tlc at a time.
+            break;
         }
     }
 
@@ -3645,7 +3654,11 @@ impl ChannelActorState {
         }
     }
 
-    pub fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TLC, ProcessingChannelError> {
+    pub fn create_inbounding_tlc(
+        &self,
+        message: AddTlc,
+        payment_preimage: Option<Hash256>,
+    ) -> Result<TLC, ProcessingChannelError> {
         if self.get_received_tlc(message.tlc_id).is_some() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Trying to add tlc with existing id {:?}",
@@ -3664,7 +3677,7 @@ impl ChannelActorState {
             amount: message.amount,
             payment_hash: message.payment_hash,
             lock_time: message.expiry,
-            payment_preimage: None,
+            payment_preimage,
             hash_algorithm: message.hash_algorithm,
             onion_packet: message.onion_packet,
             previous_tlc: None,

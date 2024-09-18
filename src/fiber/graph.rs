@@ -449,7 +449,7 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash) = payment_request
+        let (target, amount, payment_hash, preimage) = payment_request
             .check_valid()
             .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
         let invoice = payment_request
@@ -509,6 +509,7 @@ where
                 tlc_hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
                 channel_outpoint: next_channel_outpoint,
+                preimage: if is_last { preimage } else { None },
             });
             current_amount += fee;
             current_expiry += expiry;
@@ -526,6 +527,7 @@ where
             tlc_hash_algorithm: hash_algorithm,
             expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
+            preimage: None,
         });
         onion_infos.reverse();
         assert_eq!(onion_infos.len(), route.len() + 1);
@@ -1193,6 +1195,7 @@ mod tests {
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
+            keysend: None,
         });
         eprintln!("return {:?}", route);
         assert!(route.is_ok());
@@ -1228,6 +1231,7 @@ mod tests {
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
+            keysend: None,
         });
         assert!(route.is_err());
     }
@@ -1250,6 +1254,7 @@ mod tests {
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
+            keysend: None,
         });
         assert!(route.is_err());
     }

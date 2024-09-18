@@ -1,7 +1,7 @@
 meta {
-  name: Node1 send payment with router
+  name: Node1 send payment with router in keysend mode
   type: http
-  seq: 12
+  seq: 13
 }
 
 post {
@@ -23,8 +23,8 @@ body:json {
     "params": [
       {
         "target_pubkey": "03032b99943822e721a651c5a5b9621043017daa9dc3ec81d83215fd2e25121187",
-        "amount": "0x190",
-        "payment_hash": "{{payment_hash}}"
+        "amount": "0x1F4",
+        "keysend": true
       }
     ]
   }
@@ -37,4 +37,5 @@ assert {
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
+  console.log("send payment result: ", res.body);
 }
