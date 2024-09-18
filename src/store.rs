@@ -7,7 +7,7 @@ use crate::{
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
     watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
-use ckb_types::packed::OutPoint;
+use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, IteratorMode, WriteBatch, DB};
 use serde_json;
@@ -155,6 +155,13 @@ impl Batch {
                     serde_json::to_vec(&multiaddr).expect("serialize Multiaddr should be OK"),
                 );
             }
+            KeyValue::WatchtowerChannel(channel_id, channel_data) => {
+                let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&channel_data).expect("serialize ChannelData should be OK"),
+                );
+            }
         }
     }
 
@@ -185,6 +192,7 @@ impl Batch {
 /// | 129          | Timestamp          | NodeId                   |
 /// | 160          | PeerId             | MultiAddr                |
 /// | 192          | Hash256            | PaymentSession           |
+/// | 224          | Hash256            | ChannelData              |
 /// +--------------+--------------------+--------------------------+
 ///
 
@@ -199,6 +207,7 @@ const NODE_INFO_PREFIX: u8 = 128;
 const NODE_ANNOUNCEMENT_INDEX_PREFIX: u8 = 129;
 const PEER_ID_MULTIADDR_PREFIX: u8 = 160;
 const PAYMENT_SESSION_PREFIX: u8 = 192;
+const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
 
 enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
@@ -208,6 +217,7 @@ enum KeyValue {
     PeerIdMultiAddr(PeerId, Multiaddr),
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
+    WatchtowerChannel(Hash256, ChannelData),
 }
 
 impl ChannelActorStateStore for Store {
@@ -438,11 +448,62 @@ impl NetworkGraphStateStore for Store {
     }
 }
 
+impl WatchtowerStore for Store {
+    fn get_watch_channels(&self) -> Vec<ChannelData> {
+        let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
+        let iter = self
+            .db
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(col_key, _)| col_key.starts_with(&prefix));
+        iter.map(|(_key, value)| {
+            serde_json::from_slice(value.as_ref()).expect("deserialize ChannelData should be OK")
+        })
+        .collect()
+    }
+
+    fn insert_watch_channel(&self, channel_id: Hash256, funding_tx_lock: Script) {
+        let mut batch = self.batch();
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        batch.put(
+            key,
+            serde_json::to_vec(&ChannelData {
+                channel_id,
+                funding_tx_lock,
+                revocation_data: None,
+            })
+            .expect("serialize ChannelData should be OK"),
+        );
+        batch.commit();
+    }
+
+    fn remove_watch_channel(&self, channel_id: Hash256) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        self.db.delete(key).expect("delete should be OK");
+    }
+
+    fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        if let Some(mut channel_data) = self.get(&key).map(|v| {
+            serde_json::from_slice::<ChannelData>(v.as_ref())
+                .expect("deserialize ChannelData should be OK")
+        }) {
+            channel_data.revocation_data = Some(revocation_data);
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.commit();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fiber::test_utils::gen_sha256_hash;
     use crate::invoice::*;
+    use crate::watchtower::*;
+    use ckb_types::packed::Bytes;
+    use ckb_types::packed::CellOutput;
+    use musig2::CompactSignature;
     use tempfile::tempdir;
 
     #[test]
@@ -470,22 +531,43 @@ mod tests {
         let invalid_hash = gen_sha256_hash();
         assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
     }
-}
 
-impl WatchtowerStore for Store {
-    fn get_channels(&self) -> Vec<ChannelData> {
-        todo!()
-    }
+    #[test]
+    fn test_wacthtower_store() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("watchtower_store");
+        let store = Store::new(path);
 
-    fn insert_channel(&self, channel_id: Hash256, funding_tx_lock: ckb_types::packed::Script) {
-        todo!()
-    }
+        let channel_id = gen_sha256_hash();
+        let funding_tx_lock = Script::default();
+        store.insert_watch_channel(channel_id, funding_tx_lock.clone());
+        assert_eq!(
+            store.get_watch_channels(),
+            vec![ChannelData {
+                channel_id,
+                funding_tx_lock: funding_tx_lock.clone(),
+                revocation_data: None
+            }]
+        );
 
-    fn remove_channel(&self, channel_id: Hash256) {
-        todo!()
-    }
+        let revocation_data = RevocationData {
+            commitment_number: 0,
+            x_only_aggregated_pubkey: [0u8; 32],
+            aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+            output: CellOutput::default(),
+            output_data: Bytes::default(),
+        };
+        store.update_revocation(channel_id, revocation_data.clone());
+        assert_eq!(
+            store.get_watch_channels(),
+            vec![ChannelData {
+                channel_id,
+                funding_tx_lock,
+                revocation_data: Some(revocation_data)
+            }]
+        );
 
-    fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
-        todo!()
+        store.remove_watch_channel(channel_id);
+        assert_eq!(store.get_watch_channels(), vec![]);
     }
 }
