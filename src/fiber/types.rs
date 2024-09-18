@@ -2712,6 +2712,8 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnionInfo {
     pub payment_hash: Hash256,
+    // this is only specified in the last hop in the keysend mode
+    pub preimage: Option<Hash256>,
     pub tlc_hash_algorithm: HashAlgorithm,
     pub amount: u128,
     pub expiry: u64,
@@ -2806,6 +2808,7 @@ mod tests {
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
             tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+            preimage: None,
         };
         let onion_info2 = super::OnionInfo {
             payment_hash: [4; 32].into(),
@@ -2814,6 +2817,7 @@ mod tests {
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
             tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+            preimage: None,
         };
         let mut onion_packet =
             super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
@@ -2841,6 +2845,7 @@ mod tests {
             next_hop: Some(generate_pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
             tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+            preimage: None,
         };
         let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
         let serialized = onion_packet.serialize();

@@ -9,6 +9,7 @@ use ractor::{
     async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
     RactorErr, RpcReplyPort, SupervisionEvent,
 };
+use rand::Rng;
 use secp256k1::Message;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -209,10 +210,13 @@ pub struct SendPaymentCommand {
     pub max_fee_amount: Option<u128>,
     // max parts for the payment, only used for multi-part payments
     pub max_parts: Option<u64>,
+    // keysend payment, default is false
+    pub keysend: Option<bool>,
 }
 
 impl SendPaymentCommand {
-    pub fn check_valid(&self) -> Result<(Pubkey, u128, Hash256), String> {
+    // return (target_pubkey, amount, payment_hash, preimage)
+    pub fn check_valid(&self) -> Result<(Pubkey, u128, Hash256, Option<Hash256>), String> {
         let invoice = self
             .invoice
             .as_ref()
@@ -252,19 +256,40 @@ impl SendPaymentCommand {
             "amount",
         )?;
 
-        let payment_hash = validate_field(
-            self.payment_hash,
-            invoice.as_ref().map(|i| i.payment_hash().clone()),
-            "payment_hash",
-        )?;
+        let (payment_hash, preimage) = if !self.is_keysend() {
+            (
+                validate_field(
+                    self.payment_hash,
+                    invoice.as_ref().map(|i| i.payment_hash().clone()),
+                    "payment_hash",
+                )?,
+                None,
+            )
+        } else {
+            if invoice.is_some() {
+                return Err("keysend payment should not have invoice".to_string());
+            }
+            // generate a random preimage for keysend payment
+            let mut rng = rand::thread_rng();
+            let mut result = [0u8; 32];
+            rng.fill(&mut result[..]);
+            let preimage: Hash256 = result.into();
+            // use the default payment hash algorithm here for keysend payment
+            let payment_hash: Hash256 = blake2b_256(&preimage).into();
+            (payment_hash, Some(preimage))
+        };
 
-        Ok((target, amount, payment_hash))
+        Ok((target, amount, payment_hash, preimage))
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        let (_target, _amount, payment_hash) =
+        let (_target, _amount, payment_hash, _preimage) =
             self.check_valid().expect("valid SendPaymentCommand");
         payment_hash
+    }
+
+    pub fn is_keysend(&self) -> bool {
+        self.keysend.unwrap_or(false)
     }
 }
 
