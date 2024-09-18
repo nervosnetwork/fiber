@@ -1,7 +1,7 @@
 meta {
   name: Node1 send payment with router in keysend mode
   type: http
-  seq: 13
+  seq: 15
 }
 
 post {
@@ -32,6 +32,11 @@ body:json {
 
 assert {
   res.body.error: isUndefined
+}
+
+script:pre-request {
+  // sleep for a while
+  await new Promise(r => setTimeout(r, 1000));
 }
 
 script:post-response {

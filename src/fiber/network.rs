@@ -3238,11 +3238,7 @@ pub async fn start_network<
     store: S,
     channel_subscribers: ChannelSubscribers,
 ) -> ActorRef<NetworkActorMessage> {
-    let secio_kp: SecioKeyPair = config
-        .read_or_generate_secret_key()
-        .expect("read or generate secret key")
-        .into();
-    let my_pubkey = secio_kp.public_key();
+    let my_pubkey = config.public_key();
     let my_peer_id = PeerId::from_public_key(&my_pubkey);
 
     let (actor, _handle) = Actor::spawn_linked(
