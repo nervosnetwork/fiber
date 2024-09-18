@@ -1,6 +1,7 @@
 use fnn::cch::CchMessage;
 use fnn::ckb::contracts::init_contracts_context;
 use fnn::store::Store;
+use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::mpsc;
@@ -19,6 +20,7 @@ use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
+use std::time::Duration;
 use tracing_subscriber::fmt::format;
 
 #[tokio::main]
@@ -78,7 +80,7 @@ pub async fn main() {
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
                 CkbChainActor {},
-                ckb_config,
+                ckb_config.clone(),
                 root_actor.get_cell(),
             )
             .await
@@ -110,6 +112,21 @@ pub async fn main() {
                     .expect("ckb actor alive")
             }
 
+            let watchtower_actor = Actor::spawn_linked(
+                Some("watchtower".to_string()),
+                WatchtowerActor::new(store.clone()),
+                ckb_config,
+                root_actor.get_cell(),
+            )
+            .await
+            .expect("start watchtower actor")
+            .0;
+
+            // every 60 seconds, check if there are any channels that submitted a commitment transaction
+            // TODO: move interval to config file
+            watchtower_actor
+                .send_interval(Duration::from_secs(60), || WatchtowerMessage::PeriodicCheck);
+
             new_tokio_task_tracker().spawn(async move {
                 let token = new_tokio_cancellation_token();
                 loop {
@@ -121,7 +138,7 @@ pub async fn main() {
                                     break;
                                 }
                                 Some(event) => {
-                                    trace!("Received event from ckb service: {:?}", event);
+                                    let _ = watchtower_actor.send_message(WatchtowerMessage::NetworkServiceEvent(event));
                                 }
                             }
                         }

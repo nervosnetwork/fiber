@@ -322,7 +322,7 @@ pub enum NetworkServiceEvent {
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
-    ChannelReady(PeerId, Hash256),
+    ChannelReady(PeerId, Hash256, OutPoint),
     ChannelClosed(PeerId, Hash256, Byte32),
     // We should sign a commitment transaction and send it to the other party.
     CommitmentSignaturePending(PeerId, Hash256, u64),
@@ -1027,13 +1027,15 @@ where
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
                     .outpoint_channel_map
-                    .insert(channel_outpoint, channel_id);
+                    .insert(channel_outpoint.clone(), channel_id);
 
                 // Notify outside observers.
                 myself
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelReady(
-                            peer_id, channel_id,
+                            peer_id,
+                            channel_id,
+                            channel_outpoint,
                         )),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);

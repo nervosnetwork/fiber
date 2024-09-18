@@ -11,7 +11,6 @@ use super::{funding::FundingContext, CkbConfig, FundingError, FundingRequest, Fu
 
 pub struct CkbChainActor {}
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct CkbChainState {
     config: CkbConfig,
