@@ -7,6 +7,7 @@ use clap_serde_derive::{
 };
 use serde::{Deserialize, Deserializer, Serializer};
 use std::{fs, path::PathBuf};
+use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
@@ -306,6 +307,14 @@ impl FiberConfig {
     pub fn announce_node_interval_seconds(&self) -> u64 {
         self.announce_node_interval_seconds
             .unwrap_or(DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS)
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        let secio_kp: SecioKeyPair = self
+            .read_or_generate_secret_key()
+            .expect("read or generate secret key")
+            .into();
+        secio_kp.public_key()
     }
 }
 

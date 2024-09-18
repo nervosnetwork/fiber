@@ -17,6 +17,7 @@ use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
 use jsonrpsee::server::{Server, ServerHandle};
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
+use tentacle::secio::PublicKey;
 use tokio::sync::mpsc::Sender;
 
 pub type InvoiceCommandWithReply = (InvoiceCommand, Sender<crate::Result<String>>);
@@ -53,10 +54,11 @@ pub async fn start_rpc<S: ChannelActorStateStore + InvoiceStore + Clone + Send +
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     cch_actor: Option<ActorRef<CchMessage>>,
     store: S,
+    node_publick_key: Option<PublicKey>,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let server = build_server(listening_addr);
-    let mut methods = InvoiceRpcServerImpl::new(store.clone()).into_rpc();
+    let mut methods = InvoiceRpcServerImpl::new(store.clone(), node_publick_key).into_rpc();
     if let Some(network_actor) = network_actor {
         let peer = PeerRpcServerImpl::new(network_actor.clone());
         let channel = ChannelRpcServerImpl::new(network_actor, store);

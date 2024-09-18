@@ -7,8 +7,10 @@ use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
+use secp256k1::PublicKey as Publickey;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use tentacle::secio::PublicKey;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -62,11 +64,12 @@ pub trait InvoiceRpc {
 
 pub struct InvoiceRpcServerImpl<S> {
     pub store: S,
+    pub public_key: Option<PublicKey>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub fn new(store: S) -> Self {
-        Self { store }
+    pub fn new(store: S, public_key: Option<PublicKey>) -> Self {
+        Self { store, public_key }
     }
 }
 
@@ -101,6 +104,12 @@ where
         if let Some(hash_algorithm) = params.hash_algorithm {
             invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
         };
+
+        if let Some(public_key) = &self.public_key {
+            invoice_builder = invoice_builder.payee_pub_key(
+                Publickey::from_slice(public_key.inner_ref()).expect("public key must be valid"),
+            );
+        }
 
         match invoice_builder.build() {
             Ok(invoice) => match self
