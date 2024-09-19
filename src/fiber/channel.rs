@@ -1012,7 +1012,9 @@ where
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!("Beginning processing tx collaboration command");
+                debug!("Beginning processing tx collaboration command, and transitioning from {:?} to CollaboratingFundingTx state", state.state);
+                state.state =
+                    ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty());
                 CollaboratingFundingTxFlags::empty()
             }
             ChannelState::CollaboratingFundingTx(_)
@@ -3847,7 +3849,9 @@ impl ChannelActorState {
                 ));
             }
             ChannelState::NegotiatingFunding(_) => {
-                debug!("Started negotiating funding tx collaboration");
+                debug!("Started negotiating funding tx collaboration, and transitioning from {:?} to CollaboratingFundingTx state", self.state);
+                self.state =
+                    ChannelState::CollaboratingFundingTx(CollaboratingFundingTxFlags::empty());
                 CollaboratingFundingTxFlags::empty()
             }
             ChannelState::CollaboratingFundingTx(_)
@@ -4545,7 +4549,7 @@ impl ChannelActorState {
                 ChannelState::CollaboratingFundingTx(flags) => flags,
                 _ => {
                     panic!(
-                        "Must be in CollaboratingFundingTx state while running update_funding_tx"
+                        "Expect to be in CollaboratingFundingTx state while running update_funding_tx, current state {:?}", &self.state,
                     );
                 }
             };
