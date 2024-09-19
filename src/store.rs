@@ -483,7 +483,7 @@ impl WatchtowerStore for Store {
 
     fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        if let Some(mut channel_data) = self.get(&key).map(|v| {
+        if let Some(mut channel_data) = self.get(key).map(|v| {
             serde_json::from_slice::<ChannelData>(v.as_ref())
                 .expect("deserialize ChannelData should be OK")
         }) {

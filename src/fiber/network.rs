@@ -246,7 +246,7 @@ impl SendPaymentCommand {
             self.target_pubkey,
             invoice
                 .as_ref()
-                .and_then(|i| i.payee_pub_key().cloned().map(|k| Pubkey::from(k))),
+                .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
             "target_pubkey",
         )?;
 
@@ -260,7 +260,7 @@ impl SendPaymentCommand {
             (
                 validate_field(
                     self.payment_hash,
-                    invoice.as_ref().map(|i| i.payment_hash().clone()),
+                    invoice.as_ref().map(|i| *i.payment_hash()),
                     "payment_hash",
                 )?,
                 None,
@@ -275,7 +275,7 @@ impl SendPaymentCommand {
             rng.fill(&mut result[..]);
             let preimage: Hash256 = result.into();
             // use the default payment hash algorithm here for keysend payment
-            let payment_hash: Hash256 = blake2b_256(&preimage).into();
+            let payment_hash: Hash256 = blake2b_256(preimage).into();
             (payment_hash, Some(preimage))
         };
 

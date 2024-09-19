@@ -2262,7 +2262,6 @@ impl From<QueryChannelsWithinBlockRangeResult>
                         query_channels_within_block_range_result
                             .channels
                             .into_iter()
-                            .map(|channel| channel)
                             .collect(),
                     )
                     .build(),

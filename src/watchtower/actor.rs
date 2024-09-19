@@ -91,21 +91,18 @@ where
                                 Ok(Some(tx_with_status)) => {
                                     if tx_with_status.tx_status.status != Status::Committed {
                                         error!("Funding tx: {:?} is not committed yet, maybe it's a bug in the fn on_channel_ready", funding_tx_out_point);
-                                    } else {
-                                        if let Some(tx) = tx_with_status.transaction {
-                                            match tx.inner {
-                                                Either::Left(tx) => {
-                                                    let tx: Transaction = tx.inner.into();
-                                                    self.store.insert_watch_channel(
-                                                        channel_id,
-                                                        tx.raw().outputs().get(0).unwrap().lock(),
-                                                    );
-                                                }
-                                                Either::Right(_tx) => {
-                                                    // unreachable, ignore
-                                                }
+                                    } else if let Some(tx) = tx_with_status.transaction {
+                                        match tx.inner {
+                                            Either::Left(tx) => {
+                                                let tx: Transaction = tx.inner.into();
+                                                self.store.insert_watch_channel(
+                                                    channel_id,
+                                                    tx.raw().outputs().get(0).unwrap().lock(),
+                                                );
                                             }
-                                        } else {
+                                            Either::Right(_tx) => {
+                                                // unreachable, ignore
+                                            }
                                         }
                                     }
                                 }
@@ -152,7 +149,7 @@ where
                         continue;
                     }
                     let revocation_data = channel_data.revocation_data.unwrap();
-                    let secret_key = state.secret_key.clone();
+                    let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
                     tokio::task::block_in_place(move || {
                         let ckb_client = CkbRpcClient::new(&rpc_url);
@@ -181,67 +178,71 @@ where
                                                     != Status::Committed
                                                 {
                                                     error!("Cannot find the commitment tx: {:?}, status is {:?}, maybe ckb indexer bug?", tx_with_status.tx_status.status, tx.tx_hash);
-                                                } else {
-                                                    if let Some(tx) = tx_with_status.transaction {
-                                                        match tx.inner {
-                                                            Either::Left(tx) => {
-                                                                let tx: Transaction =
-                                                                    tx.inner.into();
-                                                                if tx.raw().outputs().len() == 1 {
-                                                                    let output = tx
-                                                                        .raw()
-                                                                        .outputs()
-                                                                        .get(0)
-                                                                        .unwrap();
-                                                                    let lock_args = output
-                                                                        .lock()
-                                                                        .args()
-                                                                        .raw_data();
-                                                                    let commitment_number =
-                                                                        u64::from_le_bytes(
-                                                                            lock_args[28..36]
-                                                                                .try_into()
-                                                                                .unwrap(),
+                                                } else if let Some(tx) = tx_with_status.transaction
+                                                {
+                                                    match tx.inner {
+                                                        Either::Left(tx) => {
+                                                            let tx: Transaction = tx.inner.into();
+                                                            if tx.raw().outputs().len() == 1 {
+                                                                let output = tx
+                                                                    .raw()
+                                                                    .outputs()
+                                                                    .get(0)
+                                                                    .unwrap();
+                                                                let lock_args =
+                                                                    output.lock().args().raw_data();
+                                                                let commitment_number =
+                                                                    u64::from_le_bytes(
+                                                                        lock_args[28..36]
+                                                                            .try_into()
+                                                                            .unwrap(),
+                                                                    );
+                                                                if revocation_data.commitment_number
+                                                                    >= commitment_number
+                                                                {
+                                                                    warn!("Found an old version commitment tx: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
+                                                                    let commitment_tx_out_point =
+                                                                        OutPoint::new(
+                                                                            tx.calc_tx_hash(),
+                                                                            0,
                                                                         );
-                                                                    if revocation_data
-                                                                        .commitment_number
-                                                                        >= commitment_number
-                                                                    {
-                                                                        warn!("Found an old version commitment tx: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
-                                                                        let commitment_tx_out_point =
-                                                                            OutPoint::new(
-                                                                                tx.calc_tx_hash(),
-                                                                                0,
-                                                                            );
-                                                                        match build_revocation_tx(commitment_tx_out_point, revocation_data, secret_key, &mut cell_collector) {
-                                                                            Ok(tx) => {
-                                                                                match ckb_client.send_transaction(tx.data().into(), None) {
-                                                                                    Ok(tx_hash) => {
-                                                                                        info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                                    }
-                                                                                    Err(err) => {
-                                                                                        error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
-                                                                                    }
+                                                                    match build_revocation_tx(
+                                                                        commitment_tx_out_point,
+                                                                        revocation_data,
+                                                                        secret_key,
+                                                                        &mut cell_collector,
+                                                                    ) {
+                                                                        Ok(tx) => {
+                                                                            match ckb_client
+                                                                                .send_transaction(
+                                                                                    tx.data()
+                                                                                        .into(),
+                                                                                    None,
+                                                                                ) {
+                                                                                Ok(tx_hash) => {
+                                                                                    info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
                                                                                 }
-
-                                                                            },
-                                                                            Err(err) => {
-                                                                                error!("Failed to build revocation tx: {:?}", err);
+                                                                                Err(err) => {
+                                                                                    error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                                }
                                                                             }
                                                                         }
+                                                                        Err(err) => {
+                                                                            error!("Failed to build revocation tx: {:?}", err);
+                                                                        }
                                                                     }
-                                                                } else {
-                                                                    // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
-                                                                    // it's a close channel tx, ignore
                                                                 }
-                                                            }
-                                                            Either::Right(_tx) => {
-                                                                // unreachable, ignore
+                                                            } else {
+                                                                // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
+                                                                // it's a close channel tx, ignore
                                                             }
                                                         }
-                                                    } else {
-                                                        error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
+                                                        Either::Right(_tx) => {
+                                                            // unreachable, ignore
+                                                        }
                                                     }
+                                                } else {
+                                                    error!("Cannot find the commitment tx: {:?}, transcation is none, maybe ckb indexer bug?", tx.tx_hash);
                                                 }
                                             }
                                             Ok(None) => {
