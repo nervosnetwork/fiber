@@ -123,8 +123,6 @@ fn init_or_send_udt(
     )?;
 
     let json_tx = ckb_jsonrpc_types::TransactionView::from(tx_with_groups.get_tx_view().clone());
-    println!("tx: {}", serde_json::to_string_pretty(&json_tx).unwrap());
-
     if apply {
         let tx_hash = CkbRpcClient::new(network_info.url.as_str())
             .send_transaction(json_tx.inner, None)
@@ -143,11 +141,10 @@ fn init_or_send_udt(
 fn generate_blocks(num: u64) -> Result<(), Box<dyn StdErr>> {
     let network_info = NetworkInfo::devnet();
     let rpc_client = CkbRpcClient::new(network_info.url.as_str());
-    for i in 0..num {
+    for _i in 0..num {
         rpc_client.generate_block()?;
         // sleep 200ms
         std::thread::sleep(std::time::Duration::from_millis(200));
-        eprintln!("block generated: {}", i);
     }
     Ok(())
 }
@@ -208,7 +205,7 @@ fn genrate_nodes_config() {
     for udt in UDT_KINDS {
         let udt_info = UdtInfo {
             name: udt.to_string(),
-            auto_accept_amount: Some(0),
+            auto_accept_amount: Some(1000),
             script: UdtScript {
                 code_hash: get_code_hash(udt),
                 hash_type: "Data1".to_string(),
