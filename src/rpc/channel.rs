@@ -92,11 +92,12 @@ pub struct Channel {
     pub channel_id: Hash256,
     #[serde_as(as = "DisplayFromStr")]
     pub peer_id: PeerId,
+    pub funding_udt_type_script: Option<Script>,
     pub state: ChannelState,
     #[serde_as(as = "U128Hex")]
     pub local_balance: u128,
     #[serde_as(as = "U128Hex")]
-    pub sent_tlc_balance: u128,
+    pub offered_tlc_balance: u128,
     #[serde_as(as = "U128Hex")]
     pub remote_balance: u128,
     #[serde_as(as = "U128Hex")]
@@ -336,10 +337,14 @@ where
                     .map(|state| Channel {
                         channel_id,
                         peer_id,
+                        funding_udt_type_script: state
+                            .funding_udt_type_script
+                            .clone()
+                            .map(Into::into),
                         state: state.state,
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
-                        sent_tlc_balance: state.get_sent_tlc_balance(),
+                        offered_tlc_balance: state.get_offered_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
                         created_at: state.get_created_at_in_microseconds(),
                     })
