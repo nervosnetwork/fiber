@@ -4471,10 +4471,18 @@ impl ChannelActorState {
             ))?;
 
         if first_output.lock() != self.get_funding_lock_script() {
-            error!("Checking if transaction final failed as tx's first output's script is not funding lock: tx: {:?}, first output lock script: {:?}, funding lock script: {:?}",
-                 &tx, first_output.lock(), self.get_funding_lock_script());
-            // TODO: return an error here. We panic because we want to move fast.
-            panic!("Invalid funding transation")
+            return Err(ProcessingChannelError::InvalidState(
+                "Invalid funding transation lock script".to_string(),
+            ));
+        }
+
+        let current_capacity: u64 = first_output.capacity().unpack();
+
+        // make sure both parties have paid the reserved ckb amount
+        if current_capacity <= self.local_reserved_ckb_amount
+            || current_capacity <= self.remote_reserved_ckb_amount
+        {
+            return Ok(false);
         }
 
         if self.funding_udt_type_script.is_some() {
@@ -4491,9 +4499,11 @@ impl ChannelActorState {
                 "udt_amount: {}, to_remote_amount: {}, to_local_amount: {}",
                 udt_amount, self.to_remote_amount, self.to_local_amount
             );
-            return Ok(udt_amount == self.to_remote_amount + self.to_local_amount);
+            debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
+                current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
+            let is_udt_amount_ok = udt_amount == self.to_remote_amount + self.to_local_amount;
+            return Ok(is_udt_amount_ok);
         } else {
-            let current_capacity: u64 = first_output.capacity().unpack();
             let is_complete = current_capacity
                 == (self.to_local_amount
                     + self.to_remote_amount
