@@ -60,7 +60,16 @@ Attempts to open a channel with a peer.
 
 * `peer_id` - The peer ID to open a channel with
 * `funding_amount` - The amount of CKB or UDT to fund the channel with
+* `public` - Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter (default value false)
 * `funding_udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
+* `commitment_fee_rate` - The fee rate for the commitment transaction, an optional parameter
+* `funding_fee_rate` - The fee rate for the funding transaction, an optional parameter
+* `tlc_locktime_expiry_delta` - The expiry delta for the TLC locktime, an optional parameter
+* `tlc_min_value` - The minimum value for a TLC, an optional parameter
+* `tlc_max_value` - The maximum value for a TLC, an optional parameter
+* `tlc_fee_proportional_millionths` - The fee proportional millionths for a TLC, an optional parameter
+* `max_tlc_value_in_flight` - The maximum value in flight for TLCs, an optional parameter
+* `max_num_of_accept_tlcs` - The maximum number of TLCs that can be accepted, an optional parameter
 
 ###### Returns
 
