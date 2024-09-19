@@ -1412,16 +1412,15 @@ where
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
-                    if let Some(message) = state.get_node_announcement_message() {
-                        myself
-                            .send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::BroadcastMessage(
-                                    vec![],
-                                    FiberBroadcastMessage::NodeAnnouncement(message),
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-                    }
+                    let message = state.get_node_announcement_message();
+                    myself
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::BroadcastMessage(
+                                vec![],
+                                FiberBroadcastMessage::NodeAnnouncement(message),
+                            ),
+                        ))
+                        .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             },
             NetworkActorCommand::MarkSyncingDone => {
@@ -1916,6 +1915,7 @@ pub struct NetworkActorState<S> {
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
     announced_addrs: Vec<Multiaddr>,
+    auto_announce: bool,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
     // This is the entropy used to generate various random values.
@@ -2001,10 +2001,10 @@ where
         + Sync
         + 'static,
 {
-    pub fn get_node_announcement_message(&self) -> Option<NodeAnnouncement> {
-        let alias = self.node_name?;
+    pub fn get_node_announcement_message(&self) -> NodeAnnouncement {
+        let alias = self.node_name.unwrap_or_default();
         let addresses = self.announced_addrs.clone();
-        Some(NodeAnnouncement::new(alias, addresses, &self.private_key))
+        NodeAnnouncement::new(alias, addresses, &self.private_key)
     }
 
     pub fn should_message_be_broadcasted(&mut self, message: &FiberBroadcastMessage) -> bool {
@@ -2498,15 +2498,31 @@ where
         self.peer_pubkey_map
             .insert(remote_peer_id.clone(), remote_pubkey);
 
-        if let Some(message) = self.get_node_announcement_message() {
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![remote_peer_id.clone()],
-                        FiberBroadcastMessage::NodeAnnouncement(message),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        if self.auto_announce {
+            let message = self.get_node_announcement_message();
+            debug!(
+                "Auto announcing our node to peer {:?} (message: {:?})",
+                remote_peer_id, &message
+            );
+            if let Err(e) = self
+                .send_message_to_session(
+                    session.id,
+                    FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                        message,
+                    )),
+                )
+                .await
+            {
+                error!(
+                    "Failed to send NodeAnnouncement message to peer {:?}: {:?}",
+                    remote_peer_id, e
+                );
+            }
+        } else {
+            debug!(
+                "Auto announcing is disabled, skipping node announcement to peer {:?}",
+                remote_peer_id
+            );
         }
 
         for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
@@ -3025,6 +3041,7 @@ where
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
+            auto_announce: config.auto_announce_node(),
             private_key,
             entropy,
             network: myself.clone(),
@@ -3070,19 +3087,10 @@ where
             ))?;
         }
 
-        if config.auto_announce_node() {
-            // We have no easy way to know when the connections to peers are established
-            // in tentacle, so we just wait for a while.
-            myself.send_after(Duration::from_secs(1), || {
-                NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
-                    LocalInfoKind::NodeAnnouncement,
-                ))
-            });
-        }
-
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
+                debug!("Sending broadcasting node announcement command to network actor");
                 NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
                     LocalInfoKind::NodeAnnouncement,
                 ))
