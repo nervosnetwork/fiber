@@ -796,7 +796,12 @@ mod tests {
             graph.add_node(NodeInfo {
                 node_id: public_key1.into(),
                 timestamp: 0,
-                anouncement_msg: NodeAnnouncement::new("node0".into(), vec![], &secret_key1.into()),
+                anouncement_msg: NodeAnnouncement::new(
+                    "node0".into(),
+                    vec![],
+                    &secret_key1.into(),
+                    0,
+                ),
             });
             for i in 1..keypairs.len() {
                 let (sk, pk) = keypairs[i];
@@ -807,6 +812,7 @@ mod tests {
                         format!("node{i}").as_str().into(),
                         vec![],
                         &sk.into(),
+                        0,
                     ),
                 };
                 graph.add_node(node);
