@@ -154,9 +154,9 @@ where
                     let revocation_data = channel_data.revocation_data.unwrap();
                     let secret_key = state.secret_key.clone();
                     let rpc_url = state.config.rpc_url.clone();
-                    let mut cell_collector = DefaultCellCollector::new(rpc_url.as_str());
                     tokio::task::block_in_place(move || {
                         let ckb_client = CkbRpcClient::new(&rpc_url);
+                        let mut cell_collector = DefaultCellCollector::new(&rpc_url);
                         let search_key = SearchKey {
                             script: channel_data.funding_tx_lock.clone().into(),
                             script_type: ScriptType::Lock,
