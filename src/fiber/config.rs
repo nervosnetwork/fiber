@@ -49,7 +49,7 @@ pub const DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS: u128 = 1000;
 /// Whether to automatically announce the node on startup. false means not announcing.
 pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 
-/// The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce.
+/// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 // See comment in `LdkConfig` for why do we need to specify both name and long,
@@ -149,23 +149,23 @@ pub struct FiberConfig {
     )]
     pub tlc_fee_proportional_millionths: Option<u128>,
 
-    /// Whether to automatically announce the node on startup. [default: false]
+    /// Whether to automatically announce the node on startup. [default: true]
     #[arg(
         name = "FIBER_AUTO_ANNOUNCE_NODE",
         long = "fiber-auto-announce-node",
         env,
-        help = "Whether to automatically announce the node on startup. [default: false]"
+        help = "Whether to automatically announce the node on startup. [default: true]"
     )]
     pub auto_announce_node: Option<bool>,
 
     // TODO: the more sensible default value for this option is a reasonable interval like one day
     // if this node has public channels, otherwise don't reannounce (or announce) at all.
-    /// The interval to reannounce NodeAnnouncement, in seconds. [default: 0 (never reannounce)]
+    /// The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce. [default: 3600 (1 hour)]
     #[arg(
         name = "FIBER_ANNOUNCE_NODE_INTERVAL_SECONDS",
         long = "fiber-announce-node-interval-seconds",
         env,
-        help = "The interval to reannounce NodeAnnouncement, in seconds. [default: 0 (never reannounce)]"
+        help = "The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce. [default: 3600 (1 hour)]"
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
 }
@@ -194,6 +194,9 @@ impl AnnouncedNodeName {
 
     pub fn as_str(&self) -> &str {
         let end = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
+        if end == 0 {
+            return "";
+        }
         std::str::from_utf8(&self.0[..end]).expect("valid utf8 string")
     }
 }
