@@ -94,7 +94,13 @@ Lists all active channels that the node is participating in.
 * `channels` - An array of channel objects
     * `channel_id` - The ID of the channel
     * `peer_id` - The remote peer ID of the channel
+    * `funding_udt_type_script` - The type script of the UDT used to fund the channel, may be null
     * `status` - The status of the channel
+    * `local_balance` - The balance of the channel owned by the local node
+    * `remote_balance` - The balance of the channel owned by the remote peer
+    * `offered_tlc_balance` - The total balance of currently offered TLCs in the channel
+    * `received_tlc_balance` - The total balance of currently received TLCs in the channel
+    * `created_at` - The timestamp when the channel was created, in milliseconds
 
 <a id="add_tlc"></a>
 #### Method `add_tlc`

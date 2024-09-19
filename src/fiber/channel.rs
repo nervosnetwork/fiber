@@ -2455,7 +2455,7 @@ impl ChannelActorState {
         self.to_remote_amount
     }
 
-    pub fn get_sent_tlc_balance(&self) -> u128 {
+    pub fn get_offered_tlc_balance(&self) -> u128 {
         self.get_active_offered_tlcs(true)
             .map(|tlc| tlc.tlc.amount)
             .sum::<u128>()
@@ -3070,7 +3070,7 @@ impl ChannelActorState {
         if tlc.is_offered() {
             // TODO: We should actually also consider all our fulfilled tlcs here.
             // Because this is also the amount that we can actually spend.
-            let sent_tlc_value = self.get_sent_tlc_balance();
+            let sent_tlc_value = self.get_offered_tlc_balance();
             debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             // TODO: handle transaction fee here.
