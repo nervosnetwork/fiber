@@ -4,12 +4,24 @@ fiber:
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/54.179.226.154/tcp/18228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
+  announce_listening_addr: true
 
 rpc:
   listening_addr: "127.0.0.1:8227"
 
 ckb:
   rpc_url: "https://testnet.ckbapp.dev/"
+  udt_whitelist:
+    - name: RUSD
+      script:
+        code_hash: 0x1142755a044bf2ee358cba9f2da187ce928c91cd4dc8692ded0337efa677d21a
+        hash_type: type
+        args: 0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b
+      cell_deps:
+        - tx_hash: 0xc077a28761fcea20fe369dac3d985c14083490cfa07aec6185a9f455e3037f38
+          index: 0
+          dep_type: code
+      auto_accept_amount: 1000000000
 
 services:
   - fiber
