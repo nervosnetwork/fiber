@@ -216,9 +216,8 @@ impl NetworkNode {
         nodes
     }
 
-    pub async fn connect_to(&mut self, other: &Self) {
+    pub async fn connect_to_nonblocking(&mut self, other: &Self) {
         let peer_addr = other.listening_addrs[0].clone();
-        let peer_id = other.peer_id.clone();
         println!(
             "Trying to connect to {:?} from {:?}",
             other.listening_addrs, &self.listening_addrs
@@ -229,8 +228,14 @@ impl NetworkNode {
                 NetworkActorCommand::ConnectPeer(peer_addr.clone()),
             ))
             .expect("self alive");
+    }
 
-        self.expect_event(|event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &peer_id))
+    pub async fn connect_to(&mut self, other: &Self) {
+        self.connect_to_nonblocking(other).await;
+        let peer_id = &other.peer_id;
+        self.expect_event(
+            |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == peer_id),
+        )
         .await;
     }
 

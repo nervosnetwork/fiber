@@ -1243,7 +1243,7 @@ where
 
     async fn pre_start(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         args: Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         // startup the event processing
@@ -1372,15 +1372,6 @@ where
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelCreated(
-                            state.get_id(),
-                            state.get_remote_peer_id(),
-                            myself,
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 state.update_state(ChannelState::NegotiatingFunding(
                     NegotiatingFundingFlags::INIT_SENT,
                 ));
@@ -1509,24 +1500,6 @@ where
                     &channel
                 );
 
-                // There is a slim chance that this message is not immediately processed by
-                // the network actor, while the peer already receive the message AcceptChannel and
-                // starts sending following messages. This is a problem of transactionally updating
-                // states across multiple actors (NetworkActor and ChannelActor).
-                // See also the notes [state updates across multiple actors](docs/notes/state-update-across-multiple-actors.md).
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        // TODO: The channel id here is a temporary channel id,
-                        // while the ChannelCreated event emitted by the counterpart
-                        // is a real channel id. This may cause confusion.
-                        NetworkActorEvent::ChannelCreated(
-                            channel.get_id(),
-                            peer_id.clone(),
-                            myself,
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
                 channel_id_sender
                     .send(channel.get_id())
                     .expect("Receive not dropped");
@@ -1553,16 +1526,6 @@ where
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(command),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::ChannelCreated(
-                            channel.get_id(),
-                            channel.get_remote_peer_id(),
-                            myself,
-                        ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -6709,7 +6672,10 @@ mod tests {
             })
             .await;
 
-        node_a.connect_to(&node_b).await;
+        // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
+        // This is due to tentacle connection is async. We may actually send
+        // the `ChannelCreated` event before the `PeerConnected` event.
+        node_a.connect_to_nonblocking(&node_b).await;
 
         node_a
             .expect_event(|event| match event {

@@ -361,9 +361,6 @@ pub enum NetworkActorEvent {
 
     /// Channel related events.
 
-    /// A new channel is created and the peer id and actor reference is given here.
-    /// Note the channel_id here maybe a temporary channel id.
-    ChannelCreated(Hash256, PeerId, ActorRef<ChannelActorMessage>),
     /// A channel has been accepted.
     /// The two Hash256 are respectively newly agreed channel id and temp channel id,
     /// The two u128 are respectively local and remote funding amount,
@@ -546,7 +543,12 @@ where
             FiberMessage::ChannelNormalOperation(m) => {
                 let channel_id = m.get_channel_id();
                 state
-                    .send_message_to_channel_actor(channel_id, ChannelActorMessage::PeerMessage(m));
+                    .send_message_to_channel_actor(
+                        channel_id,
+                        Some(&peer_id),
+                        ChannelActorMessage::PeerMessage(m),
+                    )
+                    .await;
             }
             FiberMessage::QueryInformation(q) => match q {
                 FiberQueryInformation::GetBroadcastMessages(GetBroadcastMessages {
@@ -952,17 +954,6 @@ where
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::NetworkServiceEvent(
                             NetworkServiceEvent::PeerDisConnected(id, session.address),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-            }
-            NetworkActorEvent::ChannelCreated(channel_id, peer_id, actor) => {
-                state.on_channel_created(channel_id, &peer_id, actor);
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::NetworkServiceEvent(
-                            NetworkServiceEvent::ChannelCreated(peer_id, channel_id),
                         ),
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
@@ -1986,9 +1977,6 @@ pub struct NetworkActorState<S> {
     // A queue of messages that are received while we are syncing network messages.
     // Need to be processed after the sync is done.
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
-    // A queue of messages that are received from a peer for a channel, but
-    // the channel is not created yet.
-    channel_message_queue: HashMap<Hash256, Vec<FiberChannelMessage>>,
 }
 
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
@@ -2195,6 +2183,7 @@ where
         .await?
         .0;
         let temp_channel_id = rx.await.expect("msg received");
+        self.on_channel_created(temp_channel_id, &peer_id, channel.clone());
         Ok((channel, temp_channel_id))
     }
 
@@ -2264,6 +2253,7 @@ where
         .await?
         .0;
         let new_id = rx.await.expect("msg received");
+        self.on_channel_created(new_id, &peer_id, channel.clone());
         Ok((channel, temp_channel_id, new_id))
     }
 
@@ -2458,6 +2448,44 @@ where
         }
     }
 
+    async fn reestablish_channel(
+        &mut self,
+        peer_id: &PeerId,
+        channel_id: Hash256,
+    ) -> Result<ActorRef<ChannelActorMessage>, Error> {
+        if let Some(actor) = self.channels.get(&channel_id) {
+            debug!(
+                "Channel {:x} already exists, skipping reestablishment",
+                &channel_id
+            );
+            return Ok(actor.clone());
+        }
+        let remote_pubkey =
+            self.get_peer_pubkey(peer_id)
+                .ok_or(ProcessingChannelError::InvalidState(format!(
+                    "Peer {:?}'s pubkey not found, this should never happen",
+                    &peer_id
+                )))?;
+
+        debug!("Reestablishing channel {:x}", &channel_id);
+        let (channel, _) = Actor::spawn_linked(
+            None,
+            ChannelActor::new(
+                self.get_public_key(),
+                remote_pubkey,
+                self.network.clone(),
+                self.store.clone(),
+                self.channel_subscribers.clone(),
+            ),
+            ChannelInitializationParameter::ReestablishChannel(channel_id),
+            self.network.get_cell(),
+        )
+        .await?;
+        info!("channel {:x} reestablished successfully", &channel_id);
+        self.on_channel_created(channel_id, peer_id, channel.clone());
+        Ok(channel)
+    }
+
     async fn on_peer_connected(
         &mut self,
         remote_peer_id: &PeerId,
@@ -2482,26 +2510,8 @@ where
         }
 
         for channel_id in store.get_active_channel_ids_by_peer(remote_peer_id) {
-            debug!("Reestablishing channel {:x}", &channel_id);
-            if let Ok((_channel, _)) = Actor::spawn_linked(
-                None,
-                ChannelActor::new(
-                    self.get_public_key(),
-                    remote_pubkey,
-                    self.network.clone(),
-                    store.clone(),
-                    self.channel_subscribers.clone(),
-                ),
-                ChannelInitializationParameter::ReestablishChannel(channel_id),
-                self.network.get_cell(),
-            )
-            .await
-            {
-                // network actor will receive ChannelCreated event after channel is created
-                // and will add the channel to the session_channels_map, so we don't need to do it here
-                info!("channel {:x} reestablished successfully", &channel_id);
-            } else {
-                error!("Failed to reestablish channel {:x}", &channel_id);
+            if let Err(e) = self.reestablish_channel(remote_peer_id, channel_id).await {
+                error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
             }
         }
         self.maybe_sync_network_graph(remote_peer_id).await;
@@ -2586,13 +2596,16 @@ where
                 .or_default()
                 .insert(id);
         }
-        if let Some(messages) = self.channel_message_queue.remove(&id) {
-            for message in messages {
-                actor
-                    .send_message(ChannelActorMessage::PeerMessage(message))
-                    .expect("channel actor alive");
-            }
-        }
+        debug!("Channel {:x} created", &id);
+        // Notify outside observers.
+        self.network
+            .send_message(NetworkActorMessage::new_event(
+                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::ChannelCreated(
+                    peer_id.clone(),
+                    id,
+                )),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
     }
 
     async fn on_closing_transaction_pending(
@@ -2653,8 +2666,10 @@ where
         }
         self.send_message_to_channel_actor(
             *channel_id,
+            None,
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
-        );
+        )
+        .await;
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_event(
@@ -2830,39 +2845,58 @@ where
         };
         self.send_message_to_channel_actor(
             channel_id,
+            None,
             ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed),
-        );
+        )
+        .await;
     }
 
     async fn on_commitment_transaction_confirmed(&mut self, tx_hash: Hash256, channel_id: Hash256) {
         debug!("Commitment transaction is confirmed: {:?}", tx_hash);
         self.send_message_to_channel_actor(
             channel_id,
+            None,
             ChannelActorMessage::Event(ChannelEvent::CommitmentTransactionConfirmed),
-        );
+        )
+        .await;
     }
 
-    fn send_message_to_channel_actor(&mut self, channel_id: Hash256, message: ChannelActorMessage) {
+    async fn send_message_to_channel_actor(
+        &mut self,
+        channel_id: Hash256,
+        // Sometimes we need to know the peer id in order to send the message to the channel actor.
+        peer_id: Option<&PeerId>,
+        message: ChannelActorMessage,
+    ) {
         match self.channels.get(&channel_id) {
-            None => match message {
+            None => match (message, peer_id) {
                 // There is some chance that the peer send a message related to a channel that is not created yet,
                 // e.g. when we just started trying to reestablish channel, we may have
                 // no reference to that channel yet.
                 // We should stash the message and process it later.
                 // TODO: ban the adversary who constantly send messages related to non-existing channels.
-                ChannelActorMessage::PeerMessage(m)
-                    if self.store.get_channel_actor_state(&channel_id).is_some() =>
-                {
-                    debug!("Channel actor {:?} not found, but state found", &channel_id);
-                    self.channel_message_queue
-                        .entry(channel_id)
-                        .or_default()
-                        .push(m);
+                (
+                    ChannelActorMessage::PeerMessage(FiberChannelMessage::ReestablishChannel(r)),
+                    Some(remote_peer_id),
+                ) if self.store.get_channel_actor_state(&channel_id).is_some() => {
+                    debug!("Received a ReestablishChannel message for channel {:?} which has persisted state, but no corresponding channel actor, starting it now", &channel_id);
+                    match self.reestablish_channel(remote_peer_id, channel_id).await {
+                        Ok(actor) => {
+                            actor
+                                .send_message(ChannelActorMessage::PeerMessage(
+                                    FiberChannelMessage::ReestablishChannel(r),
+                                ))
+                                .expect("channel actor alive");
+                        }
+                        Err(e) => {
+                            error!("Failed to reestablish channel {:x}: {:?}", &channel_id, &e);
+                        }
+                    }
                 }
-                _ => {
+                (message, _) => {
                     error!(
                             "Failed to send message to channel actor: channel {:?} not found, message: {:?}",
-                            &channel_id, message,
+                            &channel_id, &message,
                         );
                 }
             },
@@ -3022,7 +3056,6 @@ where
                 peers_to_sync_network_graph,
             ),
             broadcasted_message_queue: Default::default(),
-            channel_message_queue: Default::default(),
         };
 
         // load the connected peers from the network graph
