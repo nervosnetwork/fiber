@@ -510,7 +510,7 @@ where
                 {
                     Ok(()) => {
                         let auto_accept = if let Some(udt_type_script) =
-                            open_channel.funding_udt_type_script
+                            open_channel.funding_udt_type_script.as_ref()
                         {
                             is_udt_type_auto_accept(&udt_type_script, open_channel.funding_amount)
                         } else {
@@ -521,8 +521,11 @@ where
                         if auto_accept {
                             let accept_channel = AcceptChannelCommand {
                                 temp_channel_id,
-                                funding_amount: state.auto_accept_channel_ckb_funding_amount
-                                    as u128,
+                                funding_amount: if open_channel.funding_udt_type_script.is_some() {
+                                    0
+                                } else {
+                                    state.auto_accept_channel_ckb_funding_amount as u128
+                                },
                             };
                             state.create_inbound_channel(accept_channel).await?;
                         }
@@ -1673,7 +1676,7 @@ where
                             )));
                         }
                         let capacity: u128 = u64::from(output.capacity).into();
-                        if channel_announcement.udt_type_script.is_some()
+                        if channel_announcement.udt_type_script.is_none()
                             && capacity != channel_announcement.capacity
                         {
                             return Err(Error::InvalidParameter(format!(
