@@ -1402,11 +1402,12 @@ impl NodeAnnouncement {
         alias: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
+        version: u64,
     ) -> Self {
         Self {
             signature: None,
             features: Default::default(),
-            version: Default::default(),
+            version,
             node_id,
             alias,
             chain_hash: get_chain_hash(),
@@ -1418,8 +1419,10 @@ impl NodeAnnouncement {
         alias: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
+        version: u64,
     ) -> NodeAnnouncement {
-        let mut unsigned = NodeAnnouncement::new_unsigned(alias, addresses, private_key.pubkey());
+        let mut unsigned =
+            NodeAnnouncement::new_unsigned(alias, addresses, private_key.pubkey(), version);
         unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
         unsigned
     }

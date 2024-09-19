@@ -222,11 +222,15 @@ where
         debug!("Adding node to network graph: {:?}", node_info);
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
-            if old_node.anouncement_msg.version >= node_info.anouncement_msg.version {
+            if old_node.anouncement_msg.version > node_info.anouncement_msg.version {
                 warn!(
-                    "Ignoring adding an outdated node info {:?}, existing node {:?}",
+                    "Ignoring adding an outdated node info because old node version {} > new node version {}, new node info {:?}, existing node {:?}",
+                    old_node.anouncement_msg.version, node_info.anouncement_msg.version,
                     &node_info, &old_node
                 );
+                return;
+            } else if old_node.anouncement_msg.version == node_info.anouncement_msg.version {
+                debug!("Repeatedly adding node info, ignoring: {:?}", node_info);
                 return;
             }
         }
