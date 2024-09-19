@@ -497,13 +497,13 @@ where
         event_sender: mpsc::Sender<NetworkServiceEvent>,
         chain_actor: ActorRef<CkbChainMessage>,
         store: S,
-        my_pubkey: Pubkey,
+        network_graph: Arc<RwLock<NetworkGraph<S>>>,
     ) -> Self {
         Self {
             event_sender,
             chain_actor,
             store: store.clone(),
-            network_graph: Arc::new(RwLock::new(NetworkGraph::new(store, my_pubkey))),
+            network_graph,
         }
     }
 
@@ -3158,7 +3158,6 @@ where
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
-                debug!("Sending broadcasting node announcement command to network actor");
                 NetworkActorMessage::new_command(NetworkActorCommand::BroadcastLocalInfo(
                     LocalInfoKind::NodeAnnouncement,
                 ))
@@ -3348,13 +3347,14 @@ pub async fn start_network<
     root_actor: ActorCell,
     store: S,
     channel_subscribers: ChannelSubscribers,
+    network_graph: Arc<RwLock<NetworkGraph<S>>>,
 ) -> ActorRef<NetworkActorMessage> {
     let my_pubkey = config.public_key();
     let my_peer_id = PeerId::from_public_key(&my_pubkey);
 
     let (actor, _handle) = Actor::spawn_linked(
         Some(format!("Network {}", my_peer_id)),
-        NetworkActor::new(event_sender, chain_actor, store, my_pubkey.into()),
+        NetworkActor::new(event_sender, chain_actor, store, network_graph),
         NetworkActorStartArguments {
             config,
             tracker,

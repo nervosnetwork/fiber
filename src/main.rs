@@ -1,10 +1,11 @@
 use fnn::cch::CchMessage;
 use fnn::ckb::contracts::init_contracts_context;
+use fnn::fiber::graph::NetworkGraph;
 use fnn::store::Store;
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use ractor::Actor;
 use tentacle::multiaddr::Multiaddr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
 use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::field::MakeExt;
@@ -20,6 +21,7 @@ use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::fmt::format;
 
@@ -67,15 +69,14 @@ pub async fn main() {
 
     let store = Store::new(config.fiber.as_ref().unwrap().store_path());
     let subscribers = ChannelSubscribers::default();
-    let mut node_public_key = None;
 
-    let fiber_command_sender = match config.fiber {
+    let (fiber_command_sender, network_graph, public_key) = match config.fiber {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
             let ckb_config = config.ckb.expect("ckb service is required for ckb service. \
             Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
-            node_public_key = Some(fiber_config.public_key());
+            let node_public_key = fiber_config.public_key();
 
             let _ = init_contracts_context(fiber_config.network, Some(&ckb_config));
 
@@ -94,6 +95,11 @@ pub async fn main() {
 
             let bootnodes = fiber_config.bootnode_addrs.clone();
 
+            let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
+                store.clone(),
+                node_public_key.clone().into(),
+            )));
+
             info!("Starting fiber");
             let network_actor = start_network(
                 fiber_config,
@@ -103,6 +109,7 @@ pub async fn main() {
                 root_actor.get_cell(),
                 store.clone(),
                 subscribers.clone(),
+                network_graph.clone(),
             )
             .await;
 
@@ -153,9 +160,13 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
-            Some(network_actor)
+            (
+                Some(network_actor),
+                Some(network_graph),
+                Some(node_public_key),
+            )
         }
-        None => None,
+        None => (None, None, None),
     };
 
     let cch_actor = match config.cch {
@@ -215,7 +226,8 @@ pub async fn main() {
                 fiber_command_sender,
                 cch_actor,
                 store,
-                node_public_key,
+                network_graph.unwrap(),
+                public_key,
             )
             .await;
             Some(handle)
