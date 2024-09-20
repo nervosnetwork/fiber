@@ -66,20 +66,6 @@ impl ChannelInfo {
         0
     }
 
-    pub fn has_channel_update_one_to_two(&self) -> bool {
-        match &self.one_to_two {
-            Some(x) if x.last_update_message.is_some() => true,
-            _ => false,
-        }
-    }
-
-    pub fn has_channel_update_two_to_one(&self) -> bool {
-        match &self.two_to_one {
-            Some(x) if x.last_update_message.is_some() => true,
-            _ => false,
-        }
-    }
-
     pub fn channel_update_one_to_two_timestamp(&self) -> Option<u64> {
         self.one_to_two.as_ref().map(|x| x.timestamp)
     }
@@ -328,10 +314,15 @@ where
     }
 
     pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
+        debug!("Processing channel update: {:?}", &update);
         let channel_outpoint = &update.channel_outpoint;
         let Some(channel) = self.channels.get_mut(channel_outpoint) else {
             return Err(GraphError::Other("channel not found".to_string()));
         };
+        debug!(
+            "Found channel {:?} for channel update {:?}",
+            &channel, &update
+        );
         let update_info = if update.message_flags & 1 == 1 {
             &mut channel.one_to_two
         } else {
@@ -344,9 +335,9 @@ where
                 // broadcast many times. Don't emit too many logs in that case.
                 if update.version < info.version {
                     warn!(
-                    "Ignoring updating with an outdated channel update {:?} for channel {:?}, current update info: {:?}",
-                    &update, channel_outpoint, &info
-                );
+                        "Ignoring updating with an outdated channel update {:?} for channel {:?}, current update info: {:?}",
+                        &update, channel_outpoint, &info
+                    );
                 }
                 return Ok(());
             }
@@ -359,7 +350,7 @@ where
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
-            last_update_message: None,
+            last_update_message: Some(update.clone()),
         });
 
         self.store.insert_channel(channel.to_owned());
