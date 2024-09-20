@@ -647,7 +647,7 @@ where
                     * ProbabilityEvaluator::evaluate_probability(
                         from,
                         cur_hop.node_id,
-                        channel_info.capacity(),
+                        amount_to_send,
                         channel_info.capacity(),
                     );
 
