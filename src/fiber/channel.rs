@@ -1771,9 +1771,6 @@ pub struct ChannelActorState {
 
     // Cached channel parameter for easier of access.
     pub local_channel_parameters: ChannelParametersOneParty,
-    // The holder has set a shutdown script.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub local_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
     // This value is guaranteed to be 0 when channel is just created.
@@ -1800,6 +1797,9 @@ pub struct ChannelActorState {
     // The counterparty has already sent a shutdown message with this script.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
+    // The holder has set a shutdown script.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub local_shutdown_script: Option<Script>,
 
     pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
