@@ -246,7 +246,7 @@ impl SendPaymentCommand {
             self.target_pubkey,
             invoice
                 .as_ref()
-                .and_then(|i| i.payee_pub_key().cloned().map(|k| Pubkey::from(k))),
+                .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
             "target_pubkey",
         )?;
 
@@ -260,7 +260,7 @@ impl SendPaymentCommand {
             (
                 validate_field(
                     self.payment_hash,
-                    invoice.as_ref().map(|i| i.payment_hash().clone()),
+                    invoice.as_ref().map(|i| *i.payment_hash()),
                     "payment_hash",
                 )?,
                 None,
@@ -275,7 +275,7 @@ impl SendPaymentCommand {
             rng.fill(&mut result[..]);
             let preimage: Hash256 = result.into();
             // use the default payment hash algorithm here for keysend payment
-            let payment_hash: Hash256 = blake2b_256(&preimage).into();
+            let payment_hash: Hash256 = blake2b_256(preimage).into();
             (payment_hash, Some(preimage))
         };
 
@@ -1415,7 +1415,7 @@ where
             }
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
-                    let message = state.get_node_announcement_message();
+                    let message = state.get_or_create_new_node_announcement_message();
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessage(
@@ -1919,6 +1919,7 @@ pub struct NetworkActorState<S> {
     peer_id: PeerId,
     announced_addrs: Vec<Multiaddr>,
     auto_announce: bool,
+    last_node_announcement_message: Option<NodeAnnouncement>,
     // We need to keep private key here in order to sign node announcement messages.
     private_key: Privkey,
     // This is the entropy used to generate various random values.
@@ -2004,10 +2005,29 @@ where
         + Sync
         + 'static,
 {
-    pub fn get_node_announcement_message(&self) -> NodeAnnouncement {
-        let alias = self.node_name.unwrap_or_default();
-        let addresses = self.announced_addrs.clone();
-        NodeAnnouncement::new(alias, addresses, &self.private_key)
+    pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
+        match self.last_node_announcement_message {
+            // If the last node announcement message is still relatively new, we don't need to create a new one.
+            // Because otherwise the receiving node may be confused by the multiple announcements,
+            // and falsely believe we updated the node announcement, and then forward this message to other nodes.
+            // This is undesirable because we don't want to flood the network with the same message.
+            // On the other hand, if the message is too old, we need to create a new one.
+            Some(ref message) if now - message.version < 3600 * 1000 => {
+                debug!("Node announcement message is still valid: {:?}", &message);
+            }
+            _ => {
+                let alias = self.node_name.unwrap_or_default();
+                let addresses = self.announced_addrs.clone();
+                let announcement = NodeAnnouncement::new(alias, addresses, &self.private_key, now);
+                debug!(
+                    "Created new node announcement message: {:?}, previous {:?}",
+                    &announcement, self.last_node_announcement_message
+                );
+                self.last_node_announcement_message = Some(announcement);
+            }
+        }
+        self.last_node_announcement_message.clone().unwrap()
     }
 
     pub fn should_message_be_broadcasted(&mut self, message: &FiberBroadcastMessage) -> bool {
@@ -2518,7 +2538,7 @@ where
             .insert(remote_peer_id.clone(), remote_pubkey);
 
         if self.auto_announce {
-            let message = self.get_node_announcement_message();
+            let message = self.get_or_create_new_node_announcement_message();
             debug!(
                 "Auto announcing our node to peer {:?} (message: {:?})",
                 remote_peer_id, &message
@@ -3061,6 +3081,7 @@ where
             peer_id: my_peer_id,
             announced_addrs,
             auto_announce: config.auto_announce_node(),
+            last_node_announcement_message: None,
             private_key,
             entropy,
             network: myself.clone(),

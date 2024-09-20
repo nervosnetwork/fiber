@@ -222,11 +222,15 @@ where
         debug!("Adding node to network graph: {:?}", node_info);
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
-            if old_node.anouncement_msg.version >= node_info.anouncement_msg.version {
+            if old_node.anouncement_msg.version > node_info.anouncement_msg.version {
                 warn!(
-                    "Ignoring adding an outdated node info {:?}, existing node {:?}",
+                    "Ignoring adding an outdated node info because old node version {} > new node version {}, new node info {:?}, existing node {:?}",
+                    old_node.anouncement_msg.version, node_info.anouncement_msg.version,
                     &node_info, &old_node
                 );
+                return;
+            } else if old_node.anouncement_msg.version == node_info.anouncement_msg.version {
+                debug!("Repeatedly adding node info, ignoring: {:?}", node_info);
                 return;
             }
         }
@@ -792,7 +796,12 @@ mod tests {
             graph.add_node(NodeInfo {
                 node_id: public_key1.into(),
                 timestamp: 0,
-                anouncement_msg: NodeAnnouncement::new("node0".into(), vec![], &secret_key1.into()),
+                anouncement_msg: NodeAnnouncement::new(
+                    "node0".into(),
+                    vec![],
+                    &secret_key1.into(),
+                    0,
+                ),
             });
             for i in 1..keypairs.len() {
                 let (sk, pk) = keypairs[i];
@@ -803,6 +812,7 @@ mod tests {
                         format!("node{i}").as_str().into(),
                         vec![],
                         &sk.into(),
+                        0,
                     ),
                 };
                 graph.add_node(node);

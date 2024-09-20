@@ -2146,7 +2146,7 @@ impl From<(&ChannelActorState, bool)> for Musig2VerifyContext {
         Musig2VerifyContext {
             key_agg_ctx,
             agg_nonce,
-            pubkey: channel.get_remote_funding_pubkey().clone(),
+            pubkey: *channel.get_remote_funding_pubkey(),
             pubnonce: channel.get_remote_nonce(),
         }
     }
@@ -2670,8 +2670,8 @@ impl ChannelActorState {
                     FiberMessage::announcement_signatures(AnnouncementSignatures {
                         channel_id,
                         channel_outpoint,
-                        partial_signature: partial_signature,
-                        node_signature: node_signature,
+                        partial_signature,
+                        node_signature,
                     }),
                 )),
             ))
@@ -2829,7 +2829,7 @@ impl ChannelActorState {
         let delay_epoch = self.get_remote_channel_parameters().selected_contest_delay;
         let commitment_number = self.get_remote_commitment_number();
         let commitment_lock_script_args = [
-            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            &blake2b_256(x_only_aggregated_pubkey)[0..20],
             (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
             commitment_number.to_be_bytes().as_slice(),
         ]
@@ -3286,7 +3286,7 @@ impl ChannelActorState {
 
     pub fn get_funding_lock_script(&self) -> Script {
         let aggregated_pubkey = self.get_funding_lock_script_xonly();
-        let pubkey_hash = blake2b_256(&aggregated_pubkey);
+        let pubkey_hash = blake2b_256(aggregated_pubkey);
         get_script_by_contract(Contract::FundingLock, &pubkey_hash[0..20])
     }
 
@@ -4301,7 +4301,7 @@ impl ChannelActorState {
         let commitment_number = self.get_local_commitment_number();
 
         let commitment_lock_script_args = [
-            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            &blake2b_256(x_only_aggregated_pubkey)[0..20],
             (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
             commitment_number.to_be_bytes().as_slice(),
         ]
@@ -4329,7 +4329,7 @@ impl ChannelActorState {
         let verify_ctx = Musig2VerifyContext {
             key_agg_ctx: key_agg_ctx.clone(),
             agg_nonce: agg_nonce.clone(),
-            pubkey: self.get_remote_funding_pubkey().clone(),
+            pubkey: *self.get_remote_funding_pubkey(),
             pubnonce: self.get_remote_nonce(),
         };
 
@@ -4858,7 +4858,7 @@ impl ChannelActorState {
         let htlcs = self.get_active_htlcs(local);
 
         let mut commitment_lock_script_args = [
-            &blake2b_256(&x_only_aggregated_pubkey)[0..20],
+            &blake2b_256(x_only_aggregated_pubkey)[0..20],
             (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
             version.to_be_bytes().as_slice(),
         ]
