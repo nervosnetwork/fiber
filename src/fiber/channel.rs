@@ -187,6 +187,7 @@ pub struct OpenChannelParameter {
     pub seed: [u8; 32],
     pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
+    pub funding_lock_script: Script,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
@@ -200,6 +201,7 @@ pub struct AcceptChannelParameter {
     pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
+    pub funding_lock_script: Script,
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
 }
 
@@ -1253,6 +1255,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount: my_funding_amount,
                 reserved_ckb_amount: my_reserved_ckb_amount,
+                funding_lock_script: my_funding_lock_script,
                 public_channel_info,
                 seed,
                 open_channel,
@@ -1272,6 +1275,7 @@ where
                     commitment_fee_rate,
                     funding_fee_rate,
                     funding_udt_type_script,
+                    funding_lock_script,
                     funding_amount,
                     reserved_ckb_amount,
                     to_local_delay,
@@ -1313,6 +1317,8 @@ where
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
+                    my_funding_lock_script.clone(),
+                    funding_lock_script.clone(),
                     *funding_amount,
                     *reserved_ckb_amount,
                     *to_local_delay,
@@ -1343,6 +1349,7 @@ where
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
                     funding_amount: my_funding_amount,
+                    funding_lock_script: my_funding_lock_script,
                     reserved_ckb_amount: my_reserved_ckb_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_num_of_accept_tlcs: DEFAULT_MAX_NUM_OF_ACCEPT_TLCS,
@@ -1387,6 +1394,7 @@ where
                 seed,
                 public_channel_info,
                 funding_udt_type_script,
+                funding_lock_script,
                 channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
@@ -1414,6 +1422,7 @@ where
                     commitment_fee_rate,
                     funding_fee_rate,
                     funding_udt_type_script.clone(),
+                    funding_lock_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_num_of_accept_tlcs.unwrap_or(DEFAULT_MAX_NUM_OF_ACCEPT_TLCS),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
@@ -1441,6 +1450,7 @@ where
                     chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
+                    funding_lock_script,
                     funding_amount: channel.to_local_amount,
                     reserved_ckb_amount: channel.local_reserved_ckb_amount,
                     funding_fee_rate,
@@ -1706,6 +1716,13 @@ pub struct ChannelActorState {
     pub local_pubkey: Pubkey,
     // The remote public key used to establish p2p network connection.
     pub remote_pubkey: Pubkey,
+
+    // The lock script for funding, used to be the default lock script for the shutdown transaction.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub local_funding_script: Option<Script>,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub remote_funding_script: Option<Script>,
+
     pub id: Hash256,
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
@@ -1754,9 +1771,6 @@ pub struct ChannelActorState {
 
     // Cached channel parameter for easier of access.
     pub local_channel_parameters: ChannelParametersOneParty,
-    // The holder has set a shutdown script.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub local_shutdown_script: Option<Script>,
 
     // Commitment numbers that are used to derive keys.
     // This value is guaranteed to be 0 when channel is just created.
@@ -1783,6 +1797,9 @@ pub struct ChannelActorState {
     // The counterparty has already sent a shutdown message with this script.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
+    // The holder has set a shutdown script.
+    #[serde_as(as = "Option<EntityHex>")]
+    pub local_shutdown_script: Option<Script>,
 
     pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
@@ -2206,6 +2223,8 @@ impl ChannelActorState {
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
+        local_funding_lock_script: Script,
+        remote_funding_lock_script: Script,
         remote_value: u128,
         remote_reserved_ckb_amount: u64,
         remote_delay: LockTime,
@@ -2240,6 +2259,8 @@ impl ChannelActorState {
             funding_udt_type_script,
             to_local_amount: local_value,
             to_remote_amount: remote_value,
+            local_funding_script: Some(local_funding_lock_script),
+            remote_funding_script: Some(remote_funding_lock_script),
             commitment_fee_rate,
             funding_fee_rate,
             id: channel_id,
@@ -2290,6 +2311,7 @@ impl ChannelActorState {
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
+        funding_lock_script: Script,
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
         to_local_delay: LockTime,
@@ -2305,6 +2327,8 @@ impl ChannelActorState {
             remote_pubkey,
             funding_tx: None,
             funding_udt_type_script,
+            local_funding_script: Some(funding_lock_script),
+            remote_funding_script: None,
             is_acceptor: false,
             to_local_amount: value,
             to_remote_amount: 0,
@@ -3290,15 +3314,15 @@ impl ChannelActorState {
     }
 
     pub fn get_default_local_funding_script(&self) -> Script {
-        let pubkey = self.local_pubkey;
-        let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
-        get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
+        self.local_funding_script
+            .clone()
+            .expect("no local funding script")
     }
 
     pub fn get_default_remote_funding_script(&self) -> Script {
-        let pubkey = self.remote_pubkey;
-        let pub_key_hash = ckb_hash::blake2b_256(pubkey.serialize());
-        get_script_by_contract(Contract::Secp256k1Lock, &pub_key_hash[0..20])
+        self.remote_funding_script
+            .clone()
+            .expect("no remote funding script")
     }
 
     pub fn get_channel_announcement_musig2_secnonce(&self) -> SecNonce {
@@ -3806,6 +3830,7 @@ impl ChannelActorState {
             accept_channel.first_per_commitment_point,
             accept_channel.second_per_commitment_point,
         ];
+        self.remote_funding_script = Some(accept_channel.funding_lock_script.clone());
 
         match accept_channel.channel_announcement_nonce {
             Some(ref nonce) if self.is_public() => {

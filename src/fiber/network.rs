@@ -2154,6 +2154,8 @@ where
         // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
         let (_funding_amount, _reserved_ckb_amount) =
             self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
+
+        let funding_lock_script = self.get_funding_lock_script().await;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -2175,6 +2177,7 @@ where
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
+                funding_lock_script,
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 funding_fee_rate,
@@ -2227,6 +2230,7 @@ where
             return Ok((channel.clone(), temp_channel_id, id));
         }
 
+        let funding_lock_script = self.get_funding_lock_script().await;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -2241,6 +2245,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
+                funding_lock_script,
                 public_channel_info: Some(PublicChannelInfo::new(
                     self.tlc_locktime_expiry_delta,
                     self.tlc_min_value,
@@ -2296,6 +2301,17 @@ where
             );
             callback(result);
         });
+    }
+
+    async fn get_funding_lock_script(&self) -> Script {
+        let funding_lock_script = call!(
+            self.chain_actor,
+            CkbChainMessage::GetFundingSourceScript,
+            ()
+        )
+        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+        .expect("Get funding source script from chain");
+        funding_lock_script
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
