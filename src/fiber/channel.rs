@@ -2527,10 +2527,14 @@ impl ChannelActorState {
         };
 
         let channel_outpoint = self.get_funding_transaction_outpoint();
-        let capacity = self.to_local_amount
-            + self.to_remote_amount
-            + self.local_reserved_ckb_amount as u128
-            + self.remote_reserved_ckb_amount as u128;
+        let capacity = if self.funding_udt_type_script.is_some() {
+            self.to_local_amount + self.to_remote_amount
+        } else {
+            self.to_local_amount
+                + self.to_remote_amount
+                + self.local_reserved_ckb_amount as u128
+                + self.remote_reserved_ckb_amount as u128
+        };
 
         let (node_1_id, node_2_id) = if self.local_is_node_1() {
             (self.local_pubkey, self.remote_pubkey)

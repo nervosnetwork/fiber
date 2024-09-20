@@ -5,7 +5,7 @@ use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
 use crate::invoice::CkbInvoice;
-use ckb_types::packed::OutPoint;
+use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -453,7 +453,7 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash, preimage) = payment_request
+        let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
             .check_valid()
             .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
         let invoice = payment_request
@@ -470,7 +470,7 @@ where
         );
 
         let max_fee_amount = payment_request.max_fee_amount.unwrap_or(1000);
-        let route = self.find_route(source, target, amount, max_fee_amount)?;
+        let route = self.find_route(source, target, amount, max_fee_amount, udt_type_script)?;
         assert!(!route.is_empty());
 
         let mut current_amount = amount;
@@ -546,6 +546,7 @@ where
         target: Pubkey,
         amount: u128,
         max_fee_amount: u128,
+        udt_type_script: Option<Script>,
     ) -> Result<Vec<PathEdge>, GraphError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -605,6 +606,10 @@ where
                     "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?} htlc_max_value: {:?}",
                     fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity(), channel_update.htlc_maximum_value
                 );
+
+                if udt_type_script != channel_info.announcement_msg.udt_type_script {
+                    continue;
+                }
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if amount_to_send > amount + max_fee_amount {

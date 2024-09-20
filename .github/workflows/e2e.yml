@@ -15,6 +15,7 @@ jobs:
           - reestablish
           - cross-chain-hub
           - router-pay
+          - udt-router-pay
         release:
           - "0.116.1"
         test_env:
