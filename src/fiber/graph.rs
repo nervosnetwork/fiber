@@ -660,9 +660,15 @@ where
                     self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
-                //eprintln!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
+
+                if let Some(node) = distances.get(&from) {
+                    if distance >= node.distance {
+                        continue;
+                    }
+                }
+                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
                 // TODO: update weight and distance here
-                let node_elem: NodeHeapElement = NodeHeapElement {
+                let node: NodeHeapElement = NodeHeapElement {
                     node_id: from,
                     weight,
                     distance,
@@ -672,15 +678,8 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
                 };
-                distances
-                    .entry(node_elem.node_id)
-                    .and_modify(|node| {
-                        if node_elem.distance < node.distance {
-                            *node = node_elem.clone();
-                        }
-                    })
-                    .or_insert(node_elem.clone());
-                nodes_heap.push_or_fix(node_elem);
+                distances.insert(node.node_id, node.clone());
+                nodes_heap.push_or_fix(node);
             }
         }
 
@@ -698,7 +697,7 @@ where
             }
         }
 
-        debug!(
+        info!(
             "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
             nodes_visited,
             edges_expanded,
@@ -1116,6 +1115,23 @@ mod tests {
         network.add_edge(4, 5, Some(1000), Some(1));
 
         let route = network.find_route(1, 5, 100, 1000);
+        assert!(route.is_ok());
+    }
+
+    #[test]
+    fn test_graph_find_path_loop_exit() {
+        let mut network = MockNetworkGraph::new(6);
+
+        // node2 and node3 are connected with each other, node1 is disconnected
+        network.add_edge(2, 3, Some(1000), Some(3));
+        network.add_edge(3, 2, Some(1000), Some(2));
+
+        let route = network.find_route(1, 3, 100, 1000);
+        assert!(route.is_err());
+
+        // now add a path from node1 to node2, so that node1 can reach node3
+        network.add_edge(1, 2, Some(1000), Some(4));
+        let route = network.find_route(1, 3, 100, 1000);
         assert!(route.is_ok());
     }
 
