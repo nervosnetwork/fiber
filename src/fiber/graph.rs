@@ -898,7 +898,7 @@ mod tests {
         ) -> Result<Vec<PathEdge>, GraphError> {
             let source = self.keys[source].into();
             let target = self.keys[target].into();
-            self.graph.find_route(source, target, amount, max_fee)
+            self.graph.find_route(source, target, amount, max_fee, None)
         }
     }
 
@@ -1181,14 +1181,16 @@ mod tests {
         assert!(route.is_err());
 
         let no_exits_public_key = network.keys[0];
-        let route = network
-            .graph
-            .find_route(node1.into(), no_exits_public_key.into(), 100, 1000);
+        let route =
+            network
+                .graph
+                .find_route(node1.into(), no_exits_public_key.into(), 100, 1000, None);
         assert!(route.is_err());
 
-        let route = network
-            .graph
-            .find_route(no_exits_public_key.into(), node1.into(), 100, 1000);
+        let route =
+            network
+                .graph
+                .find_route(no_exits_public_key.into(), node1.into(), 100, 1000, None);
         assert!(route.is_err());
     }
 
@@ -1211,6 +1213,7 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
         eprintln!("return {:?}", route);
         assert!(route.is_ok());
@@ -1247,6 +1250,7 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
         assert!(route.is_err());
     }
@@ -1270,6 +1274,7 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
         assert!(route.is_err());
     }
