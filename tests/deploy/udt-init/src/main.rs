@@ -258,7 +258,8 @@ fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     for udt in UDT_KINDS {
         init_or_send_udt(udt, &udt_owner.0, &udt_owner, None, 1000000000000, true)
             .expect("init udt");
-        generate_blocks(4).expect("ok");
+        generate_blocks(8).expect("ok");
+        std::thread::sleep(std::time::Duration::from_millis(1000));
 
         for i in 0..3 {
             let wallet = get_nodes_info(&(i + 1).to_string());
@@ -270,7 +271,7 @@ fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
                 200000000000,
                 true,
             )?;
-            generate_blocks(4).expect("ok");
+            generate_blocks(8).expect("ok");
         }
 
         let script = generate_udt_type_script(udt, &udt_owner.0);
