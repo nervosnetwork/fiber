@@ -18,7 +18,7 @@ ckb:
         hash_type: type
         args: 0x878fcc6f1f08d48e87bb1c3b3d5083f23f8a39c5d5c764f253b55b998526439b
       cell_deps:
-        - tx_hash: 0xc077a28761fcea20fe369dac3d985c14083490cfa07aec6185a9f455e3037f38
+        - tx_hash: 0xed7d65b9ad3d99657e37c4285d585fea8a5fcaf58165d54dacf90243f911548b
           index: 0
           dep_type: code
       auto_accept_amount: 1000000000
