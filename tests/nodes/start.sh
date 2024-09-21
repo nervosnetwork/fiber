@@ -41,74 +41,7 @@ if [[ -f "$deploy_dir/.env.local" ]]; then
 fi
 
 echo "Initializing finished, begin to start services ...."
-
 sleep 1
-
-replace_port() {
-    local config_file=$1
-    shift
-
-    if [ ! -f "$config_file" ]; then
-        echo "Config file $config_file not found"
-        return 1
-    fi
-
-    cp "$config_file" "$config_file.bak"
-
-    while [ $# -gt 0 ]; do
-        local old_port=$1
-        local new_port=$2
-        shift 2
-        sed -i.bak -e "s/$old_port/$new_port/g" "$config_file"
-    done
-
-    rm "$config_file.bak"
-
-    echo "Replaced ports in $config_file"
-}
-
-generate_ports() {
-    local num_ports=$1
-    local ports=()
-
-    for i in $(seq 1 $num_ports); do
-        while :; do
-            port=$((RANDOM % 65535 + 1024))
-            if ! [[ " ${ports[@]} " =~ " ${port} " ]]; then
-                ports+=($port)
-                break
-            fi
-        done
-    done
-
-    echo "${ports[@]}"
-}
-
-generate_ports_and_replace() {
-    local ports=($(generate_ports 6))
-
-    echo "Generated ports: ${ports[@]}"
-    local config_files=(
-        "$nodes_dir/1/config.yml"
-        "$nodes_dir/2/config.yml"
-        "$nodes_dir/3/config.yml"
-        "$bruno_dir/test.bru"
-        "$bruno_dir/xudt-test.bru"
-    )
-
-    for config_file in "${config_files[@]}"; do
-        replace_port "$config_file" \
-            8344 "${ports[0]}" 41714 "${ports[1]}" \
-            8345 "${ports[2]}" 41715 "${ports[3]}" \
-            8346 "${ports[4]}" 41716 "${ports[5]}"
-    done
-}
-
-# if ON_GITHUB_ACTION is set we generate the ports
-if [[ -n "$should_generate_port" ]]; then
-    generate_ports_and_replace
-    sleep 1
-fi
 
 ckb run -C "$deploy_dir/node-data" --indexer &
 
