@@ -300,7 +300,7 @@ fn genrate_nodes_config() {
     // write the real ports into a file so that later script can use it to double check the ports
     let content = ports_map
         .iter()
-        .skip(1)
+        .skip(2) // bootnode node was not always started
         .map(|(_, port)| port.to_string())
         .collect::<Vec<_>>()
         .join("\n");

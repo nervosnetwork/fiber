@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-
-#set -euo pipefail
+set -euo pipefail
 export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
