@@ -47,7 +47,7 @@ function deploy() {
 }
 
 generate_blocks() {
-    ./generate-blocks.sh 4
+    ./generate-blocks.sh 8
     sleep 1
 }
 
