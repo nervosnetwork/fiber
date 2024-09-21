@@ -256,13 +256,14 @@ fn genrate_nodes_config() {
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     let udt_owner = get_nodes_info("deployer");
     for udt in UDT_KINDS {
+        eprintln!("begin init udt: {} ...", udt);
         init_or_send_udt(udt, &udt_owner.0, &udt_owner, None, 1000000000000, true)
             .expect("init udt");
         generate_blocks(8).expect("ok");
         std::thread::sleep(std::time::Duration::from_millis(1000));
-
         for i in 0..3 {
             let wallet = get_nodes_info(&(i + 1).to_string());
+            eprintln!("begin send udt: {} to node {} ...", udt, i);
             init_or_send_udt(
                 udt,
                 &udt_owner.0,
