@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -euo pipefail
+#set -euo pipefail
 export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
@@ -39,7 +39,25 @@ if [[ -f "$deploy_dir/.env.local" ]]; then
 fi
 
 echo "Initializing finished, begin to start services ...."
-sleep 1
+
+clean_up() {
+    PORTS=(8344 8345 8346 41713 41714 41715 41716 8114)
+
+    for PORT in "${PORTS[@]}"; do
+        PIDS=$(lsof -t -i:$PORT || true)
+        # Check if there are any PIDs to kill
+        if [ -n "$PIDS" ]; then
+            echo "Killing processes using port $PORT: $PIDS"
+            # Kill the processes
+            kill -9 $PIDS
+        else
+            echo "No processes found using port $PORT."
+        fi
+    done
+}
+
+clean_up
+sleep 3
 
 ckb run -C "$deploy_dir/node-data" --indexer &
 
