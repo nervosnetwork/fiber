@@ -64,6 +64,7 @@ jobs:
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y
           fi
+          export ON_GITHUB_ACTION=y
           ./tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time

@@ -6,9 +6,11 @@ export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_start_bootnode="${START_BOOTNODE:-}"
+should_generate_port="${ON_GITHUB_ACTION:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
+bruno_dir="$(dirname "$script_dir")/bruno/environments"
 
 # The following environment variables are used in the contract tests.
 # We may load all contracts within the following folder to the test environment.
@@ -40,24 +42,73 @@ fi
 
 echo "Initializing finished, begin to start services ...."
 
-clean_up() {
-    PORTS=(8344 8345 8346 41713 41714 41715 41716 8114)
+sleep 1
 
-    for PORT in "${PORTS[@]}"; do
-        PIDS=$(lsof -t -i:$PORT || true)
-        # Check if there are any PIDs to kill
-        if [ -n "$PIDS" ]; then
-            echo "Killing processes using port $PORT: $PIDS"
-            # Kill the processes
-            kill -9 $PIDS
-        else
-            echo "No processes found using port $PORT."
-        fi
+replace_port() {
+    local config_file=$1
+    shift
+
+    if [ ! -f "$config_file" ]; then
+        echo "Config file $config_file not found"
+        return 1
+    fi
+
+    cp "$config_file" "$config_file.bak"
+
+    while [ $# -gt 0 ]; do
+        local old_port=$1
+        local new_port=$2
+        shift 2
+        sed -i.bak -e "s/$old_port/$new_port/g" "$config_file"
+    done
+
+    rm "$config_file.bak"
+
+    echo "Replaced ports in $config_file"
+}
+
+generate_ports() {
+    local num_ports=$1
+    local ports=()
+
+    for i in $(seq 1 $num_ports); do
+        while :; do
+            port=$((RANDOM % 65535 + 1024))
+            if ! [[ " ${ports[@]} " =~ " ${port} " ]]; then
+                ports+=($port)
+                break
+            fi
+        done
+    done
+
+    echo "${ports[@]}"
+}
+
+generate_ports_and_replace() {
+    local ports=($(generate_ports 6))
+
+    echo "Generated ports: ${ports[@]}"
+    local config_files=(
+        "$nodes_dir/1/config.yml"
+        "$nodes_dir/2/config.yml"
+        "$nodes_dir/3/config.yml"
+        "$bruno_dir/test.bru"
+        "$bruno_dir/xudt-test.bru"
+    )
+
+    for config_file in "${config_files[@]}"; do
+        replace_port "$config_file" \
+            8344 "${ports[0]}" 41714 "${ports[1]}" \
+            8345 "${ports[2]}" 41715 "${ports[3]}" \
+            8346 "${ports[4]}" 41716 "${ports[5]}"
     done
 }
 
-clean_up
-sleep 3
+# if ON_GITHUB_ACTION is set we generate the ports
+if [[ -n "$should_generate_port" ]]; then
+    generate_ports_and_replace
+    sleep 1
+fi
 
 ckb run -C "$deploy_dir/node-data" --indexer &
 
