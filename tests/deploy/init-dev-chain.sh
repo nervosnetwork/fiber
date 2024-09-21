@@ -45,7 +45,15 @@ if ! [[ -d "$data_dir" ]]; then
     # Don't continue until the default account has some money.
     # Transfer some money from the default account (node 3) to node 1 for later use.
     echo "begin to setup wallet states for nodes"
-    sleep 3
+    for i in {1..20}; do
+        if ! nc -z 127.0.0.1 8114; then
+            echo "waiting CKB ready $i ..."
+            sleep 2
+        else
+            echo "CKB is ready now ..."
+            break
+        fi
+    done
 
     # Transfer some money to the node 1.
     # The address of node 1 can be seen with the following command:
