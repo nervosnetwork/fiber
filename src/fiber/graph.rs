@@ -163,6 +163,10 @@ where
         network_graph
     }
 
+    pub fn chain_hash(&self) -> Hash256 {
+        self.chain_hash
+    }
+
     fn load_from_store(&mut self) {
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
@@ -245,6 +249,7 @@ where
                 // If the channel already exists, we don't need to update it
                 // FIXME: if other fields is different, we should consider it as malioucious and ban the node?
                 if channel.node1_to_node2.is_some() || channel.node2_to_node1.is_some() {
+                    debug!("channel already exists, ignoring: {:?}", &channel_info);
                     return;
                 }
             }
