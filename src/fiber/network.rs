@@ -467,7 +467,8 @@ pub struct NetworkActor<S> {
 
 impl<S> NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -1019,9 +1020,7 @@ where
                 );
 
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
-                state
-                    .outpoint_channel_map
-                    .insert(channel_outpoint.clone(), channel_id);
+                state.save_channel_id_for_outpoint(channel_outpoint.clone(), channel_id);
 
                 // Notify outside observers.
                 myself
@@ -1182,8 +1181,11 @@ where
                 if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
                     if let Ok(info) = onion_packet.shift() {
                         let channel_id = state
-                            .outpoint_channel_map
-                            .get(&info.channel_outpoint.unwrap())
+                            .get_channel_id_for_outpoint(
+                                &info
+                                    .channel_outpoint
+                                    .expect("channel outpoint should exist"),
+                            )
                             .expect("channel id should exist");
                         let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
                         let rpc_reply = RpcReplyPort::from(send);
@@ -1914,6 +1916,7 @@ enum RequestState {
 
 pub struct NetworkActorState<S> {
     store: S,
+    persistent_state: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
@@ -1935,8 +1938,6 @@ pub struct NetworkActorState<S> {
     peer_pubkey_map: HashMap<PeerId, Pubkey>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
-    // Outpoint to channel id mapping.
-    outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
     to_be_accepted_channels: HashMap<Hash256, (PeerId, OpenChannel)>,
@@ -1983,6 +1984,23 @@ pub struct NetworkActorState<S> {
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
 }
 
+#[derive(Default, Clone)]
+pub struct PersistentNetworkActorState {
+    // Outpoint to channel id mapping.
+    outpoint_channel_map: HashMap<OutPoint, Hash256>,
+}
+
+impl PersistentNetworkActorState {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+pub trait NetworkActorStateStore {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState>;
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState);
+}
+
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
 
 // ractor requires that the actor name is unique, so we add a prefix to the actor name.
@@ -1997,7 +2015,8 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
 
 impl<S> NetworkActorState<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -2040,6 +2059,16 @@ where
 
     pub fn get_public_key(&self) -> Pubkey {
         self.get_private_key().pubkey()
+    }
+
+    pub fn get_channel_id_for_outpoint(&self, outpoint: &OutPoint) -> Option<&Hash256> {
+        self.persistent_state.outpoint_channel_map.get(outpoint)
+    }
+
+    pub fn save_channel_id_for_outpoint(&mut self, outpoint: OutPoint, channel_id: Hash256) {
+        self.persistent_state
+            .outpoint_channel_map
+            .insert(outpoint, channel_id);
     }
 
     pub fn generate_channel_seed(&mut self) -> [u8; 32] {
@@ -2971,7 +3000,8 @@ pub struct NetworkActorStartArguments {
 #[rasync_trait]
 impl<S> Actor for NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -3075,8 +3105,13 @@ where
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
             .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
             .expect("Get current block number from chain");
+        let persistent_state = self
+            .store
+            .get_network_actor_state(&my_peer_id)
+            .unwrap_or_default();
         let state = NetworkActorState {
             store: self.store.clone(),
+            persistent_state,
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
@@ -3090,7 +3125,6 @@ where
             peer_pubkey_map: Default::default(),
             session_channels_map: Default::default(),
             channels: Default::default(),
-            outpoint_channel_map: Default::default(),
             to_be_accepted_channels: Default::default(),
             pending_channels: Default::default(),
             chain_actor,
@@ -3169,6 +3203,9 @@ where
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
+        debug!("Saving network actor state for {:?}", state.peer_id);
+        self.store
+            .insert_network_actor_state(&state.peer_id, state.persistent_state.clone());
         debug!("Network service for {:?} shutdown", state.peer_id);
         Ok(())
     }
@@ -3311,7 +3348,14 @@ pub(crate) fn emit_service_event(
 }
 
 pub async fn start_network<
-    S: ChannelActorStateStore + NetworkGraphStateStore + InvoiceStore + Clone + Send + Sync + 'static,
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 >(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,

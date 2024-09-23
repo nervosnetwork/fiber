@@ -2,6 +2,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
+        network::{NetworkActorStateStore, PersistentNetworkActorState},
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -218,6 +219,14 @@ enum KeyValue {
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
+}
+
+impl NetworkActorStateStore for Store {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
+        None
+    }
+
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {}
 }
 
 impl ChannelActorStateStore for Store {

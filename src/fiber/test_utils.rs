@@ -33,6 +33,7 @@ use crate::{
 };
 
 use super::graph::PaymentSession;
+use super::network::{NetworkActorStateStore, PersistentNetworkActorState};
 use super::{
     channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
@@ -287,6 +288,7 @@ impl NetworkNode {
 
 #[derive(Clone, Default)]
 struct MemoryStore {
+    network_actor_sate_map: Arc<RwLock<HashMap<PeerId, PersistentNetworkActorState>>>,
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
@@ -294,6 +296,19 @@ struct MemoryStore {
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
     invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
+}
+
+impl NetworkActorStateStore for MemoryStore {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
+        self.network_actor_sate_map.read().unwrap().get(id).cloned()
+    }
+
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+        self.network_actor_sate_map
+            .write()
+            .unwrap()
+            .insert(id.clone(), state);
+    }
 }
 
 impl NetworkGraphStateStore for MemoryStore {
