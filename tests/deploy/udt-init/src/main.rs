@@ -16,7 +16,10 @@ use ckb_types::{
     H256,
 };
 use ckb_types::{packed::CellDep, prelude::Builder};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::net::TcpListener;
 
 use std::{error::Error as StdErr, str::FromStr};
 
@@ -196,6 +199,31 @@ struct UdtInfos {
     infos: Vec<UdtInfo>,
 }
 
+fn is_port_available(port: u16) -> bool {
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener); // Close the listener
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn generate_ports(num_ports: usize) -> Vec<u16> {
+    let mut ports = HashSet::new();
+    let mut rng = rand::thread_rng();
+
+    while ports.len() < num_ports {
+        // avoid https://en.wikipedia.org/wiki/Ephemeral_port
+        let port: u16 = rng.gen_range(1024..32768);
+        if is_port_available(port) {
+            ports.insert(port);
+        }
+    }
+
+    ports.into_iter().collect()
+}
+
 fn genrate_nodes_config() {
     let nodes_dir = std::env::var("NODES_DIR").expect("env var");
     let yaml_file_path = format!("{}/deployer/config.yml", nodes_dir);
@@ -225,18 +253,32 @@ fn genrate_nodes_config() {
         "# you can edit nodes/deployer/config.yml and run `REMOVE_OLD_STATE=y ./tests/nodes/start.sh` to regenerate"
     );
     let config_dirs = vec!["bootnode", "1", "2", "3"];
+    let mut ports_map = vec![];
+    let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
+    let gen_ports = generate_ports(6);
+    let mut ports_iter = gen_ports.iter();
     for (i, config_dir) in config_dirs.iter().enumerate() {
+        let use_gen_port = on_github_action && i != 0;
+        let default_fiber_port = (8343 + i) as u16;
+        let default_rpc_port = (21713 + i) as u16;
+        let (fiber_port, rpc_port) = if use_gen_port {
+            (*ports_iter.next().unwrap(), *ports_iter.next().unwrap())
+        } else {
+            (default_fiber_port, default_rpc_port)
+        };
+        ports_map.push((default_fiber_port, fiber_port));
+        ports_map.push((default_rpc_port, rpc_port));
         let mut data = data.clone();
         data["fiber"]["listening_addr"] =
-            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", 8343 + i));
+            serde_yaml::Value::String(format!("/ip4/0.0.0.0/tcp/{}", fiber_port));
         data["fiber"]["announced_addrs"] =
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(format!(
                 "/ip4/127.0.0.1/tcp/{}",
-                8343 + i
+                fiber_port
             ))]);
         data["fiber"]["announced_node_name"] = serde_yaml::Value::String(format!("fiber-{}", i));
         data["rpc"]["listening_addr"] =
-            serde_yaml::Value::String(format!("127.0.0.1:{}", 41713 + i));
+            serde_yaml::Value::String(format!("127.0.0.1:{}", rpc_port));
         data["ckb"]["udt_whitelist"] = serde_yaml::to_value(&udt_infos).unwrap();
 
         // Node 3 acts as a CCH node.
@@ -249,8 +291,36 @@ fn genrate_nodes_config() {
 
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
         let config_path = format!("{}/{}/config.yml", nodes_dir, config_dir);
+
         std::fs::write(config_path, new_yaml).expect("write failed");
     }
+
+    if on_github_action {
+        let bruno_dir = format!("{}/../bruno/environments/", nodes_dir);
+        for config in std::fs::read_dir(bruno_dir).expect("read dir") {
+            let config = config.expect("read config");
+            for (default_port, port) in ports_map.iter() {
+                eprintln!(
+                    "update bruno config: {:?} {} -> {}",
+                    config, default_port, port
+                );
+                let content = std::fs::read_to_string(config.path()).expect("read config");
+                let new_content = content.replace(&default_port.to_string(), &port.to_string());
+                std::fs::write(config.path(), new_content).expect("write config");
+            }
+        }
+    }
+
+    // write the real ports into a file so that later script can use it to double check the ports
+    let content = ports_map
+        .iter()
+        .skip(2) // bootnode node was not always started
+        .map(|(_, port)| port.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let port_file_path = format!("{}/.ports", nodes_dir);
+    std::fs::write(port_file_path, content).expect("write ports list");
 }
 
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {

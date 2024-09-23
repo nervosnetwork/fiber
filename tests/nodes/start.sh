@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_start_bootnode="${START_BOOTNODE:-}"
+should_generate_port="${ON_GITHUB_ACTION:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"
+bruno_dir="$(dirname "$script_dir")/bruno/environments"
 
 # The following environment variables are used in the contract tests.
 # We may load all contracts within the following folder to the test environment.
@@ -37,6 +38,9 @@ if [[ -f "$deploy_dir/.env.local" ]]; then
     # Local environment variables, may used to override the default ones.
     export $(xargs <"$deploy_dir/.env.local")
 fi
+
+echo "Initializing finished, begin to start services ...."
+sleep 1
 
 ckb run -C "$deploy_dir/node-data" --indexer &
 

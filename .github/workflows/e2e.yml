@@ -65,20 +65,41 @@ jobs:
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y
           fi
+          export ON_GITHUB_ACTION=y
           ./tests/nodes/start.sh &
 
           # Wait for the nodes to start, the initialization takes some time
-          # check port 127.0.0.1:(41714 ~ 41716) are open
+          # check all the ports are open
+
+          # when .ports file is not generated, we will retry 20 times to check if all ports are open
+          port_file=./tests/nodes/.ports
+          retry_count=0
+          while [ $retry_count -lt 100 ]; do
+            if [ -f $port_file ]; then
+              break
+            else
+                echo "File $port_file not found. Retrying in 2 seconds..."
+                sleep 2
+                retry_count=$((retry_count + 1))
+            fi
+          done
+
+          ports=()
+          while IFS= read -r line; do
+            ports+=("$line")
+          done < ./tests/nodes/.ports
+
           for i in {1..20}; do
             all_open=true
-            for port in 41714 41715 41716 8114; do
+            for port in $ports; do
+              echo "Checking port $port"
               if ! nc -z 127.0.0.1 $port; then
                 all_open=false
                 break
               fi
             done
             if $all_open; then
-              echo "All ports are open"
+              echo "All ports are open now ..."
               break
             else
               echo "Not all ports are open, waiting 3 seconds before retrying"
