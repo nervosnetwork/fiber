@@ -119,11 +119,26 @@ pub fn gen_sha256_hash() -> Hash256 {
     result.into()
 }
 
+pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) -> FiberConfig {
+    let base_dir = base_dir.as_ref();
+    FiberConfig {
+        announced_node_name: node_name
+            .or(base_dir.file_name().unwrap().to_str())
+            .map(Into::into),
+        announce_listening_addr: Some(true),
+        base_dir: Some(PathBuf::from(base_dir)),
+        auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
+        ..Default::default()
+    }
+}
+
 #[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
-    pub base_dir: TempDir,
+    pub base_dir: Arc<TempDir>,
+    pub node_name: Option<String>,
     pub listening_addrs: Vec<MultiAddr>,
+    pub store: MemoryStore,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
@@ -135,18 +150,34 @@ impl NetworkNode {
         Self::new_with_node_name(None).await
     }
 
-    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
-        let base_dir = TempDir::new("fnn-test");
-        let fiber_config = FiberConfig {
-            announced_node_name: node_name
-                .as_deref()
-                .or(base_dir.as_ref().file_name().unwrap().to_str())
-                .map(Into::into),
-            announce_listening_addr: Some(true),
-            base_dir: Some(PathBuf::from(base_dir.as_ref())),
-            auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
-            ..Default::default()
-        };
+    pub fn get_fiber_config(&self) -> FiberConfig {
+        get_fiber_config(self.base_dir.as_ref(), self.node_name.as_deref())
+    }
+
+    pub async fn stop(&mut self) {
+        self.network_actor.kill();
+        let my_peer_id = self.peer_id.clone();
+        self.expect_event(
+            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
+        )
+        .await;
+    }
+
+    pub async fn restart(&mut self) {
+        let base_dir = self.base_dir.clone();
+        let node_name = self.node_name.clone();
+        let store = self.store.clone();
+        self.stop().await;
+        let new = Self::new_with_base_dir_and_store(node_name, base_dir, store).await;
+        *self = new;
+    }
+
+    pub async fn new_with_base_dir_and_store(
+        node_name: Option<String>,
+        base_dir: Arc<TempDir>,
+        store: MemoryStore,
+    ) -> Self {
+        let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
 
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
@@ -160,7 +191,7 @@ impl NetworkNode {
         let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
-            MemoryStore::default(),
+            store.clone(),
             public_key.into(),
         )));
         let network_actor = Actor::spawn_linked(
@@ -168,7 +199,7 @@ impl NetworkNode {
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
-                MemoryStore::default(),
+                store.clone(),
                 network_graph,
             ),
             NetworkActorStartArguments {
@@ -202,12 +233,20 @@ impl NetworkNode {
 
         Self {
             base_dir,
+            node_name,
             listening_addrs: announced_addrs,
+            store,
             network_actor,
             chain_actor,
             peer_id,
             event_emitter: event_receiver,
         }
+    }
+
+    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
+        let base_dir = Arc::new(TempDir::new("fnn-test"));
+        let store = MemoryStore::default();
+        Self::new_with_base_dir_and_store(node_name, base_dir, store).await
     }
 
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
@@ -291,8 +330,8 @@ impl NetworkNode {
     }
 }
 
-#[derive(Clone, Default)]
-struct MemoryStore {
+#[derive(Debug, Clone, Default)]
+pub struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
     nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
@@ -522,5 +561,11 @@ mod tests {
     #[tokio::test]
     async fn test_create_two_interconnected_nodes() {
         let _two_nodes = NetworkNode::new_n_interconnected_nodes(2).await;
+    }
+
+    #[tokio::test]
+    async fn test_restart_network_node() {
+        let mut node = NetworkNode::new().await;
+        node.restart().await;
     }
 }

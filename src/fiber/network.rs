@@ -332,6 +332,7 @@ pub enum NetworkServiceEvent {
     ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
@@ -3197,6 +3198,10 @@ where
             error!("Failed to close tentacle service: {}", err);
         }
         debug!("Network service for {:?} shutdown", state.peer_id);
+        self.event_sender
+            .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
+            .await
+            .expect("send network stopped event");
         Ok(())
     }
 
