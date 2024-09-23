@@ -5,7 +5,7 @@ use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
 use crate::invoice::CkbInvoice;
-use ckb_types::packed::OutPoint;
+use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
@@ -453,7 +453,7 @@ where
         payment_request: SendPaymentCommand,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash, preimage) = payment_request
+        let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
             .check_valid()
             .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
         let invoice = payment_request
@@ -469,8 +469,13 @@ where
             source, target, amount, payment_hash
         );
 
-        let max_fee_amount = payment_request.max_fee_amount.unwrap_or(1000);
-        let route = self.find_route(source, target, amount, max_fee_amount)?;
+        let route = self.find_route(
+            source,
+            target,
+            amount,
+            payment_request.max_fee_amount,
+            udt_type_script,
+        )?;
         assert!(!route.is_empty());
 
         let mut current_amount = amount;
@@ -545,7 +550,8 @@ where
         source: Pubkey,
         target: Pubkey,
         amount: u128,
-        max_fee_amount: u128,
+        max_fee_amount: Option<u128>,
+        udt_type_script: Option<Script>,
     ) -> Result<Vec<PathEdge>, GraphError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -601,14 +607,25 @@ where
                 let fee = self.calculate_fee(next_hop_received_amount, fee_rate as u128);
                 let amount_to_send = next_hop_received_amount + fee;
 
-                info!(
-                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?} htlc_max_value: {:?}",
-                    fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity(), channel_update.htlc_maximum_value
+                debug!(
+                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} channel_capacity: {:?} htlc_max_value: {:?}",
+                    fee_rate, next_hop_received_amount, fee, amount_to_send, channel_info.capacity(), channel_update.htlc_maximum_value
                 );
 
-                // if the amount to send is greater than the amount we have, skip this edge
-                if amount_to_send > amount + max_fee_amount {
+                if udt_type_script != channel_info.announcement_msg.udt_type_script {
                     continue;
+                }
+
+                // if the amount to send is greater than the amount we have, skip this edge
+                if let Some(max_fee_amount) = max_fee_amount {
+                    if amount_to_send > amount + max_fee_amount {
+                        debug!(
+                            "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
+                            amount_to_send,
+                            amount + max_fee_amount
+                        );
+                        continue;
+                    }
                 }
                 // check to make sure the current hop can send the amount
                 // if `htlc_maximum_value` equals 0, it means there is no limit
@@ -616,7 +633,7 @@ where
                     || (channel_update.htlc_maximum_value != 0
                         && amount_to_send > channel_update.htlc_maximum_value)
                 {
-                    info!(
+                    debug!(
                         "amount_to_send is greater than channel capacity: {:?} capacity: {:?}, htlc_max_value: {:?}",
                         amount_to_send,
                         channel_info.capacity(),
@@ -625,7 +642,7 @@ where
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
-                    info!(
+                    debug!(
                         "amount_to_send is less than htlc_minimum_value: {:?} min_value: {:?}",
                         amount_to_send, channel_update.htlc_minimum_value
                     );
@@ -642,22 +659,28 @@ where
                     * ProbabilityEvaluator::evaluate_probability(
                         from,
                         cur_hop.node_id,
-                        channel_info.capacity(),
+                        amount_to_send,
                         channel_info.capacity(),
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    info!("probability is too low: {:?}", probability);
+                    debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                info!("probability: {:?}", probability);
+                debug!("probability: {:?}", probability);
                 let agg_weight =
                     self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
-                //eprintln!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
+
+                if let Some(node) = distances.get(&from) {
+                    if distance >= node.distance {
+                        continue;
+                    }
+                }
+                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
                 // TODO: update weight and distance here
-                let node_elem: NodeHeapElement = NodeHeapElement {
+                let node: NodeHeapElement = NodeHeapElement {
                     node_id: from,
                     weight,
                     distance,
@@ -667,15 +690,8 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
                 };
-                distances
-                    .entry(node_elem.node_id)
-                    .and_modify(|node| {
-                        if node_elem.distance < node.distance {
-                            *node = node_elem.clone();
-                        }
-                    })
-                    .or_insert(node_elem.clone());
-                nodes_heap.push_or_fix(node_elem);
+                distances.insert(node.node_id, node.clone());
+                nodes_heap.push_or_fix(node);
             }
         }
 
@@ -693,7 +709,7 @@ where
             }
         }
 
-        debug!(
+        info!(
             "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
             nodes_visited,
             edges_expanded,
@@ -824,7 +840,7 @@ mod tests {
             }
         }
 
-        pub fn add_edge_with_limit(
+        pub fn add_edge_with_config(
             &mut self,
             node_a: usize,
             node_b: usize,
@@ -832,6 +848,7 @@ mod tests {
             fee_rate: Option<u128>,
             min_htlc_value: Option<u128>,
             max_htlc_value: Option<u128>,
+            udt_type_script: Option<Script>,
         ) {
             let public_key1 = self.keys[node_a];
             let public_key2 = self.keys[node_b];
@@ -851,7 +868,7 @@ mod tests {
                     capacity: capacity.unwrap_or(1000),
                     ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
                     ckb_signature: None,
-                    udt_type_script: None,
+                    udt_type_script,
                     features: 0,
                 },
                 timestamp: 0,
@@ -881,7 +898,34 @@ mod tests {
             capacity: Option<u128>,
             fee_rate: Option<u128>,
         ) {
-            self.add_edge_with_limit(node_a, node_b, capacity, fee_rate, Some(0), Some(10000));
+            self.add_edge_with_config(
+                node_a,
+                node_b,
+                capacity,
+                fee_rate,
+                Some(0),
+                Some(10000),
+                None,
+            );
+        }
+
+        pub fn add_edge_udt(
+            &mut self,
+            node_a: usize,
+            node_b: usize,
+            capacity: Option<u128>,
+            fee_rate: Option<u128>,
+            udt_type_script: Script,
+        ) {
+            self.add_edge_with_config(
+                node_a,
+                node_b,
+                capacity,
+                fee_rate,
+                Some(0),
+                Some(10000),
+                Some(udt_type_script),
+            );
         }
 
         pub fn find_route(
@@ -893,7 +937,22 @@ mod tests {
         ) -> Result<Vec<PathEdge>, GraphError> {
             let source = self.keys[source].into();
             let target = self.keys[target].into();
-            self.graph.find_route(source, target, amount, max_fee)
+            self.graph
+                .find_route(source, target, amount, Some(max_fee), None)
+        }
+
+        pub fn find_route_udt(
+            &self,
+            source: usize,
+            target: usize,
+            amount: u128,
+            max_fee: u128,
+            udt_type_script: Script,
+        ) -> Result<Vec<PathEdge>, GraphError> {
+            let source = self.keys[source].into();
+            let target = self.keys[target].into();
+            self.graph
+                .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
         }
     }
 
@@ -1115,6 +1174,23 @@ mod tests {
     }
 
     #[test]
+    fn test_graph_find_path_loop_exit() {
+        let mut network = MockNetworkGraph::new(6);
+
+        // node2 and node3 are connected with each other, node1 is disconnected
+        network.add_edge(2, 3, Some(1000), Some(3));
+        network.add_edge(3, 2, Some(1000), Some(2));
+
+        let route = network.find_route(1, 3, 100, 1000);
+        assert!(route.is_err());
+
+        // now add a path from node1 to node2, so that node1 can reach node3
+        network.add_edge(1, 2, Some(1000), Some(4));
+        let route = network.find_route(1, 3, 100, 1000);
+        assert!(route.is_ok());
+    }
+
+    #[test]
     fn test_graph_find_path_amount_failed() {
         let mut network = MockNetworkGraph::new(6);
 
@@ -1176,14 +1252,22 @@ mod tests {
         assert!(route.is_err());
 
         let no_exits_public_key = network.keys[0];
-        let route = network
-            .graph
-            .find_route(node1.into(), no_exits_public_key.into(), 100, 1000);
+        let route = network.graph.find_route(
+            node1.into(),
+            no_exits_public_key.into(),
+            100,
+            Some(1000),
+            None,
+        );
         assert!(route.is_err());
 
-        let route = network
-            .graph
-            .find_route(no_exits_public_key.into(), node1.into(), 100, 1000);
+        let route = network.graph.find_route(
+            no_exits_public_key.into(),
+            node1.into(),
+            100,
+            Some(1000),
+            None,
+        );
         assert!(route.is_err());
     }
 
@@ -1206,6 +1290,7 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
         eprintln!("return {:?}", route);
         assert!(route.is_ok());
@@ -1227,8 +1312,8 @@ mod tests {
     fn test_graph_build_route_exceed_max_htlc_value() {
         let mut network = MockNetworkGraph::new(3);
         // Add edges with max_htlc_value set to 50
-        network.add_edge_with_limit(0, 2, Some(500), Some(2), None, Some(50));
-        network.add_edge_with_limit(2, 3, Some(500), Some(2), None, Some(50));
+        network.add_edge_with_config(0, 2, Some(500), Some(2), None, Some(50), None);
+        network.add_edge_with_config(2, 3, Some(500), Some(2), None, Some(50), None);
         let node3 = network.keys[3];
 
         // Test build route from node1 to node3 with amount exceeding max_htlc_value
@@ -1242,6 +1327,7 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
         assert!(route.is_err());
     }
@@ -1250,8 +1336,8 @@ mod tests {
     fn test_graph_build_route_below_min_htlc_value() {
         let mut network = MockNetworkGraph::new(3);
         // Add edges with min_htlc_value set to 50
-        network.add_edge_with_limit(0, 2, Some(500), Some(2), Some(50), None);
-        network.add_edge_with_limit(2, 3, Some(500), Some(2), Some(50), None);
+        network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
+        network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None);
         let node3 = network.keys[3];
 
         // Test build route from node1 to node3 with amount below min_htlc_value
@@ -1265,7 +1351,27 @@ mod tests {
             max_fee_amount: Some(1000),
             max_parts: None,
             keysend: None,
+            udt_type_script: None,
         });
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_graph_find_path_udt() {
+        let mut network = MockNetworkGraph::new(3);
+        let udt_type_script = Script::default();
+        network.add_edge_udt(1, 2, Some(1000), Some(1), udt_type_script.clone());
+        let node2 = network.keys[2];
+
+        let route = network.find_route_udt(1, 2, 100, 1000, udt_type_script.clone());
+        assert!(route.is_ok());
+
+        let route = route.unwrap();
+        assert_eq!(route.len(), 1);
+        assert_eq!(route[0].target, node2.into());
+        assert_eq!(route[0].channel_outpoint, network.edges[0].2);
+
+        let route = network.find_route(1, 3, 10, 100);
         assert!(route.is_err());
     }
 }

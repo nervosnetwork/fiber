@@ -205,6 +205,9 @@ pub struct SendPaymentCommandParams {
 
     // keysend payment
     pub keysend: Option<bool>,
+
+    // udt type script for the payment
+    pub udt_type_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -481,6 +484,7 @@ where
                     max_fee_amount: params.max_fee_amount,
                     max_parts: params.max_parts,
                     keysend: params.keysend,
+                    udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                 },
                 rpc_reply,
             ))

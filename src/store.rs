@@ -129,6 +129,14 @@ impl Batch {
                     serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
                 );
             }
+            KeyValue::PaymentSession(payment_hash, payment_session) => {
+                let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&payment_session)
+                        .expect("serialize PaymentSession should be OK"),
+                );
+            }
             KeyValue::NodeInfo(id, node) => {
                 // Save node announcement timestamp to index, so that we can query nodes by timestamp
                 self.put(
@@ -218,6 +226,7 @@ enum KeyValue {
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
+    PaymentSession(Hash256, PaymentSession),
 }
 
 impl ChannelActorStateStore for Store {
@@ -439,11 +448,7 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_payment_session(&self, session: PaymentSession) {
         let mut batch = self.batch();
-        let key = [&[PAYMENT_SESSION_PREFIX], session.payment_hash().as_ref()].concat();
-        batch.put(
-            key,
-            serde_json::to_vec(&session).expect("serialize PaymentSession should be OK"),
-        );
+        batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
     }
 }

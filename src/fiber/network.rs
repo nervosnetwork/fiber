@@ -1,3 +1,4 @@
+use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::TransactionView;
@@ -12,7 +13,9 @@ use ractor::{
 use rand::Rng;
 use secp256k1::Message;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::borrow::Cow;
+
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -191,6 +194,7 @@ pub struct OpenChannelCommand {
     pub max_num_of_accept_tlcs: Option<u64>,
 }
 
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommand {
     // the identifier of the payment target
@@ -212,11 +216,16 @@ pub struct SendPaymentCommand {
     pub max_parts: Option<u64>,
     // keysend payment, default is false
     pub keysend: Option<bool>,
+    // udt type script
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
 }
 
 impl SendPaymentCommand {
-    // return (target_pubkey, amount, payment_hash, preimage)
-    pub fn check_valid(&self) -> Result<(Pubkey, u128, Hash256, Option<Hash256>), String> {
+    // return (target_pubkey, amount, payment_hash, preimage, udt_type_script)
+    pub fn check_valid(
+        &self,
+    ) -> Result<(Pubkey, u128, Hash256, Option<Hash256>, Option<Script>), String> {
         let invoice = self
             .invoice
             .as_ref()
@@ -256,6 +265,16 @@ impl SendPaymentCommand {
             "amount",
         )?;
 
+        let udt_type_script = match validate_field(
+            self.udt_type_script.clone(),
+            invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
+            "udt_type_script",
+        ) {
+            Ok(script) => Some(script),
+            Err(e) if e == "udt_type_script is missing" => None,
+            Err(e) => return Err(e),
+        };
+
         let (payment_hash, preimage) = if !self.is_keysend() {
             (
                 validate_field(
@@ -279,12 +298,11 @@ impl SendPaymentCommand {
             (payment_hash, Some(preimage))
         };
 
-        Ok((target, amount, payment_hash, preimage))
+        Ok((target, amount, payment_hash, preimage, udt_type_script))
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        let (_target, _amount, payment_hash, _preimage) =
-            self.check_valid().expect("valid SendPaymentCommand");
+        let (_, _, payment_hash, ..) = self.check_valid().expect("valid SendPaymentCommand");
         payment_hash
     }
 

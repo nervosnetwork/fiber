@@ -1,0 +1,46 @@
+meta {
+  name: Node1 send payment with router
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "target_pubkey": "03032b99943822e721a651c5a5b9621043017daa9dc3ec81d83215fd2e25121187",
+        "amount": "0x5F5E100",
+        "payment_hash": "{{payment_hash}}",
+        "udt_type_script": {
+            "code_hash": "{{UDT_CODE_HASH}}",
+            "hash_type": "data1",
+            "args": "0x32e555f3ff8e135cece1351a6a2971518392c1e30375c1e006ad0ce8eac07947"
+        }
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("send payment result: ", res.body);
+}
