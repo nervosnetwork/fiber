@@ -3222,10 +3222,20 @@ where
         self.store
             .insert_network_actor_state(&state.peer_id, state.persistent_state.clone());
         debug!("Network service for {:?} shutdown", state.peer_id);
-        self.event_sender
+        if let Err(err) = self
+            .event_sender
             .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
             .await
-            .expect("send network stopped event");
+        {
+            // When the network actor received exiting signal, the event receiver
+            // may also have received the exiting signal and exited. The order of
+            // the two actors exiting is not guaranteed.
+            // TODO: ensure the event receiver is alive before sending the event.
+            error!(
+                "Failed to send network stopped event (event receiver may have exited): {}",
+                err
+            );
+        }
         Ok(())
     }
 
