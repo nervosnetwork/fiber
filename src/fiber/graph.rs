@@ -469,8 +469,13 @@ where
             source, target, amount, payment_hash
         );
 
-        let max_fee_amount = payment_request.max_fee_amount.unwrap_or(1000);
-        let route = self.find_route(source, target, amount, max_fee_amount, udt_type_script)?;
+        let route = self.find_route(
+            source,
+            target,
+            amount,
+            payment_request.max_fee_amount,
+            udt_type_script,
+        )?;
         assert!(!route.is_empty());
 
         let mut current_amount = amount;
@@ -545,7 +550,7 @@ where
         source: Pubkey,
         target: Pubkey,
         amount: u128,
-        max_fee_amount: u128,
+        max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
     ) -> Result<Vec<PathEdge>, GraphError> {
         let started_time = std::time::Instant::now();
@@ -602,9 +607,9 @@ where
                 let fee = self.calculate_fee(next_hop_received_amount, fee_rate as u128);
                 let amount_to_send = next_hop_received_amount + fee;
 
-                info!(
-                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} amount+fee: {:?}  channel_capacity: {:?} htlc_max_value: {:?}",
-                    fee_rate, next_hop_received_amount, fee, amount_to_send, amount + max_fee_amount, channel_info.capacity(), channel_update.htlc_maximum_value
+                debug!(
+                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} channel_capacity: {:?} htlc_max_value: {:?}",
+                    fee_rate, next_hop_received_amount, fee, amount_to_send, channel_info.capacity(), channel_update.htlc_maximum_value
                 );
 
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
@@ -612,8 +617,15 @@ where
                 }
 
                 // if the amount to send is greater than the amount we have, skip this edge
-                if amount_to_send > amount + max_fee_amount {
-                    continue;
+                if let Some(max_fee_amount) = max_fee_amount {
+                    if amount_to_send > amount + max_fee_amount {
+                        debug!(
+                            "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
+                            amount_to_send,
+                            amount + max_fee_amount
+                        );
+                        continue;
+                    }
                 }
                 // check to make sure the current hop can send the amount
                 // if `htlc_maximum_value` equals 0, it means there is no limit
@@ -621,7 +633,7 @@ where
                     || (channel_update.htlc_maximum_value != 0
                         && amount_to_send > channel_update.htlc_maximum_value)
                 {
-                    info!(
+                    debug!(
                         "amount_to_send is greater than channel capacity: {:?} capacity: {:?}, htlc_max_value: {:?}",
                         amount_to_send,
                         channel_info.capacity(),
@@ -630,7 +642,7 @@ where
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
-                    info!(
+                    debug!(
                         "amount_to_send is less than htlc_minimum_value: {:?} min_value: {:?}",
                         amount_to_send, channel_update.htlc_minimum_value
                     );
@@ -652,10 +664,10 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    info!("probability is too low: {:?}", probability);
+                    debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                info!("probability: {:?}", probability);
+                debug!("probability: {:?}", probability);
                 let agg_weight =
                     self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
@@ -925,7 +937,8 @@ mod tests {
         ) -> Result<Vec<PathEdge>, GraphError> {
             let source = self.keys[source].into();
             let target = self.keys[target].into();
-            self.graph.find_route(source, target, amount, max_fee, None)
+            self.graph
+                .find_route(source, target, amount, Some(max_fee), None)
         }
 
         pub fn find_route_udt(
@@ -939,7 +952,7 @@ mod tests {
             let source = self.keys[source].into();
             let target = self.keys[target].into();
             self.graph
-                .find_route(source, target, amount, max_fee, Some(udt_type_script))
+                .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
         }
     }
 
@@ -1239,16 +1252,22 @@ mod tests {
         assert!(route.is_err());
 
         let no_exits_public_key = network.keys[0];
-        let route =
-            network
-                .graph
-                .find_route(node1.into(), no_exits_public_key.into(), 100, 1000, None);
+        let route = network.graph.find_route(
+            node1.into(),
+            no_exits_public_key.into(),
+            100,
+            Some(1000),
+            None,
+        );
         assert!(route.is_err());
 
-        let route =
-            network
-                .graph
-                .find_route(no_exits_public_key.into(), node1.into(), 100, 1000, None);
+        let route = network.graph.find_route(
+            no_exits_public_key.into(),
+            node1.into(),
+            100,
+            Some(1000),
+            None,
+        );
         assert!(route.is_err());
     }
 
