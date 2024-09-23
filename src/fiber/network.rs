@@ -1199,10 +1199,18 @@ where
             NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
                 if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
                     if let Ok(info) = onion_packet.shift() {
-                        let channel_id = state
-                            .outpoint_channel_map
-                            .get(&info.channel_outpoint.unwrap())
-                            .expect("channel id should exist");
+                        debug!("Processing onion packet info: {:?}", info);
+                        let channel_outpoint = &info
+                            .channel_outpoint
+                            .expect("valid onion packet contains channel outpoint");
+                        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+                            Some(channel_id) => channel_id,
+                            None => {
+                                // TODO: Return error to the sender. This is a payment failure.
+                                error!("Failed to process onion packet: channel id not found for channel outpoint {:?}. Are we connected to the peer?", channel_outpoint);
+                                return Ok(());
+                            }
+                        };
                         let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
                         let rpc_reply = RpcReplyPort::from(send);
                         let command = ChannelCommand::AddTlc(
