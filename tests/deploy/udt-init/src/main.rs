@@ -19,6 +19,7 @@ use ckb_types::{packed::CellDep, prelude::Builder};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::net::TcpListener;
 
 use std::{error::Error as StdErr, str::FromStr};
 
@@ -198,13 +199,26 @@ struct UdtInfos {
     infos: Vec<UdtInfo>,
 }
 
+fn is_port_available(port: u16) -> bool {
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener); // Close the listener
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 fn generate_ports(num_ports: usize) -> Vec<u16> {
     let mut ports = HashSet::new();
     let mut rng = rand::thread_rng();
 
     while ports.len() < num_ports {
-        let port: u16 = rng.gen_range(1024..=65535);
-        ports.insert(port);
+        // avoid https://en.wikipedia.org/wiki/Ephemeral_port
+        let port: u16 = rng.gen_range(1024..32768);
+        if is_port_available(port) {
+            ports.insert(port);
+        }
     }
 
     ports.into_iter().collect()
@@ -246,7 +260,7 @@ fn genrate_nodes_config() {
     for (i, config_dir) in config_dirs.iter().enumerate() {
         let use_gen_port = on_github_action && i != 0;
         let default_fiber_port = (8343 + i) as u16;
-        let default_rpc_port = (41713 + i) as u16;
+        let default_rpc_port = (21713 + i) as u16;
         let (fiber_port, rpc_port) = if use_gen_port {
             (*ports_iter.next().unwrap(), *ports_iter.next().unwrap())
         } else {
