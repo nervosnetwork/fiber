@@ -1531,6 +1531,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
+name = "fiber-sphinx"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c94381300373be2ca1021ecb906c34d1d71c7e4baf28ef5f4b8414fe0cd84ea2"
+dependencies = [
+ "chacha20",
+ "hmac",
+ "secp256k1 0.28.2",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1568,6 +1581,7 @@ dependencies = [
  "ckb-types",
  "clap",
  "clap-serde-derive",
+ "fiber-sphinx",
  "futures",
  "git-version",
  "hex",
