@@ -163,6 +163,14 @@ impl Batch {
                     serde_json::to_vec(&channel_data).expect("serialize ChannelData should be OK"),
                 );
             }
+            KeyValue::NetworkActorState(peer_id, persistent_network_actor_state) => {
+                let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&persistent_network_actor_state)
+                        .expect("serialize PersistentNetworkActorState should be OK"),
+                );
+            }
         }
     }
 
@@ -180,24 +188,26 @@ impl Batch {
 }
 
 ///
-/// +--------------+--------------------+--------------------------+
-/// | KeyPrefix::  | Key::              | Value::                  |
-/// +--------------+--------------------+--------------------------+
-/// | 0            | Hash256            | ChannelActorState        |
-/// | 32           | Hash256            | CkbInvoice               |
-/// | 64           | PeerId | Hash256   | ChannelState             |
-/// | 96           | ChannelId          | ChannelInfo              |
-/// | 97           | Block | Index      | ChannelId                |
-/// | 98           | Timestamp          | ChannelId                |
-/// | 128          | NodeId             | NodeInfo                 |
-/// | 129          | Timestamp          | NodeId                   |
-/// | 160          | PeerId             | MultiAddr                |
-/// | 192          | Hash256            | PaymentSession           |
-/// | 224          | Hash256            | ChannelData              |
-/// +--------------+--------------------+--------------------------+
+/// +--------------+--------------------+-----------------------------+
+/// | KeyPrefix::  | Key::              | Value::                     |
+/// +--------------+--------------------+-----------------------------+
+/// | 0            | Hash256            | ChannelActorState           |
+/// | 16           | PeerId             | PersistentNetworkActorState |
+/// | 32           | Hash256            | CkbInvoice                  |
+/// | 64           | PeerId | Hash256   | ChannelState                |
+/// | 96           | ChannelId          | ChannelInfo                 |
+/// | 97           | Block | Index      | ChannelId                   |
+/// | 98           | Timestamp          | ChannelId                   |
+/// | 128          | NodeId             | NodeInfo                    |
+/// | 129          | Timestamp          | NodeId                      |
+/// | 160          | PeerId             | MultiAddr                   |
+/// | 192          | Hash256            | PaymentSession              |
+/// | 224          | Hash256            | ChannelData                 |
+/// +--------------+--------------------+-----------------------------+
 ///
 
 const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
+const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
 const CKB_INVOICE_PREFIX: u8 = 32;
 const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
 const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
@@ -219,14 +229,29 @@ enum KeyValue {
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
+    NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
 impl NetworkActorStateStore for Store {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
-        None
+        let mut key = Vec::with_capacity(33);
+        key.push(PEER_ID_NETWORK_ACTOR_STATE_PREFIX);
+        key.extend_from_slice(id.as_bytes());
+        let iter = self
+            .db
+            .prefix_iterator(key.as_ref())
+            .find(|(col_key, _)| col_key.starts_with(&key));
+        iter.map(|(_key, value)| {
+            serde_json::from_slice(value.as_ref())
+                .expect("deserialize PersistentNetworkActorState should be OK")
+        })
     }
 
-    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {}
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::NetworkActorState(id.clone(), state));
+        batch.commit();
+    }
 }
 
 impl ChannelActorStateStore for Store {

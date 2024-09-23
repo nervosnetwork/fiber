@@ -1,3 +1,4 @@
+use super::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::TransactionView;
@@ -12,6 +13,7 @@ use ractor::{
 use rand::Rng;
 use secp256k1::Message;
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -1984,9 +1986,11 @@ pub struct NetworkActorState<S> {
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
 }
 
-#[derive(Default, Clone)]
+#[serde_as]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct PersistentNetworkActorState {
     // Outpoint to channel id mapping.
+    #[serde_as(as = "Vec<(EntityHex, _)>")]
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
 }
 
