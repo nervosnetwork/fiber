@@ -316,6 +316,7 @@ pub enum NetworkServiceEvent {
     ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
+    NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
     PeerDisConnected(PeerId, Multiaddr),
     // An incoming/outgoing channel is created.
@@ -1987,7 +1988,7 @@ pub struct NetworkActorState<S> {
 }
 
 #[serde_as]
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentNetworkActorState {
     // Outpoint to channel id mapping.
     #[serde_as(as = "Vec<(EntityHex, _)>")]
@@ -3211,6 +3212,10 @@ where
         self.store
             .insert_network_actor_state(&state.peer_id, state.persistent_state.clone());
         debug!("Network service for {:?} shutdown", state.peer_id);
+        self.event_sender
+            .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
+            .await
+            .expect("send network stopped event");
         Ok(())
     }
 
