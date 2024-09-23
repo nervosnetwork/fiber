@@ -49,6 +49,8 @@ pub async fn main() {
         .fmt_fields(node_formatter)
         .init();
 
+    info!("Starting node with git version {}", fnn::get_git_versin());
+
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
     let config = Config::parse();

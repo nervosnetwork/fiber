@@ -22,6 +22,14 @@ pub mod actors;
 
 pub mod tasks;
 
+use git_version::git_version;
+
+const GIT_VERSION: &str = git_version!();
+
+pub fn get_git_versin() -> &'static str {
+    GIT_VERSION
+}
+
 pub fn get_node_prefix() -> &'static str {
     static INSTANCE: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
