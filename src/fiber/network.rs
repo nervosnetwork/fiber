@@ -1183,6 +1183,7 @@ where
             NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
                 if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
                     if let Ok(info) = onion_packet.shift() {
+                        debug!("Processing onion info: {:?}", &info);
                         let channel_id = state
                             .get_channel_id_for_outpoint(
                                 &info
@@ -3110,10 +3111,19 @@ where
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
             .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
             .expect("Get current block number from chain");
-        let persistent_state = self
-            .store
-            .get_network_actor_state(&my_peer_id)
-            .unwrap_or_default();
+        let persistent_state = match self.store.get_network_actor_state(&my_peer_id) {
+            Some(state) => {
+                debug!(
+                    "Persistent state for peer {:?} found, loading {:?}",
+                    &my_peer_id, &state
+                );
+                state
+            }
+            None => {
+                debug!("No persistent state found for peer {:?}", &my_peer_id);
+                Default::default()
+            }
+        };
         let state = NetworkActorState {
             store: self.store.clone(),
             persistent_state,

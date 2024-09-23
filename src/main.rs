@@ -221,6 +221,7 @@ pub async fn main() {
         None => None,
     };
 
+    info!("Registering ctrl-c handler");
     signal::ctrl_c().await.expect("Failed to listen for event");
     info!("Received Ctrl-C, shutting down");
     if let Some(handle) = rpc_server_handle {
