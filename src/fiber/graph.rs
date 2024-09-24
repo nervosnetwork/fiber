@@ -107,7 +107,7 @@ pub struct ChannelUpdateInfo {
     /// Mostly redundant with the data we store in fields explicitly.
     /// Everything else is useful only for sending out for initial routing sync.
     /// Not stored if contains excess data to prevent DoS.
-    pub last_update_message: Option<ChannelUpdate>,
+    pub last_update_message: ChannelUpdate,
 }
 
 #[derive(Clone, Debug)]
@@ -350,7 +350,7 @@ where
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
-            last_update_message: Some(update.clone()),
+            last_update_message: update.clone(),
         });
 
         self.store.insert_channel(channel.to_owned());
