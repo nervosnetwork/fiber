@@ -43,7 +43,8 @@ pub struct ChannelInfo {
     pub node2: Pubkey,
     pub last_updated_timestamp: Option<u64>,
     pub created_timestamp: u64,
-    pub fee_rate: u64,
+    pub node1_to_node2_fee_rate: Option<u64>,
+    pub node2_to_node1_fee_rate: Option<u64>,
     pub capacity: u128,
     pub chain_hash: Hash256,
 }
@@ -119,40 +120,20 @@ where
         let chain_hash = network_graph.chain_hash();
         let channels = network_graph
             .channels()
-            .map(|channel_info| {
-                let mut res = vec![];
-                if let Some(channel_update) = &channel_info.one_to_two {
-                    res.push(ChannelInfo {
-                        channel_outpoint: channel_info.out_point(),
-                        funding_tx_block_number: channel_info.funding_tx_block_number,
-                        funidng_tx_index: channel_info.funding_tx_index,
-                        node1: channel_info.node1(),
-                        node2: channel_info.node2(),
-                        capacity: channel_info.capacity(),
-                        last_updated_timestamp: channel_info.channel_update_one_to_two_timestamp(),
-                        created_timestamp: channel_info.timestamp,
-                        fee_rate: channel_update.fee_rate,
-                        chain_hash,
-                    })
-                }
-                if let Some(channel_update) = &channel_info.two_to_one {
-                    res.push(ChannelInfo {
-                        channel_outpoint: channel_info.out_point(),
-                        funding_tx_block_number: channel_info.funding_tx_block_number,
-                        funidng_tx_index: channel_info.funding_tx_index,
-                        node1: channel_info.node1(),
-                        node2: channel_info.node2(),
-                        capacity: channel_info.capacity(),
-                        last_updated_timestamp: channel_info.channel_update_two_to_one_timestamp(),
-                        created_timestamp: channel_info.timestamp,
-                        fee_rate: channel_update.fee_rate,
-                        chain_hash,
-                    })
-                }
-                res.into_iter()
+            .map(|channel_info| ChannelInfo {
+                channel_outpoint: channel_info.out_point(),
+                funding_tx_block_number: channel_info.funding_tx_block_number,
+                funidng_tx_index: channel_info.funding_tx_index,
+                node1: channel_info.node1(),
+                node2: channel_info.node2(),
+                capacity: channel_info.capacity(),
+                last_updated_timestamp: channel_info.channel_update_one_to_two_timestamp(),
+                created_timestamp: channel_info.timestamp,
+                node1_to_node2_fee_rate: channel_info.one_to_two.as_ref().map(|cu| cu.fee_rate),
+                node2_to_node1_fee_rate: channel_info.two_to_one.as_ref().map(|cu| cu.fee_rate),
+                chain_hash,
             })
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect();
         Ok(GraphChannelsResult { channels })
     }
 }
