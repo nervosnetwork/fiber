@@ -1099,7 +1099,9 @@ where
                 );
                 if let NetworkSyncStatus::Running(state) = &mut state.sync_status {
                     if let Some(actor) = state.active_syncers.remove(&peer_id) {
-                        actor.get_cell().kill();
+                        actor
+                            .get_cell()
+                            .stop(Some("stopping syncer normally".to_string()));
                     }
                     debug!("Changing sync succeeded/failed counter");
                     match reason {
