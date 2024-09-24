@@ -359,13 +359,12 @@ impl NetworkGraphStateStore for Store {
     ) -> (Vec<ChannelInfo>, JsonBytes) {
         let channel_prefix = vec![CHANNEL_INFO_PREFIX];
         let (prefix, skip) = after
-            .clone()
-            .map(|after| {
+            .as_ref()
+            .map_or((vec![CHANNEL_INFO_PREFIX], 0), |after| {
                 let mut key = Vec::with_capacity(37);
                 key.extend_from_slice(after.as_bytes());
                 (key, 1)
-            })
-            .unwrap_or((vec![CHANNEL_INFO_PREFIX], 0));
+            });
         let outpoint_key = outpoint.map(|outpoint| {
             let mut key = Vec::with_capacity(37);
             key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
@@ -410,14 +409,11 @@ impl NetworkGraphStateStore for Store {
         node_id: Option<Pubkey>,
     ) -> (Vec<NodeInfo>, JsonBytes) {
         let node_prefix = vec![NODE_INFO_PREFIX];
-        let (prefix, skip) = after
-            .clone()
-            .map(|after| {
-                let mut key = Vec::with_capacity(34);
-                key.extend_from_slice(after.as_bytes());
-                (key, 1)
-            })
-            .unwrap_or((vec![NODE_INFO_PREFIX], 0));
+        let (prefix, skip) = after.as_ref().map_or((vec![NODE_INFO_PREFIX], 0), |after| {
+            let mut key = Vec::with_capacity(34);
+            key.extend_from_slice(after.as_bytes());
+            (key, 1)
+        });
         let node_key = node_id.map(|node_id| {
             let mut key = Vec::with_capacity(34);
             key.push(NODE_INFO_PREFIX);
@@ -566,16 +562,73 @@ impl WatchtowerStore for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fiber::config::AnnouncedNodeName;
     use crate::fiber::test_utils::gen_sha256_hash;
+    use crate::fiber::types::ChannelAnnouncement;
+    use crate::fiber::types::NodeAnnouncement;
     use crate::invoice::*;
     use crate::watchtower::*;
     use ckb_types::packed::Bytes;
     use ckb_types::packed::CellOutput;
+    use ckb_types::prelude::Builder;
+    use ckb_types::prelude::Pack;
     use musig2::CompactSignature;
+    use secp256k1::Keypair;
+    use secp256k1::PublicKey;
+    use secp256k1::Secp256k1;
     use tempfile::tempdir;
 
+    fn gen_rand_public_key() -> PublicKey {
+        let secp = Secp256k1::new();
+        let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+        PublicKey::from_keypair(&key_pair)
+    }
+
+    fn mock_node() -> (Pubkey, NodeInfo) {
+        let node_id: Pubkey = gen_rand_public_key().into();
+        let node = NodeInfo {
+            node_id,
+            anouncement_msg: NodeAnnouncement::new_unsigned(
+                AnnouncedNodeName::from_str("node1").expect("invalid name"),
+                vec![],
+                node_id,
+                1,
+            ),
+            timestamp: 0,
+        };
+        (node_id, node)
+    }
+
+    fn mock_channel() -> ChannelInfo {
+        let node1: Pubkey = gen_rand_public_key().into();
+        let node2: Pubkey = gen_rand_public_key().into();
+        let secp = Secp256k1::new();
+        let keypair = Keypair::new(&secp, &mut rand::thread_rng());
+        let (xonly, _parity) = keypair.x_only_public_key();
+        let rand_hash256 = gen_sha256_hash();
+        ChannelInfo {
+            funding_tx_block_number: 0,
+            funding_tx_index: 0,
+            timestamp: 0,
+            node1_to_node2: None,
+            node2_to_node1: None,
+            announcement_msg: ChannelAnnouncement::new_unsigned(
+                &node1,
+                &node2,
+                OutPoint::new_builder()
+                    .tx_hash(rand_hash256.into())
+                    .index(0u32.pack())
+                    .build(),
+                Hash256::default(),
+                &xonly,
+                0,
+                None,
+            ),
+        }
+    }
+
     #[test]
-    fn test_invoice_store() {
+    fn test_store_invoice() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("invoice_store");
         let store = Store::new(path);
@@ -601,7 +654,71 @@ mod tests {
     }
 
     #[test]
-    fn test_wacthtower_store() {
+    fn test_store_channels() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invoice_store");
+        let store = Store::new(path);
+
+        let mut channels = vec![];
+        for _ in 0..10 {
+            let channel = mock_channel();
+            store.insert_channel(channel.clone());
+            channels.push(channel);
+        }
+
+        // sort by out_point
+        channels.sort_by(|a, b| a.out_point().cmp(&b.out_point()));
+
+        let outpoint_0 = channels[0].out_point();
+        assert_eq!(
+            store.get_channels(Some(outpoint_0)),
+            vec![channels[0].clone()]
+        );
+        let (res, last_cursor) = store.get_channels_with_params(1, None, None);
+        assert_eq!(res, vec![channels[0].clone()]);
+        assert_eq!(res.len(), 1);
+
+        let mut key = Vec::with_capacity(34);
+        key.push(CHANNEL_INFO_PREFIX);
+        key.extend_from_slice(channels[0].out_point().as_slice());
+        assert_eq!(last_cursor, JsonBytes::from_bytes(key.to_vec().into()));
+
+        let (res, _last_cursor) = store.get_channels_with_params(3, Some(last_cursor), None);
+        assert_eq!(res, channels[1..=3]);
+    }
+
+    #[test]
+    fn test_store_nodes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invoice_store");
+        let store = Store::new(path);
+
+        let mut nodes = vec![];
+        for _ in 0..10 {
+            let (_, node) = mock_node();
+            store.insert_node(node.clone());
+            nodes.push(node);
+        }
+
+        // sort by node pubkey
+        nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+
+        let node_id = nodes[0].node_id;
+        assert_eq!(store.get_nodes(Some(node_id)), vec![nodes[0].clone()]);
+        let (res, last_cursor) = store.get_nodes_with_params(1, None, None);
+        assert_eq!(res, vec![nodes[0].clone()]);
+        assert_eq!(res.len(), 1);
+        let mut key = Vec::with_capacity(34);
+        key.push(NODE_INFO_PREFIX);
+        key.extend_from_slice(nodes[0].node_id.serialize().as_ref());
+        assert_eq!(last_cursor, JsonBytes::from_bytes(key.to_vec().into()));
+
+        let (res, _last_cursor) = store.get_nodes_with_params(3, Some(last_cursor), None);
+        assert_eq!(res, nodes[1..=3]);
+    }
+
+    #[test]
+    fn test_store_wacthtower() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("watchtower_store");
         let store = Store::new(path);
