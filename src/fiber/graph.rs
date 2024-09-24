@@ -1,4 +1,4 @@
-use super::network::{get_chain_hash, SendPaymentCommand};
+use super::network::{get_chain_hash, SendPaymentData};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
@@ -455,27 +455,16 @@ where
         self.connected_peer_addresses.clear();
     }
 
-    pub fn init_payment_session(&self, payment_request: SendPaymentCommand) -> PaymentSession {
-        let payment_session = PaymentSession::new(payment_request, 3);
-        if let Some(session) = self
-            .store
-            .get_payment_session(payment_session.payment_hash())
-        {
-            return session;
-        } else {
-            self.store.insert_payment_session(payment_session.clone());
-            payment_session
-        }
-    }
-
     pub fn build_route(
         &self,
-        payment_request: SendPaymentCommand,
+        payment_request: SendPaymentData,
     ) -> Result<Vec<OnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
-            .check_valid()
-            .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
+        let target = payment_request.target_pubkey;
+        let amount = payment_request.amount;
+        let preimage = payment_request.preimage;
+        let payment_hash = payment_request.payment_hash;
+        let udt_type_script = payment_request.udt_type_script;
         let invoice = payment_request
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
@@ -781,32 +770,49 @@ pub trait NetworkGraphStateStore {
     fn insert_payment_session(&self, session: PaymentSession);
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentSessionStatus {
+    Created,
+    Inflight,
+    Success,
+    Failed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
-    pub command: SendPaymentCommand,
+    pub request: SendPaymentData,
     pub retried_times: u32,
     pub last_error: Option<String>,
     pub try_limit: u32,
+    pub status: PaymentSessionStatus,
+    pub created_time: u128,
 }
 
 impl PaymentSession {
-    pub fn new(command: SendPaymentCommand, try_limit: u32) -> Self {
+    pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
         Self {
-            command,
+            request,
             retried_times: 0,
             last_error: None,
             try_limit,
+            status: PaymentSessionStatus::Created,
+            created_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
         }
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        self.command.payment_hash()
+        self.request.payment_hash
+    }
+
+    pub fn set_status(&mut self, status: PaymentSessionStatus) {
+        self.status = status;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fiber::network::SendPaymentData;
     use crate::fiber::test_utils::{generate_keypair, generate_pubkey};
     use crate::store::Store;
     use ckb_types::prelude::Entity;
@@ -1312,17 +1318,18 @@ mod tests {
         let node2 = network.keys[2];
         let node3 = network.keys[3];
         // Test build route from node1 to node3
-        let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: Some(node3.into()),
-            amount: Some(100),
-            payment_hash: Some(Hash256::default()),
+        let route = network.graph.build_route(SendPaymentData {
+            target_pubkey: node3.into(),
+            amount: 100,
+            payment_hash: Hash256::default(),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
-            keysend: None,
+            keysend: false,
             udt_type_script: None,
+            preimage: None,
         });
         eprintln!("return {:?}", route);
         assert!(route.is_ok());
@@ -1349,17 +1356,18 @@ mod tests {
         let node3 = network.keys[3];
 
         // Test build route from node1 to node3 with amount exceeding max_htlc_value
-        let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: Some(node3.into()),
-            amount: Some(100), // Exceeds max_htlc_value of 50
-            payment_hash: Some(Hash256::default()),
+        let route = network.graph.build_route(SendPaymentData {
+            target_pubkey: node3.into(),
+            amount: 100, // Exceeds max_htlc_value of 50
+            payment_hash: Hash256::default(),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
-            keysend: None,
+            keysend: false,
             udt_type_script: None,
+            preimage: None,
         });
         assert!(route.is_err());
     }
@@ -1373,17 +1381,18 @@ mod tests {
         let node3 = network.keys[3];
 
         // Test build route from node1 to node3 with amount below min_htlc_value
-        let route = network.graph.build_route(SendPaymentCommand {
-            target_pubkey: Some(node3.into()),
-            amount: Some(10), // Below min_htlc_value of 50
-            payment_hash: Some(Hash256::default()),
+        let route = network.graph.build_route(SendPaymentData {
+            target_pubkey: node3.into(),
+            amount: 10, // Below min_htlc_value of 50
+            payment_hash: Hash256::default(),
             invoice: None,
             final_cltv_delta: Some(100),
             timeout: Some(10),
             max_fee_amount: Some(1000),
             max_parts: None,
-            keysend: None,
+            keysend: false,
             udt_type_script: None,
+            preimage: None,
         });
         assert!(route.is_err());
     }

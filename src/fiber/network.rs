@@ -69,7 +69,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
+use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
 use crate::invoice::{CkbInvoice, InvoiceStore};
 use crate::{unwrap_or_return, Error};
@@ -221,12 +221,26 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
 }
 
-impl SendPaymentCommand {
-    // return (target_pubkey, amount, payment_hash, preimage, udt_type_script)
-    pub fn check_valid(
-        &self,
-    ) -> Result<(Pubkey, u128, Hash256, Option<Hash256>, Option<Script>), String> {
-        let invoice = self
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendPaymentData {
+    pub target_pubkey: Pubkey,
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub invoice: Option<String>,
+    pub final_cltv_delta: Option<u64>,
+    pub timeout: Option<u64>,
+    pub max_fee_amount: Option<u128>,
+    pub max_parts: Option<u64>,
+    pub keysend: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+    pub preimage: Option<Hash256>,
+}
+
+impl SendPaymentData {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+        let invoice = command
             .invoice
             .as_ref()
             .map(|invoice| invoice.parse::<CkbInvoice>())
@@ -252,7 +266,7 @@ impl SendPaymentCommand {
         }
 
         let target = validate_field(
-            self.target_pubkey,
+            command.target_pubkey,
             invoice
                 .as_ref()
                 .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
@@ -260,13 +274,13 @@ impl SendPaymentCommand {
         )?;
 
         let amount = validate_field(
-            self.amount,
+            command.amount,
             invoice.as_ref().and_then(|i| i.amount()),
             "amount",
         )?;
 
         let udt_type_script = match validate_field(
-            self.udt_type_script.clone(),
+            command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
             "udt_type_script",
         ) {
@@ -275,10 +289,11 @@ impl SendPaymentCommand {
             Err(e) => return Err(e),
         };
 
-        let (payment_hash, preimage) = if !self.is_keysend() {
+        let keysend = command.keysend.unwrap_or(false);
+        let (payment_hash, preimage) = if !keysend {
             (
                 validate_field(
-                    self.payment_hash,
+                    command.payment_hash,
                     invoice.as_ref().map(|i| *i.payment_hash()),
                     "payment_hash",
                 )?,
@@ -298,16 +313,19 @@ impl SendPaymentCommand {
             (payment_hash, Some(preimage))
         };
 
-        Ok((target, amount, payment_hash, preimage, udt_type_script))
-    }
-
-    pub fn payment_hash(&self) -> Hash256 {
-        let (_, _, payment_hash, ..) = self.check_valid().expect("valid SendPaymentCommand");
-        payment_hash
-    }
-
-    pub fn is_keysend(&self) -> bool {
-        self.keysend.unwrap_or(false)
+        Ok(SendPaymentData {
+            target_pubkey: target,
+            amount,
+            payment_hash,
+            invoice: command.invoice,
+            final_cltv_delta: command.final_cltv_delta,
+            timeout: command.timeout,
+            max_fee_amount: command.max_fee_amount,
+            max_parts: command.max_parts,
+            keysend,
+            udt_type_script,
+            preimage,
+        })
     }
 }
 
@@ -1801,25 +1819,95 @@ where
         }
     }
 
+    fn prepare_payment_session(&self, payment_data: SendPaymentData) -> PaymentSession {
+        let payment_session = PaymentSession::new(payment_data.clone(), 5);
+        self.store.insert_payment_session(payment_session.clone());
+        payment_session
+    }
+
     async fn on_send_payment(
         &self,
         my_self: ActorRef<NetworkActorMessage>,
         payment_request: SendPaymentCommand,
     ) -> Result<Hash256, Error> {
         let graph = self.network_graph.read().await;
+        let payment_data = SendPaymentData::new(payment_request).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
         // initialize the payment session in db and begin the payment process in a statemachine to
         // handle the payment process
-        let payment_session = PaymentSession::new(payment_request.clone(), 3);
+        if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
+            // we only allow retrying payment session with status failed
+            if payment_session.status != PaymentSessionStatus::Failed {
+                return Err(Error::InvalidParameter(format!(
+                    "Payment session already exists: {} with payment session status: {:?}",
+                    payment_data.payment_hash, payment_session.status
+                )));
+            }
+        }
 
-        let onion_path = graph.build_route(payment_request.clone())?;
-        assert!(!onion_path.is_empty());
-        let onion_packet = OnionPacket::new(onion_path).serialize();
+        let mut payment_session = self.prepare_payment_session(payment_data.clone());
+        let mut error = None;
 
-        let res = my_self.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
-        ));
-        info!("send_payment: {:?} => result: {:?}", payment_request, res);
-        Ok(payment_session.payment_hash())
+        for i in 0..payment_session.try_limit {
+            debug!(
+                "send_payment: {:?} => retrying: {:?}",
+                payment_data.payment_hash, i
+            );
+            payment_session.retried_times += 1;
+            let onion_path = graph.build_route(payment_data.clone());
+            let onion_path = match onion_path {
+                Err(e) => {
+                    error!("Failed to build route: {:?}", e);
+                    payment_session.set_status(PaymentSessionStatus::Failed);
+                    error = Some(Err(Error::PaymentError(format!(
+                        "Failed to build route: {:?}",
+                        payment_data.payment_hash
+                    ))));
+                    break;
+                }
+                Ok(onion_path) => {
+                    assert!(!onion_path.is_empty());
+                    onion_path
+                }
+            };
+
+            let onion_packet = OnionPacket::new(onion_path).serialize();
+            let res = my_self.send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
+            ));
+
+            debug!(
+                "send_payment: {:?} => sending onion packet: {:?}",
+                payment_data.payment_hash, res
+            );
+            match res {
+                Err(e) => {
+                    error!("Failed to send onion packet: {:?}", e);
+                    // for some error we may need to update the graph and then retry
+                    // TODO: update the graph here according to the error
+                    let err = format!(
+                        "Failed to send onion packet: {:?} with error: {:?}",
+                        payment_data.payment_hash, e
+                    );
+                    payment_session.last_error = Some(err.clone());
+                    error = Some(Err(Error::PaymentError(err)));
+                    continue;
+                }
+                Ok(_) => {
+                    info!(
+                        "send_payment: {:?} => onion packet sent: {:?}",
+                        payment_data.payment_hash, onion_packet
+                    );
+                    payment_session.set_status(PaymentSessionStatus::Inflight);
+                    return Ok(payment_session.payment_hash());
+                }
+            }
+        }
+        payment_session.set_status(PaymentSessionStatus::Failed);
+        self.store.insert_payment_session(payment_session);
+        return error.expect("expect error details");
     }
 }
 
