@@ -48,31 +48,7 @@ ckb run -C "$deploy_dir/node-data" --indexer &
 cd "$nodes_dir" || exit 1
 
 start() {
-    # Number of retries
-    MAX_RETRIES=5
-    # Initial retry count
-    RETRY_COUNT=0
-
-    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-        # Run the cargo command
-        OUTPUT=$(cargo run -- "$@" 2>&1)
-        # Capture the exit status of the cargo command
-        EXIT_STATUS=$?
-
-        # Check if the exit status is non-zero and the error message contains "Address already in use"
-        if [ $EXIT_STATUS -ne 0 ] && echo "$OUTPUT" | grep -q "Address already in use"; then
-            echo "Address already in use. Retrying in 3 seconds..."
-            RETRY_COUNT=$((RETRY_COUNT + 1))
-            sleep 3
-        else
-            # Print the output and exit the loop if the command was successful or the error is not "Address already in use"
-            echo "$OUTPUT"
-            break
-        fi
-    done
-
-    # Exit with the last exit status
-    return $EXIT_STATUS
+    cargo run -- "$@"
 }
 
 if [ "$#" -ne 1 ]; then
