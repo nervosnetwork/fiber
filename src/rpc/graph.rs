@@ -141,10 +141,10 @@ where
                 node1: channel_info.node1(),
                 node2: channel_info.node2(),
                 capacity: channel_info.capacity(),
-                last_updated_timestamp: channel_info.channel_update_one_to_two_timestamp(),
+                last_updated_timestamp: channel_info.channel_last_update_time(),
                 created_timestamp: channel_info.timestamp,
-                node1_to_node2_fee_rate: channel_info.one_to_two.as_ref().map(|cu| cu.fee_rate),
-                node2_to_node1_fee_rate: channel_info.two_to_one.as_ref().map(|cu| cu.fee_rate),
+                node1_to_node2_fee_rate: channel_info.node1_to_node2.as_ref().map(|cu| cu.fee_rate),
+                node2_to_node1_fee_rate: channel_info.node2_to_node1.as_ref().map(|cu| cu.fee_rate),
                 chain_hash,
             })
             .collect();

@@ -343,18 +343,18 @@ impl NetworkGraphStateStore for MemoryStore {
 
     fn get_nodes_with_params(
         &self,
-        limit: usize,
-        after: Option<JsonBytes>,
-        node_id: Option<Pubkey>,
+        _limit: usize,
+        _after: Option<JsonBytes>,
+        _node_id: Option<Pubkey>,
     ) -> (Vec<NodeInfo>, JsonBytes) {
         unimplemented!("currently not used in mock store");
     }
 
     fn get_channels_with_params(
         &self,
-        limit: usize,
-        after: Option<JsonBytes>,
-        outpoint: Option<OutPoint>,
+        _limit: usize,
+        _after: Option<JsonBytes>,
+        _ooutpoint: Option<OutPoint>,
     ) -> (Vec<ChannelInfo>, JsonBytes) {
         unimplemented!("currently not used in mock store");
     }
