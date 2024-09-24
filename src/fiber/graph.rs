@@ -5,6 +5,7 @@ use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::OnionInfo;
 use crate::invoice::CkbInvoice;
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -281,6 +282,14 @@ where
 
     pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.values()
+    }
+
+    pub fn query_nodes(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+    ) -> (Vec<NodeInfo>, JsonBytes) {
+        self.store.get_nodes_with_query(limit, after, None)
     }
 
     pub fn get_node(&self, node_id: Pubkey) -> Option<&NodeInfo> {
@@ -736,6 +745,12 @@ where
 pub trait NetworkGraphStateStore {
     fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo>;
     fn get_nodes(&self, peer_id: Option<Pubkey>) -> Vec<NodeInfo>;
+    fn get_nodes_with_query(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+        node_id: Option<Pubkey>,
+    ) -> (Vec<NodeInfo>, JsonBytes);
     fn insert_channel(&self, channel: ChannelInfo);
     fn insert_node(&self, node: NodeInfo);
     fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr);

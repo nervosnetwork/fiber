@@ -340,6 +340,15 @@ impl NetworkGraphStateStore for MemoryStore {
         }
     }
 
+    fn get_nodes_with_query(
+        &self,
+        _limit: usize,
+        _after: Option<ckb_jsonrpc_types::JsonBytes>,
+        _node_id: Option<Pubkey>,
+    ) -> (Vec<NodeInfo>, ckb_jsonrpc_types::JsonBytes) {
+        unimplemented!("get_nodes_with_query currently not used in mock store");
+    }
+
     fn insert_node(&self, node: NodeInfo) {
         self.nodes_map
             .write()

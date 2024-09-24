@@ -4,6 +4,7 @@ use crate::fiber::{
     config::AnnouncedNodeName,
     graph::{NetworkGraph, NetworkGraphStateStore},
 };
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,10 @@ use tentacle::multiaddr::MultiAddr;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GraphNodesParams {}
+pub struct GraphNodesParams {
+    limit: usize,
+    after: Option<JsonBytes>,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
@@ -27,6 +31,7 @@ pub struct NodeInfo {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GraphNodesResult {
     pub nodes: Vec<NodeInfo>,
+    pub last_cursor: JsonBytes,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -96,11 +101,13 @@ where
 {
     async fn graph_nodes(
         &self,
-        _params: GraphNodesParams,
+        params: GraphNodesParams,
     ) -> Result<GraphNodesResult, ErrorObjectOwned> {
         let network_graph = self.network_graph.read().await;
-        let nodes = network_graph
-            .nodes()
+        let (nodes, last_cursor) = network_graph.query_nodes(params.limit, params.after);
+
+        let nodes = nodes
+            .iter()
             .map(|node_info| NodeInfo {
                 alias: node_info.anouncement_msg.alias,
                 addresses: node_info.anouncement_msg.addresses.clone(),
@@ -109,7 +116,7 @@ where
                 chain_hash: node_info.anouncement_msg.chain_hash,
             })
             .collect();
-        Ok(GraphNodesResult { nodes })
+        Ok(GraphNodesResult { nodes, last_cursor })
     }
 
     async fn graph_channels(

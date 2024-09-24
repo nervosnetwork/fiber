@@ -7,6 +7,7 @@ use crate::{
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
     watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, IteratorMode, WriteBatch, DB};
@@ -367,23 +368,52 @@ impl NetworkGraphStateStore for Store {
     }
 
     fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
-        let key = match node_id {
-            Some(node_id) => {
+        let (nodes, _) = self.get_nodes_with_query(usize::MAX, None, node_id);
+        nodes
+    }
+
+    fn get_nodes_with_query(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+        node_id: Option<Pubkey>,
+    ) -> (Vec<NodeInfo>, JsonBytes) {
+        let (prefix, skip) = after
+            .map(|after| {
                 let mut key = Vec::with_capacity(34);
-                key.extend_from_slice(&[NODE_INFO_PREFIX]);
-                key.extend_from_slice(node_id.serialize().as_ref());
-                key
-            }
-            None => vec![NODE_INFO_PREFIX],
-        };
+                key.push(NODE_INFO_PREFIX);
+                key.extend_from_slice(after.as_bytes());
+                (key, 1)
+            })
+            .unwrap_or((vec![NODE_INFO_PREFIX], 0));
+        let node_key = node_id.map(|node_id| {
+            let mut key = Vec::with_capacity(34);
+            key.push(NODE_INFO_PREFIX);
+            key.extend_from_slice(node_id.serialize().as_ref());
+            key
+        });
         let iter = self
             .db
-            .prefix_iterator(key.as_ref())
-            .take_while(|(col_key, _)| col_key.starts_with(&key));
-        iter.map(|(_col_key, value)| {
-            serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
-        })
-        .collect()
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(key, _)| key.starts_with(&prefix))
+            .filter_map(|(col_key, value)| {
+                if let Some(key) = &node_key {
+                    if !col_key.starts_with(&key) {
+                        return None;
+                    }
+                }
+                Some((col_key, value))
+            })
+            .skip(skip)
+            .take(limit);
+        let mut last_key = Vec::new();
+        let nodes = iter
+            .map(|(col_key, value)| {
+                last_key = col_key.to_vec();
+                serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
+            })
+            .collect();
+        (nodes, JsonBytes::from_bytes(last_key.into()))
     }
 
     fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
