@@ -906,12 +906,12 @@ where
                             channel_info
                                 .one_to_two
                                 .as_ref()
-                                .and_then(|u| u.last_update_message.clone())
+                                .map(|u| u.last_update_message.clone())
                         } else {
                             channel_info
                                 .two_to_one
                                 .as_ref()
-                                .and_then(|u| u.last_update_message.clone())
+                                .map(|u| u.last_update_message.clone())
                         };
                         match update {
                             Some(update) => Ok(FiberBroadcastMessage::ChannelUpdate(update)),
