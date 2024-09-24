@@ -830,23 +830,23 @@ where
             }
         }
         for channel_info in network_graph.channels() {
-            if let Some(t) = channel_info.channel_update_one_to_two_timestamp() {
+            if let Some(t) = channel_info.channel_update_node1_to_node2_timestamp() {
                 if is_within_range(t) {
                     queries.push(FiberBroadcastMessageQuery::ChannelUpdate(
                         ChannelUpdateQuery {
                             channel_outpoint: channel_info.out_point(),
-                            flags: channel_info.one_to_two_channel_update_flags(),
+                            flags: channel_info.node1_to_node2_channel_update_flags(),
                         },
                     ));
                 }
             }
 
-            if let Some(t) = channel_info.channel_update_two_to_one_timestamp() {
+            if let Some(t) = channel_info.channel_update_node2_to_node1_timestamp() {
                 if is_within_range(t) {
                     queries.push(FiberBroadcastMessageQuery::ChannelUpdate(
                         ChannelUpdateQuery {
                             channel_outpoint: channel_info.out_point(),
-                            flags: channel_info.two_to_one_channel_update_flags(),
+                            flags: channel_info.node2_to_node1_channel_update_flags(),
                         },
                     ));
                 }
@@ -899,17 +899,17 @@ where
                 flags,
             }) => {
                 let channel_info = network_graph.get_channel(&channel_outpoint);
-                let is_one_to_two = flags & 1 == 0;
+                let is_node1_to_node2 = flags & 1 == 0;
                 match channel_info {
                     Some(channel_info) => {
-                        let update = if is_one_to_two {
+                        let update = if is_node1_to_node2 {
                             channel_info
-                                .one_to_two
+                                .node1_to_node2
                                 .as_ref()
                                 .and_then(|u| u.last_update_message.clone())
                         } else {
                             channel_info
-                                .two_to_one
+                                .node2_to_node1
                                 .as_ref()
                                 .and_then(|u| u.last_update_message.clone())
                         };
@@ -1596,7 +1596,7 @@ where
                     &channel_announcement
                 );
                 let message = channel_announcement.message_to_sign();
-                if channel_announcement.node_1_id == channel_announcement.node_2_id {
+                if channel_announcement.node1_id == channel_announcement.node2_id {
                     return Err(Error::InvalidParameter(format!(
                         "Channel announcement node had a channel with itself: {:?}",
                         &channel_announcement
@@ -1613,13 +1613,13 @@ where
                         &channel_announcement
                     )));
                 }
-                let (node_1_signature, node_2_signature, ckb_signature) = match (
-                    channel_announcement.node_1_signature,
-                    channel_announcement.node_2_signature,
+                let (node1_signature, node2_signature, ckb_signature) = match (
+                    channel_announcement.node1_signature,
+                    channel_announcement.node2_signature,
                     channel_announcement.ckb_signature,
                 ) {
-                    (Some(node_1_signature), Some(node_2_signature), Some(ckb_signature)) => {
-                        (node_1_signature, node_2_signature, ckb_signature)
+                    (Some(node1_signature), Some(node2_signature), Some(ckb_signature)) => {
+                        (node1_signature, node2_signature, ckb_signature)
                     }
                     _ => {
                         return Err(Error::InvalidParameter(format!(
@@ -1629,23 +1629,23 @@ where
                     }
                 };
 
-                if !node_1_signature.verify(&channel_announcement.node_1_id, &message) {
+                if !node1_signature.verify(&channel_announcement.node1_id, &message) {
                     return Err(Error::InvalidParameter(format!(
                         "Channel announcement message signature verification failed for node 1: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
                         &channel_announcement,
                         &message,
-                        &node_1_signature,
-                        &channel_announcement.node_1_id
+                        &node1_signature,
+                        &channel_announcement.node1_id
                     )));
                 }
 
-                if !node_2_signature.verify(&channel_announcement.node_2_id, &message) {
+                if !node2_signature.verify(&channel_announcement.node2_id, &message) {
                     return Err(Error::InvalidParameter(format!(
                         "Channel announcement message signature verification failed for node 2: {:?}, message: {:?}, signature: {:?}, pubkey: {:?}",
                         &channel_announcement,
                         &message,
-                        &node_2_signature,
-                        &channel_announcement.node_2_id
+                        &node2_signature,
+                        &channel_announcement.node2_id
                     )));
                 }
 
@@ -1739,8 +1739,8 @@ where
                     funding_tx_block_number: block_number,
                     funding_tx_index: tx_index,
                     announcement_msg: channel_announcement.clone(),
-                    one_to_two: None, // wait for channel update message
-                    two_to_one: None,
+                    node1_to_node2: None, // wait for channel update message
+                    node2_to_node1: None,
                     timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
                 };
                 self.network_graph.write().await.add_channel(channel_info);

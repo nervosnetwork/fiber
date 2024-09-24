@@ -174,8 +174,8 @@ table NodeAnnouncement {
 }
 
 table ChannelAnnouncement {
-    node_signature_1: EcdsaSignature,
-    node_signature_2: EcdsaSignature,
+    node1_signature: EcdsaSignature,
+    node2_signature: EcdsaSignature,
     // Signature signed by the funding transaction output public key.
     ckb_signature: SchnorrSignature,
     // Tentatively using 64 bits for features. May change the type later while developing.
@@ -184,8 +184,8 @@ table ChannelAnnouncement {
     features: Uint64,
     chain_hash: Byte32,
     channel_outpoint: OutPoint,
-    node_1_id: Pubkey,
-    node_2_id: Pubkey,
+    node1_id: Pubkey,
+    node2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
     ckb_key: SchnorrXOnlyPubkey,
     capacity: Uint128,

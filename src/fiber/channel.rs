@@ -2178,8 +2178,8 @@ impl ChannelActorState {
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
-        let local_is_node_1 = self.local_is_node_1();
-        let message_flags = if local_is_node_1 { 0 } else { 1 };
+        let local_is_node1 = self.local_is_node1();
+        let message_flags = if local_is_node1 { 0 } else { 1 };
 
         self.public_channel_info.as_ref().and_then(|info| {
             match (
@@ -2512,7 +2512,7 @@ impl ChannelActorState {
         self.state = new_state;
     }
 
-    fn local_is_node_1(&self) -> bool {
+    fn local_is_node1(&self) -> bool {
         self.local_pubkey < self.remote_pubkey
     }
 
@@ -2536,14 +2536,14 @@ impl ChannelActorState {
                 + self.remote_reserved_ckb_amount as u128
         };
 
-        let (node_1_id, node_2_id) = if self.local_is_node_1() {
+        let (node1_id, node2_id) = if self.local_is_node1() {
             (self.local_pubkey, self.remote_pubkey)
         } else {
             (self.remote_pubkey, self.local_pubkey)
         };
         let channel_announcement = ChannelAnnouncement::new_unsigned(
-            &node_1_id,
-            &node_2_id,
+            &node1_id,
+            &node2_id,
             channel_outpoint,
             Default::default(),
             &self.get_funding_lock_script_xonly_key(),
@@ -2604,12 +2604,12 @@ impl ChannelActorState {
 
         debug!("Aggregating partial signatures for channel {:?}", &self.id);
 
-        if self.local_is_node_1() {
-            channel_announcement.node_1_signature = Some(local_node_signature);
-            channel_announcement.node_2_signature = Some(remote_node_signature);
+        if self.local_is_node1() {
+            channel_announcement.node1_signature = Some(local_node_signature);
+            channel_announcement.node2_signature = Some(remote_node_signature);
         } else {
-            channel_announcement.node_1_signature = Some(remote_node_signature);
-            channel_announcement.node_2_signature = Some(local_node_signature);
+            channel_announcement.node1_signature = Some(remote_node_signature);
+            channel_announcement.node2_signature = Some(local_node_signature);
         }
 
         let partial_signatures =

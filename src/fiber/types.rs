@@ -1500,8 +1500,8 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelAnnouncement {
-    pub node_1_signature: Option<EcdsaSignature>,
-    pub node_2_signature: Option<EcdsaSignature>,
+    pub node1_signature: Option<EcdsaSignature>,
+    pub node2_signature: Option<EcdsaSignature>,
     // Signature signed by the funding transaction output public key.
     pub ckb_signature: Option<SchnorrSignature>,
     // Tentatively using 64 bits for features. May change the type later while developing.
@@ -1510,8 +1510,8 @@ pub struct ChannelAnnouncement {
     pub chain_hash: Hash256,
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    pub node_1_id: Pubkey,
-    pub node_2_id: Pubkey,
+    pub node1_id: Pubkey,
+    pub node2_id: Pubkey,
     // The aggregated public key of the funding transaction output.
     pub ckb_key: XOnlyPublicKey,
     // The total capacity of the channel.
@@ -1523,8 +1523,8 @@ pub struct ChannelAnnouncement {
 
 impl ChannelAnnouncement {
     pub fn new_unsigned(
-        node_1_pubkey: &Pubkey,
-        node_2_pubkey: &Pubkey,
+        node1_pubkey: &Pubkey,
+        node2_pubkey: &Pubkey,
         channel_outpoint: OutPoint,
         chain_hash: Hash256,
         ckb_pubkey: &XOnlyPublicKey,
@@ -1532,14 +1532,14 @@ impl ChannelAnnouncement {
         udt_type_script: Option<Script>,
     ) -> Self {
         Self {
-            node_1_signature: None,
-            node_2_signature: None,
+            node1_signature: None,
+            node2_signature: None,
             ckb_signature: None,
             features: Default::default(),
             chain_hash,
             channel_outpoint,
-            node_1_id: *node_1_pubkey,
-            node_2_id: *node_2_pubkey,
+            node1_id: *node1_pubkey,
+            node2_id: *node2_pubkey,
             ckb_key: *ckb_pubkey,
             capacity,
             udt_type_script,
@@ -1547,21 +1547,21 @@ impl ChannelAnnouncement {
     }
 
     pub fn is_signed(&self) -> bool {
-        self.node_1_signature.is_some()
-            && self.node_2_signature.is_some()
+        self.node1_signature.is_some()
+            && self.node2_signature.is_some()
             && self.ckb_signature.is_some()
     }
 
     pub fn message_to_sign(&self) -> [u8; 32] {
         let unsigned_announcement = Self {
-            node_1_signature: None,
-            node_2_signature: None,
+            node1_signature: None,
+            node2_signature: None,
             ckb_signature: None,
             features: self.features,
             chain_hash: self.chain_hash,
             channel_outpoint: self.channel_outpoint.clone(),
-            node_1_id: self.node_1_id,
-            node_2_id: self.node_2_id,
+            node1_id: self.node1_id,
+            node2_id: self.node2_id,
             ckb_key: self.ckb_key,
             capacity: self.capacity,
             udt_type_script: self.udt_type_script.clone(),
@@ -1573,15 +1573,15 @@ impl ChannelAnnouncement {
 impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
     fn from(channel_announcement: ChannelAnnouncement) -> Self {
         molecule_fiber::ChannelAnnouncement::new_builder()
-            .node_signature_1(
+            .node1_signature(
                 channel_announcement
-                    .node_1_signature
+                    .node1_signature
                     .expect("channel announcement signed")
                     .into(),
             )
-            .node_signature_2(
+            .node2_signature(
                 channel_announcement
-                    .node_2_signature
+                    .node2_signature
                     .expect("channel announcement signed")
                     .into(),
             )
@@ -1594,8 +1594,8 @@ impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
             .features(channel_announcement.features.pack())
             .chain_hash(channel_announcement.chain_hash.into())
             .channel_outpoint(channel_announcement.channel_outpoint)
-            .node_1_id(channel_announcement.node_1_id.into())
-            .node_2_id(channel_announcement.node_2_id.into())
+            .node1_id(channel_announcement.node1_id.into())
+            .node2_id(channel_announcement.node2_id.into())
             .capacity(channel_announcement.capacity.pack())
             .udt_type_script(channel_announcement.udt_type_script.pack())
             .ckb_key(channel_announcement.ckb_key.into())
@@ -1610,16 +1610,16 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
         channel_announcement: molecule_fiber::ChannelAnnouncement,
     ) -> Result<Self, Self::Error> {
         Ok(ChannelAnnouncement {
-            node_1_signature: Some(channel_announcement.node_signature_1().try_into()?),
-            node_2_signature: Some(channel_announcement.node_signature_2().try_into()?),
+            node1_signature: Some(channel_announcement.node1_signature().try_into()?),
+            node2_signature: Some(channel_announcement.node2_signature().try_into()?),
             ckb_signature: Some(channel_announcement.ckb_signature().try_into()?),
             features: channel_announcement.features().unpack(),
             capacity: channel_announcement.capacity().unpack(),
             chain_hash: channel_announcement.chain_hash().into(),
             channel_outpoint: channel_announcement.channel_outpoint(),
             udt_type_script: channel_announcement.udt_type_script().to_opt(),
-            node_1_id: channel_announcement.node_1_id().try_into()?,
-            node_2_id: channel_announcement.node_2_id().try_into()?,
+            node1_id: channel_announcement.node1_id().try_into()?,
+            node2_id: channel_announcement.node2_id().try_into()?,
             ckb_key: channel_announcement.ckb_key().try_into()?,
         })
     }
