@@ -35,8 +35,8 @@ pub struct ChannelInfo {
     pub funding_tx_block_number: u64,
     pub funding_tx_index: u32,
     pub announcement_msg: ChannelAnnouncement,
-    pub one_to_two: Option<ChannelUpdateInfo>,
-    pub two_to_one: Option<ChannelUpdateInfo>,
+    pub node1_to_node2: Option<ChannelUpdateInfo>,
+    pub node2_to_node1: Option<ChannelUpdateInfo>,
     // The time that the channel was announced to the network.
     pub timestamp: u64,
 }
@@ -47,35 +47,35 @@ impl ChannelInfo {
     }
 
     pub fn node1(&self) -> Pubkey {
-        self.announcement_msg.node_1_id
+        self.announcement_msg.node1_id
     }
 
     pub fn node2(&self) -> Pubkey {
-        self.announcement_msg.node_2_id
+        self.announcement_msg.node2_id
     }
 
     pub fn channel_annoucement_timestamp(&self) -> u64 {
         self.timestamp
     }
 
-    pub fn one_to_two_channel_update_flags(&self) -> u8 {
+    pub fn node1_to_node2_channel_update_flags(&self) -> u8 {
         1
     }
 
-    pub fn two_to_one_channel_update_flags(&self) -> u8 {
+    pub fn node2_to_node1_channel_update_flags(&self) -> u8 {
         0
     }
 
-    pub fn channel_update_one_to_two_timestamp(&self) -> Option<u64> {
-        self.one_to_two.as_ref().map(|x| x.timestamp)
+    pub fn channel_update_node1_to_node2_timestamp(&self) -> Option<u64> {
+        self.node1_to_node2.as_ref().map(|x| x.timestamp)
     }
 
-    pub fn channel_update_two_to_one_timestamp(&self) -> Option<u64> {
-        self.two_to_one.as_ref().map(|x| x.timestamp)
+    pub fn channel_update_node2_to_node1_timestamp(&self) -> Option<u64> {
+        self.node2_to_node1.as_ref().map(|x| x.timestamp)
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.one_to_two.is_some() && self.two_to_one.is_some()
+        self.node1_to_node2.is_some() && self.node2_to_node1.is_some()
     }
 
     pub fn capacity(&self) -> u128 {
@@ -172,12 +172,12 @@ where
             if self.last_update_timestamp < channel.timestamp {
                 self.last_update_timestamp = channel.timestamp;
             }
-            if let Some(channel_update) = channel.one_to_two.as_ref() {
+            if let Some(channel_update) = channel.node1_to_node2.as_ref() {
                 if self.last_update_timestamp < channel_update.timestamp {
                     self.last_update_timestamp = channel_update.timestamp;
                 }
             }
-            if let Some(channel_update) = channel.two_to_one.as_ref() {
+            if let Some(channel_update) = channel.node2_to_node1.as_ref() {
                 if self.last_update_timestamp < channel_update.timestamp {
                     self.last_update_timestamp = channel_update.timestamp;
                 }
@@ -244,7 +244,7 @@ where
             Some(channel) => {
                 // If the channel already exists, we don't need to update it
                 // FIXME: if other fields is different, we should consider it as malioucious and ban the node?
-                if channel.one_to_two.is_some() || channel.two_to_one.is_some() {
+                if channel.node1_to_node2.is_some() || channel.node2_to_node1.is_some() {
                     return;
                 }
             }
@@ -324,9 +324,9 @@ where
             &channel, &update
         );
         let update_info = if update.message_flags & 1 == 1 {
-            &mut channel.one_to_two
+            &mut channel.node1_to_node2
         } else {
-            &mut channel.two_to_one
+            &mut channel.node2_to_node1
         };
 
         if let Some(info) = update_info {
@@ -389,13 +389,13 @@ where
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         self.channels.values().filter_map(move |channel| {
-            if let Some(info) = channel.one_to_two.as_ref() {
+            if let Some(info) = channel.node1_to_node2.as_ref() {
                 if info.enabled && channel.node2() == node_id {
                     return Some((channel.node1(), channel, info));
                 }
             }
 
-            if let Some(info) = channel.two_to_one.as_ref() {
+            if let Some(info) = channel.node2_to_node1.as_ref() {
                 if info.enabled && channel.node1() == node_id {
                     return Some((channel.node2(), channel, info));
                 }
@@ -489,9 +489,9 @@ where
                     .get_channel(&route[i + 1].channel_outpoint)
                     .expect("channel not found");
                 let channel_update = &if channel_info.node1() == route[i + 1].target {
-                    channel_info.two_to_one.as_ref()
+                    channel_info.node2_to_node1.as_ref()
                 } else {
-                    channel_info.one_to_two.as_ref()
+                    channel_info.node1_to_node2.as_ref()
                 }
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
@@ -851,11 +851,11 @@ mod tests {
                 funding_tx_index: 0,
                 announcement_msg: ChannelAnnouncement {
                     chain_hash: get_chain_hash(),
-                    node_1_id: public_key1.into(),
-                    node_2_id: public_key2.into(),
+                    node1_id: public_key1.into(),
+                    node2_id: public_key2.into(),
                     channel_outpoint: channel_outpoint.clone(),
-                    node_1_signature: None,
-                    node_2_signature: None,
+                    node1_signature: None,
+                    node2_signature: None,
                     capacity: capacity.unwrap_or(1000),
                     ckb_key: XOnlyPublicKey::from_slice([0x01; 32].as_ref()).unwrap(),
                     ckb_signature: None,
@@ -863,8 +863,8 @@ mod tests {
                     features: 0,
                 },
                 timestamp: 0,
-                one_to_two: None,
-                two_to_one: None,
+                node1_to_node2: None,
+                node2_to_node1: None,
             };
             self.graph.add_channel(channel_info);
             let channel_update = ChannelUpdate {
