@@ -40,7 +40,7 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("get result: ", res.body.result);
-  if (res.body.result.channels.length != 4) {
+  if (res.body.result.channels.length != 2) {
     throw new Error("Assertion failed: channels number is not right");
   }
 }

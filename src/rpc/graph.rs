@@ -1,9 +1,6 @@
+use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{Hash256, Pubkey};
-use crate::fiber::{
-    config::AnnouncedNodeName,
-    graph::{NetworkGraph, NetworkGraphStateStore},
-};
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
@@ -15,13 +12,13 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GraphNodesParams {
-    limit: usize,
+    limit: Option<usize>,
     after: Option<JsonBytes>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
-    pub alias: AnnouncedNodeName,
+    pub alias: String,
     pub addresses: Vec<MultiAddr>,
     pub node_id: Pubkey,
     pub timestamp: u64,
@@ -35,7 +32,10 @@ pub struct GraphNodesResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GraphChannelsParams {}
+pub struct GraphChannelsParams {
+    limit: Option<usize>,
+    after: Option<JsonBytes>,
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
@@ -57,6 +57,7 @@ pub struct ChannelInfo {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GraphChannelsResult {
     pub channels: Vec<ChannelInfo>,
+    pub last_cursor: JsonBytes,
 }
 
 #[rpc(server)]
@@ -104,12 +105,14 @@ where
         params: GraphNodesParams,
     ) -> Result<GraphNodesResult, ErrorObjectOwned> {
         let network_graph = self.network_graph.read().await;
-        let (nodes, last_cursor) = network_graph.query_nodes(params.limit, params.after);
+        let default_max_limit = 500;
+        let (nodes, last_cursor) = network_graph
+            .get_nodes_with_params(params.limit.unwrap_or(default_max_limit), params.after);
 
         let nodes = nodes
             .iter()
             .map(|node_info| NodeInfo {
-                alias: node_info.anouncement_msg.alias,
+                alias: node_info.anouncement_msg.alias.as_str().to_string(),
                 addresses: node_info.anouncement_msg.addresses.clone(),
                 node_id: node_info.node_id,
                 timestamp: node_info.timestamp,
@@ -121,12 +124,16 @@ where
 
     async fn graph_channels(
         &self,
-        _params: GraphChannelsParams,
+        params: GraphChannelsParams,
     ) -> Result<GraphChannelsResult, ErrorObjectOwned> {
+        let default_max_limit = 500;
         let network_graph = self.network_graph.read().await;
         let chain_hash = network_graph.chain_hash();
-        let channels = network_graph
-            .channels()
+        let (channels, last_cursor) = network_graph
+            .get_channels_with_params(params.limit.unwrap_or(default_max_limit), params.after);
+
+        let channels = channels
+            .iter()
             .map(|channel_info| ChannelInfo {
                 channel_outpoint: channel_info.out_point(),
                 funding_tx_block_number: channel_info.funding_tx_block_number,
@@ -141,6 +148,9 @@ where
                 chain_hash,
             })
             .collect();
-        Ok(GraphChannelsResult { channels })
+        Ok(GraphChannelsResult {
+            channels,
+            last_cursor,
+        })
     }
 }

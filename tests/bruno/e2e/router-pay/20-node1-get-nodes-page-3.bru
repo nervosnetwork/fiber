@@ -1,7 +1,8 @@
+
 meta {
   name: Node1 send get_nodes rpc request
   type: http
-  seq: 16
+  seq: 20
 }
 
 post {
@@ -20,7 +21,10 @@ body:json {
     "id": "42",
     "jsonrpc": "2.0",
     "method": "graph_nodes",
-    "params": [{}]
+    "params": [{
+        "limit": 2,
+        "after": "{{last_cursor_2}}"
+    }]
   }
 }
 
@@ -37,7 +41,7 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("get result: ", res.body.result);
-  if (res.body.result.nodes.length != 4) {
+  if (res.body.result.nodes.length != 0) {
     throw new Error("Assertion failed: nodes number is not right");
   }
 }

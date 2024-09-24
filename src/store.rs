@@ -10,7 +10,7 @@ use crate::{
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use rocksdb::{prelude::*, DBIterator, IteratorMode, WriteBatch, DB};
+use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
 use serde_json;
 use std::{path::Path, sync::Arc};
 use tentacle::{multiaddr::Multiaddr, secio::PeerId};
@@ -347,41 +347,73 @@ impl InvoiceStore for Store {
 
 impl NetworkGraphStateStore for Store {
     fn get_channels(&self, channel_id: Option<OutPoint>) -> Vec<ChannelInfo> {
-        let key = match channel_id.clone() {
-            Some(channel_id) => {
-                let mut key = Vec::with_capacity(37);
-                key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
-                key.extend_from_slice(channel_id.as_slice());
-                key
-            }
-            None => vec![CHANNEL_INFO_PREFIX],
-        };
+        let (channels, _) = self.get_channels_with_params(usize::MAX, None, channel_id);
+        channels
+    }
 
+    fn get_channels_with_params(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+        outpoint: Option<OutPoint>,
+    ) -> (Vec<ChannelInfo>, JsonBytes) {
+        let channel_prefix = vec![CHANNEL_INFO_PREFIX];
+        let (prefix, skip) = after
+            .clone()
+            .map(|after| {
+                let mut key = Vec::with_capacity(37);
+                key.extend_from_slice(after.as_bytes());
+                (key, 1)
+            })
+            .unwrap_or((vec![CHANNEL_INFO_PREFIX], 0));
+        let outpoint_key = outpoint.map(|outpoint| {
+            let mut key = Vec::with_capacity(37);
+            key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
+            key.extend_from_slice(outpoint.as_slice());
+            key
+        });
+
+        let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
         let iter = self
             .db
-            .prefix_iterator(key.as_ref())
-            .take_while(|(col_key, _)| col_key.starts_with(&key));
-        iter.map(|(_key, value)| {
-            serde_json::from_slice(value.as_ref()).expect("deserialize ChannelInfo should be OK")
-        })
-        .collect()
+            .iterator(mode)
+            .take_while(|(key, _)| key.starts_with(&channel_prefix))
+            .filter_map(|(col_key, value)| {
+                if let Some(key) = &outpoint_key {
+                    if !col_key.starts_with(&key) {
+                        return None;
+                    }
+                }
+                Some((col_key, value))
+            })
+            .skip(skip)
+            .take(limit);
+        let mut last_key = Vec::new();
+        let channels = iter
+            .map(|(col_key, value)| {
+                last_key = col_key.to_vec();
+                serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
+            })
+            .collect();
+        (channels, JsonBytes::from_bytes(last_key.into()))
     }
 
     fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
-        let (nodes, _) = self.get_nodes_with_query(usize::MAX, None, node_id);
+        let (nodes, _) = self.get_nodes_with_params(usize::MAX, None, node_id);
         nodes
     }
 
-    fn get_nodes_with_query(
+    fn get_nodes_with_params(
         &self,
         limit: usize,
         after: Option<JsonBytes>,
         node_id: Option<Pubkey>,
     ) -> (Vec<NodeInfo>, JsonBytes) {
+        let node_prefix = vec![NODE_INFO_PREFIX];
         let (prefix, skip) = after
+            .clone()
             .map(|after| {
                 let mut key = Vec::with_capacity(34);
-                key.push(NODE_INFO_PREFIX);
                 key.extend_from_slice(after.as_bytes());
                 (key, 1)
             })
@@ -392,10 +424,11 @@ impl NetworkGraphStateStore for Store {
             key.extend_from_slice(node_id.serialize().as_ref());
             key
         });
+        let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
         let iter = self
             .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(key, _)| key.starts_with(&prefix))
+            .iterator(mode)
+            .take_while(|(key, _)| key.starts_with(&node_prefix))
             .filter_map(|(col_key, value)| {
                 if let Some(key) = &node_key {
                     if !col_key.starts_with(&key) {

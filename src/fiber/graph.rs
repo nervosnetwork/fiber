@@ -284,12 +284,20 @@ where
         self.nodes.values()
     }
 
-    pub fn query_nodes(
+    pub fn get_nodes_with_params(
         &self,
         limit: usize,
         after: Option<JsonBytes>,
     ) -> (Vec<NodeInfo>, JsonBytes) {
-        self.store.get_nodes_with_query(limit, after, None)
+        self.store.get_nodes_with_params(limit, after, None)
+    }
+
+    pub fn get_channels_with_params(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+    ) -> (Vec<ChannelInfo>, JsonBytes) {
+        self.store.get_channels_with_params(limit, after, None)
     }
 
     pub fn get_node(&self, node_id: Pubkey) -> Option<&NodeInfo> {
@@ -745,12 +753,18 @@ where
 pub trait NetworkGraphStateStore {
     fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo>;
     fn get_nodes(&self, peer_id: Option<Pubkey>) -> Vec<NodeInfo>;
-    fn get_nodes_with_query(
+    fn get_nodes_with_params(
         &self,
         limit: usize,
         after: Option<JsonBytes>,
         node_id: Option<Pubkey>,
     ) -> (Vec<NodeInfo>, JsonBytes);
+    fn get_channels_with_params(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+        outpoint: Option<OutPoint>,
+    ) -> (Vec<ChannelInfo>, JsonBytes);
     fn insert_channel(&self, channel: ChannelInfo);
     fn insert_node(&self, node: NodeInfo);
     fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr);

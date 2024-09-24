@@ -5,7 +5,7 @@ export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_start_bootnode="${START_BOOTNODE:-}"
-should_generate_port="${ON_GITHUB_ACTION:-}"
+on_github_action="${ON_GITHUB_ACTION:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
 deploy_dir="$(dirname "$script_dir")/deploy"

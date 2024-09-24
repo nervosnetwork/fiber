@@ -1,6 +1,7 @@
 use crate::fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo};
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
@@ -340,13 +341,22 @@ impl NetworkGraphStateStore for MemoryStore {
         }
     }
 
-    fn get_nodes_with_query(
+    fn get_nodes_with_params(
         &self,
-        _limit: usize,
-        _after: Option<ckb_jsonrpc_types::JsonBytes>,
-        _node_id: Option<Pubkey>,
-    ) -> (Vec<NodeInfo>, ckb_jsonrpc_types::JsonBytes) {
-        unimplemented!("get_nodes_with_query currently not used in mock store");
+        limit: usize,
+        after: Option<JsonBytes>,
+        node_id: Option<Pubkey>,
+    ) -> (Vec<NodeInfo>, JsonBytes) {
+        unimplemented!("currently not used in mock store");
+    }
+
+    fn get_channels_with_params(
+        &self,
+        limit: usize,
+        after: Option<JsonBytes>,
+        outpoint: Option<OutPoint>,
+    ) -> (Vec<ChannelInfo>, JsonBytes) {
+        unimplemented!("currently not used in mock store");
     }
 
     fn insert_node(&self, node: NodeInfo) {
