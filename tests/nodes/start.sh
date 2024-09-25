@@ -4,6 +4,7 @@ export SHELLOPTS
 export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
+should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"
 should_start_bootnode="${START_BOOTNODE:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 nodes_dir="$(dirname "$script_dir")/nodes"
@@ -25,7 +26,10 @@ if [[ ! -f "$deploy_dir/.env" ]]; then
     echo "In case of issue pesisting, run $deploy_dir/init-dev-chain.sh -f to reintialize the devchain"
     exit 1
 else
-    if [ -n "$should_remove_old_state" ]; then
+    if [ -n "$should_clean_fiber_state" ]; then
+        echo "starting to clean fiber store ...."
+        rm -rf "$nodes_dir"/*/fiber/store
+    elif [ -n "$should_remove_old_state" ]; then
         echo "starting to reset ...."
         rm -rf "$nodes_dir"/*/fiber/store
         "$deploy_dir/init-dev-chain.sh" -f
