@@ -3075,6 +3075,17 @@ impl ChannelActorState {
     }
 
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
+        let payment_hash = tlc.payment_hash;
+        if self
+            .tlcs
+            .values()
+            .any(|tlc| tlc.tlc.payment_hash == payment_hash)
+        {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Trying to insert tlc with duplicate payment hash {:?}",
+                payment_hash
+            )));
+        }
         if let Some(current) = self.tlcs.get(&tlc.id) {
             if current.tlc == tlc {
                 debug!(
