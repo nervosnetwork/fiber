@@ -967,23 +967,23 @@ where
         let mut updated = false;
 
         if let Some(enabled) = enabled {
-            updated = updated || state.update_our_enabled(enabled);
+            updated |= state.update_our_enabled(enabled);
         }
 
         if let Some(delta) = tlc_locktime_expiry_delta {
-            updated = updated || state.update_our_locktime_expiry_delta(delta);
+            updated |= state.update_our_locktime_expiry_delta(delta);
         }
 
         if let Some(value) = tlc_minimum_value {
-            updated = updated || state.update_our_tlc_min_value(value);
+            updated |= state.update_our_tlc_min_value(value);
         }
 
         if let Some(value) = tlc_maximum_value {
-            updated = updated || state.update_our_tlc_max_value(value);
+            updated |= state.update_our_tlc_max_value(value);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {
-            updated = updated || state.update_our_tlc_fee_proportional_millionths(fee);
+            updated |= state.update_our_tlc_fee_proportional_millionths(fee);
         }
 
         if updated {
