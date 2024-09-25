@@ -1,5 +1,6 @@
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
 use crate::fiber::types::{Hash256, Pubkey};
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
@@ -16,11 +17,13 @@ pub struct GraphNodesParams {
     after: Option<JsonBytes>,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NodeInfo {
     pub alias: String,
     pub addresses: Vec<MultiAddr>,
     pub node_id: Pubkey,
+    #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     pub chain_hash: Hash256,
 }
@@ -42,14 +45,20 @@ pub struct GraphChannelsParams {
 pub struct ChannelInfo {
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
+    #[serde_as(as = "U64Hex")]
     pub funding_tx_block_number: u64,
+    #[serde_as(as = "U32Hex")]
     pub funidng_tx_index: u32,
     pub node1: Pubkey,
     pub node2: Pubkey,
+    #[serde_as(as = "Option<U64Hex>")]
     pub last_updated_timestamp: Option<u64>,
     pub created_timestamp: u64,
+    #[serde_as(as = "Option<U64Hex>")]
     pub node1_to_node2_fee_rate: Option<u64>,
+    #[serde_as(as = "Option<U64Hex>")]
     pub node2_to_node1_fee_rate: Option<u64>,
+    #[serde_as(as = "U128Hex")]
     pub capacity: u128,
     pub chain_hash: Hash256,
 }
