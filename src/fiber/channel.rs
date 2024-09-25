@@ -3074,14 +3074,14 @@ impl ChannelActorState {
 
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
         let payment_hash = tlc.payment_hash;
-        if self
+        if let Some(tlc) = self
             .tlcs
             .values()
-            .any(|tlc| tlc.tlc.payment_hash == payment_hash)
+            .find(|tlc| tlc.tlc.payment_hash == payment_hash && tlc.removed_at.is_none())
         {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Trying to insert tlc with duplicate payment hash {:?}",
-                payment_hash
+                "Trying to insert tlc with duplicate payment hash {:?} with tlc {:?}",
+                payment_hash, tlc
             )));
         }
         if let Some(current) = self.tlcs.get(&tlc.id) {
@@ -6123,6 +6123,9 @@ mod tests {
         })
         .expect("node_b alive")
         .expect("successfully removed tlc");
+
+        dbg!("Sleeping for some time to wait for the RemoveTlc processed by both party");
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
