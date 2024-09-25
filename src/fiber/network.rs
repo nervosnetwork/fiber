@@ -139,7 +139,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    SendOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
+    SendOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<u64, String>>),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information.
@@ -333,6 +333,12 @@ impl SendPaymentData {
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
+}
+
+#[derive(Debug)]
+pub struct SendOnionPacketCommand {
+    pub packet: Vec<u8>,
+    pub previous_tlc: Option<(Hash256, u64)>,
 }
 
 impl NetworkActorMessage {
@@ -1216,42 +1222,10 @@ where
             }
 
             // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
-            NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
-                if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
-                    if let Ok(info) = onion_packet.shift() {
-                        debug!("Processing onion packet info: {:?}", info);
-                        let channel_outpoint = &info
-                            .channel_outpoint
-                            .expect("valid onion packet contains channel outpoint");
-                        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
-                            Some(channel_id) => channel_id,
-                            None => {
-                                // TODO: Return error to the sender. This is a payment failure.
-                                error!("Failed to process onion packet: channel id not found for channel outpoint {:?}. Are we connected to the peer?", channel_outpoint);
-                                return Ok(());
-                            }
-                        };
-                        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
-                        let rpc_reply = RpcReplyPort::from(send);
-                        let command = ChannelCommand::AddTlc(
-                            AddTlcCommand {
-                                amount: info.amount,
-                                preimage: None,
-                                payment_hash: Some(info.payment_hash),
-                                expiry: info.expiry.into(),
-                                hash_algorithm: info.tlc_hash_algorithm,
-                                onion_packet: onion_packet.serialize(),
-                                previous_tlc,
-                            },
-                            rpc_reply,
-                        );
-                        state.send_command_to_channel(*channel_id, command).await?;
-                        let res = recv.await.expect("recv add tlc response");
-                        info!("send onion packet: {:?}", res);
-                    }
-                } else {
-                    info!("onion packet is empty, ignore it");
-                }
+            NetworkActorCommand::SendOnionPacket(command, reply) => {
+                info!("send onion packet: {:?}", command);
+                self.handle_onion_packet_send_command(state, command, reply)
+                    .await;
             }
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
@@ -1449,7 +1423,7 @@ where
                 let _ = reply.send(signature);
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
-                match self.on_send_payment(myself, payment_request).await {
+                match self.on_send_payment(state, myself, payment_request).await {
                     Ok(payment_hash) => {
                         let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
                     }
@@ -1819,6 +1793,74 @@ where
         }
     }
 
+    async fn handle_onion_packet_send_command(
+        &self,
+        state: &mut NetworkActorState<S>,
+        command: SendOnionPacketCommand,
+        reply: RpcReplyPort<Result<u64, String>>,
+    ) {
+        let SendOnionPacketCommand {
+            packet,
+            previous_tlc,
+        } = command;
+        if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
+            if let Ok(info) = onion_packet.shift() {
+                debug!("Processing onion packet info: {:?}", info);
+                let channel_outpoint = &info
+                    .channel_outpoint
+                    .expect("valid onion packet contains channel outpoint");
+                let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+                    Some(channel_id) => channel_id,
+                    None => {
+                        error!(
+                            "Failed to process onion packet: channel id not found for channel outpoint {:?}. \
+                            Are we connected to the peer?",
+                            channel_outpoint
+                        );
+                        reply
+                            .send(Err("channel id not found".to_string()))
+                            .expect("send add tlc response");
+                        return;
+                    }
+                };
+                let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
+                let rpc_reply = RpcReplyPort::from(send);
+                let command = ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: info.amount,
+                        preimage: None,
+                        payment_hash: Some(info.payment_hash),
+                        expiry: info.expiry.into(),
+                        hash_algorithm: info.tlc_hash_algorithm,
+                        onion_packet: onion_packet.serialize(),
+                        previous_tlc,
+                    },
+                    rpc_reply,
+                );
+
+                // we have already checked the channel_id is valid
+                state
+                    .send_command_to_channel(*channel_id, command)
+                    .await
+                    .expect("send command failed");
+
+                let res = recv.await;
+                info!("send onion packet: {:?}", res);
+                let res = match res {
+                    Ok(Ok(res)) => Ok(res.tlc_id),
+                    Ok(Err(err)) => Err(err),
+                    Err(e) => Err(e.to_string()),
+                };
+                reply.send(res).expect("send error");
+            }
+        } else {
+            info!("onion packet is empty, ignore it");
+            reply
+                .send(Err("onion packet is empty".to_string()))
+                .expect("send error");
+        }
+    }
+
     fn prepare_payment_session(&self, payment_data: SendPaymentData) -> PaymentSession {
         let payment_session = PaymentSession::new(payment_data.clone(), 5);
         self.store.insert_payment_session(payment_session.clone());
@@ -1827,11 +1869,12 @@ where
 
     async fn on_send_payment(
         &self,
-        my_self: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
+        _my_self: ActorRef<NetworkActorMessage>,
         payment_request: SendPaymentCommand,
     ) -> Result<Hash256, Error> {
         let graph = self.network_graph.read().await;
-        let payment_data = SendPaymentData::new(payment_request).map_err(|e| {
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
@@ -1850,11 +1893,7 @@ where
         let mut payment_session = self.prepare_payment_session(payment_data.clone());
         let mut error = None;
 
-        for i in 0..payment_session.try_limit {
-            debug!(
-                "send_payment: {:?} => retrying: {:?}",
-                payment_data.payment_hash, i
-            );
+        for _i in 0..payment_session.try_limit {
             payment_session.retried_times += 1;
             let onion_path = graph.build_route(payment_data.clone());
             let onion_path = match onion_path {
@@ -1874,12 +1913,27 @@ where
             };
 
             let onion_packet = OnionPacket::new(onion_path).serialize();
-            let res = my_self.send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
-            ));
-
-            debug!(
-                "send_payment: {:?} => sending onion packet: {:?}",
+            let (send, recv) = oneshot::channel::<Result<u64, String>>();
+            let rpc_reply = RpcReplyPort::from(send);
+            let command = SendOnionPacketCommand {
+                packet: onion_packet.clone(),
+                previous_tlc: None,
+            };
+            self.handle_onion_packet_send_command(state, command, rpc_reply)
+                .await;
+            let res = recv.await;
+            info!(
+                "send_payment: {:?} => onion packet sent: {:?}",
+                payment_data.payment_hash, res,
+            );
+            let res = match res {
+                Ok(Ok(tlc_id)) => Ok(tlc_id),
+                Ok(Err(err)) => Err(err),
+                Err(e) => Err(e.to_string()),
+            }
+            .map_err(|err| Error::SendPaymentError(err.to_string()));
+            info!(
+                "send_payment: {:?} => result: {:?}",
                 payment_data.payment_hash, res
             );
             match res {

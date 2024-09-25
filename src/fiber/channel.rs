@@ -4,7 +4,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     fiber::{
-        network::get_chain_hash,
+        network::{get_chain_hash, SendOnionPacketCommand},
         types::{ChannelUpdate, OnionPacket},
     },
     invoice::InvoiceStore,
@@ -495,14 +495,21 @@ where
                 // this message, and our processing of this message is idempotent.
 
                 if forward_to_next_hop {
+                    let (send, recv) = oneshot::channel::<Result<u64, String>>();
+                    let rpc_reply = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::Command(
                             NetworkActorCommand::SendOnionPacket(
-                                add_tlc.onion_packet.clone(),
-                                Some((state.get_id(), tlc.get_id())),
+                                SendOnionPacketCommand {
+                                    packet: add_tlc.onion_packet.clone(),
+                                    previous_tlc: Some((state.get_id(), tlc.get_id())),
+                                },
+                                rpc_reply,
                             ),
                         ))
                         .expect("network actor is alive");
+                    let _res = recv.await;
+                    // TODO: if the result is an error, we should handle it. we need to begin to remove the tlc.
                 }
                 Ok(())
             }
