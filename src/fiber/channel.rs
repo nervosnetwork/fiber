@@ -450,30 +450,28 @@ where
             FiberChannelMessage::AddTlc(add_tlc) => {
                 state.check_for_tlc_update(Some(add_tlc.amount))?;
 
-                // check the onion_packet is valid or not, if not, we should return an error.
+                // check the onion_packet is valid or not, check the payment hash and amount.
+                // check time lock is valid or not.
                 // If there is a next hop, we should send the AddTlc message to the next hop.
-                // If this is the last hop, we should check the payment hash and amount and then
-                // try to fulfill the payment, find the corresponding payment preimage from payment hash.
+                // If this is the last hop, try to fulfill the payment,
+                // find the corresponding payment preimage from payment hash, this is done in try_to_settle_down_tlc.
                 let mut forward_to_next_hop = false;
                 let mut preimage = None;
                 if let Ok(onion_packet) = OnionPacket::deserialize(&add_tlc.onion_packet) {
                     if let Some(onion_info) = onion_packet.peek() {
-                        if onion_info.next_hop.is_some() {
-                            forward_to_next_hop = true;
-                        } else {
-                            // check the payment hash and amount
-                            if onion_info.payment_hash != add_tlc.payment_hash
-                                || onion_info.amount != add_tlc.amount
-                            {
-                                return Err(ProcessingChannelError::InvalidParameter(
-                                    "Payment hash or amount mismatch".to_string(),
-                                ));
-                            }
-                            // TODO: check the expiry time, if expired, we should return an error.
-
-                            // if this is the last hop, store the preimage.
-                            preimage = onion_info.preimage;
+                        // check the payment hash and amount
+                        if onion_info.payment_hash != add_tlc.payment_hash
+                            || onion_info.amount != add_tlc.amount
+                        {
+                            return Err(ProcessingChannelError::InvalidParameter(
+                                "Payment hash or amount mismatch".to_string(),
+                            ));
                         }
+                        // TODO: check the expiry time, if expired, we should return an error.
+                        // if this is the last hop, store the preimage.
+                        preimage = onion_info.preimage;
+
+                        forward_to_next_hop = onion_info.next_hop.is_some();
                     }
                 }
 

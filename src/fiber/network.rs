@@ -1955,7 +1955,8 @@ where
                         payment_data.payment_hash, onion_packet
                     );
                     payment_session.set_status(PaymentSessionStatus::Inflight);
-                    return Ok(payment_session.payment_hash());
+                    self.store.insert_payment_session(payment_session);
+                    return Ok(payment_data.payment_hash);
                 }
             }
         }
