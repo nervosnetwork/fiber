@@ -360,8 +360,10 @@ impl NetworkGraphStateStore for Store {
             .db
             .prefix_iterator(key.as_ref())
             .take_while(|(col_key, _)| col_key.starts_with(&key));
-        iter.map(|(_key, value)| {
-            serde_json::from_slice(value.as_ref()).expect("deserialize ChannelInfo should be OK")
+        iter.filter_map(|(_key, value)| {
+            let channel: ChannelInfo = serde_json::from_slice(value.as_ref())
+                .expect("deserialize ChannelInfo should be OK");
+            channel.is_enabled().then_some(channel)
         })
         .collect()
     }

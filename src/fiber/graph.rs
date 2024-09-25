@@ -74,8 +74,14 @@ impl ChannelInfo {
         self.node2_to_node1.as_ref().map(|x| x.timestamp)
     }
 
+    // TODO: Is it possible that a channel is enabled in one direction
+    // but disabled in the other direction?
     pub fn is_enabled(&self) -> bool {
-        self.node1_to_node2.is_some() && self.node2_to_node1.is_some()
+        match (&self.node1_to_node2, &self.node2_to_node1) {
+            (Some(update1), _) if !update1.enabled => false,
+            (_, Some(update2)) if !update2.enabled => false,
+            _ => true,
+        }
     }
 
     pub fn capacity(&self) -> u128 {
@@ -342,10 +348,12 @@ where
                 return Ok(());
             }
         }
+        let enabled = update.channel_flags & 1 == 1;
+
         *update_info = Some(ChannelUpdateInfo {
             version: update.version,
             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-            enabled: true,
+            enabled,
             cltv_expiry_delta: update.tlc_locktime_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
@@ -358,6 +366,9 @@ where
             "Processed channel update: channel {:?}, update {:?}",
             &channel, &update
         );
+        if !enabled {
+            self.channels.remove(channel_outpoint);
+        }
         Ok(())
     }
 
