@@ -1809,7 +1809,12 @@ pub struct ChannelUpdate {
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
     pub version: u64,
+    // Currently only the first bit is used to indicate the direction of the channel.
+    // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
+    // sent from node 2 to node 1). Otherwise, it is from node 2.
     pub message_flags: u32,
+    // Currently only the first bit is used to indicate if the channel is disabled.
+    // If the first bit is set, the channel is disabled.
     pub channel_flags: u32,
     pub tlc_locktime_expiry_delta: u64,
     pub tlc_minimum_value: u128,

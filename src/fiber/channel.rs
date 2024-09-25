@@ -82,6 +82,9 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
 
+// The channel is disabled, and no more tlcs can be added to the channel.
+pub const CHANNEL_DISABLED_FLAG: u32 = 1;
+
 #[derive(Debug)]
 pub enum ChannelActorMessage {
     /// Command are the messages that are sent to the channel actor to perform some action.
@@ -149,6 +152,7 @@ pub struct ShutdownCommand {
 
 #[derive(Debug)]
 pub struct UpdateCommand {
+    pub enabled: Option<bool>,
     pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
@@ -428,7 +432,7 @@ where
                 state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
-            FiberChannelMessage::ChannelReady(channel_ready) => {
+            FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
                     ChannelState::AwaitingTxSignatures(flags) => {
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
@@ -987,6 +991,7 @@ where
         }
 
         let UpdateCommand {
+            enabled,
             tlc_locktime_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
@@ -994,6 +999,10 @@ where
         } = command;
 
         let mut updated = false;
+
+        if let Some(enabled) = enabled {
+            updated = updated || state.update_our_enabled(enabled);
+        }
 
         if let Some(delta) = tlc_locktime_expiry_delta {
             updated = updated || state.update_our_locktime_expiry_delta(delta);
@@ -1239,6 +1248,18 @@ where
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed => {
+                // Broadcast the channel update message which disables the channel.
+                let update = state.generate_disabled_channel_update(&self.network).await;
+
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(
+                            vec![state.get_remote_peer_id()],
+                            FiberBroadcastMessage::ChannelUpdate(update),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                 myself.stop(Some("ChannelClosed".to_string()));
             }
         }
@@ -1873,6 +1894,7 @@ pub struct ShutdownInfo {
 // the config to the network via another ChannelUpdate message.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
+    pub enabled: bool,
     // The fee rate for tlc transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
     // This is a fee that is paid by the sender of the tlc.
@@ -1907,6 +1929,7 @@ impl PublicChannelInfo {
             tlc_max_value: Some(tlc_max_value),
             tlc_min_value: Some(tlc_min_value),
             tlc_locktime_expiry_delta: Some(tlc_locktime_expiry_delta),
+            enabled: true,
             ..Default::default()
         }
     }
@@ -2336,19 +2359,16 @@ impl ChannelActorState {
         Some(channel_announcement)
     }
 
-    pub async fn generate_channel_update(
+    async fn do_generate_channel_update(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
+        // The function that would change the channel update parameters.
+        f: impl FnOnce(&mut ChannelUpdate),
     ) -> ChannelUpdate {
         let mut channel_update = self
             .get_unsigned_channel_update_message()
             .expect("public channel can generate channel update message");
-
-        debug!(
-            "Generated unsigned channel update message: {:?}",
-            &channel_update
-        );
-
+        f(&mut channel_update);
         let node_signature =
             sign_network_message(network.clone(), channel_update.message_to_sign())
                 .await
@@ -2357,6 +2377,23 @@ impl ChannelActorState {
         channel_update.signature = Some(node_signature);
         self.public_channel_state_mut().channel_update = Some(channel_update.clone());
         channel_update
+    }
+
+    async fn generate_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ChannelUpdate {
+        self.do_generate_channel_update(network, |_update| {}).await
+    }
+
+    async fn generate_disabled_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ChannelUpdate {
+        self.do_generate_channel_update(network, |update| {
+            update.channel_flags = CHANNEL_DISABLED_FLAG
+        })
+        .await
     }
 
     pub async fn generate_and_broadcast_channel_update(
@@ -2872,6 +2909,21 @@ impl ChannelActorState {
             Some(old_value) if old_value == value => false,
             _ => {
                 self.public_channel_state_mut().tlc_min_value = Some(value);
+                true
+            }
+        }
+    }
+
+    fn get_our_enabled(&self) -> Option<bool> {
+        self.public_channel_info.as_ref().map(|state| state.enabled)
+    }
+
+    fn update_our_enabled(&mut self, enabled: bool) -> bool {
+        let old_value = self.get_our_enabled();
+        match old_value {
+            Some(old_value) if old_value == enabled => false,
+            _ => {
+                self.public_channel_state_mut().enabled = enabled;
                 true
             }
         }
