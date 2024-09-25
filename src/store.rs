@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(res, vec![channels[0].clone()]);
         assert_eq!(res.len(), 1);
 
-        let mut key = Vec::with_capacity(34);
+        let mut key = Vec::with_capacity(37);
         key.push(CHANNEL_INFO_PREFIX);
         key.extend_from_slice(channels[0].out_point().as_slice());
         assert_eq!(last_cursor, JsonBytes::from_bytes(key.to_vec().into()));
