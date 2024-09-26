@@ -3687,6 +3687,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_node1_node2_channel_update() {
+        let (node, channel_info, _priv_key, sk1, sk2) = create_a_channel().await;
+
+        let create_channel_update = |version: u64, message_flags: u32, key: Privkey| {
+            let mut channel_update = ChannelUpdate::new_unsigned(
+                get_chain_hash(),
+                channel_info.announcement_msg.channel_outpoint.clone(),
+                version,
+                message_flags,
+                0,
+                42,
+                0,
+                0,
+                10,
+            );
+
+            channel_update.signature = Some(key.sign(channel_update.message_to_sign()));
+            node.network_actor
+                .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                    get_test_peer_id(),
+                    FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
+                        channel_update.clone(),
+                    )),
+                )))
+                .expect("send message to network actor");
+            channel_update
+        };
+
+        let channel_update_of_node1 = create_channel_update(2, 0, sk1);
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let new_channel_info = node
+            .store
+            .get_channels(Some(channel_info.announcement_msg.channel_outpoint.clone()));
+        assert_eq!(new_channel_info.len(), 1);
+        assert_eq!(
+            new_channel_info[0]
+                .node2_to_node1
+                .as_ref()
+                .unwrap()
+                .last_update_message,
+            channel_update_of_node1
+        );
+        assert_eq!(new_channel_info[0].node1_to_node2, None);
+
+        let channel_update_of_node2 = create_channel_update(3, 1, sk2);
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let new_channel_info = node
+            .store
+            .get_channels(Some(channel_info.announcement_msg.channel_outpoint.clone()));
+        assert_eq!(new_channel_info.len(), 1);
+        assert_eq!(
+            new_channel_info[0]
+                .node2_to_node1
+                .as_ref()
+                .unwrap()
+                .last_update_message,
+            channel_update_of_node1
+        );
+        assert_eq!(
+            new_channel_info[0]
+                .node1_to_node2
+                .as_ref()
+                .unwrap()
+                .last_update_message,
+            channel_update_of_node2
+        );
+    }
+
+    #[tokio::test]
     async fn test_channel_update_version() {
         let (node, channel_info, _priv_key, sk1, _sk2) = create_a_channel().await;
 
