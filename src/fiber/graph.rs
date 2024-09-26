@@ -3,7 +3,7 @@ use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
-use crate::fiber::types::OnionInfo;
+use crate::fiber::types::PaymentOnionInfo;
 use crate::invoice::CkbInvoice;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
@@ -471,7 +471,7 @@ where
     pub fn build_route(
         &self,
         payment_request: SendPaymentCommand,
-    ) -> Result<Vec<OnionInfo>, GraphError> {
+    ) -> Result<Vec<PaymentOnionInfo>, GraphError> {
         let source = self.get_source_pubkey();
         let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
             .check_valid()
@@ -531,7 +531,7 @@ where
 
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
-            onion_infos.push(OnionInfo {
+            onion_infos.push(PaymentOnionInfo {
                 amount: current_amount,
                 payment_hash,
                 next_hop,
@@ -549,7 +549,7 @@ where
         } else {
             None
         };
-        onion_infos.push(OnionInfo {
+        onion_infos.push(PaymentOnionInfo {
             amount: current_amount,
             payment_hash,
             next_hop,

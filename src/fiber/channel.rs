@@ -497,7 +497,7 @@ where
                 if forward_to_next_hop {
                     self.network
                         .send_message(NetworkActorMessage::Command(
-                            NetworkActorCommand::SendOnionPacket(
+                            NetworkActorCommand::SendPaymentOnionPacket(
                                 add_tlc.onion_packet.clone(),
                                 Some((state.get_id(), tlc.get_id())),
                             ),

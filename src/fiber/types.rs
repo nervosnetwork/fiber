@@ -2710,7 +2710,7 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 // TODO: replace this with real OnionPacket implementation
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OnionInfo {
+pub struct PaymentOnionInfo {
     pub payment_hash: Hash256,
     // this is only specified in the last hop in the keysend mode
     pub preimage: Option<Hash256>,

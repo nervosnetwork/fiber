@@ -139,7 +139,7 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    SendOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
+    SendPaymentOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information.
@@ -1198,7 +1198,7 @@ where
             }
 
             // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
-            NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
+            NetworkActorCommand::SendPaymentOnionPacket(packet, previous_tlc) => {
                 if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
                     if let Ok(info) = onion_packet.shift() {
                         debug!("Processing onion packet info: {:?}", info);
@@ -1816,7 +1816,7 @@ where
         let onion_packet = OnionPacket::new(onion_path).serialize();
 
         let res = my_self.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
+            NetworkActorCommand::SendPaymentOnionPacket(onion_packet.clone(), None),
         ));
         info!("send_payment: {:?} => result: {:?}", payment_request, res);
         Ok(payment_session.payment_hash())
