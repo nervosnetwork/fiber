@@ -369,6 +369,8 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction.
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
+    // The syncing of network information has completed.
+    SyncingCompleted,
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -1475,6 +1477,14 @@ where
                         error!("Failed to process broadcasted message: {:?}", e);
                     }
                 }
+                // Send a service event that manifests the syncing is done.
+                myself
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::NetworkServiceEvent(
+                            NetworkServiceEvent::SyncingCompleted,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorCommand::GetAndProcessChannelsWithinBlockRangeFromPeer(request, reply) => {
                 // TODO: We need to send a reply to the caller if enough time passed,
@@ -3446,4 +3456,82 @@ pub async fn start_network<
     .expect("Failed to start network actor");
 
     actor
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        fiber::{
+            graph::NetworkGraphStateStore,
+            network::PeerId,
+            test_utils::NetworkNode,
+            types::{FiberBroadcastMessage, FiberMessage, NodeAnnouncement, Privkey, Pubkey},
+            NetworkActorMessage,
+        },
+        NetworkServiceEvent,
+    };
+    use std::str::FromStr;
+    use tentacle::multiaddr::MultiAddr;
+
+    use super::NetworkActorEvent;
+
+    fn get_test_priv_key() -> Privkey {
+        Privkey::from_slice(&[42u8; 32])
+    }
+
+    fn get_test_pub_key() -> Pubkey {
+        get_test_priv_key().pubkey()
+    }
+
+    fn get_test_peer_id() -> PeerId {
+        let pub_key = get_test_pub_key().into();
+        PeerId::from_public_key(&pub_key)
+    }
+
+    fn create_fake_node_announcement_mesage() -> NodeAnnouncement {
+        let priv_key = get_test_priv_key();
+        let node_name = "fake node";
+        let addresses = vec![MultiAddr::from_str(
+            "/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ",
+        )
+        .expect("valid multiaddr")];
+        let version = 0;
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+    }
+
+    // Test that we can sync the network graph with peers.
+    // We will first create a node and announce a fake node announcement to the network.
+    // Then we will create another node and connect to the first node.
+    // We will see if the second node has the fake node announcement.
+    #[tokio::test]
+    async fn test_sync_node_announcement_on_startup() {
+        let mut node1 = NetworkNode::new_with_node_name("node1").await;
+        let mut node2 = NetworkNode::new_with_node_name("node2").await;
+        let test_pub_key = get_test_pub_key();
+        let test_peer_id = get_test_peer_id();
+        node1
+            .network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                test_peer_id.clone(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    create_fake_node_announcement_mesage(),
+                )),
+            )))
+            .expect("send message to network actor");
+
+        node1.connect_to(&node2).await;
+
+        node1
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+        node2
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+
+        node2.stop().await;
+        dbg!(&node2.store.nodes_map.read().unwrap());
+        let node = node2.store.get_nodes(Some(test_pub_key));
+        dbg!(&node);
+        assert!(!node.is_empty());
+    }
 }

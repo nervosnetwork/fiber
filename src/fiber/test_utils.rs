@@ -81,6 +81,19 @@ impl Drop for TempDir {
     }
 }
 
+pub fn init_tracing() {
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .pretty()
+            .init();
+    });
+}
+
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
@@ -144,6 +157,12 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+}
+
+impl NetworkNode {
+    pub fn get_node_address(&self) -> &MultiAddr {
+        &self.listening_addrs[0]
+    }
 }
 
 pub struct NetworkNodeConfig {
@@ -224,10 +243,17 @@ impl NetworkNodeConfigBuilder {
 
 impl NetworkNode {
     pub async fn new() -> Self {
-        Self::new_with_node_name(None).await
+        Self::new_with_node_name_opt(None).await
     }
 
-    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
+    pub async fn new_with_node_name(node_name: &str) -> Self {
+        let config = NetworkNodeConfigBuilder::new()
+            .node_name(Some(node_name.to_string()))
+            .build();
+        Self::new_with_config(config).await
+    }
+
+    pub async fn new_with_node_name_opt(node_name: Option<String>) -> Self {
         let config = NetworkNodeConfigBuilder::new().node_name(node_name).build();
         Self::new_with_config(config).await
     }
@@ -332,7 +358,25 @@ impl NetworkNode {
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_node_name(Some(format!("Node {i}"))).await;
+            let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
+            for node in nodes.iter_mut() {
+                node.connect_to(&new).await;
+            }
+            nodes.push(new);
+        }
+        nodes
+    }
+
+    // Create n nodes and connect them. The config_gen function
+    // (function that creates a NetworkNodeConfig from an index)
+    // will be called to generate the config for each node.
+    pub async fn new_n_interconnected_nodes_with_config(
+        n: usize,
+        config_gen: impl Fn(usize) -> NetworkNodeConfig,
+    ) -> Vec<Self> {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
+        for i in 0..n {
+            let new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
@@ -414,7 +458,7 @@ impl NetworkNode {
 pub struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
-    nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
+    pub nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
     connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
