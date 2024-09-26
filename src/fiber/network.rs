@@ -3490,15 +3490,122 @@ mod tests {
         PeerId::from_public_key(&pub_key)
     }
 
-    fn create_fake_node_announcement_mesage() -> NodeAnnouncement {
+    fn create_fake_node_announcement_mesage_version1() -> NodeAnnouncement {
         let priv_key = get_test_priv_key();
         let node_name = "fake node";
-        let addresses = vec![MultiAddr::from_str(
-            "/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ",
-        )
-        .expect("valid multiaddr")];
-        let version = 0;
+        let addresses =
+            vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+                .iter()
+                .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+                .collect();
+        let version = 1;
         NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+    }
+
+    fn create_fake_node_announcement_mesage_version2() -> NodeAnnouncement {
+        let priv_key = get_test_priv_key();
+        let node_name = "fake node";
+        let addresses =
+            vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+                .iter()
+                .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+                .collect();
+        let version = 2;
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+    }
+
+    fn create_fake_node_announcement_mesage_version3() -> NodeAnnouncement {
+        let priv_key = get_test_priv_key();
+        let node_name = "fake node";
+        let addresses =
+            vec!["/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"]
+                .iter()
+                .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
+                .collect();
+        let version = 3;
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+    }
+
+    // Manually mark syncing done to avoid waiting for the syncing process.
+    async fn new_synced_node(name: &str) -> NetworkNode {
+        let mut node = NetworkNode::new_with_node_name(name).await;
+        node.network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::MarkSyncingDone,
+            ))
+            .expect("send message to network actor");
+
+        node.expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+        node
+    }
+
+    #[tokio::test]
+    async fn test_sync_node_announcement_version() {
+        init_tracing();
+
+        let node = new_synced_node("node").await;
+        let test_pub_key = get_test_pub_key();
+        let test_peer_id = get_test_peer_id();
+
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                test_peer_id.clone(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    create_fake_node_announcement_mesage_version2(),
+                )),
+            )))
+            .expect("send message to network actor");
+
+        // Wait for the broadcast message to be processed.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let node_info = node.store.get_nodes(Some(test_pub_key));
+        match node_info.first() {
+            Some(n) if n.anouncement_msg.version == 2 => {}
+            _ => panic!(
+                "Must have version 2 announcement message, found {:?}",
+                &node_info
+            ),
+        }
+
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                test_peer_id.clone(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    create_fake_node_announcement_mesage_version1(),
+                )),
+            )))
+            .expect("send message to network actor");
+
+        // Wait for the broadcast message to be processed.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let node_info = node.store.get_nodes(Some(test_pub_key));
+        match node_info.first() {
+            Some(n) if n.anouncement_msg.version == 2 => {}
+            _ => panic!(
+                "Must have version 2 announcement message, found {:?}",
+                &node_info
+            ),
+        }
+
+        node.network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                test_peer_id.clone(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    create_fake_node_announcement_mesage_version3(),
+                )),
+            )))
+            .expect("send message to network actor");
+        // Wait for the broadcast message to be processed.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        let node_info = node.store.get_nodes(Some(test_pub_key));
+        match node_info.first() {
+            Some(n) if n.anouncement_msg.version == 3 => {}
+            _ => panic!(
+                "Must have version 3 announcement message, found {:?}",
+                &node_info
+            ),
+        }
     }
 
     // Test that we can sync the network graph with peers.
@@ -3530,7 +3637,7 @@ mod tests {
             .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
                 test_peer_id.clone(),
                 FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
-                    create_fake_node_announcement_mesage(),
+                    create_fake_node_announcement_mesage_version1(),
                 )),
             )))
             .expect("send message to network actor");
