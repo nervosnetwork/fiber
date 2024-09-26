@@ -1,6 +1,7 @@
-use crate::fiber::graph::{ChannelInfo, NodeInfo};
+use crate::fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo};
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
+use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
@@ -18,6 +19,7 @@ use std::{
 use tempfile::TempDir as OldTempDir;
 use tentacle::multiaddr::Multiaddr;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
     select,
     sync::{mpsc, OnceCell},
@@ -157,13 +159,17 @@ impl NetworkNode {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
+            MemoryStore::default(),
+            public_key.into(),
+        )));
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
                 MemoryStore::default(),
-                public_key.into(),
+                network_graph,
             ),
             NetworkActorStartArguments {
                 config: fiber_config,
@@ -333,6 +339,24 @@ impl NetworkGraphStateStore for MemoryStore {
         } else {
             self.nodes_map.read().unwrap().values().cloned().collect()
         }
+    }
+
+    fn get_nodes_with_params(
+        &self,
+        _limit: usize,
+        _after: Option<JsonBytes>,
+        _node_id: Option<Pubkey>,
+    ) -> (Vec<NodeInfo>, JsonBytes) {
+        unimplemented!("currently not used in mock store");
+    }
+
+    fn get_channels_with_params(
+        &self,
+        _limit: usize,
+        _after: Option<JsonBytes>,
+        _ooutpoint: Option<OutPoint>,
+    ) -> (Vec<ChannelInfo>, JsonBytes) {
+        unimplemented!("currently not used in mock store");
     }
 
     fn insert_node(&self, node: NodeInfo) {
