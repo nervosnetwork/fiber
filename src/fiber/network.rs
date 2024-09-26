@@ -3622,7 +3622,7 @@ mod tests {
             .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
             .await;
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let channels = node2.store.get_channels(None);
         assert!(!channels.is_empty());
     }
@@ -3723,6 +3723,12 @@ mod tests {
         node2
             .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
             .await;
+
+        // Wait for the broadcast message to be processed.
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let node = node1.store.get_nodes(Some(test_pub_key));
+        assert!(!node.is_empty());
 
         let node = node2.store.get_nodes(Some(test_pub_key));
         assert!(!node.is_empty());
