@@ -3465,12 +3465,25 @@ mod tests {
     use crate::{
         fiber::{
             graph::NetworkGraphStateStore,
-            network::PeerId,
+            network::{get_chain_hash, PeerId},
             test_utils::{init_tracing, NetworkNode},
-            types::{FiberBroadcastMessage, FiberMessage, NodeAnnouncement, Privkey, Pubkey},
+            types::{
+                ChannelAnnouncement, FiberBroadcastMessage, FiberMessage, NodeAnnouncement,
+                Privkey, Pubkey,
+            },
             NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
+    };
+    use ckb_hash::blake2b_256;
+    use ckb_jsonrpc_types::Status;
+    use ckb_types::{
+        core::TransactionView,
+        packed::{CellOutput, ScriptBuilder},
+    };
+    use ckb_types::{
+        packed::OutPoint,
+        prelude::{Builder, Entity, Pack},
     };
     use std::str::FromStr;
     use tentacle::multiaddr::MultiAddr;
@@ -3488,6 +3501,32 @@ mod tests {
     fn get_test_peer_id() -> PeerId {
         let pub_key = get_test_pub_key().into();
         PeerId::from_public_key(&pub_key)
+    }
+
+    fn create_fake_channel_announcement_mesage(
+        priv_key: Privkey,
+        capacity: u64,
+        outpoint: OutPoint,
+    ) -> ChannelAnnouncement {
+        let x_only_pub_key = priv_key.x_only_pub_key();
+        let sk1 = Privkey::from([1u8; 32]);
+        let sk2 = Privkey::from([2u8; 32]);
+
+        let mut announcement = ChannelAnnouncement::new_unsigned(
+            &sk1.pubkey(),
+            &sk2.pubkey(),
+            outpoint,
+            get_chain_hash(),
+            &x_only_pub_key,
+            capacity as u128,
+            None,
+        );
+        let message = announcement.message_to_sign();
+
+        announcement.ckb_signature = Some(priv_key.sign_schnorr(message));
+        announcement.node1_signature = Some(sk1.sign(message));
+        announcement.node2_signature = Some(sk2.sign(message));
+        announcement
     }
 
     fn create_fake_node_announcement_mesage_version1() -> NodeAnnouncement {
@@ -3538,6 +3577,54 @@ mod tests {
         node.expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
             .await;
         node
+    }
+
+    #[tokio::test]
+    async fn test_sync_channel_announcement_on_startup() {
+        init_tracing();
+
+        let mut node1 = new_synced_node("node1").await;
+        let mut node2 = NetworkNode::new_with_node_name("node2").await;
+
+        let capacity = 42;
+        let priv_key: Privkey = get_test_priv_key();
+        let pubkey = priv_key.x_only_pub_key().serialize();
+        let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
+        let tx = TransactionView::new_advanced_builder()
+            .output(
+                CellOutput::new_builder()
+                    .capacity(capacity.pack())
+                    .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
+                    .build(),
+            )
+            .output_data(vec![0u8; 8].pack())
+            .build();
+        let outpoint = tx.output_pts()[0].clone();
+        let channel_announcement =
+            create_fake_channel_announcement_mesage(priv_key, capacity, outpoint);
+
+        assert_eq!(node1.submit_tx(tx.clone()).await, Status::Committed);
+
+        node1
+            .network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                get_test_peer_id(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
+                    channel_announcement.clone(),
+                )),
+            )))
+            .expect("send message to network actor");
+
+        node1.connect_to(&node2).await;
+
+        assert_eq!(node2.submit_tx(tx.clone()).await, Status::Committed);
+        node2
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        let channels = node2.store.get_channels(None);
+        assert!(!channels.is_empty());
     }
 
     #[tokio::test]
@@ -3616,21 +3703,10 @@ mod tests {
     async fn test_sync_node_announcement_on_startup() {
         init_tracing();
 
-        let mut node1 = NetworkNode::new_with_node_name("node1").await;
+        let mut node1 = new_synced_node("node1").await;
         let mut node2 = NetworkNode::new_with_node_name("node2").await;
         let test_pub_key = get_test_pub_key();
         let test_peer_id = get_test_peer_id();
-        // Manually mark syncing done to avoid waiting for the syncing process.
-        node1
-            .network_actor
-            .send_message(NetworkActorMessage::Command(
-                NetworkActorCommand::MarkSyncingDone,
-            ))
-            .expect("send message to network actor");
-
-        node1
-            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
-            .await;
 
         node1
             .network_actor
