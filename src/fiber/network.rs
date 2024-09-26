@@ -164,6 +164,8 @@ pub enum NetworkActorCommand {
         (PeerId, u64, u64),
         RpcReplyPort<Result<(u64, bool), Error>>,
     ),
+    StartSyncing,
+    StopSyncing,
     MarkSyncingDone,
 }
 
@@ -1511,6 +1513,49 @@ where
                 );
                 state.send_message_to_peer(&peer_id, message).await?;
             }
+            NetworkActorCommand::StartSyncing => match &mut state.sync_status {
+                NetworkSyncStatus::NotRunning(ref sync_state) => {
+                    debug!(
+                        "Starting syncing network information from state {:?}",
+                        sync_state
+                    );
+                    let sync_state = sync_state.refresh(self.chain_actor.clone()).await;
+                    state.sync_status = NetworkSyncStatus::Running(sync_state);
+                    let peers: Vec<_> = state.peer_session_map.keys().cloned().collect();
+                    debug!(
+                        "Trying to sync network information from peers: {:?}, sync parameters: {:?}",
+                        &peers, &state.sync_status
+                    );
+                    for peer_id in peers {
+                        state.maybe_sync_network_graph(&peer_id).await;
+                    }
+                }
+                _ => {
+                    error!(
+                        "Syncing is already started or is done: {:?}",
+                        &state.sync_status
+                    );
+                }
+            },
+            NetworkActorCommand::StopSyncing => match &mut state.sync_status {
+                NetworkSyncStatus::Running(s) => {
+                    debug!("Stopping syncing network information");
+                    let mut s = s.clone();
+                    for syncer in s.active_syncers.values() {
+                        syncer
+                            .get_cell()
+                            .stop(Some("stopping syncer on request".to_string()));
+                    }
+                    s.active_syncers.clear();
+                    state.sync_status = NetworkSyncStatus::NotRunning(s);
+                }
+                _ => {
+                    error!(
+                        "Syncing is not running or is already done: {:?}",
+                        &state.sync_status
+                    );
+                }
+            },
         };
         Ok(())
     }
@@ -1824,6 +1869,7 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 struct NetworkSyncState {
     // The block number we are syncing from.
     starting_height: u64,
@@ -1843,6 +1889,19 @@ struct NetworkSyncState {
 }
 
 impl NetworkSyncState {
+    async fn refresh(&self, chain_actor: ActorRef<CkbChainMessage>) -> Self {
+        let mut cloned = self.clone();
+        cloned.active_syncers.clear();
+        cloned.succeeded = 0;
+        cloned.failed = 0;
+        // TODO: The calling to chain actor will block the calling actor from handling other messages.
+        let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
+            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+            .expect("Get current block number from chain");
+        cloned.ending_height = current_block_number;
+        cloned
+    }
+
     // Note that this function may actually change the state, this is because,
     // when the sync to all peers failed, we actually want to start a new syncer,
     // and we want to track this syncer.
@@ -1903,6 +1962,7 @@ impl NetworkSyncState {
     }
 }
 
+#[derive(Debug, Clone)]
 enum NetworkSyncStatus {
     // The syncing is not running, but we have all the information to start syncing.
     NotRunning(NetworkSyncState),
