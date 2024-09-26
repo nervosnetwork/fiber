@@ -137,12 +137,89 @@ pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub listening_addrs: Vec<MultiAddr>,
     pub store: MemoryStore,
+    pub fiber_config: FiberConfig,
+    pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+}
+
+pub struct NetworkNodeConfig {
+    base_dir: Arc<TempDir>,
+    node_name: Option<String>,
+    store: MemoryStore,
+    fiber_config: FiberConfig,
+}
+
+impl NetworkNodeConfig {
+    pub fn builder() -> NetworkNodeConfigBuilder {
+        NetworkNodeConfigBuilder::new()
+    }
+}
+
+pub struct NetworkNodeConfigBuilder {
+    base_dir: Option<Arc<TempDir>>,
+    node_name: Option<String>,
+    store: Option<MemoryStore>,
+    // We may generate a FiberConfig based on the base_dir and node_name,
+    // but allow user to override it.
+    fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+}
+
+impl NetworkNodeConfigBuilder {
+    pub fn new() -> Self {
+        Self {
+            base_dir: None,
+            node_name: None,
+            store: None,
+            fiber_config_updater: None,
+        }
+    }
+
+    pub fn base_dir(mut self, base_dir: Arc<TempDir>) -> Self {
+        self.base_dir = Some(base_dir);
+        self
+    }
+
+    pub fn node_name(mut self, node_name: Option<String>) -> Self {
+        self.node_name = node_name;
+        self
+    }
+
+    pub fn store(mut self, store: MemoryStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn fiber_config_updater(
+        mut self,
+        updater: impl FnOnce(&mut FiberConfig) + 'static,
+    ) -> Self {
+        self.fiber_config_updater = Some(Box::new(updater));
+        self
+    }
+
+    pub fn build(self) -> NetworkNodeConfig {
+        let base_dir = self
+            .base_dir
+            .clone()
+            .unwrap_or_else(|| Arc::new(TempDir::new("fnn-test")));
+        let node_name = self.node_name.clone();
+        let store = self.store.clone().unwrap_or_default();
+        let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
+        let mut config = NetworkNodeConfig {
+            base_dir,
+            node_name,
+            store,
+            fiber_config,
+        };
+        if let Some(updater) = self.fiber_config_updater {
+            updater(&mut config.fiber_config);
+        }
+        config
+    }
 }
 
 impl NetworkNode {
@@ -150,35 +227,18 @@ impl NetworkNode {
         Self::new_with_node_name(None).await
     }
 
-    pub fn get_fiber_config(&self) -> FiberConfig {
-        get_fiber_config(self.base_dir.as_ref(), self.node_name.as_deref())
+    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
+        let config = NetworkNodeConfigBuilder::new().node_name(node_name).build();
+        Self::new_with_config(config).await
     }
 
-    pub async fn stop(&mut self) {
-        self.network_actor.kill();
-        let my_peer_id = self.peer_id.clone();
-        self.expect_event(
-            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
-        )
-        .await;
-    }
-
-    pub async fn restart(&mut self) {
-        let base_dir = self.base_dir.clone();
-        let node_name = self.node_name.clone();
-        let store = self.store.clone();
-        self.stop().await;
-        let new = Self::new_with_base_dir_and_store(node_name, base_dir, store).await;
-        *self = new;
-    }
-
-    pub async fn new_with_base_dir_and_store(
-        node_name: Option<String>,
-        base_dir: Arc<TempDir>,
-        store: MemoryStore,
-    ) -> Self {
-        let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
-
+    pub async fn new_with_config(config: NetworkNodeConfig) -> Self {
+        let NetworkNodeConfig {
+            base_dir,
+            node_name,
+            store,
+            fiber_config,
+        } = config;
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
@@ -203,7 +263,7 @@ impl NetworkNode {
                 network_graph,
             ),
             NetworkActorStartArguments {
-                config: fiber_config,
+                config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
                 channel_subscribers: Default::default(),
             },
@@ -234,8 +294,9 @@ impl NetworkNode {
         Self {
             base_dir,
             node_name,
-            listening_addrs: announced_addrs,
             store,
+            fiber_config,
+            listening_addrs: announced_addrs,
             network_actor,
             chain_actor,
             peer_id,
@@ -243,10 +304,29 @@ impl NetworkNode {
         }
     }
 
-    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
-        let base_dir = Arc::new(TempDir::new("fnn-test"));
-        let store = MemoryStore::default();
-        Self::new_with_base_dir_and_store(node_name, base_dir, store).await
+    pub fn get_node_config(&self) -> NetworkNodeConfig {
+        NetworkNodeConfig {
+            base_dir: self.base_dir.clone(),
+            node_name: self.node_name.clone(),
+            store: self.store.clone(),
+            fiber_config: self.fiber_config.clone(),
+        }
+    }
+
+    pub async fn stop(&mut self) {
+        self.network_actor.kill();
+        let my_peer_id = self.peer_id.clone();
+        self.expect_event(
+            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
+        )
+        .await;
+    }
+
+    pub async fn restart(&mut self) {
+        let config = self.get_node_config();
+        self.stop().await;
+        let new = Self::new_with_config(config).await;
+        *self = new;
     }
 
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
