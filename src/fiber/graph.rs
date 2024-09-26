@@ -76,14 +76,10 @@ impl ChannelInfo {
     }
 
     pub fn channel_last_update_time(&self) -> Option<u64> {
-        let node1_to_node2_time = self.node1_to_node2.as_ref().map(|x| x.timestamp);
-        let node2_to_node1_time = self.node2_to_node1.as_ref().map(|x| x.timestamp);
-        match (node1_to_node2_time, node2_to_node1_time) {
-            (Some(time1), Some(time2)) => Some(time1.max(time2)),
-            (Some(time1), None) => Some(time1),
-            (None, Some(time2)) => Some(time2),
-            (None, None) => None,
-        }
+        self.node1_to_node2
+            .as_ref()
+            .map(|n| n.timestamp)
+            .max(self.node2_to_node1.as_ref().map(|n| n.timestamp))
     }
 
     pub fn is_enabled(&self) -> bool {

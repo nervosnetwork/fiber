@@ -48,7 +48,7 @@ pub struct ChannelInfo {
     #[serde_as(as = "U64Hex")]
     pub funding_tx_block_number: u64,
     #[serde_as(as = "U32Hex")]
-    pub funidng_tx_index: u32,
+    pub funding_tx_index: u32,
     pub node1: Pubkey,
     pub node2: Pubkey,
     #[serde_as(as = "Option<U64Hex>")]
@@ -146,7 +146,7 @@ where
             .map(|channel_info| ChannelInfo {
                 channel_outpoint: channel_info.out_point(),
                 funding_tx_block_number: channel_info.funding_tx_block_number,
-                funidng_tx_index: channel_info.funding_tx_index,
+                funding_tx_index: channel_info.funding_tx_index,
                 node1: channel_info.node1(),
                 node2: channel_info.node2(),
                 capacity: channel_info.capacity(),
