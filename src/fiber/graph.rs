@@ -336,9 +336,11 @@ where
                     && channel.funding_tx_block_number < end_block
             }),
             end_block,
-            self.channels
-                .values()
-                .any(|channel| channel.funding_tx_block_number >= end_block),
+            self.channels.is_empty()
+                || self
+                    .channels
+                    .values()
+                    .any(|channel| channel.funding_tx_block_number >= end_block),
         )
     }
 

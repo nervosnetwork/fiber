@@ -522,6 +522,7 @@ where
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
+        dbg!("handle_peer_message", &state.peer_id, &peer_id, &message);
         match message {
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -3393,6 +3394,7 @@ impl ServiceProtocol for Handle {
         match context.session.remote_pubkey.as_ref() {
             Some(pubkey) => {
                 let peer_id = PeerId::from_public_key(pubkey);
+                dbg!("Received message from peer", &peer_id, &msg);
                 self.send_actor_message(NetworkActorMessage::new_event(
                     NetworkActorEvent::PeerMessage(peer_id, msg),
                 ));
