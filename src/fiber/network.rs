@@ -3198,10 +3198,12 @@ where
             error!("Failed to close tentacle service: {}", err);
         }
         debug!("Network service for {:?} shutdown", state.peer_id);
-        self.event_sender
+        // The event receiver may have been closed already.
+        // We ignore the error here.
+        let _ = self
+            .event_sender
             .send(NetworkServiceEvent::NetworkStopped(state.peer_id.clone()))
-            .await
-            .expect("send network stopped event");
+            .await;
         Ok(())
     }
 
