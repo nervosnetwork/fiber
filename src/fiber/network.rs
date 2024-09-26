@@ -1904,12 +1904,18 @@ impl NetworkSyncState {
 }
 
 enum NetworkSyncStatus {
+    // The syncing is not running, but we have all the information to start syncing.
+    NotRunning(NetworkSyncState),
+    // We should start running the syncing immediately or the syncing is already in progress.
     Running(NetworkSyncState),
+    // Syncing done, unless we restart the node, we don't have to sync again
+    // (we will automatically process the newest broadcasted network messages).
     Done,
 }
 
 impl NetworkSyncStatus {
     fn new(
+        start_immediately: bool,
         starting_height: u64,
         ending_height: u64,
         starting_time: u64,
@@ -1924,11 +1930,16 @@ impl NetworkSyncStatus {
             succeeded: 0,
             failed: 0,
         };
-        NetworkSyncStatus::Running(state)
+        if start_immediately {
+            NetworkSyncStatus::Running(state)
+        } else {
+            NetworkSyncStatus::NotRunning(state)
+        }
     }
 
     fn is_syncing(&self) -> bool {
         match self {
+            NetworkSyncStatus::NotRunning(_) => false,
             NetworkSyncStatus::Running(_) => true,
             NetworkSyncStatus::Done => false,
         }
@@ -3104,6 +3115,13 @@ where
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
             .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
             .expect("Get current block number from chain");
+        let sync_status = NetworkSyncStatus::new(
+            config.sync_network_graph(),
+            height,
+            current_block_number,
+            last_update,
+            peers_to_sync_network_graph,
+        );
         let state = NetworkActorState {
             store: self.store.clone(),
             node_name: config.announced_node_name,
@@ -3135,12 +3153,7 @@ where
             next_request_id: Default::default(),
             broadcast_message_responses: Default::default(),
             original_requests: Default::default(),
-            sync_status: NetworkSyncStatus::new(
-                height,
-                current_block_number,
-                last_update,
-                peers_to_sync_network_graph,
-            ),
+            sync_status,
             broadcasted_message_queue: Default::default(),
         };
 

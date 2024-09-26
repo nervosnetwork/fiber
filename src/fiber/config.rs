@@ -52,6 +52,9 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// Whether to sync the network graph from the network. true means syncing.
+pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
+
 // See comment in `LdkConfig` for why do we need to specify both name and long,
 // and prefix them with `ckb-`/`CKB_`.
 #[derive(ClapSerde, Debug, Clone)]
@@ -168,6 +171,15 @@ pub struct FiberConfig {
         help = "The interval to reannounce NodeAnnouncement, in seconds. 0 means never reannounce. [default: 3600 (1 hour)]"
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
+
+    /// Whether to sync the network graph from the network. [default: true]
+    #[arg(
+        name = "FIBER_SYNC_NETWORK_GRAPH",
+        long = "fiber-sync-network-graph",
+        env,
+        help = "Whether to sync the network graph from the network. [default: true]"
+    )]
+    pub(crate) sync_network_graph: Option<bool>,
 }
 
 #[derive(PartialEq, Copy, Clone, Default)]
@@ -318,6 +330,11 @@ impl FiberConfig {
             .expect("read or generate secret key")
             .into();
         secio_kp.public_key()
+    }
+
+    pub fn sync_network_graph(&self) -> bool {
+        self.sync_network_graph
+            .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
     }
 }
 
