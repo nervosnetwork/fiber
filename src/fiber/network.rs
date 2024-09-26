@@ -1902,6 +1902,7 @@ where
         // handle the payment process
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
+            debug!("Payment session already exists: {:?}", payment_session);
             if payment_session.status != PaymentSessionStatus::Failed {
                 return Err(Error::InvalidParameter(format!(
                     "Payment session already exists: {} with payment session status: {:?}",
@@ -1914,7 +1915,6 @@ where
         self.store.insert_payment_session(payment_session.clone());
 
         let mut error = None;
-
         for _i in 0..payment_session.try_limit {
             payment_session.retried_times += 1;
             let onion_path = graph.build_route(payment_data.clone());

@@ -690,19 +690,32 @@ where
         let mut preimage = None;
         if let Ok(onion_packet) = OnionPacket::deserialize(&add_tlc.onion_packet) {
             if let Some(onion_info) = onion_packet.peek() {
+                forward_to_next_hop = onion_info.next_hop.is_some();
+
                 // check the payment hash and amount
-                if onion_info.payment_hash != add_tlc.payment_hash
-                    || onion_info.amount != add_tlc.amount
-                {
+                if onion_info.payment_hash != add_tlc.payment_hash {
                     return Err(ProcessingChannelError::InvalidParameter(
                         "Payment hash or amount mismatch".to_string(),
                     ));
                 }
+                if forward_to_next_hop && onion_info.amount > add_tlc.amount {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        format!("Payment amount is too large, expect next hop amount [{}] less than received amount [{}]",
+                            onion_info.amount, add_tlc.amount)
+                    ));
+                }
+                if !forward_to_next_hop {
+                    if onion_info.amount != add_tlc.amount {
+                        return Err(ProcessingChannelError::InvalidParameter(
+                            "Payment amount mismatch".to_string(),
+                        ));
+                    }
+                }
+
                 // TODO: check the expiry time, if expired, we should return an error.
 
                 // if this is the last hop, store the preimage.
                 preimage = onion_info.preimage;
-                forward_to_next_hop = onion_info.next_hop.is_some();
             }
         }
 
