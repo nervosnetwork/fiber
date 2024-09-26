@@ -1900,7 +1900,7 @@ where
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
                     payment_session.set_status(PaymentSessionStatus::Failed);
-                    error = Some(Err(Error::PaymentError(format!(
+                    error = Some(Err(Error::SendPaymentError(format!(
                         "Failed to build route: {:?}",
                         payment_data.payment_hash
                     ))));
@@ -1946,7 +1946,7 @@ where
                         payment_data.payment_hash, e
                     );
                     payment_session.last_error = Some(err.clone());
-                    error = Some(Err(Error::PaymentError(err)));
+                    error = Some(Err(Error::SendPaymentError(err)));
                     continue;
                 }
                 Ok(_) => {

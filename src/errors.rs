@@ -40,8 +40,6 @@ pub enum Error {
     SendPaymentError(String),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
-    #[error("Payment error: {0}")]
-    PaymentError(String),
     #[error("Network Graph error: {0}")]
     NetworkGraphError(#[from] GraphError),
     #[error("Invalid peer message: {0}")]
