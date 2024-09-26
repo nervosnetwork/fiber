@@ -3466,9 +3466,9 @@ mod tests {
         fiber::{
             graph::NetworkGraphStateStore,
             network::PeerId,
-            test_utils::NetworkNode,
+            test_utils::{init_tracing, NetworkNode},
             types::{FiberBroadcastMessage, FiberMessage, NodeAnnouncement, Privkey, Pubkey},
-            NetworkActorMessage,
+            NetworkActorCommand, NetworkActorMessage,
         },
         NetworkServiceEvent,
     };
@@ -3507,10 +3507,24 @@ mod tests {
     // We will see if the second node has the fake node announcement.
     #[tokio::test]
     async fn test_sync_node_announcement_on_startup() {
+        init_tracing();
+
         let mut node1 = NetworkNode::new_with_node_name("node1").await;
         let mut node2 = NetworkNode::new_with_node_name("node2").await;
         let test_pub_key = get_test_pub_key();
         let test_peer_id = get_test_peer_id();
+        // Manually mark syncing done to avoid waiting for the syncing process.
+        node1
+            .network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::MarkSyncingDone,
+            ))
+            .expect("send message to network actor");
+
+        node1
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+
         node1
             .network_actor
             .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
@@ -3523,17 +3537,11 @@ mod tests {
 
         node1.connect_to(&node2).await;
 
-        node1
-            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
-            .await;
         node2
             .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
             .await;
 
-        node2.stop().await;
-        dbg!(&node2.store.nodes_map.read().unwrap());
         let node = node2.store.get_nodes(Some(test_pub_key));
-        dbg!(&node);
         assert!(!node.is_empty());
     }
 }
