@@ -450,8 +450,22 @@ where
             FiberChannelMessage::AddTlc(add_tlc) => {
                 let tlc_id = add_tlc.tlc_id;
                 let tlc_count = state.tlcs.len();
-                match self.handle_add_tlc_peer_message(state, add_tlc).await {
-                    Ok(_) => Ok(()),
+                match self
+                    .handle_add_tlc_peer_message(state, add_tlc.clone())
+                    .await
+                {
+                    Ok((added_tlc_id, forward_to_next_hop)) => {
+                        if forward_to_next_hop {
+                            let _ = self
+                                .handle_forward_onion_packet(
+                                    state,
+                                    add_tlc.onion_packet,
+                                    added_tlc_id.into(),
+                                )
+                                .await?;
+                        }
+                        Ok(())
+                    }
                     Err(e) => {
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
@@ -655,7 +669,7 @@ where
         &self,
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
-    ) -> Result<(), ProcessingChannelError> {
+    ) -> Result<(TLCId, bool), ProcessingChannelError> {
         state.check_for_tlc_update(Some(add_tlc.amount))?;
 
         // check the onion_packet is valid or not, check the payment hash and amount.
@@ -676,15 +690,16 @@ where
                     ));
                 }
                 // TODO: check the expiry time, if expired, we should return an error.
+
                 // if this is the last hop, store the preimage.
                 preimage = onion_info.preimage;
-
                 forward_to_next_hop = onion_info.next_hop.is_some();
             }
         }
 
         let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
         state.insert_tlc(tlc.clone())?;
+
         if let Some(ref udt_type_script) = state.funding_udt_type_script {
             self.subscribers
                 .pending_received_tlcs_subscribers
@@ -695,27 +710,62 @@ where
                 });
         }
         warn!("created tlc: {:?}", &tlc);
+
         // TODO: here we didn't send any ack message to the peer.
         // The peer may falsely believe that we have already processed this message,
         // while we have crashed. We need a way to make sure that the peer will resend
         // this message, and our processing of this message is idempotent.
+        Ok((tlc.id, forward_to_next_hop))
+    }
 
-        if forward_to_next_hop {
-            let (send, recv) = oneshot::channel::<Result<u64, String>>();
-            let rpc_reply = RpcReplyPort::from(send);
+    async fn handle_forward_onion_packet(
+        &self,
+        state: &mut ChannelActorState,
+        onion_packet: Vec<u8>,
+        added_tlc_id: u64,
+    ) -> Result<(), ProcessingChannelError> {
+        let (send, recv) = oneshot::channel::<Result<u64, String>>();
+        let rpc_reply = RpcReplyPort::from(send);
+        self.network
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::SendOnionPacket(
+                    SendOnionPacketCommand {
+                        packet: onion_packet,
+                        previous_tlc: Some((state.get_id(), added_tlc_id.into())),
+                    },
+                    rpc_reply,
+                ),
+            ))
+            .expect("network actor is alive");
+        let res = match recv.await {
+            Ok(Ok(tlc_id)) => Ok(tlc_id),
+            Ok(Err(err)) => Err(err),
+            Err(e) => Err(e.to_string()),
+        };
+        // If we failed to forward the onion packet, we should remove the tlc.
+        if let Err(res) = res {
+            error!("Error forwarding onion packet: {:?}", res);
+            let (send, recv) = oneshot::channel::<Result<(), String>>();
+            let port = RpcReplyPort::from(send);
             self.network
-                .send_message(NetworkActorMessage::Command(
-                    NetworkActorCommand::SendOnionPacket(
-                        SendOnionPacketCommand {
-                            packet: add_tlc.onion_packet.clone(),
-                            previous_tlc: Some((state.get_id(), tlc.get_id())),
-                        },
-                        rpc_reply,
-                    ),
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: state.get_id(),
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: added_tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFail(RemoveTlcFail {
+                                    //FIXME: we should define the error code carefully according
+                                    //refer to https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
+                                    error_code: 1,
+                                }),
+                            },
+                            port,
+                        ),
+                    }),
                 ))
                 .expect("network actor is alive");
-            let _res = recv.await;
-            // TODO: if the result is an error, we should handle it. we need to begin to remove the tlc.
+            let _ = recv.await.expect("RemoveTlc command replied");
         }
         Ok(())
     }
