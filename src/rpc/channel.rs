@@ -3,6 +3,7 @@ use crate::fiber::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
         RemoveTlcCommand, ShutdownCommand, UpdateCommand,
     },
+    graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{U128Hex, U32Hex, U64Hex},
@@ -210,9 +211,14 @@ pub struct SendPaymentCommandParams {
     pub udt_type_script: Option<Script>,
 }
 
+#[serde_as]
 #[derive(Clone, Serialize)]
 pub struct SendPaymentResult {
     pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    #[serde_as(as = "U128Hex")]
+    pub last_update_time: u128,
+    pub failed_error: Option<String>,
 }
 #[rpc(server)]
 pub trait ChannelRpc {
@@ -491,6 +497,9 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
             payment_hash: response.payment_hash,
+            status: response.status,
+            last_update_time: response.last_update_time,
+            failed_error: response.failed_error,
         })
     }
 }

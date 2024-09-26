@@ -546,6 +546,15 @@ where
                     let res = recv.await.expect("network actor is alive");
                     info!("remove tlc from previous channel: {:?}", &res);
                 }
+
+                self.network
+                    .send_message(NetworkActorMessage::new_event(
+                        NetworkActorEvent::TlcRemoveReceived(
+                            tlc_details.tlc.payment_hash,
+                            remove_tlc,
+                        ),
+                    ))
+                    .expect("myself alive");
                 Ok(())
             }
             FiberChannelMessage::Shutdown(shutdown) => {

@@ -60,7 +60,7 @@ use super::types::{
     GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
     Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
     QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
-    QueryChannelsWithinBlockRangeResult,
+    QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
 };
 use super::FiberConfig;
 
@@ -105,6 +105,9 @@ pub struct AcceptChannelResponse {
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    pub last_update_time: u128,
+    pub failed_error: Option<String>,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -453,6 +456,9 @@ pub enum NetworkActorEvent {
 
     // The graph syncer to the peer has exited with some reason.
     GraphSyncerExited(PeerId, GraphSyncerExitStatus),
+
+    // A tlc remove message is received. (payment_hash, remove_tlc)
+    TlcRemoveReceived(Hash256, RemoveTlc),
 
     /// Network service events to be sent to outside observers.
     /// These events may be both present at `NetworkActorEvent` and
@@ -1153,6 +1159,9 @@ where
                 }
                 state.maybe_finish_sync();
             }
+            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
+                self.on_tlc_remove_received(payment_hash, remove_tlc);
+            }
         }
         Ok(())
     }
@@ -1424,8 +1433,8 @@ where
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 match self.on_send_payment(state, myself, payment_request).await {
-                    Ok(payment_hash) => {
-                        let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
+                    Ok(payment_res) => {
+                        let _ = reply.send(Ok(payment_res));
                     }
                     Err(e) => {
                         error!("Failed to send payment: {:?}", e);
@@ -1861,10 +1870,21 @@ where
         }
     }
 
-    fn prepare_payment_session(&self, payment_data: SendPaymentData) -> PaymentSession {
-        let payment_session = PaymentSession::new(payment_data.clone(), 5);
-        self.store.insert_payment_session(payment_session.clone());
-        payment_session
+    fn on_tlc_remove_received(&self, payment_hash: Hash256, remove_tlc: RemoveTlc) {
+        let payment_session = self.store.get_payment_session(payment_hash);
+        if let Some(mut payment_session) = payment_session {
+            if payment_session.status == PaymentSessionStatus::Inflight {
+                if matches!(remove_tlc.reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
+                    payment_session.set_status(PaymentSessionStatus::Success);
+                } else {
+                    // FIXME(yukang): we should handle tlc fail reason here
+                    payment_session.set_failed_status(format!("{:?}", remove_tlc.reason));
+                }
+                payment_session.last_updated_time =
+                    std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+            }
+            self.store.insert_payment_session(payment_session);
+        }
     }
 
     async fn on_send_payment(
@@ -1872,7 +1892,7 @@ where
         state: &mut NetworkActorState<S>,
         _my_self: ActorRef<NetworkActorMessage>,
         payment_request: SendPaymentCommand,
-    ) -> Result<Hash256, Error> {
+    ) -> Result<SendPaymentResponse, Error> {
         let graph = self.network_graph.read().await;
         let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
             error!("Failed to validate payment request: {:?}", e);
@@ -1890,7 +1910,9 @@ where
             }
         }
 
-        let mut payment_session = self.prepare_payment_session(payment_data.clone());
+        let mut payment_session = PaymentSession::new(payment_data.clone(), 5);
+        self.store.insert_payment_session(payment_session.clone());
+
         let mut error = None;
 
         for _i in 0..payment_session.try_limit {
@@ -1955,8 +1977,14 @@ where
                         payment_data.payment_hash, onion_packet
                     );
                     payment_session.set_status(PaymentSessionStatus::Inflight);
-                    self.store.insert_payment_session(payment_session);
-                    return Ok(payment_data.payment_hash);
+                    self.store.insert_payment_session(payment_session.clone());
+                    let response = SendPaymentResponse {
+                        payment_hash: payment_data.payment_hash,
+                        last_update_time: payment_session.last_updated_time,
+                        status: PaymentSessionStatus::Inflight,
+                        failed_error: None,
+                    };
+                    return Ok(response);
                 }
             }
         }

@@ -772,9 +772,13 @@ pub trait NetworkGraphStateStore {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PaymentSessionStatus {
+    // initial status, payment session is created, no HTLC is sent
     Created,
+    // related HTLC is send and waiting for the response
     Inflight,
+    // related HTLC is successfully settled
     Success,
+    // related HTLC is failed
     Failed,
 }
 
@@ -786,17 +790,20 @@ pub struct PaymentSession {
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
     pub created_time: u128,
+    pub last_updated_time: u128,
 }
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
         Self {
             request,
             retried_times: 0,
             last_error: None,
             try_limit,
             status: PaymentSessionStatus::Created,
-            created_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+            created_time: now,
+            last_updated_time: now,
         }
     }
 
@@ -806,6 +813,11 @@ impl PaymentSession {
 
     pub fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
+    }
+
+    pub fn set_failed_status(&mut self, error: String) {
+        self.status = PaymentSessionStatus::Failed;
+        self.last_error = Some(error);
     }
 }
 
