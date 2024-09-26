@@ -30,6 +30,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `connect_peer`](#connect_peer)
         * [Method `disconnect_peer`](#disconnect_peer)
 
+    * [Module Graph](#module-graph)
+        * [Method `graph_nodes`](#graph_nodes)
+        * [Method `graph_channels`](#graph_channels)
+
 ## RPC Modules
 
 ### Module `Cch`
@@ -249,3 +253,44 @@ Attempts to disconnect from a peer.
 ###### Returns
 
 Returns null when the request is successful. Otherwise, returns an error message.
+
+### Module `Graph`
+
+<a id="graph_nodes"></a>
+#### Method `graph_nodes`
+Get all the nodes in the network graph.
+
+###### Params
+* `limit`: The maximum number of nodes to return, an optional parameter
+* `after`: Return the nodes after public key `after`, used for pagination, an optional parameter
+
+###### Returns
+* `nodes`: An array of node objects, each object contains the following fields:
+    * `alias`: The alias of the node
+    * `node_id`: The public key of the node
+    * `addresses`: An array of addresses of the node
+    * `timestamp`: The timestamp when the node was added to the graph, in milliseconds
+    * `chain_hash`: The chain hash of the node, used to identify the network chain the node is on
+* `last_cursor`: The last public key of the returned nodes, used for pagination
+
+<a id="graph_channels"></a>
+#### Method `graph_channels`
+Get all the channels in the network graph.
+
+###### Params
+* `limit`: The maximum number of channels to return, an optional parameter
+* `after`: Return the channels after channel outpoint `after`, used for pagination, an optional parameter
+
+###### Returns
+* `channels`: An array of channel objects, each object contains the following fields:
+    * `channel_outpoint`: The funding outpoint of the channel, used as the identifier of the channel
+    * `funding_tx_block_number`: The funding transaction block number
+    * `funding_tx_index`: The funding transaction index in the block
+    * `node1`: The public key of the first node in the channel
+    * `node2`: The public key of the second node in the channel
+    * `last_updated_timestamp`: The timestamp when the channel was last updated, in milliseconds
+    * `created_timestamp`: The timestamp when the channel was created, in milliseconds
+    * `node1_to_node2_fee_rate`: The fee rate from the first node to the second node
+    * `node2_to_node1_fee_rate`: The fee rate from the second node to the first node
+    * `capacity`: The capacity of the channel
+    * `chain_hash`: The chain hash of the channel, used to identify the network chain the channel is on
