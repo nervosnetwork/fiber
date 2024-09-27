@@ -339,6 +339,13 @@ impl NetworkNode {
         }
     }
 
+    pub async fn start(&mut self) {
+        let config = self.get_node_config();
+        let new = Self::new_with_config(config).await;
+        tracing::debug!("New node started: {:?}", &new);
+        *self = new;
+    }
+
     pub async fn stop(&mut self) {
         self.network_actor.kill();
         let my_peer_id = self.peer_id.clone();
@@ -349,10 +356,8 @@ impl NetworkNode {
     }
 
     pub async fn restart(&mut self) {
-        let config = self.get_node_config();
         self.stop().await;
-        let new = Self::new_with_config(config).await;
-        *self = new;
+        self.start().await;
     }
 
     pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {

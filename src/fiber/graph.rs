@@ -236,9 +236,7 @@ where
         if self.last_update_timestamp < node_info.timestamp {
             self.last_update_timestamp = node_info.timestamp;
         }
-        debug!("Really adding node to network graph: {:?}", node_info);
         self.nodes.insert(node_id, node_info.clone());
-        dbg!(&self.nodes);
         self.store.insert_node(node_info);
     }
 
@@ -291,7 +289,6 @@ where
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &NodeInfo> {
-        dbg!(&self.nodes);
         self.nodes.values()
     }
 

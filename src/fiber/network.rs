@@ -522,7 +522,6 @@ where
         peer_id: PeerId,
         message: FiberMessage,
     ) -> crate::Result<()> {
-        dbg!("handle_peer_message", &state.peer_id, &peer_id, &message);
         match message {
             // We should process OpenChannel message here because there is no channel corresponding
             // to the channel id in the message yet.
@@ -3394,7 +3393,6 @@ impl ServiceProtocol for Handle {
         match context.session.remote_pubkey.as_ref() {
             Some(pubkey) => {
                 let peer_id = PeerId::from_public_key(pubkey);
-                dbg!("Received message from peer", &peer_id, &msg);
                 self.send_actor_message(NetworkActorMessage::new_event(
                     NetworkActorEvent::PeerMessage(peer_id, msg),
                 ));
@@ -3931,6 +3929,57 @@ mod tests {
 
         // Wait for the broadcast message to be processed.
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        let node = node1.store.get_nodes(Some(test_pub_key));
+        assert!(!node.is_empty());
+
+        let node = node2.store.get_nodes(Some(test_pub_key));
+        assert!(!node.is_empty());
+    }
+
+    // Test that we can sync the network graph with peers.
+    // We will first create a node and announce a fake node announcement to the network.
+    // Then we will create another node and connect to the first node.
+    // We will see if the second node has the fake node announcement.
+    #[tokio::test]
+    async fn test_sync_node_announcement_after_restart() {
+        init_tracing();
+
+        let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes(2)
+            .await
+            .try_into()
+            .unwrap();
+
+        node1
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+        node2
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+
+        node2.stop().await;
+
+        let test_pub_key = get_test_pub_key();
+        let test_peer_id = get_test_peer_id();
+        node1
+            .network_actor
+            .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+                test_peer_id.clone(),
+                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                    create_fake_node_announcement_mesage_version1(),
+                )),
+            )))
+            .expect("send message to network actor");
+
+        node2.start().await;
+        node2.connect_to(&node1).await;
+
+        node2
+            .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
+            .await;
+
+        // Wait for the broadcast message to be processed.
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
         let node = node1.store.get_nodes(Some(test_pub_key));
         assert!(!node.is_empty());
