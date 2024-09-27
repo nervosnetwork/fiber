@@ -1506,10 +1506,9 @@ where
                     NegotiatingFundingFlags::OUR_INIT_SENT,
                 ));
                 debug!(
-                    "Channel to peer {:?} with id {:?} created: {:?}",
+                    "Channel to peer {:?} with id {:?} created",
                     &peer_id,
-                    &channel.get_id(),
-                    &channel
+                    &channel.get_id()
                 );
 
                 channel_id_sender
@@ -1706,7 +1705,7 @@ impl TLCId {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelActorState {
     pub state: ChannelState,
     // The data below are only relevant if the channel is public.
@@ -2063,7 +2062,7 @@ impl From<&ChannelActorState> for Musig2SignContext {
         Musig2SignContext {
             key_agg_ctx: value.get_musig2_agg_context(),
             agg_nonce: value.get_musig2_agg_pubnonce(),
-            seckey: value.signer.funding_key,
+            seckey: value.signer.funding_key.clone(),
             secnonce: value.get_local_musig2_secnonce(),
         }
     }
@@ -2110,7 +2109,7 @@ impl From<(&ChannelActorState, bool)> for Musig2SignContext {
         Musig2SignContext {
             key_agg_ctx,
             agg_nonce,
-            seckey: channel.signer.funding_key,
+            seckey: channel.signer.funding_key.clone(),
             secnonce: channel.get_local_musig2_secnonce(),
         }
     }
@@ -2632,14 +2631,13 @@ impl ChannelActorState {
         message: [u8; 32],
         network: &ActorRef<NetworkActorMessage>,
     ) -> (EcdsaSignature, PartialSignature) {
-        match self
+        if let Some(local_channel_announcement_signature) = self
             .public_channel_info
             .as_ref()
-            .and_then(|state| state.local_channel_announcement_signature)
+            .and_then(|channel_info| channel_info.local_channel_announcement_signature.clone())
         {
-            Some(x) => return x,
-            _ => {}
-        };
+            return local_channel_announcement_signature;
+        }
 
         let local_secnonce = self.get_channel_announcement_musig2_secnonce();
         let local_nonce = local_secnonce.public_nonce();
@@ -2649,11 +2647,9 @@ impl ChannelActorState {
         let peer_id = self.get_remote_peer_id();
         let channel_outpoint = self.get_funding_transaction_outpoint();
 
-        debug!("Signing channel announcement for channel {:?}", &channel_id);
-
         let partial_signature: PartialSignature = sign_partial(
             &key_agg_ctx,
-            self.signer.funding_key,
+            &self.signer.funding_key,
             local_secnonce,
             &agg_nonce,
             message,
@@ -2663,10 +2659,6 @@ impl ChannelActorState {
         let node_signature = sign_network_message(network.clone(), message)
             .await
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        debug!(
-            "Sending channel announcement signature for channel {:?}",
-            &self.id
-        );
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -2675,18 +2667,14 @@ impl ChannelActorState {
                         channel_id,
                         channel_outpoint,
                         partial_signature,
-                        node_signature,
+                        node_signature: node_signature.clone(),
                     }),
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        debug!(
-            "Created channel announcement signature for channel {:?}: node signature {:?}, partial signature: {:?}",
-            &channel_id, &node_signature, &partial_signature
-        );
         let result = (node_signature, partial_signature);
         self.public_channel_state_mut()
-            .local_channel_announcement_signature = Some(result);
+            .local_channel_announcement_signature = Some(result.clone());
         result
     }
 
@@ -2711,7 +2699,7 @@ impl ChannelActorState {
     ) -> Option<(EcdsaSignature, PartialSignature)> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.remote_channel_announcement_signature)
+            .and_then(|state| state.remote_channel_announcement_signature.clone())
     }
 
     fn update_remote_channel_announcement_signature(
@@ -2854,7 +2842,7 @@ impl ChannelActorState {
         let sign_ctx = Musig2SignContext {
             key_agg_ctx,
             agg_nonce,
-            seckey: self.signer.funding_key,
+            seckey: self.signer.funding_key.clone(),
             secnonce: self.get_local_musig2_secnonce(),
         };
         let signature = sign_ctx.sign(message.as_slice()).expect("valid signature");
@@ -4347,7 +4335,7 @@ impl ChannelActorState {
         let sign_ctx: Musig2SignContext = Musig2SignContext {
             key_agg_ctx,
             agg_nonce,
-            seckey: self.signer.funding_key,
+            seckey: self.signer.funding_key.clone(),
             secnonce: self.get_local_musig2_secnonce(),
         };
         let signature2 = sign_ctx.sign(message.as_slice())?;
@@ -5173,7 +5161,7 @@ impl Musig2VerifyContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Musig2SignContext {
     key_agg_ctx: KeyAggContext,
     agg_nonce: AggNonce,
@@ -5443,7 +5431,7 @@ pub fn derive_tlc_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey
 ///
 /// This implementation performs no policy checks and is insufficient by itself as
 /// a secure external signer.
-#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InMemorySigner {
     /// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
     /// holder's anchor output in a commitment transaction, if one is present.
