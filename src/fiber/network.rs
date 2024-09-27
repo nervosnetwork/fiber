@@ -1,4 +1,3 @@
-use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TxStatus};
 use ckb_types::core::TransactionView;
@@ -70,6 +69,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
     TxSignatures,
@@ -497,7 +497,8 @@ pub struct NetworkActor<S> {
 
 impl<S> NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -1972,6 +1973,7 @@ enum RequestState {
 
 pub struct NetworkActorState<S> {
     store: S,
+    persistent_state: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
@@ -2041,6 +2043,21 @@ pub struct NetworkActorState<S> {
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
 }
 
+#[serde_as]
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct PersistentNetworkActorState {}
+
+impl PersistentNetworkActorState {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+pub trait NetworkActorStateStore {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState>;
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState);
+}
+
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
 
 // ractor requires that the actor name is unique, so we add a prefix to the actor name.
@@ -2055,7 +2072,8 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
 
 impl<S> NetworkActorState<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -3025,7 +3043,8 @@ pub struct NetworkActorStartArguments {
 #[rasync_trait]
 impl<S> Actor for NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -3129,8 +3148,13 @@ where
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
             .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
             .expect("Get current block number from chain");
+        let persistent_state = self
+            .store
+            .get_network_actor_state(&my_peer_id)
+            .unwrap_or_default();
         let state = NetworkActorState {
             store: self.store.clone(),
+            persistent_state,
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
@@ -3222,6 +3246,9 @@ where
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
+        debug!("Saving network actor state for {:?}", state.peer_id);
+        self.store
+            .insert_network_actor_state(&state.peer_id, state.persistent_state.clone());
         debug!("Network service for {:?} shutdown", state.peer_id);
         Ok(())
     }
@@ -3364,7 +3391,14 @@ pub(crate) fn emit_service_event(
 }
 
 pub async fn start_network<
-    S: ChannelActorStateStore + NetworkGraphStateStore + InvoiceStore + Clone + Send + Sync + 'static,
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 >(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
