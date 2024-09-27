@@ -14,7 +14,7 @@ use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
 use serde_json;
 use std::{path::Path, sync::Arc};
-use tentacle::{multiaddr::Multiaddr, secio::PeerId};
+use tentacle::secio::PeerId;
 
 #[derive(Clone)]
 pub struct Store {
@@ -158,13 +158,6 @@ impl Batch {
                     serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
                 );
             }
-            KeyValue::PeerIdMultiAddr(peer_id, multiaddr) => {
-                let key = [&[PEER_ID_MULTIADDR_PREFIX], peer_id.as_bytes()].concat();
-                self.put(
-                    key,
-                    serde_json::to_vec(&multiaddr).expect("serialize Multiaddr should be OK"),
-                );
-            }
             KeyValue::WatchtowerChannel(channel_id, channel_data) => {
                 let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
                 self.put(
@@ -225,7 +218,6 @@ const CHANNEL_ANNOUNCEMENT_INDEX_PREFIX: u8 = 97;
 const CHANNEL_UPDATE_INDEX_PREFIX: u8 = 98;
 const NODE_INFO_PREFIX: u8 = 128;
 const NODE_ANNOUNCEMENT_INDEX_PREFIX: u8 = 129;
-const PEER_ID_MULTIADDR_PREFIX: u8 = 160;
 const PAYMENT_SESSION_PREFIX: u8 = 192;
 const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
 
@@ -234,7 +226,6 @@ enum KeyValue {
     CkbInvoice(Hash256, CkbInvoice),
     CkbInvoicePreimage(Hash256, Hash256),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
-    PeerIdMultiAddr(PeerId, Multiaddr),
     NodeInfo(Pubkey, NodeInfo),
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
@@ -479,30 +470,6 @@ impl NetworkGraphStateStore for Store {
         (nodes, JsonBytes::from_bytes(last_key.into()))
     }
 
-    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
-        let key = match peer_id {
-            Some(peer_id) => {
-                let mut key = Vec::with_capacity(33);
-                key.push(PEER_ID_MULTIADDR_PREFIX);
-                key.extend_from_slice(peer_id.as_bytes());
-                key
-            }
-            None => vec![PEER_ID_MULTIADDR_PREFIX],
-        };
-        let iter = self
-            .db
-            .prefix_iterator(key.as_ref())
-            .take_while(|(col_key, _)| col_key.starts_with(&key));
-        iter.map(|(key, value)| {
-            let peer_id =
-                PeerId::from_bytes(key[1..].into()).expect("deserialize peer id should be OK");
-            let addr =
-                serde_json::from_slice(value.as_ref()).expect("deserialize Multiaddr should be OK");
-            (peer_id, addr)
-        })
-        .collect()
-    }
-
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::ChannelInfo(channel.out_point(), channel.clone()));
@@ -513,23 +480,6 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::NodeInfo(node.node_id, node.clone()));
         batch.commit();
-    }
-
-    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr) {
-        let mut batch = self.batch();
-        batch.put_kv(KeyValue::PeerIdMultiAddr(peer_id, multiaddr));
-        batch.commit();
-    }
-
-    fn remove_connected_peer(&self, peer_id: &PeerId) {
-        let prefix = [&[PEER_ID_MULTIADDR_PREFIX], peer_id.as_bytes()].concat();
-        let iter = self
-            .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(key, _)| key.starts_with(&prefix));
-        for (key, _) in iter {
-            self.db.delete(key).expect("delete should be OK");
-        }
     }
 
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
