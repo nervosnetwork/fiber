@@ -145,7 +145,7 @@ impl From<&PubNonce> for Byte66 {
     }
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Serialize, Deserialize, Debug)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Privkey(pub SecretKey);
 
 impl From<Privkey> for Scalar {
@@ -353,15 +353,7 @@ impl Privkey {
 
     pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
         let message = secp256k1::Message::from_digest(message);
-        let sig = secp256k1_instance().sign_ecdsa(&message, &self.0);
-        debug!(
-            "Signing message {:?} with private key {:?} (pub key {:?}), Signature: {:?}",
-            message,
-            self,
-            self.pubkey(),
-            EcdsaSignature::from(sig)
-        );
-        EcdsaSignature::from(sig)
+        secp256k1_instance().sign_ecdsa(&message, &self.0).into()
     }
 }
 
@@ -437,7 +429,7 @@ impl Pubkey {
     }
 }
 
-#[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub struct EcdsaSignature(pub Secp256k1Signature);
 
 impl EcdsaSignature {

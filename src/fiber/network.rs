@@ -1616,9 +1616,9 @@ where
                     )));
                 }
                 let (node1_signature, node2_signature, ckb_signature) = match (
-                    channel_announcement.node1_signature,
-                    channel_announcement.node2_signature,
-                    channel_announcement.ckb_signature,
+                    &channel_announcement.node1_signature,
+                    &channel_announcement.node2_signature,
+                    &channel_announcement.ckb_signature,
                 ) {
                     (Some(node1_signature), Some(node2_signature), Some(ckb_signature)) => {
                         (node1_signature, node2_signature, ckb_signature)
@@ -2062,12 +2062,8 @@ where
         self.broadcasted_messages.insert(message.id())
     }
 
-    pub fn get_private_key(&self) -> Privkey {
-        self.private_key
-    }
-
     pub fn get_public_key(&self) -> Pubkey {
-        self.get_private_key().pubkey()
+        self.private_key.pubkey()
     }
 
     pub fn generate_channel_seed(&mut self) -> [u8; 32] {
