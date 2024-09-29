@@ -379,7 +379,7 @@ impl NetworkGraphStateStore for Store {
             .take_while(|(key, _)| key.starts_with(&channel_prefix))
             .filter_map(|(col_key, value)| {
                 if let Some(key) = &outpoint_key {
-                    if !col_key.starts_with(&key) {
+                    if !col_key.starts_with(key) {
                         return None;
                     }
                 }
@@ -427,7 +427,7 @@ impl NetworkGraphStateStore for Store {
             .take_while(|(key, _)| key.starts_with(&node_prefix))
             .filter_map(|(col_key, value)| {
                 if let Some(key) = &node_key {
-                    if !col_key.starts_with(&key) {
+                    if !col_key.starts_with(key) {
                         return None;
                     }
                 }
@@ -667,7 +667,7 @@ mod tests {
         }
 
         // sort by out_point
-        channels.sort_by(|a, b| a.out_point().cmp(&b.out_point()));
+        channels.sort_by_key(|a| a.out_point());
 
         let outpoint_0 = channels[0].out_point();
         assert_eq!(

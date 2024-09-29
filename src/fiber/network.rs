@@ -560,7 +560,7 @@ where
                         let auto_accept = if let Some(udt_type_script) =
                             open_channel.funding_udt_type_script.as_ref()
                         {
-                            is_udt_type_auto_accept(&udt_type_script, open_channel.funding_amount)
+                            is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
                         } else {
                             state.auto_accept_channel_ckb_funding_amount > 0
                                 && open_channel.all_ckb_amount()
@@ -1718,7 +1718,7 @@ where
                 };
 
                 if let Err(err) = secp256k1_instance().verify_schnorr(
-                    &ckb_signature,
+                    ckb_signature,
                     &Message::from_digest(message),
                     &channel_announcement.ckb_key,
                 ) {
@@ -2519,14 +2519,13 @@ where
     }
 
     async fn get_funding_lock_script(&self) -> Script {
-        let funding_lock_script = call!(
+        call!(
             self.chain_actor,
             CkbChainMessage::GetFundingSourceScript,
             ()
         )
         .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-        .expect("Get funding source script from chain");
-        funding_lock_script
+        .expect("Get funding source script from chain")
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {

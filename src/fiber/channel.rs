@@ -456,13 +456,12 @@ where
                 {
                     Ok((added_tlc_id, forward_to_next_hop)) => {
                         if forward_to_next_hop {
-                            let _ = self
-                                .handle_forward_onion_packet(
-                                    state,
-                                    add_tlc.onion_packet,
-                                    added_tlc_id.into(),
-                                )
-                                .await?;
+                            self.handle_forward_onion_packet(
+                                state,
+                                add_tlc.onion_packet,
+                                added_tlc_id.into(),
+                            )
+                            .await?;
                         }
                         Ok(())
                     }
@@ -482,7 +481,7 @@ where
                                             state.get_remote_peer_id(),
                                             FiberMessage::remove_tlc(RemoveTlc {
                                                 channel_id: state.get_id(),
-                                                tlc_id: tlc_id,
+                                                tlc_id,
                                                 reason: RemoveTlcReason::RemoveTlcFail(
                                                     RemoveTlcFail {
                                                         //FIXME: we should define the error code carefully according
@@ -704,12 +703,10 @@ where
                             onion_info.amount, add_tlc.amount)
                     ));
                 }
-                if !forward_to_next_hop {
-                    if onion_info.amount != add_tlc.amount {
-                        return Err(ProcessingChannelError::InvalidParameter(
-                            "Payment amount mismatch".to_string(),
-                        ));
-                    }
+                if !forward_to_next_hop && onion_info.amount != add_tlc.amount {
+                    return Err(ProcessingChannelError::InvalidParameter(
+                        "Payment amount mismatch".to_string(),
+                    ));
                 }
 
                 // TODO: check the expiry time, if expired, we should return an error.
@@ -753,7 +750,7 @@ where
                 NetworkActorCommand::SendOnionPacket(
                     SendOnionPacketCommand {
                         packet: onion_packet,
-                        previous_tlc: Some((state.get_id(), added_tlc_id.into())),
+                        previous_tlc: Some((state.get_id(), added_tlc_id)),
                     },
                     rpc_reply,
                 ),
@@ -6040,7 +6037,7 @@ mod tests {
             })
             .await;
 
-        let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -6058,8 +6055,6 @@ mod tests {
         })
         .expect("node_b alive")
         .expect("successfully removed tlc");
-
-        dbg!(&remove_tlc_result);
 
         // Since we currently automatically send a `CommitmentSigned` message
         // after sending a `RemoveTlc` message, we can expect the `RemoteCommitmentSigned`
@@ -6547,7 +6542,7 @@ mod tests {
             })
             .await;
 
-        let _ = node_a
+        node_a
             .network_actor
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
