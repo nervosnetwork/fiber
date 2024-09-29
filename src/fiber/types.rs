@@ -13,18 +13,20 @@ use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
+use fiber_sphinx::SphinxError;
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
-use secp256k1::XOnlyPublicKey;
 use secp256k1::{
     ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
-    Secp256k1, SecretKey,
+    Secp256k1, SecretKey, Signing,
 };
+use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::marker::PhantomData;
 use std::str::FromStr;
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
@@ -469,10 +471,22 @@ pub enum Error {
     TentacleMultiAddr(#[from] tentacle::multiaddr::Error),
     #[error("Musig2 error: {0}")]
     Musig2(String),
+    #[error("Invalid onion packet")]
+    OnionPacket(#[from] OnionPacketError),
     #[error("Error: {0}")]
     AnyHow(#[from] anyhow::Error),
-    #[error("Invalid onion packet")]
-    OnionPacket,
+}
+
+#[derive(Error, Debug)]
+pub enum OnionPacketError {
+    #[error("Try to peel the last hop")]
+    PeelingLastHop,
+
+    #[error("Fail to deserialize the hop data")]
+    InvalidHopData,
+
+    #[error("Sphinx protocol error")]
+    Sphinx(#[from] SphinxError),
 }
 
 impl From<Pubkey> for molecule_fiber::Pubkey {
@@ -2707,10 +2721,9 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(deterministically_serialize(v))
 }
 
-// TODO: replace this with real OnionPacket implementation
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OnionInfo {
+pub struct PaymentHopData {
     pub payment_hash: Hash256,
     // this is only specified in the last hop in the keysend mode
     pub preimage: Option<Hash256>,
@@ -2722,53 +2735,221 @@ pub struct OnionInfo {
     pub channel_outpoint: Option<OutPoint>,
 }
 
-// TODO: replace this with real OnionPacket implementation
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OnionPacket {
-    pub hop_data: Vec<OnionInfo>,
+/// Trait for hop data
+pub trait HopData: Sized {
+    const PACKET_DATA_LEN: usize;
+    fn next_hop(&self) -> Option<Pubkey>;
+    fn assoc_data(&self) -> Option<Vec<u8>>;
+    fn serialize(&self) -> Vec<u8>;
+    fn deserialize(data: &[u8]) -> Option<Self>;
 }
 
-impl OnionPacket {
-    pub fn new(hop_data: Vec<OnionInfo>) -> Self {
-        OnionPacket { hop_data }
+impl HopData for PaymentHopData {
+    const PACKET_DATA_LEN: usize = 1300;
+
+    fn next_hop(&self) -> Option<Pubkey> {
+        self.next_hop.clone()
     }
 
-    pub fn serialize(&self) -> Vec<u8> {
+    fn assoc_data(&self) -> Option<Vec<u8>> {
+        Some(self.payment_hash.as_ref().to_vec())
+    }
+
+    fn serialize(&self) -> Vec<u8> {
         deterministically_serialize(self)
     }
 
-    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        serde_json::from_slice(data).map_err(|_| Error::OnionPacket)
+    fn deserialize(data: &[u8]) -> Option<Self> {
+        serde_json::from_slice(data).ok()
     }
+}
 
-    pub fn shift(&mut self) -> Result<OnionInfo, Error> {
-        if !self.hop_data.is_empty() {
-            Ok(self.hop_data.remove(0))
-        } else {
-            Err(Error::OnionPacket)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OnionPacket<T> {
+    _phantom: PhantomData<T>,
+    // The encrypted packet
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PeeledOnionPacket<T> {
+    // The decrypted hop data for the current hop
+    pub current: T,
+    // The packet for the next hop
+    pub next: Option<OnionPacket<T>>,
+}
+
+pub type PaymentOnionPacket = OnionPacket<PaymentHopData>;
+pub type PeeledPaymentOnionPacket = PeeledOnionPacket<PaymentHopData>;
+
+impl<T> OnionPacket<T> {
+    pub fn new(data: Vec<u8>) -> Self {
+        OnionPacket {
+            _phantom: PhantomData,
+            data,
         }
     }
+}
 
-    pub fn peek(&self) -> Option<&OnionInfo> {
-        if !self.hop_data.is_empty() {
-            Some(&self.hop_data[0])
+impl<T: HopData> OnionPacket<T> {
+    /// Peels the next layer of the onion packet using the privkey of the current node.
+    ///
+    /// Returns errors when:
+    /// - This is the packet for the last hop.
+    /// - Fail to peel the packet using the given private key.
+    pub fn peel<C: Verification>(
+        self,
+        privkey: &Privkey,
+        assoc_data: Option<&[u8]>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<PeeledOnionPacket<T>, Error> {
+        let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))?;
+
+        let (new_current, new_next) = sphinx_packet
+            .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
+            .map_err(|err| Error::OnionPacket(err.into()))?;
+
+        let current = unpack_hop_data(&new_current)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+        // All zeros hmac indicates the last hop
+        let next = new_next
+            .hmac
+            .iter()
+            .any(|b| *b != 0)
+            .then(|| OnionPacket::new(new_next.into_bytes()));
+
+        Ok(PeeledOnionPacket { current, next })
+    }
+}
+
+impl<T: HopData> PeeledOnionPacket<T> {
+    /// - `hops_info`: the first is the instruction for the origin node itself. Remaining elements are for each node to receive the packet.
+    pub fn create<C: Signing>(
+        session_key: Privkey,
+        mut hops_infos: Vec<T>,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<Self, Error> {
+        if hops_infos.is_empty() {
+            return Err(Error::OnionPacket(SphinxError::HopsIsEmpty.into()));
+        }
+
+        let hops_path: Vec<PublicKey> = hops_infos
+            .iter()
+            .map(HopData::next_hop)
+            .take_while(Option::is_some)
+            .map(|opt| opt.unwrap().into())
+            .collect();
+
+        // Add length as the header
+        let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
+
+        let current = hops_infos.swap_remove(0);
+        let assoc_data = current.assoc_data();
+
+        let next = if !hops_path.is_empty() {
+            Some(OnionPacket::new(
+                fiber_sphinx::OnionPacket::create(
+                    session_key.into(),
+                    hops_path,
+                    hops_data,
+                    assoc_data,
+                    T::PACKET_DATA_LEN,
+                    secp_ctx,
+                )
+                .map_err(|err| Error::OnionPacket(err.into()))?
+                .into_bytes(),
+            ))
         } else {
             None
-        }
+        };
+
+        Ok(PeeledOnionPacket { current, next })
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.hop_data.is_empty()
+    /// Returns true if this is the peeled packet for the last destination.
+    pub fn is_last(&self) -> bool {
+        self.next.is_none()
     }
+
+    /// Peels the next layer of the onion packet using the privkey of the current node.
+    ///
+    /// Returns errors when:
+    /// - This is the packet for the last hop.
+    /// - Fail to peel the packet using the given private key.
+    pub fn peel<C: Verification>(
+        self,
+        privkey: &Privkey,
+        secp_ctx: &Secp256k1<C>,
+    ) -> Result<Self, Error> {
+        let next = self
+            .next
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::PeelingLastHop))?;
+
+        next.peel(privkey, self.current.assoc_data().as_deref(), secp_ctx)
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut res = pack_hop_data(&self.current);
+        if let Some(ref next) = self.next {
+            res.append(&mut (next.data.clone()));
+        }
+        res
+    }
+
+    pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
+        let current_len = get_hop_data_len(data)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+        let current = unpack_hop_data(data)
+            .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
+        let next = if current_len < data.len() {
+            Some(OnionPacket::new(data[current_len..].to_vec()))
+        } else {
+            None
+        };
+        Ok(Self { current, next })
+    }
+}
+
+const HOP_DATA_HEAD_LEN: usize = std::mem::size_of::<u64>();
+
+/// TODO: when JSON is replaced, this function may return `data` directly.
+fn pack_hop_data<T: HopData>(hop_data: &T) -> Vec<u8> {
+    let mut serialized = hop_data.serialize();
+    // A temporary solution to prepend the length as the header
+    let mut packed = (serialized.len() as u64).to_be_bytes().to_vec();
+    packed.append(&mut serialized);
+    packed
+}
+
+/// TODO: when JSON is replaced, this function may return `data` directly.
+fn unpack_hop_data<T: HopData>(buf: &[u8]) -> Option<T> {
+    let len = get_hop_data_len(buf)?;
+    if buf.len() < len {
+        return None;
+    }
+    T::deserialize(&buf[HOP_DATA_HEAD_LEN..len])
+}
+
+/// TODO: when JSON is replaced, this function may return `data` directly.
+fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < HOP_DATA_HEAD_LEN {
+        return None;
+    }
+    Some(
+        u64::from_be_bytes(buf[0..HOP_DATA_HEAD_LEN].try_into().unwrap()) as usize
+            + HOP_DATA_HEAD_LEN,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{secp256k1_instance, Pubkey};
-    use crate::fiber::test_utils::generate_pubkey;
+    use crate::fiber::test_utils::generate_seckey;
+    use crate::fiber::types::Privkey;
     use ckb_types::packed::OutPointBuilder;
     use ckb_types::prelude::Builder;
-    use secp256k1::SecretKey;
+    use secp256k1::{Secp256k1, SecretKey};
 
     #[test]
     fn test_serde_public_key() {
@@ -2800,56 +2981,59 @@ mod tests {
     }
 
     #[test]
-    fn test_onion_packet() {
-        let onion_info1 = super::OnionInfo {
-            payment_hash: [1; 32].into(),
-            amount: 2,
-            expiry: 3,
-            next_hop: Some(generate_pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
-            preimage: None,
-        };
-        let onion_info2 = super::OnionInfo {
-            payment_hash: [4; 32].into(),
-            amount: 5,
-            expiry: 6,
-            next_hop: Some(generate_pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
-            preimage: None,
-        };
-        let mut onion_packet =
-            super::OnionPacket::new(vec![onion_info1.clone(), onion_info2.clone()]);
+    fn test_peeled_onion_packet() {
+        let secp = Secp256k1::new();
+        let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
+            .take(3)
+            .collect();
+        let payment_hash = [1; 32].into();
+        let hops_infos = vec![
+            super::PaymentHopData {
+                payment_hash,
+                amount: 2,
+                expiry: 3,
+                next_hop: Some(keys[1].pubkey().into()),
+                channel_outpoint: Some(OutPointBuilder::default().build().into()),
+                tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+                preimage: None,
+            },
+            super::PaymentHopData {
+                payment_hash,
+                amount: 5,
+                expiry: 6,
+                next_hop: Some(keys[2].pubkey().into()),
+                channel_outpoint: Some(OutPointBuilder::default().build().into()),
+                tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+                preimage: None,
+            },
+            super::PaymentHopData {
+                payment_hash,
+                amount: 8,
+                expiry: 9,
+                next_hop: None,
+                channel_outpoint: Some(OutPointBuilder::default().build().into()),
+                tlc_hash_algorithm: super::HashAlgorithm::Sha256,
+                preimage: None,
+            },
+        ];
+        let packet =
+            super::PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)
+                .expect("create peeled packet");
 
-        let serialized = onion_packet.serialize();
-        let deserialized_onion_packet =
-            super::OnionPacket::deserialize(&serialized).expect("deserialize");
+        let serialized = packet.serialize();
+        let deserialized = super::PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
 
-        assert_eq!(onion_packet, deserialized_onion_packet);
+        assert_eq!(packet, deserialized);
 
-        let first = onion_packet.shift().expect("shift error");
-        assert_eq!(first, onion_info1);
-        let first = onion_packet.shift().expect("shift error");
-        assert_eq!(first, onion_info2);
-        let first = onion_packet.shift();
-        assert!(first.is_err());
-    }
+        assert_eq!(packet.current, hops_infos[0]);
+        assert!(!packet.is_last());
 
-    #[test]
-    fn test_onion_packet_serde() {
-        let onion_info = super::OnionInfo {
-            payment_hash: [42; 32].into(),
-            amount: 42,
-            expiry: 42,
-            next_hop: Some(generate_pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: super::HashAlgorithm::Sha256,
-            preimage: None,
-        };
-        let onion_packet = super::OnionPacket::new(vec![onion_info.clone()]);
-        let serialized = onion_packet.serialize();
-        let onion_packet2 = super::OnionPacket::deserialize(&serialized).expect("deserialize");
-        assert_eq!(onion_packet, onion_packet2);
+        let packet = packet.peel(&keys[1], &secp).expect("peel");
+        assert_eq!(packet.current, hops_infos[1]);
+        assert!(!packet.is_last());
+
+        let packet = packet.peel(&keys[2], &secp).expect("peel");
+        assert_eq!(packet.current, hops_infos[2]);
+        assert!(packet.is_last());
     }
 }

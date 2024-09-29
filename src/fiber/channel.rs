@@ -3,10 +3,7 @@ use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    fiber::{
-        network::get_chain_hash,
-        types::{ChannelUpdate, OnionPacket},
-    },
+    fiber::{network::get_chain_hash, types::ChannelUpdate},
     invoice::InvoiceStore,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -26,8 +23,8 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
-    SpawnErr,
+    async_trait as rasync_trait, call, Actor, ActorProcessingErr, ActorRef, OutputPort,
+    RpcReplyPort, SpawnErr,
 };
 
 use serde::{Deserialize, Serialize};
@@ -454,26 +451,38 @@ where
                 // If there is a next hop, we should send the AddTlc message to the next hop.
                 // If this is the last hop, we should check the payment hash and amount and then
                 // try to fulfill the payment, find the corresponding payment preimage from payment hash.
-                let mut forward_to_next_hop = false;
                 let mut preimage = None;
-                if let Ok(onion_packet) = OnionPacket::deserialize(&add_tlc.onion_packet) {
-                    if let Some(onion_info) = onion_packet.peek() {
-                        if onion_info.next_hop.is_some() {
-                            forward_to_next_hop = true;
-                        } else {
-                            // check the payment hash and amount
-                            if onion_info.payment_hash != add_tlc.payment_hash
-                                || onion_info.amount != add_tlc.amount
-                            {
-                                return Err(ProcessingChannelError::InvalidParameter(
-                                    "Payment hash or amount mismatch".to_string(),
-                                ));
-                            }
-                            // TODO: check the expiry time, if expired, we should return an error.
+                let mut peeled_packet_bytes: Option<Vec<u8>> = None;
 
-                            // if this is the last hop, store the preimage.
-                            preimage = onion_info.preimage;
-                        }
+                if !add_tlc.onion_packet.is_empty() {
+                    // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
+                    // the network actor when it handles `FiberMessage::ChannelNormalOperation`. A better alternative is
+                    // peeling the onion packet there before forwarding the message to the channel actor.
+                    let peeled_packet = call!(self.network, |tx| NetworkActorMessage::Command(
+                        NetworkActorCommand::PeelPaymentOnionPacket(
+                            add_tlc.onion_packet.clone(),
+                            add_tlc.payment_hash.clone(),
+                            tx
+                        )
+                    ))
+                    .expect("call network")
+                    .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
+
+                    // check the payment hash and amount
+                    if peeled_packet.current.payment_hash != add_tlc.payment_hash
+                        || peeled_packet.current.amount != add_tlc.amount
+                    {
+                        return Err(ProcessingChannelError::InvalidParameter(
+                            "Payment hash or amount mismatch".to_string(),
+                        ));
+                    }
+                    // TODO: check the expiry time, if expired, we should return an error.
+
+                    if peeled_packet.is_last() {
+                        // if this is the last hop, store the preimage.
+                        preimage = peeled_packet.current.preimage;
+                    } else {
+                        peeled_packet_bytes = Some(peeled_packet.serialize());
                     }
                 }
 
@@ -494,11 +503,11 @@ where
                 // while we have crashed. We need a way to make sure that the peer will resend
                 // this message, and our processing of this message is idempotent.
 
-                if forward_to_next_hop {
+                if let Some(peeled_packet_bytes) = peeled_packet_bytes {
                     self.network
                         .send_message(NetworkActorMessage::Command(
-                            NetworkActorCommand::SendOnionPacket(
-                                add_tlc.onion_packet.clone(),
+                            NetworkActorCommand::SendPaymentOnionPacket(
+                                peeled_packet_bytes,
                                 Some((state.get_id(), tlc.get_id())),
                             ),
                         ))
@@ -1895,6 +1904,8 @@ pub enum ProcessingChannelError {
     Musig2VerifyError(#[from] VerifyError),
     #[error("Musig2 SigningError: {0}")]
     Musig2SigningError(#[from] SigningError),
+    #[error("Failed to peel onion packet: {0}")]
+    PeelingOnionPacketError(String),
 }
 
 bitflags! {

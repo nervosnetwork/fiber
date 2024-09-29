@@ -42,6 +42,8 @@ pub enum Error {
     NetworkGraphError(#[from] GraphError),
     #[error("Invalid peer message: {0}")]
     InvalidPeerMessage(String),
+    #[error("Onion packet error: {0}")]
+    InvalidOnionPacket(crate::fiber::types::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

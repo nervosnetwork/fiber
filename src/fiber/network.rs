@@ -11,7 +11,7 @@ use ractor::{
     RactorErr, RpcReplyPort, SupervisionEvent,
 };
 use rand::Rng;
-use secp256k1::Message;
+use secp256k1::{Message, Secp256k1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::borrow::Cow;
@@ -70,7 +70,11 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
-use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, OnionPacket, TxSignatures};
+use crate::fiber::types::{
+    secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
+    TxSignatures,
+};
+use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, InvoiceStore};
 use crate::{unwrap_or_return, Error};
 
@@ -139,7 +143,15 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    SendOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
+    // SendPaymentOnionPacket(peeled_packet_buf, previous_tlc),
+    // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
+    // is for the current node.
+    SendPaymentOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
+    PeelPaymentOnionPacket(
+        Vec<u8>, // onion_packet
+        Hash256, // payment_hash
+        RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
+    ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Broadcast node/channel information.
@@ -1198,43 +1210,56 @@ where
             }
 
             // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
-            NetworkActorCommand::SendOnionPacket(packet, previous_tlc) => {
-                if let Ok(mut onion_packet) = OnionPacket::deserialize(&packet) {
-                    if let Ok(info) = onion_packet.shift() {
-                        debug!("Processing onion packet info: {:?}", info);
-                        let channel_outpoint = &info
-                            .channel_outpoint
-                            .expect("valid onion packet contains channel outpoint");
-                        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
-                            Some(channel_id) => channel_id,
-                            None => {
-                                // TODO: Return error to the sender. This is a payment failure.
-                                error!("Failed to process onion packet: channel id not found for channel outpoint {:?}. Are we connected to the peer?", channel_outpoint);
-                                return Ok(());
-                            }
-                        };
-                        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
-                        let rpc_reply = RpcReplyPort::from(send);
-                        let command = ChannelCommand::AddTlc(
-                            AddTlcCommand {
-                                amount: info.amount,
-                                preimage: None,
-                                payment_hash: Some(info.payment_hash),
-                                expiry: info.expiry.into(),
-                                hash_algorithm: info.tlc_hash_algorithm,
-                                onion_packet: onion_packet.serialize(),
-                                previous_tlc,
-                            },
-                            rpc_reply,
-                        );
-                        state.send_command_to_channel(*channel_id, command).await?;
-                        let res = recv.await.expect("recv add tlc response");
-                        info!("send onion packet: {:?}", res);
-                    }
-                } else {
-                    info!("onion packet is empty, ignore it");
+            NetworkActorCommand::SendPaymentOnionPacket(peeled_packet_buf, previous_tlc) => {
+                if let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&peeled_packet_buf)
+                {
+                    let current_hop_info = peeled_packet.current;
+                    debug!("Processing onion packet info: {:?}", current_hop_info);
+                    let channel_outpoint = &current_hop_info
+                        .channel_outpoint
+                        .expect("valid onion packet contains channel outpoint");
+                    let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+                        Some(channel_id) => channel_id,
+                        None => {
+                            // TODO: Return error to the sender. This is a payment failure.
+                            error!("Failed to process onion packet: channel id not found for channel outpoint {:?}. Are we connected to the peer?", channel_outpoint);
+                            return Ok(());
+                        }
+                    };
+                    let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
+                    let rpc_reply = RpcReplyPort::from(send);
+                    let command = ChannelCommand::AddTlc(
+                        AddTlcCommand {
+                            amount: current_hop_info.amount,
+                            preimage: None,
+                            payment_hash: Some(current_hop_info.payment_hash),
+                            expiry: current_hop_info.expiry.into(),
+                            hash_algorithm: current_hop_info.tlc_hash_algorithm,
+                            onion_packet: peeled_packet
+                                .next
+                                .map(|next| next.data)
+                                .unwrap_or_default(),
+                            previous_tlc,
+                        },
+                        rpc_reply,
+                    );
+                    state.send_command_to_channel(*channel_id, command).await?;
+                    let res = recv.await.expect("recv add tlc response");
+                    info!("send onion packet: {:?}", res);
                 }
             }
+            NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
+                let response = PaymentOnionPacket::new(onion_packet)
+                    .peel(
+                        &state.private_key,
+                        Some(payment_hash.as_ref()),
+                        &Secp256k1::new(),
+                    )
+                    .map_err(|err| err.to_string());
+
+                let _ = reply.send(response);
+            }
+
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
                 let old_tx = transaction.into_view();
                 let mut tx = FundingTx::new();
@@ -1811,12 +1836,17 @@ where
         // handle the payment process
         let payment_session = PaymentSession::new(payment_request.clone(), 3);
 
-        let onion_path = graph.build_route(payment_request.clone())?;
-        assert!(!onion_path.is_empty());
-        let onion_packet = OnionPacket::new(onion_path).serialize();
+        let hops_infos = graph.build_route(payment_request.clone())?;
+        assert!(!hops_infos.is_empty());
+
+        // generate session key
+        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+        let peeled_packet =
+            PeeledPaymentOnionPacket::create(session_key, hops_infos, &Secp256k1::signing_only())
+                .map_err(|err| Error::InvalidOnionPacket(err))?;
 
         let res = my_self.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendOnionPacket(onion_packet.clone(), None),
+            NetworkActorCommand::SendPaymentOnionPacket(peeled_packet.serialize(), None),
         ));
         info!("send_payment: {:?} => result: {:?}", payment_request, res);
         Ok(payment_session.payment_hash())
