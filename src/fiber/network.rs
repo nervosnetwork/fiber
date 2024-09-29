@@ -159,6 +159,8 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    // Get Payment Session for query payment status and errors
+    GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     GetAndProcessChannelsWithinBlockRangeFromPeer(
         (PeerId, u64, u64),
         RpcReplyPort<Result<(u64, bool), Error>>,
@@ -1433,11 +1435,21 @@ where
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
                 match self.on_send_payment(state, myself, payment_request).await {
-                    Ok(payment_res) => {
-                        let _ = reply.send(Ok(payment_res));
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
                     }
                     Err(e) => {
                         error!("Failed to send payment: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
+            NetworkActorCommand::GetPayment(payment_hash, reply) => {
+                match self.on_get_payment(&payment_hash) {
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
+                    }
+                    Err(e) => {
                         let _ = reply.send(Err(e.to_string()));
                     }
                 }
@@ -1884,6 +1896,25 @@ where
                     std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
             }
             self.store.insert_payment_session(payment_session);
+        }
+    }
+
+    fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
+        let payment_session = self.store.get_payment_session(*payment_hash);
+        match payment_session {
+            Some(payment_session) => {
+                let response = SendPaymentResponse {
+                    payment_hash: payment_session.payment_hash(),
+                    last_update_time: payment_session.last_updated_time,
+                    status: payment_session.status,
+                    failed_error: payment_session.last_error.clone(),
+                };
+                Ok(response)
+            }
+            None => Err(Error::InvalidParameter(format!(
+                "Payment session not found: {:?}",
+                payment_hash
+            ))),
         }
     }
 

@@ -172,6 +172,22 @@ pub struct UpdateChannelParams {
 }
 
 #[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetPaymentCommandParams {
+    pub payment_hash: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct GetPaymentCommandResult {
+    pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    #[serde_as(as = "U128Hex")]
+    pub last_update_time: u128,
+    pub failed_error: Option<String>,
+}
+
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendPaymentCommandParams {
     // the identifier of the payment target
@@ -220,6 +236,7 @@ pub struct SendPaymentResult {
     pub last_update_time: u128,
     pub failed_error: Option<String>,
 }
+
 #[rpc(server)]
 pub trait ChannelRpc {
     #[method(name = "open_channel")]
@@ -264,6 +281,12 @@ pub trait ChannelRpc {
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<SendPaymentResult, ErrorObjectOwned>;
+
+    #[method(name = "get_payment")]
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
 pub struct ChannelRpcServerImpl<S> {
@@ -496,6 +519,24 @@ where
             ))
         };
         handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
+            payment_hash: response.payment_hash,
+            status: response.status,
+            last_update_time: response.last_update_time,
+            failed_error: response.failed_error,
+        })
+    }
+
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                params.payment_hash,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
             status: response.status,
             last_update_time: response.last_update_time,
