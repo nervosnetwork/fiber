@@ -14,6 +14,7 @@ use secp256k1::{Message, Secp256k1};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use tentacle::utils::extract_peer_id;
 
 use std::collections::{HashMap, HashSet};
@@ -2041,11 +2042,26 @@ impl PersistentNetworkActorState {
         Default::default()
     }
 
-    pub fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) {
-        self.peer_store.insert(peer_id, addr);
+    /// Save peer addresses to the peer store. If the peer addresses are updated,
+    /// return true, otherwise return false.
+    fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
+        match self.peer_store.entry(peer_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get() == &addr {
+                    false
+                } else {
+                    entry.insert(addr);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(addr);
+                true
+            }
+        }
     }
 
-    pub fn get_peers_to_sync_graph(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
+    fn get_peers_to_sync_graph(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
         const NUM_PEERS_TO_SYNC_NETWORK_GRAPH: usize = 5;
         self.peer_store
             .iter()
@@ -2054,7 +2070,7 @@ impl PersistentNetworkActorState {
             .collect()
     }
 
-    pub fn get_peers_to_connect(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
+    fn get_peers_to_connect(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
         const NUM_PEERS_TO_CONNECT: usize = 20;
         self.peer_store
             .iter()
@@ -2672,8 +2688,21 @@ where
 
     fn on_node_announcement(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
         self.maybe_connect_to_peer(&peer_id, &addresses);
-        self.persistent_state
-            .save_peer_addresses(peer_id, addresses);
+        self.save_peer_addresses(peer_id, addresses);
+    }
+
+    fn save_peer_addresses(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
+        if self
+            .persistent_state
+            .save_peer_addresses(peer_id, addresses)
+        {
+            self.persist_state();
+        }
+    }
+
+    fn persist_state(&self) {
+        self.store
+            .insert_network_actor_state(&self.peer_id, self.persistent_state.clone());
     }
 
     fn maybe_connect_to_peer(&mut self, peer_id: &PeerId, addresses: &[Multiaddr]) {
@@ -3303,8 +3332,7 @@ where
             error!("Failed to close tentacle service: {}", err);
         }
         debug!("Saving network actor state for {:?}", state.peer_id);
-        self.store
-            .insert_network_actor_state(&state.peer_id, state.persistent_state.clone());
+        state.persist_state();
         debug!("Network service for {:?} shutdown", state.peer_id);
         Ok(())
     }
