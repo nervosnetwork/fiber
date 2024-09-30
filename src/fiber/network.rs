@@ -1559,7 +1559,6 @@ where
         state: &mut NetworkActorState<S>,
         message: FiberBroadcastMessage,
     ) -> Result<(), Error> {
-        let network = &state.network;
         match message {
             FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
                 let message = node_announcement.message_to_sign();
@@ -1591,16 +1590,8 @@ where
                         };
                         self.network_graph.write().await.add_node(node_info);
 
-                        // TODO: bookkeeping how many nodes we have connected to. Stop connnecting once we surpass a threshold.
                         let peer_id = node_announcement.peer_id();
-                        state
-                            .persistent_state
-                            .save_peer_addresses(peer_id, node_announcement.addresses.clone());
-                        for addr in &node_announcement.addresses {
-                            network.send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone()),
-                            ))?;
-                        }
+                        state.on_node_announcement(peer_id, node_announcement.addresses.clone());
                         Ok(())
                     }
                     _ => {
@@ -2677,6 +2668,39 @@ where
             }
         }
         self.maybe_tell_syncer_peer_disconnected(id);
+    }
+
+    fn on_node_announcement(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
+        self.maybe_connect_to_peer(&peer_id, &addresses);
+        self.persistent_state
+            .save_peer_addresses(peer_id, addresses);
+    }
+
+    fn maybe_connect_to_peer(&mut self, peer_id: &PeerId, addresses: &[Multiaddr]) {
+        // TODO: Make this configurable and add more complex connection logic,
+        // e.g. if a peer is banned, we should not connect to it.
+        const MAX_CONNECTED_PEERS: usize = 40;
+        if self.peer_session_map.len() >= MAX_CONNECTED_PEERS {
+            debug!(
+                "Already connected to {} peers, skipping connection to peer {:?}",
+                MAX_CONNECTED_PEERS, peer_id
+            );
+            return;
+        }
+        if let Some(session) = self.get_peer_session(peer_id) {
+            debug!(
+                "Peer {:?} already connected with session id {:?}, skipping connection",
+                peer_id, session
+            );
+            return;
+        }
+        for addr in addresses {
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ConnectPeer(addr.clone()),
+                ))
+                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        }
     }
 
     async fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
