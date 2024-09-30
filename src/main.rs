@@ -4,19 +4,16 @@ use fnn::fiber::graph::NetworkGraph;
 use fnn::store::Store;
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use ractor::Actor;
-use tentacle::multiaddr::Multiaddr;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
 use tracing::{debug, error, info, info_span, trace};
 use tracing_subscriber::field::MakeExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use std::str::FromStr;
-
 use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::ckb::CkbChainActor;
-use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
+use fnn::fiber::channel::ChannelSubscribers;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
@@ -93,8 +90,6 @@ pub async fn main() {
             const CHANNEL_SIZE: usize = 4000;
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
 
-            let bootnodes = fiber_config.bootnode_addrs.clone();
-
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
                 node_public_key.clone().into(),
@@ -112,14 +107,6 @@ pub async fn main() {
                 network_graph.clone(),
             )
             .await;
-
-            for bootnode in bootnodes {
-                let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
-                let command = NetworkActorCommand::ConnectPeer(addr);
-                network_actor
-                    .send_message(NetworkActorMessage::new_command(command))
-                    .expect("ckb actor alive")
-            }
 
             let watchtower_actor = Actor::spawn_linked(
                 Some("watchtower".to_string()),

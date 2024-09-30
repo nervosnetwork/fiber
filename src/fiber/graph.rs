@@ -10,8 +10,6 @@ use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
-use tentacle::multiaddr::Multiaddr;
-use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, warn};
@@ -129,8 +127,6 @@ pub struct NetworkGraph<S> {
     // Similar to the best_height, this is the last update time of the network graph.
     // We assume that we have already synced the graph up to this time - ASSUME_MAX_MESSAGE_TIMESTAMP_GAP.
     last_update_timestamp: u64,
-    // when we restarting a node, we will reconnect to these peers
-    connected_peer_addresses: HashMap<PeerId, Multiaddr>,
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
@@ -163,7 +159,6 @@ where
             last_update_timestamp: 0,
             channels: HashMap::new(),
             nodes: HashMap::new(),
-            connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: get_chain_hash(),
         };
@@ -202,9 +197,6 @@ where
                 self.last_update_timestamp = node.timestamp;
             }
             self.nodes.insert(node.node_id, node.clone());
-        }
-        for (peer, addr) in self.store.get_connected_peer(None) {
-            self.connected_peer_addresses.insert(peer, addr);
         }
     }
 
@@ -394,25 +386,6 @@ where
         self.chain_hash == chain_hash
     }
 
-    pub fn add_connected_peer(&mut self, peer_id: &PeerId, address: Multiaddr) {
-        self.connected_peer_addresses
-            .insert(peer_id.clone(), address.clone());
-        self.store.insert_connected_peer(peer_id.clone(), address);
-    }
-
-    pub fn get_connected_peers(&self) -> Vec<(&PeerId, &Multiaddr)> {
-        self.connected_peer_addresses.iter().collect()
-    }
-
-    pub fn get_peers_to_sync_network_graph(&self) -> Vec<(&PeerId, &Multiaddr)> {
-        self.connected_peer_addresses.iter().take(3).collect()
-    }
-
-    pub fn remove_connected_peer(&mut self, peer_id: &PeerId) {
-        self.connected_peer_addresses.remove(peer_id);
-        self.store.remove_connected_peer(peer_id);
-    }
-
     pub fn get_node_inbounds(
         &self,
         node_id: Pubkey,
@@ -452,7 +425,6 @@ where
     pub fn reset(&mut self) {
         self.channels.clear();
         self.nodes.clear();
-        self.connected_peer_addresses.clear();
     }
 
     pub fn init_payment_session(&self, payment_request: SendPaymentCommand) -> PaymentSession {
@@ -775,9 +747,6 @@ pub trait NetworkGraphStateStore {
     ) -> (Vec<ChannelInfo>, JsonBytes);
     fn insert_channel(&self, channel: ChannelInfo);
     fn insert_node(&self, node: NodeInfo);
-    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr);
-    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)>;
-    fn remove_connected_peer(&self, peer_id: &PeerId);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
 }
@@ -808,18 +777,10 @@ impl PaymentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fiber::test_utils::{generate_keypair, generate_pubkey};
+    use crate::fiber::test_utils::generate_keypair;
     use crate::store::Store;
     use ckb_types::prelude::Entity;
     use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
-
-    fn generate_keys(num: usize) -> Vec<PublicKey> {
-        let mut keys = vec![];
-        for _ in 0..num {
-            keys.push(generate_pubkey());
-        }
-        keys
-    }
 
     fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
         let mut keys = vec![];
@@ -987,41 +948,6 @@ mod tests {
             self.graph
                 .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
         }
-    }
-
-    #[test]
-    fn test_graph_connected_peers() {
-        let temp_path = tempfile::tempdir().unwrap();
-        let store = Store::new(temp_path.path());
-        let keys = generate_keys(1);
-        let public_key1 = keys[0];
-        let mut network_graph = NetworkGraph::new(store, public_key1.into());
-
-        let peer_id = PeerId::random();
-        let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-        network_graph.add_connected_peer(&peer_id, address.clone());
-
-        let connected_peers = network_graph.get_connected_peers();
-        assert_eq!(connected_peers.len(), 1);
-        assert_eq!(connected_peers[0], (&peer_id, &address));
-
-        network_graph.reset();
-        let connected_peers = network_graph.get_connected_peers();
-        assert_eq!(connected_peers.len(), 0);
-
-        // load from db
-        network_graph.load_from_store();
-        let connected_peers = network_graph.get_connected_peers();
-        assert_eq!(connected_peers.len(), 1);
-        assert_eq!(connected_peers[0], (&peer_id, &address));
-
-        network_graph.remove_connected_peer(&peer_id);
-        let connected_peers = network_graph.get_connected_peers();
-        assert_eq!(connected_peers.len(), 0);
-
-        network_graph.load_from_store();
-        let connected_peers = network_graph.get_connected_peers();
-        assert_eq!(connected_peers.len(), 0);
     }
 
     #[test]

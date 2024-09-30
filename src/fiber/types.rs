@@ -1451,6 +1451,10 @@ impl NodeAnnouncement {
         };
         deterministically_hash(&unsigned_announcement)
     }
+
+    pub fn peer_id(&self) -> PeerId {
+        PeerId::from_public_key(&self.node_id.into())
+    }
 }
 
 impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
