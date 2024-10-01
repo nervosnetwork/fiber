@@ -145,7 +145,6 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
     }
 }
 
-#[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
@@ -342,7 +341,6 @@ impl NetworkNode {
     pub async fn start(&mut self) {
         let config = self.get_node_config();
         let new = Self::new_with_config(config).await;
-        tracing::debug!("New node started: {:?}", &new);
         *self = new;
     }
 
@@ -360,16 +358,19 @@ impl NetworkNode {
         self.start().await;
     }
 
-    pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
-        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
-        for i in 0..n {
+    pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
+        for i in 0..N {
             let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
             nodes.push(new);
         }
-        nodes
+        match nodes.try_into() {
+            Ok(nodes) => nodes,
+            Err(_) => unreachable!(),
+        }
     }
 
     // Create n nodes and connect them. The config_gen function
@@ -459,7 +460,7 @@ impl NetworkNode {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
@@ -674,22 +675,10 @@ mod tests {
     use super::NetworkNode;
 
     #[tokio::test]
-    async fn test_start_network_node() {
-        println!("starting network node");
-        let node = NetworkNode::new().await;
-        println!("network node {:?} started", &node);
-    }
-
-    #[tokio::test]
     async fn test_connect_to_other_node() {
         let mut node_a = NetworkNode::new().await;
         let node_b = NetworkNode::new().await;
         node_a.connect_to(&node_b).await;
-    }
-
-    #[tokio::test]
-    async fn test_create_two_interconnected_nodes() {
-        let _two_nodes = NetworkNode::new_n_interconnected_nodes(2).await;
     }
 
     #[tokio::test]

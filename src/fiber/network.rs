@@ -3783,7 +3783,7 @@ mod tests {
     async fn test_channel_update_version() {
         let (node, channel_info, _priv_key, sk1, _sk2) = create_a_channel().await;
 
-        let create_channel_update = |version: u64, key: Privkey| {
+        let create_channel_update = |version: u64, key: &Privkey| {
             let mut channel_update = ChannelUpdate::new_unsigned(
                 get_chain_hash(),
                 channel_info.announcement_msg.channel_outpoint.clone(),
@@ -3808,7 +3808,7 @@ mod tests {
             channel_update
         };
 
-        let channel_update_2 = create_channel_update(2, sk1);
+        let channel_update_2 = create_channel_update(2, &sk1);
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let new_channel_info = node
             .store
@@ -3824,7 +3824,7 @@ mod tests {
         );
 
         // Old channel update will not replace the new one.
-        let _channel_update_1 = create_channel_update(1, sk1);
+        let _channel_update_1 = create_channel_update(1, &sk1);
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let new_channel_info = node
             .store
@@ -3840,7 +3840,7 @@ mod tests {
         );
 
         // New channel update will replace the old one.
-        let channel_update_3 = create_channel_update(3, sk1);
+        let channel_update_3 = create_channel_update(3, &sk1);
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         let new_channel_info = node
             .store
@@ -3971,10 +3971,7 @@ mod tests {
     async fn test_sync_node_announcement_after_restart() {
         init_tracing();
 
-        let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node1, mut node2] = NetworkNode::new_n_interconnected_nodes().await;
 
         node1
             .expect_event(|c| matches!(c, NetworkServiceEvent::SyncingCompleted))
