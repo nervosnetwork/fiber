@@ -5618,10 +5618,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_channel_to_peer() {
-        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -5662,10 +5659,7 @@ mod tests {
     async fn test_open_and_accept_channel() {
         use crate::fiber::channel::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
 
-        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -5764,10 +5758,7 @@ mod tests {
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let node_a_funding_amount = 100000000000;
         let node_b_funidng_amount = 6200000000;
@@ -5960,10 +5951,7 @@ mod tests {
         node_b_funding_amount: u128,
         public: bool,
     ) -> (NetworkNode, NetworkNode, Hash256) {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -6302,10 +6290,7 @@ mod tests {
     async fn test_revoke_old_commitment_transaction() {
         init_tracing();
 
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -6480,10 +6465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_channel() {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -6605,10 +6587,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reestablish_channel() {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
