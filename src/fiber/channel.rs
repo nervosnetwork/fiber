@@ -511,12 +511,10 @@ where
                 if let (
                     Some(ref udt_type_script),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-                ) = (
-                    state.funding_udt_type_script.clone(),
-                    remove_tlc.reason.clone(),
-                ) {
+                ) = (state.funding_udt_type_script.clone(), &remove_tlc.reason)
+                {
                     let mut tlc = tlc_details.tlc.clone();
-                    tlc.payment_preimage = Some(payment_preimage);
+                    tlc.payment_preimage = Some(*payment_preimage);
                     self.subscribers
                         .settled_tlcs_subscribers
                         .send(TlcNotification {
@@ -549,17 +547,18 @@ where
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     let res = recv.await.expect("network actor is alive");
                     info!("remove tlc from previous channel: {:?}", &res);
+                } else {
+                    // only the original sender of the TLC should send `TlcRemoveReceived` event
+                    // because only the original sender cares about the TLC event to settle the payment
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::TlcRemoveReceived(
+                                tlc_details.tlc.payment_hash,
+                                remove_tlc,
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
-
-                // TODO: only the original sender of the TLC should send `TlcRemoveReceived` event
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::TlcRemoveReceived(
-                            tlc_details.tlc.payment_hash,
-                            remove_tlc,
-                        ),
-                    ))
-                    .expect("myself alive");
                 Ok(())
             }
             FiberChannelMessage::Shutdown(shutdown) => {
