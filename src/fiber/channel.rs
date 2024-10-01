@@ -5567,7 +5567,7 @@ mod tests {
             },
             hash_algorithm::HashAlgorithm,
             network::{AcceptChannelCommand, OpenChannelCommand},
-            test_utils::NetworkNode,
+            test_utils::{init_tracing, NetworkNode},
             types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
@@ -5582,22 +5582,11 @@ mod tests {
         prelude::{AsTransactionBuilder, Builder, Entity, Pack},
     };
     use ractor::call;
-    use std::sync::Once;
-    use tracing_subscriber;
-
-    static INIT: Once = Once::new();
-
-    fn init_tracing() {
-        INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .pretty()
-                .init();
-        });
-    }
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
+        init_tracing();
+
         let signer = InMemorySigner::generate_from_seed(&[1; 32]);
         assert_eq!(
             signer.get_commitment_point(0),
