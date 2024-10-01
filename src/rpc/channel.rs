@@ -441,7 +441,10 @@ where
                                 }
                                 RemoveTlcReason::RemoveTlcFail { error_code } => {
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        RemoveTlcFail { error_code },
+                                        RemoveTlcFail {
+                                            error_code,
+                                            packet_data: vec![],
+                                        },
                                     )
                                 }
                             },

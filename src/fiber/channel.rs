@@ -487,6 +487,7 @@ where
                                                         //FIXME: we should define the error code carefully according
                                                         //refer to https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
                                                         error_code: 1,
+                                                        packet_data: vec![],
                                                     },
                                                 ),
                                             }),
@@ -503,13 +504,17 @@ where
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
-                let tlc_details = state
-                    .remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), remove_tlc.reason)?;
+                let tlc_details = state.remove_tlc_with_reason(
+                    TLCId::Offered(remove_tlc.tlc_id),
+                    &remove_tlc.reason,
+                )?;
                 if let (
                     Some(ref udt_type_script),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-                ) = (state.funding_udt_type_script.clone(), remove_tlc.reason)
-                {
+                ) = (
+                    state.funding_udt_type_script.clone(),
+                    remove_tlc.reason.clone(),
+                ) {
                     let mut tlc = tlc_details.tlc.clone();
                     tlc.payment_preimage = Some(payment_preimage);
                     self.subscribers
@@ -535,7 +540,7 @@ where
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
                                         id: previous_tlc.into(),
-                                        reason: remove_tlc.reason,
+                                        reason: remove_tlc.reason.clone(),
                                     },
                                     port,
                                 ),
@@ -546,6 +551,7 @@ where
                     info!("remove tlc from previous channel: {:?}", &res);
                 }
 
+                // TODO: only the original sender of the TLC should send `TlcRemoveReceived` event
                 self.network
                     .send_message(NetworkActorMessage::new_event(
                         NetworkActorEvent::TlcRemoveReceived(
@@ -790,6 +796,7 @@ where
                                     //FIXME: we should define the error code carefully according
                                     //refer to https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
                                     error_code: 1,
+                                    packet_data: vec![],
                                 }),
                             },
                             port,
@@ -966,7 +973,7 @@ where
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None)?;
-        let tlc = state.remove_tlc_with_reason(TLCId::Received(command.id), command.reason)?;
+        let tlc = state.remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
             FiberMessage::remove_tlc(RemoveTlc {
@@ -3046,7 +3053,7 @@ impl ChannelActorState {
                 );
                 tlc.creation_confirmed_at = Some(commitment_numbers);
             }
-            match (tlc.removed_at, tlc.removal_confirmed_at) {
+            match (tlc.removed_at.clone(), tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {
                     tlc.removal_confirmed_at = Some(commitment_numbers);
                      match reason {
@@ -3292,7 +3299,7 @@ impl ChannelActorState {
     pub fn remove_tlc_with_reason(
         &mut self,
         tlc_id: TLCId,
-        reason: RemoveTlcReason,
+        reason: &RemoveTlcReason,
     ) -> Result<DetailedTLCInfo, ProcessingChannelError> {
         let removed_at = self.get_current_commitment_numbers();
 
@@ -3304,9 +3311,9 @@ impl ChannelActorState {
                 )))
             }
             Some(current) => {
-                match current.removed_at {
+                match &current.removed_at {
                     Some((current_removed_at, current_remove_reason))
-                        if current_remove_reason == reason && removed_at == current_removed_at =>
+                        if current_remove_reason == reason && removed_at == *current_removed_at =>
                     {
                         debug!(
                             "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
@@ -3338,7 +3345,7 @@ impl ChannelActorState {
                         }
                     }
                 };
-                current.removed_at = Some((removed_at, reason));
+                current.removed_at = Some((removed_at, reason.clone()));
                 current
             }
         };
@@ -4561,7 +4568,7 @@ impl ChannelActorState {
 
                                 need_resend_commitment_signed = true;
                             }
-                        } else if let Some((commitment_number, remove_reason)) = info.removed_at {
+                        } else if let Some((commitment_number, remove_reason)) = &info.removed_at {
                             if commitment_number.get_local() >= acutal_local_commitment_number {
                                 // resend RemoveTlc message
                                 network
@@ -4572,7 +4579,7 @@ impl ChannelActorState {
                                                 FiberMessage::remove_tlc(RemoveTlc {
                                                     channel_id: self.get_id(),
                                                     tlc_id: info.tlc.get_id(),
-                                                    reason: remove_reason,
+                                                    reason: remove_reason.clone(),
                                                 }),
                                             ),
                                         ),
@@ -5539,7 +5546,7 @@ impl DetailedTLCInfo {
     }
 
     fn is_fullfill_removed(&self) -> bool {
-        if let Some((_, removed_reason)) = self.removed_at {
+        if let Some((_, removed_reason)) = &self.removed_at {
             matches!(removed_reason, RemoveTlcReason::RemoveTlcFulfill(_))
         } else {
             false

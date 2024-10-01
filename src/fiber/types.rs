@@ -1221,9 +1221,10 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
     pub error_code: u32,
+    pub packet_data: Vec<u8>,
 }
 
 impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
@@ -1240,11 +1241,12 @@ impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
     fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
         Ok(RemoveTlcFail {
             error_code: remove_tlc_fail.error_code().unpack(),
+            packet_data: remove_tlc_fail.packet_data().unpack(),
         })
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(RemoveTlcFail),
