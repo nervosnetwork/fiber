@@ -6,7 +6,7 @@ use crate::fiber::{
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U32Hex, U64Hex},
+    serde_utils::{U128Hex, U16Hex, U64Hex},
     types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -142,8 +142,8 @@ pub enum RemoveTlcReason {
         payment_preimage: Hash256,
     },
     RemoveTlcFail {
-        #[serde_as(as = "U32Hex")]
-        error_code: u32,
+        #[serde_as(as = "U16Hex")]
+        error_code: u16,
     },
 }
 

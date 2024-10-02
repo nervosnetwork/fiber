@@ -1223,14 +1223,15 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
-    pub error_code: u32,
+    pub error_code: u16,
     pub packet_data: Vec<u8>,
 }
 
 impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
     fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
         molecule_fiber::RemoveTlcFail::new_builder()
-            .error_code(remove_tlc_fail.error_code.pack())
+            .error_code((remove_tlc_fail.error_code as u32).pack())
+            .packet_data(remove_tlc_fail.packet_data.pack())
             .build()
     }
 }
@@ -1239,10 +1240,77 @@ impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
     type Error = Error;
 
     fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
+        let error_code: u32 = remove_tlc_fail.error_code().unpack();
         Ok(RemoveTlcFail {
-            error_code: remove_tlc_fail.error_code().unpack(),
+            error_code: error_code as u16,
             packet_data: remove_tlc_fail.packet_data().unpack(),
         })
+    }
+}
+
+// The onion packet is invalid
+const BADONION: u16 = 0x8000;
+// Permanent errors (otherwise transient)
+const PERM: u16 = 0x4000;
+// Node releated errors (otherwise channels)
+const NODE: u16 = 0x2000;
+//  Channel forwarding parameter was violated
+const UPDATE: u16 = 0x1000;
+
+impl RemoveTlcFail {
+    pub fn is_node(&self) -> bool {
+        self.error_code & NODE != 0
+    }
+
+    pub fn is_bad_onion(&self) -> bool {
+        self.error_code & BADONION != 0
+    }
+
+    pub fn is_perm(&self) -> bool {
+        self.error_code & PERM != 0
+    }
+
+    pub fn is_update(&self) -> bool {
+        self.error_code & UPDATE != 0
+    }
+
+    pub fn new(error_code: TlcFailErrorCode, packet_data: Vec<u8>) -> Self {
+        RemoveTlcFail {
+            error_code: error_code.into(),
+            packet_data,
+        }
+    }
+}
+
+#[repr(u16)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TlcFailErrorCode {
+    TemporaryNodeFailure = NODE | 2,
+    PermanentNodeFailure = PERM | NODE | 2,
+    RequiredNodeFeatureMissing = PERM | NODE | 3,
+    InvalidOnionVersion = BADONION | PERM | 4,
+    InvalidOnionHmac = BADONION | PERM | 5,
+    InvalidOnionKey = BADONION | PERM | 6,
+    TemporaryChannelFailure = UPDATE | 7,
+    PermanentChannelFailure = PERM | 8,
+    RequiredChannelFeatureMissing = PERM | 9,
+    UnknownNextPeer = PERM | 10,
+    AmountBelowMinimum = UPDATE | 11,
+    FeeInsufficient = UPDATE | 12,
+    IncorrectCltvExpiry = UPDATE | 13,
+    ExpiryTooSoon = UPDATE | 14,
+    IncorrectOrUnknownPaymentDetails = PERM | 15,
+    FinalIncorrectCltvExpiry = 18,
+    FinalIncorrectHtlcAmount = 19,
+    ChannelDisabled = UPDATE | 20,
+    ExpiryTooFar = 21,
+    InvalidOnionPayload = PERM | 22,
+    MppTimeout = 23,
+    InvalidOnionBlinding = BADONION | PERM | 24,
+}
+impl From<TlcFailErrorCode> for u16 {
+    fn from(error_code: TlcFailErrorCode) -> Self {
+        error_code as u16
     }
 }
 
@@ -2947,7 +3015,7 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{secp256k1_instance, Pubkey};
+    use super::{secp256k1_instance, Pubkey, RemoveTlcFail, TlcFailErrorCode};
     use crate::fiber::test_utils::generate_seckey;
     use crate::fiber::types::Privkey;
     use ckb_types::packed::OutPointBuilder;
@@ -3038,5 +3106,18 @@ mod tests {
         let packet = packet.peel(&keys[2], &secp).expect("peel");
         assert_eq!(packet.current, hops_infos[2]);
         assert!(packet.is_last());
+    }
+
+    #[test]
+    fn test_tlc_fail_error() {
+        let packet_data: Vec<u8> = vec![42; 32];
+        let error = RemoveTlcFail::new(TlcFailErrorCode::InvalidOnionVersion, packet_data);
+        assert!(!error.is_node());
+        assert!(error.is_bad_onion());
+        assert!(error.is_perm());
+        let error_mol: super::molecule_fiber::RemoveTlcFail = error.clone().into();
+
+        let decoded: RemoveTlcFail = error_mol.try_into().expect("decode");
+        assert_eq!(error, decoded);
     }
 }
