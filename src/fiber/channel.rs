@@ -582,8 +582,12 @@ where
                         )));
                     }
                 };
-                state.remote_shutdown_script = Some(shutdown.close_script);
-                state.remote_shutdown_fee_rate = Some(shutdown.fee_rate.as_u64());
+                let shutdown_info = ShutdownInfo {
+                    close_script: shutdown.close_script,
+                    fee_rate: shutdown.fee_rate.as_u64(),
+                    signature: None,
+                };
+                state.remote_shutdown_info = Some(shutdown_info);
 
                 let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
 
@@ -595,20 +599,26 @@ where
                     matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
 
                 if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
+                    let close_script = state.get_local_shutdown_script();
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                                 state.get_remote_peer_id(),
                                 FiberMessage::shutdown(Shutdown {
                                     channel_id: state.get_id(),
-                                    close_script: state.get_local_shutdown_script(),
+                                    close_script: close_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
                                     force: shutdown.force,
                                 }),
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    state.local_shutdown_fee_rate = Some(0);
+                    let shutdown_info = ShutdownInfo {
+                        close_script,
+                        fee_rate: 0,
+                        signature: None,
+                    };
+                    state.local_shutdown_info = Some(shutdown_info);
                     flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
                     debug!("Auto accept shutdown ...");
                 }
@@ -635,7 +645,9 @@ where
                 // We do this to simplify the handling of the message.
                 // We may change this in the future.
                 // We also didn't check the state here.
-                state.remote_shutdown_signature = Some(partial_signature);
+                if let Some(shutdown_info) = state.remote_shutdown_info.as_mut() {
+                    shutdown_info.signature = Some(partial_signature);
+                }
 
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
@@ -936,8 +948,12 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-            state.local_shutdown_script = Some(command.close_script.clone());
-            state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
+            let shutdown_info = ShutdownInfo {
+                close_script: command.close_script,
+                fee_rate: command.fee_rate.as_u64(),
+                signature: None,
+            };
+            state.local_shutdown_info = Some(shutdown_info);
             state.update_state(ChannelState::ShuttingDown(
                 flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
             ));
@@ -1794,10 +1810,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Vec<(_, _)>")]
     pub tlcs: BTreeMap<TLCId, DetailedTLCInfo>,
 
-    // The remote lock script for close channel, the default value is the lock script of the funding transaction, may be overridden by the shutdown message.
+    // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
-    // The local lock script for close channel, the default value is the lock script of the funding transaction, may be overridden by the shutdown message.
     #[serde_as(as = "Option<EntityHex>")]
     pub local_shutdown_script: Option<Script>,
 
@@ -1812,15 +1827,24 @@ pub struct ChannelActorState {
     // We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<Pubkey>,
     pub remote_channel_parameters: Option<ChannelParametersOneParty>,
-    pub local_shutdown_signature: Option<PartialSignature>,
-    pub local_shutdown_fee_rate: Option<u64>,
-    pub remote_shutdown_fee_rate: Option<u64>,
-    pub remote_shutdown_signature: Option<PartialSignature>,
+
+    // The shutdown info for both local and remote, they are setup by the shutdown command or message.
+    pub local_shutdown_info: Option<ShutdownInfo>,
+    pub remote_shutdown_info: Option<ShutdownInfo>,
 
     // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
 
     pub created_at: SystemTime,
+}
+
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ShutdownInfo {
+    #[serde_as(as = "EntityHex")]
+    pub close_script: Script,
+    pub fee_rate: u64,
+    pub signature: Option<PartialSignature>,
 }
 
 // This struct holds the channel information that are only relevant when the channel
@@ -2281,10 +2305,8 @@ impl ChannelActorState {
             previous_remote_nonce: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
-            local_shutdown_signature: None,
-            local_shutdown_fee_rate: None,
-            remote_shutdown_signature: None,
-            remote_shutdown_fee_rate: None,
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
             latest_commitment_transaction: None,
@@ -2348,11 +2370,9 @@ impl ChannelActorState {
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
             local_shutdown_script: Some(shutdown_script),
-            local_shutdown_fee_rate: None,
             remote_shutdown_script: None,
-            remote_shutdown_fee_rate: None,
-            local_shutdown_signature: None,
-            remote_shutdown_signature: None,
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
@@ -2452,7 +2472,7 @@ impl ChannelActorState {
         let fee = calculate_shutdown_tx_fee(
             fee_rate.as_u64(),
             &self.funding_udt_type_script,
-            (close_script.clone(), self.get_remote_shutdown_script()),
+            (self.get_remote_shutdown_script(), close_script.clone()),
         );
 
         let available_max_fee = if self.funding_udt_type_script.is_none() {
@@ -3526,7 +3546,7 @@ impl ChannelActorState {
     }
 
     fn check_valid_to_auto_accept_shutdown(&self) -> bool {
-        let Some(remote_fee_rate) = self.remote_shutdown_fee_rate else {
+        let Some(remote_fee_rate) = self.remote_shutdown_info.as_ref().map(|i| i.fee_rate) else {
             return false;
         };
         if remote_fee_rate < self.commitment_fee_rate {
@@ -3536,8 +3556,8 @@ impl ChannelActorState {
             remote_fee_rate,
             &self.funding_udt_type_script,
             (
-                self.get_local_shutdown_script(),
                 self.get_remote_shutdown_script(),
+                self.get_local_shutdown_script(),
             ),
         );
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
@@ -3722,33 +3742,35 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let shutdown_tx = self.build_shutdown_tx()?;
-        let sign_ctx = Musig2SignContext::from(&*self);
+        if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
+            let shutdown_tx = self.build_shutdown_tx()?;
+            let sign_ctx = Musig2SignContext::from(&*self);
 
-        // Create our shutdown signature if we haven't already.
-        let local_shutdown_signature = match self.local_shutdown_signature {
-            Some(signature) => signature,
-            None => {
-                let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
-                self.local_shutdown_signature = Some(signature);
+            let local_shutdown_info = self.local_shutdown_info.as_mut().unwrap();
+            let local_shutdown_signature = match local_shutdown_info.signature {
+                Some(signature) => signature,
+                None => {
+                    let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    local_shutdown_info.signature = Some(signature);
 
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            self.get_remote_peer_id(),
-                            FiberMessage::closing_signed(ClosingSigned {
-                                partial_signature: signature,
-                                channel_id: self.get_id(),
-                            }),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                signature
-            }
-        };
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::closing_signed(ClosingSigned {
+                                    partial_signature: signature,
+                                    channel_id: self.get_id(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    signature
+                }
+            };
 
-        match self.remote_shutdown_signature {
-            Some(remote_shutdown_signature) => {
+            if let Some(remote_shutdown_signature) =
+                self.remote_shutdown_info.as_ref().unwrap().signature
+            {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
                         [local_shutdown_signature, remote_shutdown_signature],
@@ -3776,11 +3798,11 @@ impl ChannelActorState {
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
-
-            None => {
+            } else {
                 debug!("We have sent our shutdown signature, waiting for counterparty's signature");
             }
+        } else {
+            debug!("Not ready to shutdown the channel, waiting for both parties to send the Shutdown message");
         }
 
         Ok(())
@@ -4654,22 +4676,25 @@ impl ChannelActorState {
     }
 
     pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
-        let local_shutdown_script = self.get_local_shutdown_script();
-        let remote_shutdown_script = self.get_remote_shutdown_script();
+        let local_shutdown_info = self.local_shutdown_info.as_ref().unwrap();
+        let remote_shutdown_info = self.remote_shutdown_info.as_ref().unwrap();
+
+        let local_shutdown_script = local_shutdown_info.close_script.clone();
+        let remote_shutdown_script = remote_shutdown_info.close_script.clone();
         let local_shutdown_fee = calculate_shutdown_tx_fee(
-            self.local_shutdown_fee_rate.unwrap_or_default(),
+            local_shutdown_info.fee_rate,
             &self.funding_udt_type_script,
             (
-                local_shutdown_script.clone(),
                 remote_shutdown_script.clone(),
+                local_shutdown_script.clone(),
             ),
         );
         let remote_shutdown_fee = calculate_shutdown_tx_fee(
-            self.remote_shutdown_fee_rate.unwrap_or_default(),
+            remote_shutdown_info.fee_rate,
             &self.funding_udt_type_script,
             (
-                remote_shutdown_script.clone(),
                 local_shutdown_script.clone(),
+                remote_shutdown_script.clone(),
             ),
         );
 
