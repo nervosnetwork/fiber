@@ -468,17 +468,16 @@ where
                     .expect("call network")
                     .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
 
-                    // check the payment hash and amount
-                    if peeled_packet.current.payment_hash != add_tlc.payment_hash
-                        || peeled_packet.current.amount != add_tlc.amount
-                    {
-                        return Err(ProcessingChannelError::InvalidParameter(
-                            "Payment hash or amount mismatch".to_string(),
-                        ));
-                    }
                     // TODO: check the expiry time, if expired, we should return an error.
-
                     if peeled_packet.is_last() {
+                        // check the payment hash and amount
+                        if peeled_packet.current.payment_hash != add_tlc.payment_hash
+                            || peeled_packet.current.amount != add_tlc.amount
+                        {
+                            return Err(ProcessingChannelError::InvalidParameter(
+                                "Payment hash or amount mismatch".to_string(),
+                            ));
+                        }
                         // if this is the last hop, store the preimage.
                         preimage = peeled_packet.current.preimage;
                     } else {

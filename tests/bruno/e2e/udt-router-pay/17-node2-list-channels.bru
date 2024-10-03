@@ -1,0 +1,49 @@
+meta {
+  name: get channels from node2
+  type: http
+  seq: 17
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 3000));
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("step 17 list channels: ", res.body.result.channels[0]);
+  // step 12: 100000000
+  // step 14: 32
+  // step 15: 48
+  // sum is: 100000080 (0x5f5e150)
+  if (res.body.result.channels[0].remote_balance != "0x5f5e150" || res.body.result.channels[0].local_balance != "0x35a4e8b0") {
+    throw new Error("Assertion failed: channel amount is not right");
+  }
+}
