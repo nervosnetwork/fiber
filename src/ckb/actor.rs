@@ -1,9 +1,5 @@
 use ckb_sdk::{rpc::ResponseFormatGetter, CkbRpcClient, RpcError};
-use ckb_types::{
-    core::TransactionView,
-    packed::{self, Script},
-    prelude::*,
-};
+use ckb_types::{core::TransactionView, packed, prelude::*};
 use ractor::{
     concurrency::{sleep, Duration},
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
@@ -40,7 +36,6 @@ pub enum CkbChainMessage {
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
     GetCurrentBlockNumber((), RpcReplyPort<Result<u64, RpcError>>),
-    GetFundingSourceScript((), RpcReplyPort<Result<Script, RpcError>>),
 }
 
 #[derive(Debug)]
@@ -94,9 +89,7 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::{
-            Fund, GetCurrentBlockNumber, GetFundingSourceScript, SendTx, Sign, TraceTx,
-        };
+        use CkbChainMessage::{Fund, GetCurrentBlockNumber, SendTx, Sign, TraceTx};
         match message {
             GetCurrentBlockNumber(_, reply) => {
                 // Have to use block_in_place here, see https://github.com/seanmonstar/reqwest/issues/1017.
@@ -107,11 +100,6 @@ impl Actor for CkbChainActor {
                 });
                 let _ = reply.send(result);
             }
-
-            GetFundingSourceScript(_, reply) => {
-                let _ = reply.send(Ok(state.funding_source_lock_script.clone()));
-            }
-
             Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(&request);
                 if !reply_port.is_closed() {
@@ -376,9 +364,6 @@ mod test_utils {
             match message {
                 GetCurrentBlockNumber(_, reply) => {
                     let _ = reply.send(Ok(0));
-                }
-                GetFundingSourceScript(_, reply) => {
-                    let _ = reply.send(Ok(Default::default()));
                 }
                 Fund(tx, request, reply_port) => {
                     let mut fulfilled_tx = tx.clone();

@@ -1,4 +1,4 @@
-use super::channel::{ChannelActorState, FUNDING_CELL_WITNESS_LEN};
+use super::channel::FUNDING_CELL_WITNESS_LEN;
 use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
@@ -109,26 +109,12 @@ pub(crate) fn calculate_commitment_tx_fee(fee_rate: u64, udt_type_script: &Optio
     res
 }
 
-/// Note: the shutdown scripts are optional, if not provided, the default lock script will be used
-pub(crate) fn calculate_shutdown_tx_fee(fee_rate: u64, state: &ChannelActorState) -> u64 {
-    let udt_type_script = &state.funding_udt_type_script;
-    let shutdown_scripts = (
-        state
-            .remote_shutdown_script
-            .clone()
-            .unwrap_or(state.get_default_remote_funding_script()),
-        state
-            .local_shutdown_script
-            .clone()
-            .unwrap_or(state.get_default_local_funding_script()),
-    );
-    debug!(
-        "calculate_shutdown_tx_fee: {} udt_script: {:?}",
-        fee_rate, udt_type_script
-    );
+pub(crate) fn calculate_shutdown_tx_fee(
+    fee_rate: u64,
+    udt_type_script: &Option<Script>,
+    shutdown_scripts: (Script, Script),
+) -> u64 {
     let fee_rate: FeeRate = FeeRate::from_u64(fee_rate);
     let tx_size = shutdown_tx_size(udt_type_script, shutdown_scripts) as u64;
-    let res = fee_rate.fee(tx_size).as_u64();
-    debug!("calculate_shutdown_tx_fee return: {}", res);
-    res
+    fee_rate.fee(tx_size).as_u64()
 }

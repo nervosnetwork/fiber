@@ -197,6 +197,7 @@ pub struct OpenChannelCommand {
     pub peer_id: PeerId,
     pub funding_amount: u128,
     pub public: bool,
+    pub shutdown_script: Option<Script>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
@@ -329,6 +330,7 @@ impl SendPaymentCommand {
 pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
+    pub shutdown_script: Option<Script>,
 }
 
 impl NetworkActorMessage {
@@ -561,6 +563,7 @@ where
                                 } else {
                                     state.auto_accept_channel_ckb_funding_amount as u128
                                 },
+                                shutdown_script: None,
                             };
                             state.create_inbound_channel(accept_channel).await?;
                         }
@@ -2066,6 +2069,8 @@ pub struct NetworkActorState<S> {
     // Must be kept secret.
     // TODO: Maybe we should abstract this into a separate trait.
     entropy: [u8; 32],
+    // The default lock script to be used when closing a channel, may be overridden by the shutdown command.
+    default_shutdown_script: Script,
     network: ActorRef<NetworkActorMessage>,
     // This immutable attribute is placed here because we need to create it in
     // the pre_start function.
@@ -2284,6 +2289,7 @@ where
             peer_id,
             funding_amount,
             public,
+            shutdown_script,
             funding_udt_type_script,
             commitment_fee_rate,
             funding_fee_rate,
@@ -2311,7 +2317,6 @@ where
         let (_funding_amount, _reserved_ckb_amount) =
             self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
 
-        let funding_lock_script = self.get_funding_lock_script().await;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -2333,7 +2338,8 @@ where
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
-                funding_lock_script,
+                shutdown_script: shutdown_script
+                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 funding_fee_rate,
@@ -2357,6 +2363,7 @@ where
         let AcceptChannelCommand {
             temp_channel_id,
             funding_amount,
+            shutdown_script,
         } = accept_channel;
 
         let (peer_id, open_channel) = self
@@ -2386,7 +2393,6 @@ where
             return Ok((channel.clone(), temp_channel_id, id));
         }
 
-        let funding_lock_script = self.get_funding_lock_script().await;
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
         let channel = Actor::spawn_linked(
@@ -2401,7 +2407,6 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                funding_lock_script,
                 public_channel_info: Some(PublicChannelInfo::new(
                     self.tlc_locktime_expiry_delta,
                     self.tlc_min_value,
@@ -2410,6 +2415,8 @@ where
                 )),
                 seed,
                 open_channel,
+                shutdown_script: shutdown_script
+                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
                 channel_id_sender: Some(tx),
             }),
             network.clone().get_cell(),
@@ -2457,17 +2464,6 @@ where
             );
             callback(result);
         });
-    }
-
-    async fn get_funding_lock_script(&self) -> Script {
-        let funding_lock_script = call!(
-            self.chain_actor,
-            CkbChainMessage::GetFundingSourceScript,
-            ()
-        )
-        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-        .expect("Get funding source script from chain");
-        funding_lock_script
     }
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
@@ -3102,6 +3098,7 @@ pub struct NetworkActorStartArguments {
     pub config: FiberConfig,
     pub tracker: TaskTracker,
     pub channel_subscribers: ChannelSubscribers,
+    pub default_shutdown_script: Script,
 }
 
 #[rasync_trait]
@@ -3128,6 +3125,7 @@ where
             config,
             tracker,
             channel_subscribers,
+            default_shutdown_script,
         } = args;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -3227,6 +3225,7 @@ where
             last_node_announcement_message: None,
             private_key,
             entropy,
+            default_shutdown_script,
             network: myself.clone(),
             control,
             peer_session_map: Default::default(),
@@ -3464,6 +3463,7 @@ pub async fn start_network<
     store: S,
     channel_subscribers: ChannelSubscribers,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
+    default_shutdown_script: Script,
 ) -> ActorRef<NetworkActorMessage> {
     let my_pubkey = config.public_key();
     let my_peer_id = PeerId::from_public_key(&my_pubkey);
@@ -3475,6 +3475,7 @@ pub async fn start_network<
             config,
             tracker,
             channel_subscribers,
+            default_shutdown_script,
         },
         root_actor,
     )
