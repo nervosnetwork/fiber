@@ -81,6 +81,19 @@ impl Drop for TempDir {
     }
 }
 
+pub fn init_tracing() {
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .pretty()
+            .init();
+    });
+}
+
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
@@ -119,10 +132,25 @@ pub fn gen_sha256_hash() -> Hash256 {
     result.into()
 }
 
-#[derive(Debug)]
+pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) -> FiberConfig {
+    let base_dir = base_dir.as_ref();
+    FiberConfig {
+        announced_node_name: node_name
+            .or(base_dir.file_name().unwrap().to_str())
+            .map(Into::into),
+        announce_listening_addr: Some(true),
+        base_dir: Some(PathBuf::from(base_dir)),
+        auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
+        ..Default::default()
+    }
+}
+
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
-    pub base_dir: TempDir,
+    pub base_dir: Arc<TempDir>,
+    pub node_name: Option<String>,
+    pub store: MemoryStore,
+    pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
     pub chain_actor: ActorRef<CkbChainMessage>,
@@ -131,23 +159,111 @@ pub struct NetworkNode {
 }
 
 impl NetworkNode {
-    pub async fn new() -> Self {
-        Self::new_with_node_name(None).await
+    pub fn get_node_address(&self) -> &MultiAddr {
+        &self.listening_addrs[0]
+    }
+}
+
+pub struct NetworkNodeConfig {
+    base_dir: Arc<TempDir>,
+    node_name: Option<String>,
+    store: MemoryStore,
+    fiber_config: FiberConfig,
+}
+
+impl NetworkNodeConfig {
+    pub fn builder() -> NetworkNodeConfigBuilder {
+        NetworkNodeConfigBuilder::new()
+    }
+}
+
+pub struct NetworkNodeConfigBuilder {
+    base_dir: Option<Arc<TempDir>>,
+    node_name: Option<String>,
+    store: Option<MemoryStore>,
+    // We may generate a FiberConfig based on the base_dir and node_name,
+    // but allow user to override it.
+    fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
+}
+
+impl NetworkNodeConfigBuilder {
+    pub fn new() -> Self {
+        Self {
+            base_dir: None,
+            node_name: None,
+            store: None,
+            fiber_config_updater: None,
+        }
     }
 
-    pub async fn new_with_node_name(node_name: Option<String>) -> Self {
-        let base_dir = TempDir::new("fnn-test");
-        let fiber_config = FiberConfig {
-            announced_node_name: node_name
-                .as_deref()
-                .or(base_dir.as_ref().file_name().unwrap().to_str())
-                .map(Into::into),
-            announce_listening_addr: Some(true),
-            base_dir: Some(PathBuf::from(base_dir.as_ref())),
-            auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
-            ..Default::default()
-        };
+    pub fn base_dir(mut self, base_dir: Arc<TempDir>) -> Self {
+        self.base_dir = Some(base_dir);
+        self
+    }
 
+    pub fn node_name(mut self, node_name: Option<String>) -> Self {
+        self.node_name = node_name;
+        self
+    }
+
+    pub fn store(mut self, store: MemoryStore) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    pub fn fiber_config_updater(
+        mut self,
+        updater: impl FnOnce(&mut FiberConfig) + 'static,
+    ) -> Self {
+        self.fiber_config_updater = Some(Box::new(updater));
+        self
+    }
+
+    pub fn build(self) -> NetworkNodeConfig {
+        let base_dir = self
+            .base_dir
+            .clone()
+            .unwrap_or_else(|| Arc::new(TempDir::new("fnn-test")));
+        let node_name = self.node_name.clone();
+        let store = self.store.clone().unwrap_or_default();
+        let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
+        let mut config = NetworkNodeConfig {
+            base_dir,
+            node_name,
+            store,
+            fiber_config,
+        };
+        if let Some(updater) = self.fiber_config_updater {
+            updater(&mut config.fiber_config);
+        }
+        config
+    }
+}
+
+impl NetworkNode {
+    pub async fn new() -> Self {
+        Self::new_with_node_name_opt(None).await
+    }
+
+    pub async fn new_with_node_name(node_name: &str) -> Self {
+        let config = NetworkNodeConfigBuilder::new()
+            .node_name(Some(node_name.to_string()))
+            .build();
+        Self::new_with_config(config).await
+    }
+
+    pub async fn new_with_node_name_opt(node_name: Option<String>) -> Self {
+        let config = NetworkNodeConfigBuilder::new().node_name(node_name).build();
+        Self::new_with_config(config).await
+    }
+
+    pub async fn new_with_config(config: NetworkNodeConfig) -> Self {
+        let NetworkNodeConfig {
+            base_dir,
+            node_name,
+            store,
+            fiber_config,
+        } = config;
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
@@ -160,7 +276,7 @@ impl NetworkNode {
         let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
         let public_key = PublicKey::from_secret_key(&secp, &secret_key);
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
-            MemoryStore::default(),
+            store.clone(),
             public_key.into(),
         )));
         let network_actor = Actor::spawn_linked(
@@ -168,13 +284,14 @@ impl NetworkNode {
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
-                MemoryStore::default(),
+                store.clone(),
                 network_graph,
             ),
             NetworkActorStartArguments {
-                config: fiber_config,
+                config: fiber_config.clone(),
                 tracker: new_tokio_task_tracker(),
                 channel_subscribers: Default::default(),
+                default_shutdown_script: Default::default(),
             },
             root.get_cell(),
         )
@@ -202,6 +319,9 @@ impl NetworkNode {
 
         Self {
             base_dir,
+            node_name,
+            store,
+            fiber_config,
             listening_addrs: announced_addrs,
             network_actor,
             chain_actor,
@@ -210,10 +330,60 @@ impl NetworkNode {
         }
     }
 
-    pub async fn new_n_interconnected_nodes(n: usize) -> Vec<Self> {
+    pub fn get_node_config(&self) -> NetworkNodeConfig {
+        NetworkNodeConfig {
+            base_dir: self.base_dir.clone(),
+            node_name: self.node_name.clone(),
+            store: self.store.clone(),
+            fiber_config: self.fiber_config.clone(),
+        }
+    }
+
+    pub async fn start(&mut self) {
+        let config = self.get_node_config();
+        let new = Self::new_with_config(config).await;
+        *self = new;
+    }
+
+    pub async fn stop(&mut self) {
+        self.network_actor.kill();
+        let my_peer_id = self.peer_id.clone();
+        self.expect_event(
+            |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
+        )
+        .await;
+    }
+
+    pub async fn restart(&mut self) {
+        self.stop().await;
+        self.start().await;
+    }
+
+    pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
+        for i in 0..N {
+            let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
+            for node in nodes.iter_mut() {
+                node.connect_to(&new).await;
+            }
+            nodes.push(new);
+        }
+        match nodes.try_into() {
+            Ok(nodes) => nodes,
+            Err(_) => unreachable!(),
+        }
+    }
+
+    // Create n nodes and connect them. The config_gen function
+    // (function that creates a NetworkNodeConfig from an index)
+    // will be called to generate the config for each node.
+    pub async fn new_n_interconnected_nodes_with_config(
+        n: usize,
+        config_gen: impl Fn(usize) -> NetworkNodeConfig,
+    ) -> Vec<Self> {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
         for i in 0..n {
-            let new = Self::new_with_node_name(Some(format!("Node {i}"))).await;
+            let new = Self::new_with_config(config_gen(i)).await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
@@ -292,10 +462,10 @@ impl NetworkNode {
 }
 
 #[derive(Clone, Default)]
-struct MemoryStore {
+pub struct MemoryStore {
     channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
     channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
-    nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
+    pub nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
     connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
@@ -506,13 +676,6 @@ mod tests {
     use super::NetworkNode;
 
     #[tokio::test]
-    async fn test_start_network_node() {
-        println!("starting network node");
-        let node = NetworkNode::new().await;
-        println!("network node {:?} started", &node);
-    }
-
-    #[tokio::test]
     async fn test_connect_to_other_node() {
         let mut node_a = NetworkNode::new().await;
         let node_b = NetworkNode::new().await;
@@ -520,7 +683,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_two_interconnected_nodes() {
-        let _two_nodes = NetworkNode::new_n_interconnected_nodes(2).await;
+    async fn test_restart_network_node() {
+        let mut node = NetworkNode::new().await;
+        node.restart().await;
     }
 }

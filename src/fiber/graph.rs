@@ -218,6 +218,7 @@ where
 
     pub fn add_node(&mut self, node_info: NodeInfo) {
         debug!("Adding node to network graph: {:?}", node_info);
+
         let node_id = node_info.node_id;
         if let Some(old_node) = self.nodes.get(&node_id) {
             if old_node.anouncement_msg.version > node_info.anouncement_msg.version {
@@ -336,9 +337,11 @@ where
                     && channel.funding_tx_block_number < end_block
             }),
             end_block,
-            self.channels
-                .values()
-                .any(|channel| channel.funding_tx_block_number >= end_block),
+            self.channels.is_empty()
+                || self
+                    .channels
+                    .values()
+                    .any(|channel| channel.funding_tx_block_number >= end_block),
         )
     }
 

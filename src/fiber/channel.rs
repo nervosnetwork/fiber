@@ -187,7 +187,7 @@ pub struct OpenChannelParameter {
     pub seed: [u8; 32],
     pub public_channel_info: Option<PublicChannelInfo>,
     pub funding_udt_type_script: Option<Script>,
-    pub funding_lock_script: Script,
+    pub shutdown_script: Script,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
     pub funding_fee_rate: Option<u64>,
@@ -201,7 +201,7 @@ pub struct AcceptChannelParameter {
     pub public_channel_info: Option<PublicChannelInfo>,
     pub seed: [u8; 32],
     pub open_channel: OpenChannel,
-    pub funding_lock_script: Script,
+    pub shutdown_script: Script,
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
 }
 
@@ -580,8 +580,12 @@ where
                         )));
                     }
                 };
-                state.remote_shutdown_script = Some(shutdown.close_script);
-                state.remote_shutdown_fee_rate = Some(shutdown.fee_rate.as_u64());
+                let shutdown_info = ShutdownInfo {
+                    close_script: shutdown.close_script,
+                    fee_rate: shutdown.fee_rate.as_u64(),
+                    signature: None,
+                };
+                state.remote_shutdown_info = Some(shutdown_info);
 
                 let mut flags = flags | ShuttingDownFlags::THEIR_SHUTDOWN_SENT;
 
@@ -593,22 +597,26 @@ where
                     matches!(flags, ShuttingDownFlags::THEIR_SHUTDOWN_SENT);
 
                 if state.check_valid_to_auto_accept_shutdown() && should_we_reply_shutdown {
-                    let local_funding_script = state.get_default_local_funding_script();
+                    let close_script = state.get_local_shutdown_script();
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                                 state.get_remote_peer_id(),
                                 FiberMessage::shutdown(Shutdown {
                                     channel_id: state.get_id(),
-                                    close_script: local_funding_script.clone(),
+                                    close_script: close_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
                                     force: shutdown.force,
                                 }),
                             )),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    state.local_shutdown_script = Some(local_funding_script);
-                    state.local_shutdown_fee_rate = Some(0);
+                    let shutdown_info = ShutdownInfo {
+                        close_script,
+                        fee_rate: 0,
+                        signature: None,
+                    };
+                    state.local_shutdown_info = Some(shutdown_info);
                     flags |= ShuttingDownFlags::OUR_SHUTDOWN_SENT;
                     debug!("Auto accept shutdown ...");
                 }
@@ -635,7 +643,9 @@ where
                 // We do this to simplify the handling of the message.
                 // We may change this in the future.
                 // We also didn't check the state here.
-                state.remote_shutdown_signature = Some(partial_signature);
+                if let Some(shutdown_info) = state.remote_shutdown_info.as_mut() {
+                    shutdown_info.signature = Some(partial_signature);
+                }
 
                 state.maybe_transition_to_shutdown(&self.network)?;
                 Ok(())
@@ -1066,8 +1076,12 @@ where
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-            state.local_shutdown_script = Some(command.close_script.clone());
-            state.local_shutdown_fee_rate = Some(command.fee_rate.as_u64());
+            let shutdown_info = ShutdownInfo {
+                close_script: command.close_script,
+                fee_rate: command.fee_rate.as_u64(),
+                signature: None,
+            };
+            state.local_shutdown_info = Some(shutdown_info);
             state.update_state(ChannelState::ShuttingDown(
                 flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
             ));
@@ -1390,9 +1404,9 @@ where
         // startup the event processing
         match args {
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
-                funding_amount: my_funding_amount,
-                reserved_ckb_amount: my_reserved_ckb_amount,
-                funding_lock_script: my_funding_lock_script,
+                funding_amount: local_funding_amount,
+                reserved_ckb_amount: local_reserved_ckb_amount,
+                shutdown_script: local_shutdown_script,
                 public_channel_info,
                 seed,
                 open_channel,
@@ -1412,8 +1426,8 @@ where
                     commitment_fee_rate,
                     funding_fee_rate,
                     funding_udt_type_script,
-                    funding_lock_script,
                     funding_amount,
+                    shutdown_script,
                     reserved_ckb_amount,
                     to_local_delay,
                     first_per_commitment_point,
@@ -1446,16 +1460,16 @@ where
                 let mut state = ChannelActorState::new_inbound_channel(
                     *channel_id,
                     public_channel_info,
-                    my_funding_amount,
-                    my_reserved_ckb_amount,
+                    local_funding_amount,
+                    local_reserved_ckb_amount,
                     *commitment_fee_rate,
                     *funding_fee_rate,
                     funding_udt_type_script.clone(),
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
-                    my_funding_lock_script.clone(),
-                    funding_lock_script.clone(),
+                    local_shutdown_script.clone(),
+                    shutdown_script.clone(),
                     *funding_amount,
                     *reserved_ckb_amount,
                     *to_local_delay,
@@ -1485,9 +1499,9 @@ where
                 };
                 let accept_channel = AcceptChannel {
                     channel_id: *channel_id,
-                    funding_amount: my_funding_amount,
-                    funding_lock_script: my_funding_lock_script,
-                    reserved_ckb_amount: my_reserved_ckb_amount,
+                    funding_amount: local_funding_amount,
+                    shutdown_script: local_shutdown_script,
+                    reserved_ckb_amount: local_reserved_ckb_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_num_of_accept_tlcs: DEFAULT_MAX_NUM_OF_ACCEPT_TLCS,
                     to_local_delay: *to_local_delay,
@@ -1531,7 +1545,7 @@ where
                 seed,
                 public_channel_info,
                 funding_udt_type_script,
-                funding_lock_script,
+                shutdown_script,
                 channel_id_sender,
                 commitment_fee_rate,
                 funding_fee_rate,
@@ -1559,7 +1573,7 @@ where
                     commitment_fee_rate,
                     funding_fee_rate,
                     funding_udt_type_script.clone(),
-                    funding_lock_script.clone(),
+                    shutdown_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_num_of_accept_tlcs.unwrap_or(DEFAULT_MAX_NUM_OF_ACCEPT_TLCS),
                     LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
@@ -1587,8 +1601,8 @@ where
                     chain_hash: get_chain_hash(),
                     channel_id: channel.get_id(),
                     funding_udt_type_script,
-                    funding_lock_script,
                     funding_amount: channel.to_local_amount,
+                    shutdown_script,
                     reserved_ckb_amount: channel.local_reserved_ckb_amount,
                     funding_fee_rate,
                     commitment_fee_rate,
@@ -1853,12 +1867,6 @@ pub struct ChannelActorState {
     // The remote public key used to establish p2p network connection.
     pub remote_pubkey: Pubkey,
 
-    // The lock script for funding, used to be the default lock script for the shutdown transaction.
-    #[serde_as(as = "Option<EntityHex>")]
-    pub local_funding_script: Option<Script>,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub remote_funding_script: Option<Script>,
-
     pub id: Hash256,
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
@@ -1930,10 +1938,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Vec<(_, _)>")]
     pub tlcs: BTreeMap<TLCId, DetailedTLCInfo>,
 
-    // The counterparty has already sent a shutdown message with this script.
+    // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
-    // The holder has set a shutdown script.
     #[serde_as(as = "Option<EntityHex>")]
     pub local_shutdown_script: Option<Script>,
 
@@ -1948,15 +1955,24 @@ pub struct ChannelActorState {
     // We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<Pubkey>,
     pub remote_channel_parameters: Option<ChannelParametersOneParty>,
-    pub local_shutdown_signature: Option<PartialSignature>,
-    pub local_shutdown_fee_rate: Option<u64>,
-    pub remote_shutdown_fee_rate: Option<u64>,
-    pub remote_shutdown_signature: Option<PartialSignature>,
+
+    // The shutdown info for both local and remote, they are setup by the shutdown command or message.
+    pub local_shutdown_info: Option<ShutdownInfo>,
+    pub remote_shutdown_info: Option<ShutdownInfo>,
 
     // A flag to indicate whether the channel is reestablishing, we won't process any messages until the channel is reestablished.
     pub reestablishing: bool,
 
     pub created_at: SystemTime,
+}
+
+#[serde_as]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ShutdownInfo {
+    #[serde_as(as = "EntityHex")]
+    pub close_script: Script,
+    pub fee_rate: u64,
+    pub signature: Option<PartialSignature>,
 }
 
 // This struct holds the channel information that are only relevant when the channel
@@ -2361,8 +2377,8 @@ impl ChannelActorState {
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
-        local_funding_lock_script: Script,
-        remote_funding_lock_script: Script,
+        local_shutdown_script: Script,
+        remote_shutdown_script: Script,
         remote_value: u128,
         remote_reserved_ckb_amount: u64,
         remote_delay: LockTime,
@@ -2397,14 +2413,12 @@ impl ChannelActorState {
             funding_udt_type_script,
             to_local_amount: local_value,
             to_remote_amount: remote_value,
-            local_funding_script: Some(local_funding_lock_script),
-            remote_funding_script: Some(remote_funding_lock_script),
             commitment_fee_rate,
             funding_fee_rate,
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
-            local_shutdown_script: None,
+            local_shutdown_script: Some(local_shutdown_script),
             local_channel_parameters: ChannelParametersOneParty {
                 pubkeys: local_base_pubkeys,
                 selected_contest_delay: remote_delay,
@@ -2415,14 +2429,12 @@ impl ChannelActorState {
                 selected_contest_delay: remote_delay,
             }),
             commitment_numbers: Default::default(),
-            remote_shutdown_script: None,
+            remote_shutdown_script: Some(remote_shutdown_script),
             previous_remote_nonce: None,
             remote_nonce: Some(remote_nonce),
             remote_commitment_points: vec![first_commitment_point, second_commitment_point],
-            local_shutdown_signature: None,
-            local_shutdown_fee_rate: None,
-            remote_shutdown_signature: None,
-            remote_shutdown_fee_rate: None,
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount,
             latest_commitment_transaction: None,
@@ -2449,7 +2461,7 @@ impl ChannelActorState {
         commitment_fee_rate: u64,
         funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
-        funding_lock_script: Script,
+        shutdown_script: Script,
         max_tlc_value_in_flight: u128,
         max_num_of_accept_tlcs: u64,
         to_local_delay: LockTime,
@@ -2465,8 +2477,6 @@ impl ChannelActorState {
             remote_pubkey,
             funding_tx: None,
             funding_udt_type_script,
-            local_funding_script: Some(funding_lock_script),
-            remote_funding_script: None,
             is_acceptor: false,
             to_local_amount: value,
             to_remote_amount: 0,
@@ -2487,12 +2497,10 @@ impl ChannelActorState {
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
-            local_shutdown_script: None,
-            local_shutdown_fee_rate: None,
+            local_shutdown_script: Some(shutdown_script),
             remote_shutdown_script: None,
-            remote_shutdown_fee_rate: None,
-            local_shutdown_signature: None,
-            remote_shutdown_signature: None,
+            local_shutdown_info: None,
+            remote_shutdown_info: None,
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
@@ -2589,9 +2597,11 @@ impl ChannelActorState {
             )));
         }
 
-        let mut cloned = self.clone();
-        cloned.local_shutdown_script = Some(close_script.clone());
-        let fee = calculate_shutdown_tx_fee(fee_rate.as_u64(), &cloned);
+        let fee = calculate_shutdown_tx_fee(
+            fee_rate.as_u64(),
+            &self.funding_udt_type_script,
+            (self.get_remote_shutdown_script(), close_script.clone()),
+        );
 
         let available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
@@ -2927,7 +2937,7 @@ impl ChannelActorState {
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
-        let lock_script = self.get_default_remote_funding_script();
+        let lock_script = self.get_remote_shutdown_script();
         let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
             let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
                 - commitment_tx_fee;
@@ -3375,17 +3385,18 @@ impl ChannelActorState {
         OutPoint::new(tx.calc_tx_hash(), 0)
     }
 
-    pub fn get_local_shutdown_script(&self) -> &Script {
-        // TODO: what is the best strategy for shutdown script here?
+    pub fn get_local_shutdown_script(&self) -> Script {
         self.local_shutdown_script
             .as_ref()
-            .expect("Holder shutdown script is present")
+            .expect("local_shutdown_script should be set in current state")
+            .clone()
     }
 
-    pub fn get_remote_shutdown_script(&self) -> &Script {
+    pub fn get_remote_shutdown_script(&self) -> Script {
         self.remote_shutdown_script
             .as_ref()
-            .expect("Counterparty shutdown script is present")
+            .expect("remote_shutdown_script should be set in current state")
+            .clone()
     }
 
     fn get_local_commitment_point(&self, commitment_number: u64) -> Pubkey {
@@ -3453,18 +3464,6 @@ impl ChannelActorState {
         let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
         let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
         KeyAggContext::new(keys).expect("Valid pubkeys")
-    }
-
-    pub fn get_default_local_funding_script(&self) -> Script {
-        self.local_funding_script
-            .clone()
-            .expect("no local funding script")
-    }
-
-    pub fn get_default_remote_funding_script(&self) -> Script {
-        self.remote_funding_script
-            .clone()
-            .expect("no remote funding script")
     }
 
     pub fn get_channel_announcement_musig2_secnonce(&self) -> SecNonce {
@@ -3691,13 +3690,20 @@ impl ChannelActorState {
     }
 
     fn check_valid_to_auto_accept_shutdown(&self) -> bool {
-        let Some(remote_fee_rate) = self.remote_shutdown_fee_rate else {
+        let Some(remote_fee_rate) = self.remote_shutdown_info.as_ref().map(|i| i.fee_rate) else {
             return false;
         };
         if remote_fee_rate < self.commitment_fee_rate {
             return false;
         }
-        let fee = calculate_shutdown_tx_fee(remote_fee_rate, self);
+        let fee = calculate_shutdown_tx_fee(
+            remote_fee_rate,
+            &self.funding_udt_type_script,
+            (
+                self.get_remote_shutdown_script(),
+                self.get_local_shutdown_script(),
+            ),
+        );
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
             self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
         } else {
@@ -3880,33 +3886,35 @@ impl ChannelActorState {
             flags | ShuttingDownFlags::DROPPING_PENDING,
         ));
 
-        let shutdown_tx = self.build_shutdown_tx()?;
-        let sign_ctx = Musig2SignContext::from(&*self);
+        if self.local_shutdown_info.is_some() && self.remote_shutdown_info.is_some() {
+            let shutdown_tx = self.build_shutdown_tx()?;
+            let sign_ctx = Musig2SignContext::from(&*self);
 
-        // Create our shutdown signature if we haven't already.
-        let local_shutdown_signature = match self.local_shutdown_signature {
-            Some(signature) => signature,
-            None => {
-                let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
-                self.local_shutdown_signature = Some(signature);
+            let local_shutdown_info = self.local_shutdown_info.as_mut().unwrap();
+            let local_shutdown_signature = match local_shutdown_info.signature {
+                Some(signature) => signature,
+                None => {
+                    let signature = sign_ctx.sign(shutdown_tx.hash().as_slice())?;
+                    local_shutdown_info.signature = Some(signature);
 
-                network
-                    .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                            self.get_remote_peer_id(),
-                            FiberMessage::closing_signed(ClosingSigned {
-                                partial_signature: signature,
-                                channel_id: self.get_id(),
-                            }),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                signature
-            }
-        };
+                    network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                self.get_remote_peer_id(),
+                                FiberMessage::closing_signed(ClosingSigned {
+                                    partial_signature: signature,
+                                    channel_id: self.get_id(),
+                                }),
+                            )),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    signature
+                }
+            };
 
-        match self.remote_shutdown_signature {
-            Some(remote_shutdown_signature) => {
+            if let Some(remote_shutdown_signature) =
+                self.remote_shutdown_info.as_ref().unwrap().signature
+            {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
                         [local_shutdown_signature, remote_shutdown_signature],
@@ -3934,11 +3942,11 @@ impl ChannelActorState {
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            }
-
-            None => {
+            } else {
                 debug!("We have sent our shutdown signature, waiting for counterparty's signature");
             }
+        } else {
+            debug!("Not ready to shutdown the channel, waiting for both parties to send the Shutdown message");
         }
 
         Ok(())
@@ -3977,7 +3985,7 @@ impl ChannelActorState {
             accept_channel.first_per_commitment_point,
             accept_channel.second_per_commitment_point,
         ];
-        self.remote_funding_script = Some(accept_channel.funding_lock_script.clone());
+        self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
 
         match accept_channel.channel_announcement_nonce {
             Some(ref nonce) if self.is_public() => {
@@ -4414,7 +4422,7 @@ impl ChannelActorState {
     ) -> ProcessingChannelResult {
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
-        let lock_script = self.get_default_local_funding_script();
+        let lock_script = self.get_local_shutdown_script();
         let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
             let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
                 - commitment_tx_fee;
@@ -4812,39 +4820,27 @@ impl ChannelActorState {
     }
 
     pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
-        // Don't use get_local_shutdown_script and get_remote_shutdown_script here
-        // as they will panic if the scripts are not present.
-        // This function may be called in a state where these scripts are not present.
-        let (
-            local_shutdown_script,
-            remote_shutdown_script,
-            local_shutdown_fee,
-            remote_shutdown_fee,
-        ) = match (
-            self.local_shutdown_script.clone(),
-            self.remote_shutdown_script.clone(),
-            self.local_shutdown_fee_rate,
-            self.remote_shutdown_fee_rate,
-        ) {
+        let local_shutdown_info = self.local_shutdown_info.as_ref().unwrap();
+        let remote_shutdown_info = self.remote_shutdown_info.as_ref().unwrap();
+
+        let local_shutdown_script = local_shutdown_info.close_script.clone();
+        let remote_shutdown_script = remote_shutdown_info.close_script.clone();
+        let local_shutdown_fee = calculate_shutdown_tx_fee(
+            local_shutdown_info.fee_rate,
+            &self.funding_udt_type_script,
             (
-                Some(local_shutdown_script),
-                Some(remote_shutdown_script),
-                Some(local_shutdown_fee_rate),
-                Some(remote_shutdown_fee_rate),
-            ) => (
-                local_shutdown_script,
-                remote_shutdown_script,
-                calculate_shutdown_tx_fee(local_shutdown_fee_rate, self),
-                calculate_shutdown_tx_fee(remote_shutdown_fee_rate, self),
+                remote_shutdown_script.clone(),
+                local_shutdown_script.clone(),
             ),
-            _ => {
-                return Err(ProcessingChannelError::InvalidState(format!(
-                    "Shutdown scripts are not present: local_shutdown_script {:?}, remote_shutdown_script {:?}, local_shutdown_fee_rate {:?}, remote_shutdown_fee_rate {:?}",
-                    &self.local_shutdown_script, &self.remote_shutdown_script,
-                    &self.local_shutdown_fee_rate, &self.remote_shutdown_fee_rate
-                )));
-            }
-        };
+        );
+        let remote_shutdown_fee = calculate_shutdown_tx_fee(
+            remote_shutdown_info.fee_rate,
+            &self.funding_udt_type_script,
+            (
+                local_shutdown_script.clone(),
+                remote_shutdown_script.clone(),
+            ),
+        );
 
         debug!(
             "build_shutdown_tx local_shutdown_fee: local {}, remote {}",
@@ -5060,8 +5056,8 @@ impl ChannelActorState {
         let to_remote_value =
             self.to_remote_amount + self.remote_reserved_ckb_amount as u128 - received_tlc_value;
 
-        let to_local_output_script = self.get_default_local_funding_script();
-        let to_remote_output_script = self.get_default_remote_funding_script();
+        let to_local_output_script = self.get_local_shutdown_script();
+        let to_remote_output_script = self.get_remote_shutdown_script();
 
         if let Some(udt_type_script) = &self.funding_udt_type_script {
             let to_local_output = CellOutput::new_builder()
@@ -5719,7 +5715,7 @@ mod tests {
             },
             hash_algorithm::HashAlgorithm,
             network::{AcceptChannelCommand, OpenChannelCommand},
-            test_utils::NetworkNode,
+            test_utils::{init_tracing, NetworkNode},
             types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason},
             NetworkActorCommand, NetworkActorMessage,
         },
@@ -5734,22 +5730,11 @@ mod tests {
         prelude::{AsTransactionBuilder, Builder, Entity, Pack},
     };
     use ractor::call;
-    use std::sync::Once;
-    use tracing_subscriber;
-
-    static INIT: Once = Once::new();
-
-    fn init_tracing() {
-        INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-                .pretty()
-                .init();
-        });
-    }
 
     #[test]
     fn test_per_commitment_point_and_secret_consistency() {
+        init_tracing();
+
         let signer = InMemorySigner::generate_from_seed(&[1; 32]);
         assert_eq!(
             signer.get_commitment_point(0),
@@ -5781,16 +5766,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_open_channel_to_peer() {
-        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5825,16 +5808,14 @@ mod tests {
     async fn test_open_and_accept_channel() {
         use crate::fiber::channel::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
 
-        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5869,6 +5850,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT as u128,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))
@@ -5927,10 +5909,7 @@ mod tests {
     }
 
     async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let node_a_funding_amount = 100000000000;
         let node_b_funidng_amount = 6200000000;
@@ -5940,6 +5919,7 @@ mod tests {
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: node_a_funding_amount,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -5973,6 +5953,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: node_b_funidng_amount,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))
@@ -6121,16 +6102,14 @@ mod tests {
         node_b_funding_amount: u128,
         public: bool,
     ) -> (NetworkNode, NetworkNode, Hash256) {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public,
+                    shutdown_script: None,
                     funding_amount: node_a_funding_amount,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -6164,6 +6143,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: node_b_funding_amount,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))
@@ -6466,16 +6446,14 @@ mod tests {
     async fn test_revoke_old_commitment_transaction() {
         init_tracing();
 
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -6509,6 +6487,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6200000000,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))
@@ -6644,16 +6623,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_channel() {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -6687,6 +6664,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6200000000,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))
@@ -6769,16 +6747,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_reestablish_channel() {
-        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes(2)
-            .await
-            .try_into()
-            .unwrap();
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
         let message = |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
                 OpenChannelCommand {
                     peer_id: node_b.peer_id.clone(),
                     public: false,
+                    shutdown_script: None,
                     funding_amount: 100000000000,
                     funding_udt_type_script: None,
                     commitment_fee_rate: None,
@@ -6813,6 +6789,7 @@ mod tests {
                 AcceptChannelCommand {
                     temp_channel_id: open_channel_result.channel_id,
                     funding_amount: 6200000000,
+                    shutdown_script: None,
                 },
                 rpc_reply,
             ))

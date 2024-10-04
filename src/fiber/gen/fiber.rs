@@ -4190,13 +4190,8 @@ impl ::core::fmt::Display for OpenChannel {
             "funding_udt_type_script",
             self.funding_udt_type_script()
         )?;
-        write!(
-            f,
-            ", {}: {}",
-            "funding_lock_script",
-            self.funding_lock_script()
-        )?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
+        write!(f, ", {}: {}", "shutdown_script", self.shutdown_script())?;
         write!(
             f,
             ", {}: {}",
@@ -4274,13 +4269,13 @@ impl ::core::default::Default for OpenChannel {
 }
 impl OpenChannel {
     const DEFAULT_VALUE: [u8; 595] = [
-        83, 2, 0, 0, 92, 0, 0, 0, 124, 0, 0, 0, 156, 0, 0, 0, 156, 0, 0, 0, 209, 0, 0, 0, 225, 0,
+        83, 2, 0, 0, 92, 0, 0, 0, 124, 0, 0, 0, 156, 0, 0, 0, 156, 0, 0, 0, 172, 0, 0, 0, 225, 0,
         0, 0, 233, 0, 0, 0, 241, 0, 0, 0, 249, 0, 0, 0, 9, 1, 0, 0, 17, 1, 0, 0, 33, 1, 0, 0, 41,
         1, 0, 0, 74, 1, 0, 0, 107, 1, 0, 0, 140, 1, 0, 0, 173, 1, 0, 0, 206, 1, 0, 0, 239, 1, 0, 0,
         16, 2, 0, 0, 16, 2, 0, 0, 82, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0,
-        49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -4331,17 +4326,17 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[16..]) as usize;
         ScriptOpt::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_lock_script(&self) -> Script {
+    pub fn funding_amount(&self) -> Uint128 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
         let end = molecule::unpack_number(&slice[20..]) as usize;
-        Script::new_unchecked(self.0.slice(start..end))
+        Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_amount(&self) -> Uint128 {
+    pub fn shutdown_script(&self) -> Script {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
-        Uint128::new_unchecked(self.0.slice(start..end))
+        Script::new_unchecked(self.0.slice(start..end))
     }
     pub fn reserved_ckb_amount(&self) -> Uint64 {
         let slice = self.as_slice();
@@ -4479,8 +4474,8 @@ impl molecule::prelude::Entity for OpenChannel {
             .chain_hash(self.chain_hash())
             .channel_id(self.channel_id())
             .funding_udt_type_script(self.funding_udt_type_script())
-            .funding_lock_script(self.funding_lock_script())
             .funding_amount(self.funding_amount())
+            .shutdown_script(self.shutdown_script())
             .reserved_ckb_amount(self.reserved_ckb_amount())
             .funding_fee_rate(self.funding_fee_rate())
             .commitment_fee_rate(self.commitment_fee_rate())
@@ -4527,13 +4522,8 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
             "funding_udt_type_script",
             self.funding_udt_type_script()
         )?;
-        write!(
-            f,
-            ", {}: {}",
-            "funding_lock_script",
-            self.funding_lock_script()
-        )?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
+        write!(f, ", {}: {}", "shutdown_script", self.shutdown_script())?;
         write!(
             f,
             ", {}: {}",
@@ -4639,17 +4629,17 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[16..]) as usize;
         ScriptOptReader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_lock_script(&self) -> ScriptReader<'r> {
+    pub fn funding_amount(&self) -> Uint128Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[16..]) as usize;
         let end = molecule::unpack_number(&slice[20..]) as usize;
-        ScriptReader::new_unchecked(&self.as_slice()[start..end])
+        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_amount(&self) -> Uint128Reader<'r> {
+    pub fn shutdown_script(&self) -> ScriptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[20..]) as usize;
         let end = molecule::unpack_number(&slice[24..]) as usize;
-        Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        ScriptReader::new_unchecked(&self.as_slice()[start..end])
     }
     pub fn reserved_ckb_amount(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
@@ -4807,8 +4797,8 @@ impl<'r> molecule::prelude::Reader<'r> for OpenChannelReader<'r> {
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         ScriptOptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        ScriptReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
-        Uint128Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
+        ScriptReader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         Uint64Reader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         Uint64Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         Uint64Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
@@ -4834,8 +4824,8 @@ pub struct OpenChannelBuilder {
     pub(crate) chain_hash: Byte32,
     pub(crate) channel_id: Byte32,
     pub(crate) funding_udt_type_script: ScriptOpt,
-    pub(crate) funding_lock_script: Script,
     pub(crate) funding_amount: Uint128,
+    pub(crate) shutdown_script: Script,
     pub(crate) reserved_ckb_amount: Uint64,
     pub(crate) funding_fee_rate: Uint64,
     pub(crate) commitment_fee_rate: Uint64,
@@ -4868,12 +4858,12 @@ impl OpenChannelBuilder {
         self.funding_udt_type_script = v;
         self
     }
-    pub fn funding_lock_script(mut self, v: Script) -> Self {
-        self.funding_lock_script = v;
-        self
-    }
     pub fn funding_amount(mut self, v: Uint128) -> Self {
         self.funding_amount = v;
+        self
+    }
+    pub fn shutdown_script(mut self, v: Script) -> Self {
+        self.shutdown_script = v;
         self
     }
     pub fn reserved_ckb_amount(mut self, v: Uint64) -> Self {
@@ -4953,8 +4943,8 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.chain_hash.as_slice().len()
             + self.channel_id.as_slice().len()
             + self.funding_udt_type_script.as_slice().len()
-            + self.funding_lock_script.as_slice().len()
             + self.funding_amount.as_slice().len()
+            + self.shutdown_script.as_slice().len()
             + self.reserved_ckb_amount.as_slice().len()
             + self.funding_fee_rate.as_slice().len()
             + self.commitment_fee_rate.as_slice().len()
@@ -4983,9 +4973,9 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.funding_udt_type_script.as_slice().len();
         offsets.push(total_size);
-        total_size += self.funding_lock_script.as_slice().len();
-        offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.shutdown_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.reserved_ckb_amount.as_slice().len();
         offsets.push(total_size);
@@ -5027,8 +5017,8 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.chain_hash.as_slice())?;
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_udt_type_script.as_slice())?;
-        writer.write_all(self.funding_lock_script.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
+        writer.write_all(self.shutdown_script.as_slice())?;
         writer.write_all(self.reserved_ckb_amount.as_slice())?;
         writer.write_all(self.funding_fee_rate.as_slice())?;
         writer.write_all(self.commitment_fee_rate.as_slice())?;
@@ -5076,12 +5066,7 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
-        write!(
-            f,
-            ", {}: {}",
-            "funding_lock_script",
-            self.funding_lock_script()
-        )?;
+        write!(f, ", {}: {}", "shutdown_script", self.shutdown_script())?;
         write!(
             f,
             ", {}: {}",
@@ -5199,7 +5184,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn funding_lock_script(&self) -> Script {
+    pub fn shutdown_script(&self) -> Script {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -5322,7 +5307,7 @@ impl molecule::prelude::Entity for AcceptChannel {
         Self::new_builder()
             .channel_id(self.channel_id())
             .funding_amount(self.funding_amount())
-            .funding_lock_script(self.funding_lock_script())
+            .shutdown_script(self.shutdown_script())
             .reserved_ckb_amount(self.reserved_ckb_amount())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_num_of_accept_tlcs(self.max_num_of_accept_tlcs())
@@ -5360,12 +5345,7 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "funding_amount", self.funding_amount())?;
-        write!(
-            f,
-            ", {}: {}",
-            "funding_lock_script",
-            self.funding_lock_script()
-        )?;
+        write!(f, ", {}: {}", "shutdown_script", self.shutdown_script())?;
         write!(
             f,
             ", {}: {}",
@@ -5457,7 +5437,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[12..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn funding_lock_script(&self) -> ScriptReader<'r> {
+    pub fn shutdown_script(&self) -> ScriptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
         let end = molecule::unpack_number(&slice[16..]) as usize;
@@ -5622,7 +5602,7 @@ impl<'r> molecule::prelude::Reader<'r> for AcceptChannelReader<'r> {
 pub struct AcceptChannelBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) funding_amount: Uint128,
-    pub(crate) funding_lock_script: Script,
+    pub(crate) shutdown_script: Script,
     pub(crate) reserved_ckb_amount: Uint64,
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_num_of_accept_tlcs: Uint64,
@@ -5648,8 +5628,8 @@ impl AcceptChannelBuilder {
         self.funding_amount = v;
         self
     }
-    pub fn funding_lock_script(mut self, v: Script) -> Self {
-        self.funding_lock_script = v;
+    pub fn shutdown_script(mut self, v: Script) -> Self {
+        self.shutdown_script = v;
         self
     }
     pub fn reserved_ckb_amount(mut self, v: Uint64) -> Self {
@@ -5716,7 +5696,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
             + self.funding_amount.as_slice().len()
-            + self.funding_lock_script.as_slice().len()
+            + self.shutdown_script.as_slice().len()
             + self.reserved_ckb_amount.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_num_of_accept_tlcs.as_slice().len()
@@ -5740,7 +5720,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.funding_amount.as_slice().len();
         offsets.push(total_size);
-        total_size += self.funding_lock_script.as_slice().len();
+        total_size += self.shutdown_script.as_slice().len();
         offsets.push(total_size);
         total_size += self.reserved_ckb_amount.as_slice().len();
         offsets.push(total_size);
@@ -5775,7 +5755,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         }
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.funding_amount.as_slice())?;
-        writer.write_all(self.funding_lock_script.as_slice())?;
+        writer.write_all(self.shutdown_script.as_slice())?;
         writer.write_all(self.reserved_ckb_amount.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_num_of_accept_tlcs.as_slice())?;
@@ -16570,13 +16550,13 @@ impl ::core::default::Default for FiberMessage {
 }
 impl FiberMessage {
     const DEFAULT_VALUE: [u8; 599] = [
-        0, 0, 0, 0, 83, 2, 0, 0, 92, 0, 0, 0, 124, 0, 0, 0, 156, 0, 0, 0, 156, 0, 0, 0, 209, 0, 0,
+        0, 0, 0, 0, 83, 2, 0, 0, 92, 0, 0, 0, 124, 0, 0, 0, 156, 0, 0, 0, 156, 0, 0, 0, 172, 0, 0,
         0, 225, 0, 0, 0, 233, 0, 0, 0, 241, 0, 0, 0, 249, 0, 0, 0, 9, 1, 0, 0, 17, 1, 0, 0, 33, 1,
         0, 0, 41, 1, 0, 0, 74, 1, 0, 0, 107, 1, 0, 0, 140, 1, 0, 0, 173, 1, 0, 0, 206, 1, 0, 0,
         239, 1, 0, 0, 16, 2, 0, 0, 16, 2, 0, 0, 82, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0,
-        48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

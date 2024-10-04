@@ -33,6 +33,7 @@ pub struct OpenChannelParams {
     pub funding_amount: u128,
     pub public: Option<bool>,
     pub funding_udt_type_script: Option<Script>,
+    pub shutdown_script: Option<Script>,
     #[serde_as(as = "Option<U64Hex>")]
     pub commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
@@ -62,6 +63,7 @@ pub struct AcceptChannelParams {
     pub temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
     pub funding_amount: u128,
+    pub shutdown_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
@@ -315,6 +317,7 @@ where
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(false),
+                    shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()
@@ -345,6 +348,7 @@ where
                 AcceptChannelCommand {
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
+                    shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                 },
                 rpc_reply,
             ))

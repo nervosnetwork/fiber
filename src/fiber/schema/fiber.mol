@@ -12,8 +12,8 @@ table OpenChannel {
     chain_hash:                  Byte32,
     channel_id:                  Byte32,
     funding_udt_type_script:     ScriptOpt,
-    funding_lock_script:         Script,
     funding_amount:              Uint128,
+    shutdown_script:             Script,
     reserved_ckb_amount:         Uint64,
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
@@ -36,7 +36,7 @@ table OpenChannel {
 table AcceptChannel {
     channel_id:                  Byte32,
     funding_amount:              Uint128,
-    funding_lock_script:         Script,
+    shutdown_script:             Script,
     reserved_ckb_amount:         Uint64,
     max_tlc_value_in_flight:     Uint128,
     max_num_of_accept_tlcs:      Uint64,

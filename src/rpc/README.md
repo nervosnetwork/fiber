@@ -67,6 +67,7 @@ Attempts to open a channel with a peer.
 * `funding_amount` - The amount of CKB or UDT to fund the channel with
 * `public` - Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter (default value false)
 * `funding_udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
+* `shutdown_script` - The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
 * `commitment_fee_rate` - The fee rate for the commitment transaction, an optional parameter
 * `funding_fee_rate` - The fee rate for the funding transaction, an optional parameter
 * `tlc_locktime_expiry_delta` - The expiry delta for the TLC locktime, an optional parameter
@@ -89,6 +90,7 @@ Accepts a channel opening request from a peer.
 
 * `temporary_channel_id` - The temporary channel ID of the channel to accept
 * `funding_amount` - The amount of CKB or UDT to fund the channel with
+* `shutdown_script` - The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
 
 ###### Returns
 

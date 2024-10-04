@@ -1,9 +1,11 @@
+use ckb_hash::blake2b_256;
 use fnn::cch::CchMessage;
-use fnn::ckb::contracts::init_contracts_context;
+use fnn::ckb::contracts::{get_script_by_contract, init_contracts_context, Contract};
 use fnn::fiber::graph::NetworkGraph;
 use fnn::store::Store;
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use ractor::Actor;
+use secp256k1::Secp256k1;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
@@ -100,6 +102,12 @@ pub async fn main() {
                 node_public_key.clone().into(),
             )));
 
+            let secret_key = ckb_config.read_secret_key().unwrap();
+            let secp = Secp256k1::new();
+            let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
+            let default_shutdown_script =
+                get_script_by_contract(Contract::Secp256k1Lock, &pubkey_hash[0..20]);
+
             info!("Starting fiber");
             let network_actor = start_network(
                 fiber_config,
@@ -110,6 +118,7 @@ pub async fn main() {
                 store.clone(),
                 subscribers.clone(),
                 network_graph.clone(),
+                default_shutdown_script,
             )
             .await;
 
