@@ -39,3 +39,27 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - run: |
           make clippy
+
+  coverage:
+    name: Code Coverage
+    needs: [ test ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v2
+      - uses: dsherret/rust-toolchain-file@v1
+      - name: Install Grcov
+        run: make coverage-install-tools
+      - name: Generate Code Coverage Report of Unit Tests
+        run: |
+          make coverage-run-unittests
+          make coverage-collect-data
+      - name: Upload Code Coverage Report of Unit Tests
+        uses: codecov/codecov-action@v3
+        with:
+          files: coverage-report.info
+          env_vars: OS,RUST_TOOLCHAIN
+          fail_ci_if_error: false
+          flags: unittests
+          verbose: false
+          token: ${{ secrets.CODECOV_TOKEN }}
