@@ -1,5 +1,6 @@
 CARGO_TARGET_DIR ?= target
 COVERAGE_PROFRAW_DIR ?= ${CARGO_TARGET_DIR}/coverage
+GRCOV_OUTPUT ?= coverage-report.info
 GRCOV_EXCL_START = ^\s*((log::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\($$
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = \s*((log::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
