@@ -1430,6 +1430,8 @@ pub struct NodeAnnouncement {
     pub addresses: Vec<MultiAddr>,
     // chain_hash
     pub chain_hash: Hash256,
+    // If the other party funding more than this amount, we will automatically accept the channel.
+    pub auto_accept_min_ckb_funding_amount: u64,
 }
 
 impl NodeAnnouncement {
@@ -1438,6 +1440,7 @@ impl NodeAnnouncement {
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
         version: u64,
+        auto_accept_min_ckb_funding_amount: u64,
     ) -> Self {
         Self {
             signature: None,
@@ -1447,6 +1450,7 @@ impl NodeAnnouncement {
             alias,
             chain_hash: get_chain_hash(),
             addresses,
+            auto_accept_min_ckb_funding_amount,
         }
     }
 
@@ -1455,9 +1459,15 @@ impl NodeAnnouncement {
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
         version: u64,
+        auto_accept_min_ckb_funding_amount: u64,
     ) -> NodeAnnouncement {
-        let mut unsigned =
-            NodeAnnouncement::new_unsigned(alias, addresses, private_key.pubkey(), version);
+        let mut unsigned = NodeAnnouncement::new_unsigned(
+            alias,
+            addresses,
+            private_key.pubkey(),
+            version,
+            auto_accept_min_ckb_funding_amount,
+        );
         unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
         unsigned
     }
@@ -1471,6 +1481,7 @@ impl NodeAnnouncement {
             alias: self.alias,
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
+            auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
         };
         deterministically_hash(&unsigned_announcement)
     }
@@ -1490,6 +1501,9 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
             .node_id(node_announcement.node_id.into())
             .alias(u8_32_as_byte_32(&node_announcement.alias.0))
             .chain_hash(node_announcement.chain_hash.into())
+            .auto_accept_min_ckb_funding_amount(
+                node_announcement.auto_accept_min_ckb_funding_amount.pack(),
+            )
             .address(
                 BytesVec::new_builder()
                     .set(
@@ -1515,6 +1529,9 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
             version: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
             chain_hash: node_announcement.chain_hash().into(),
+            auto_accept_min_ckb_funding_amount: node_announcement
+                .auto_accept_min_ckb_funding_amount()
+                .unpack(),
             alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
             addresses: node_announcement

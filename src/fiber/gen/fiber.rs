@@ -10723,6 +10723,12 @@ impl ::core::fmt::Display for NodeAnnouncement {
         write!(f, ", {}: {}", "alias", self.alias())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
+        write!(
+            f,
+            ", {}: {}",
+            "auto_accept_min_ckb_funding_amount",
+            self.auto_accept_min_ckb_funding_amount()
+        )?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10737,15 +10743,15 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 153] = [
-        153, 0, 0, 0, 32, 0, 0, 0, 36, 0, 0, 0, 44, 0, 0, 0, 52, 0, 0, 0, 85, 0, 0, 0, 117, 0, 0,
-        0, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 165] = [
+        165, 0, 0, 0, 36, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 89, 0, 0, 0, 121, 0, 0,
+        0, 125, 0, 0, 0, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10801,11 +10807,17 @@ impl NodeAnnouncement {
     pub fn chain_hash(&self) -> Byte32 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
+        Byte32::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            Byte32::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[36..]) as usize;
+            Uint64::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte32::new_unchecked(self.0.slice(start..))
+            Uint64::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> NodeAnnouncementReader<'r> {
@@ -10842,6 +10854,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .alias(self.alias())
             .address(self.address())
             .chain_hash(self.chain_hash())
+            .auto_accept_min_ckb_funding_amount(self.auto_accept_min_ckb_funding_amount())
     }
 }
 #[derive(Clone, Copy)]
@@ -10870,6 +10883,12 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
         write!(f, ", {}: {}", "alias", self.alias())?;
         write!(f, ", {}: {}", "address", self.address())?;
         write!(f, ", {}: {}", "chain_hash", self.chain_hash())?;
+        write!(
+            f,
+            ", {}: {}",
+            "auto_accept_min_ckb_funding_amount",
+            self.auto_accept_min_ckb_funding_amount()
+        )?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10878,7 +10897,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
     }
 }
 impl<'r> NodeAnnouncementReader<'r> {
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10934,11 +10953,17 @@ impl<'r> NodeAnnouncementReader<'r> {
     pub fn chain_hash(&self) -> Byte32Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
+        let end = molecule::unpack_number(&slice[32..]) as usize;
+        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[32..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[32..]) as usize;
-            Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[36..]) as usize;
+            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Byte32Reader::new_unchecked(&self.as_slice()[start..])
+            Uint64Reader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -10995,6 +11020,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
         Byte32Reader::verify(&slice[offsets[4]..offsets[5]], compatible)?;
         BytesVecReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         Byte32Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
+        Uint64Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
         Ok(())
     }
 }
@@ -11007,9 +11033,10 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) alias: Byte32,
     pub(crate) address: BytesVec,
     pub(crate) chain_hash: Byte32,
+    pub(crate) auto_accept_min_ckb_funding_amount: Uint64,
 }
 impl NodeAnnouncementBuilder {
-    pub const FIELD_COUNT: usize = 7;
+    pub const FIELD_COUNT: usize = 8;
     pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
@@ -11038,6 +11065,10 @@ impl NodeAnnouncementBuilder {
         self.chain_hash = v;
         self
     }
+    pub fn auto_accept_min_ckb_funding_amount(mut self, v: Uint64) -> Self {
+        self.auto_accept_min_ckb_funding_amount = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for NodeAnnouncementBuilder {
     type Entity = NodeAnnouncement;
@@ -11051,6 +11082,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.alias.as_slice().len()
             + self.address.as_slice().len()
             + self.chain_hash.as_slice().len()
+            + self.auto_accept_min_ckb_funding_amount.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -11069,6 +11101,8 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         total_size += self.address.as_slice().len();
         offsets.push(total_size);
         total_size += self.chain_hash.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.auto_accept_min_ckb_funding_amount.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -11080,6 +11114,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.alias.as_slice())?;
         writer.write_all(self.address.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
+        writer.write_all(self.auto_accept_min_ckb_funding_amount.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -13630,13 +13665,13 @@ impl ::core::default::Default for BroadcastMessage {
     }
 }
 impl BroadcastMessage {
-    const DEFAULT_VALUE: [u8; 157] = [
-        0, 0, 0, 0, 153, 0, 0, 0, 32, 0, 0, 0, 36, 0, 0, 0, 44, 0, 0, 0, 52, 0, 0, 0, 85, 0, 0, 0,
-        117, 0, 0, 0, 121, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 169] = [
+        0, 0, 0, 0, 165, 0, 0, 0, 36, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 89, 0, 0, 0,
+        121, 0, 0, 0, 125, 0, 0, 0, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
     pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {

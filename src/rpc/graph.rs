@@ -2,7 +2,7 @@ use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
 use crate::fiber::types::{Hash256, Pubkey};
-use ckb_jsonrpc_types::JsonBytes;
+use ckb_jsonrpc_types::{JsonBytes, Script};
 use ckb_types::packed::OutPoint;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,8 @@ pub struct NodeInfo {
     #[serde_as(as = "U64Hex")]
     pub timestamp: u64,
     pub chain_hash: Hash256,
+    #[serde_as(as = "U64Hex")]
+    pub auto_accept_min_ckb_funding_amount: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -61,6 +63,7 @@ pub struct ChannelInfo {
     #[serde_as(as = "U128Hex")]
     pub capacity: u128,
     pub chain_hash: Hash256,
+    pub udt_type_script: Option<Script>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -126,6 +129,9 @@ where
                 node_id: node_info.node_id,
                 timestamp: node_info.timestamp,
                 chain_hash: node_info.anouncement_msg.chain_hash,
+                auto_accept_min_ckb_funding_amount: node_info
+                    .anouncement_msg
+                    .auto_accept_min_ckb_funding_amount,
             })
             .collect();
         Ok(GraphNodesResult { nodes, last_cursor })
@@ -155,6 +161,11 @@ where
                 node1_to_node2_fee_rate: channel_info.node1_to_node2.as_ref().map(|cu| cu.fee_rate),
                 node2_to_node1_fee_rate: channel_info.node2_to_node1.as_ref().map(|cu| cu.fee_rate),
                 chain_hash,
+                udt_type_script: channel_info
+                    .announcement_msg
+                    .udt_type_script
+                    .clone()
+                    .map(|s| s.into()),
             })
             .collect();
         Ok(GraphChannelsResult {

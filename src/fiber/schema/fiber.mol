@@ -171,6 +171,8 @@ table NodeAnnouncement {
     address: BytesVec,
     // Chain hash
     chain_hash: Byte32,
+    // Minimal auto accept ckb amount
+    auto_accept_min_ckb_funding_amount: Uint64,
 }
 
 table ChannelAnnouncement {
