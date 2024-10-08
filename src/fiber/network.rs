@@ -1,6 +1,6 @@
 use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{Status, TxStatus};
+use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -81,6 +81,10 @@ use crate::{unwrap_or_return, Error};
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
+
+// tx index is not returned on older ckb version, using dummy tx index instead.
+// Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
+const DUMMY_FUNDING_TX_INDEX: u32 = 0;
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -422,8 +426,9 @@ pub enum NetworkActorEvent {
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
-    /// A funding transaction has been confirmed.
-    FundingTransactionConfirmed(OutPoint),
+    /// A funding transaction has been confirmed. The transaction was included in the
+    /// block with the given transaction index.
+    FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
 
     /// A funding transaction has been confirmed.
     FundingTransactionFailed(OutPoint),
@@ -1080,8 +1085,10 @@ where
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
-                state.on_funding_transaction_confirmed(outpoint).await;
+            NetworkActorEvent::FundingTransactionConfirmed(outpoint, block_number, tx_index) => {
+                state
+                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index)
+                    .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
                 state
@@ -1752,12 +1759,7 @@ where
                                 block_number: Some(block_number),
                                 ..
                             },
-                    }) => (
-                        tx,
-                        block_number.into(),
-                        // tx index is not returned on older ckb version, using dummy tx index instead
-                        0u32,
-                    ),
+                    }) => (tx, block_number.into(), DUMMY_FUNDING_TX_INDEX),
                     err => {
                         return Err(Error::InvalidParameter(format!(
                             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
@@ -2969,12 +2971,17 @@ where
                     status:
                         TxStatus {
                             status: Status::Committed,
+                            block_number: Some(block_number),
                             ..
                         },
                     ..
                 }) => {
                     info!("Funding transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::FundingTransactionConfirmed(outpoint)
+                    NetworkActorEvent::FundingTransactionConfirmed(
+                        outpoint,
+                        block_number.into(),
+                        DUMMY_FUNDING_TX_INDEX,
+                    )
                 }
                 Ok(status) => {
                     error!(
@@ -3045,7 +3052,12 @@ where
         .await;
     }
 
-    async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
+    async fn on_funding_transaction_confirmed(
+        &mut self,
+        outpoint: OutPoint,
+        block_number: BlockNumber,
+        tx_index: u32,
+    ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
             Some(channel_id) => channel_id,
@@ -3060,7 +3072,10 @@ where
         self.send_message_to_channel_actor(
             channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed),
+            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
+                block_number,
+                tx_index,
+            )),
         )
         .await;
     }

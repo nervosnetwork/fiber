@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use ckb_jsonrpc_types::BlockNumber;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, warn};
 
@@ -1195,7 +1196,7 @@ where
         event: ChannelEvent,
     ) -> Result<(), ProcessingChannelError> {
         match event {
-            ChannelEvent::FundingTransactionConfirmed => {
+            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index) => {
                 debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
@@ -1209,6 +1210,7 @@ where
                             "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
+                state.funding_tx_confirmed_at = Some((block_number, tx_index));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1752,6 +1754,8 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
+    pub funding_tx_confirmed_at: Option<(BlockNumber, u32)>,
+
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 
@@ -1908,7 +1912,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     PeerDisconnected,
-    FundingTransactionConfirmed,
+    FundingTransactionConfirmed(BlockNumber, u32),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
 }
@@ -2302,6 +2306,7 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
+            funding_tx_confirmed_at: None,
             is_acceptor: true,
             funding_udt_type_script,
             to_local_amount: local_value,
@@ -2369,6 +2374,7 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
+            funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
