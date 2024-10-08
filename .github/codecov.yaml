@@ -1,0 +1,16 @@
+coverage:
+  status:
+    project:
+      default:
+        # This target could be increased, but don't decrease it.
+        target: 25%
+        threshold: 0%
+        paths:
+        - "src"
+    patch:
+      default:
+        # The majority of new code should be tested.
+        target: 60%
+        threshold: 0%
+        paths:
+        - "src"
