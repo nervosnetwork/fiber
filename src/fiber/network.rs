@@ -1,6 +1,7 @@
 use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TxStatus};
+use ckb_sdk::RpcError;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -2339,40 +2340,61 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
+    // This function send the transaction to the network and then trace the transaction status.
+    // Either the sending or the tracing may fail, in which case the callback will be called with
+    // the error.
     async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
         F: Send + 'static + FnOnce(Result<TraceTxResponse, RactorErr<CkbChainMessage>>),
     {
-        debug!("Trying to broadcast transaction {:?}", &transaction);
         let chain = self.chain_actor.clone();
-        call_t!(
-            &chain,
-            CkbChainMessage::SendTx,
-            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-            transaction.clone()
-        )
-        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-        .expect("valid tx to broadcast");
-
-        let tx_hash = transaction.hash();
-        info!("Transactoin sent to the network: {}", tx_hash);
-
-        // TODO: make number of confirmation to transaction configurable.
-        const NUM_CONFIRMATIONS: u64 = 4;
-        let request = TraceTxRequest {
-            tx_hash: tx_hash.clone(),
-            confirmations: NUM_CONFIRMATIONS,
-        };
-
         // Spawn a new task to avoid blocking current actor message processing.
         ractor::concurrency::tokio_primatives::spawn(async move {
-            debug!("Tracing transaction status {:?}", &request.tx_hash);
-            let result = call_t!(
-                chain,
-                CkbChainMessage::TraceTx,
+            debug!("Trying to broadcast transaction {:?}", &transaction);
+            let result = match call_t!(
+                &chain,
+                CkbChainMessage::SendTx,
                 DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                request.clone()
-            );
+                transaction.clone()
+            )
+            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+            {
+                Err(err) => {
+                    error!("Failed to send transaction to the network: {:?}", &err);
+                    // TODO: the caller of this function will deem the failure returned here as permanent.
+                    // But SendTx may only fail temporarily. We need to handle this case.
+                    Ok(TraceTxResponse {
+                        tx: None,
+                        status: TxStatus {
+                            status: Status::Rejected,
+                            block_number: None,
+                            block_hash: None,
+                            reason: Some(format!("Sending transaction failed: {:?}", &err)),
+                        },
+                    })
+                }
+                Ok(_) => {
+                    let tx_hash = transaction.hash();
+                    // TODO: make number of confirmation to transaction configurable.
+                    const NUM_CONFIRMATIONS: u64 = 4;
+                    let request = TraceTxRequest {
+                        tx_hash: tx_hash.clone(),
+                        confirmations: NUM_CONFIRMATIONS,
+                    };
+                    debug!(
+                        "Transaction sent to the network, waiting for it to be confirmed: {:?}",
+                        &request.tx_hash
+                    );
+                    call_t!(
+                        chain,
+                        CkbChainMessage::TraceTx,
+                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                        request.clone()
+                    )
+                }
+            };
+
+            debug!("Transaction trace result: {:?}", &result);
             callback(result);
         });
     }
