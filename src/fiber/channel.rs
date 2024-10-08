@@ -5,7 +5,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     fiber::{
         network::{get_chain_hash, SendOnionPacketCommand},
-        types::{ChannelUpdate, RemoveTlcFail},
+        types::{ChannelUpdate, RemoveTlcFail, TlcFailErrorCode},
     },
     invoice::InvoiceStore,
 };
@@ -466,6 +466,37 @@ where
                         Ok(())
                     }
                     Err(e) => {
+                        let error_code = match e {
+                            ProcessingChannelError::PeelingOnionPacketError(_) => {
+                                TlcFailErrorCode::InvalidOnionPayload
+                            }
+                            ProcessingChannelError::InvalidParameter(_) => {
+                                TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
+                            }
+                            ProcessingChannelError::FinalIncorrectHTLCAmount => {
+                                TlcFailErrorCode::FinalIncorrectHtlcAmount
+                            }
+                            ProcessingChannelError::TlcAmountIsTooLow => {
+                                TlcFailErrorCode::AmountBelowMinimum
+                            }
+                            ProcessingChannelError::TlcNumberExceedLimit
+                            | ProcessingChannelError::TlcValueInflightExceedLimit => {
+                                TlcFailErrorCode::TemporaryChannelFailure
+                            }
+                            ProcessingChannelError::InvalidState(_) => match state.state {
+                                ChannelState::Closed(_) => TlcFailErrorCode::ChannelDisabled,
+                                ChannelState::ShuttingDown(_) | ChannelState::ChannelReady() => {
+                                    // we expect `ShuttingDown` and `ChannelReady` are both OK for tlc forwarding,
+                                    // so here are the unreachable point in normal workflow,
+                                    // set `TemporaryNodeFailure` for general temporary failure of the processing node here
+                                    TlcFailErrorCode::TemporaryNodeFailure
+                                }
+                                // otherwise, channel maybe not ready
+                                _ => TlcFailErrorCode::TemporaryChannelFailure,
+                            },
+                            // TODO: there maybe more error types here
+                            _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
+                        };
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
@@ -483,12 +514,7 @@ where
                                                 channel_id: state.get_id(),
                                                 tlc_id,
                                                 reason: RemoveTlcReason::RemoveTlcFail(
-                                                    RemoveTlcFail {
-                                                        //FIXME: we should define the error code carefully according
-                                                        //refer to https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
-                                                        error_code: 1,
-                                                        packet_data: vec![],
-                                                    },
+                                                    RemoveTlcFail::new(error_code, vec![]),
                                                 ),
                                             }),
                                         ),
@@ -734,15 +760,14 @@ where
             }
 
             if forward_to_next_hop && peeled_packet.current.amount > add_tlc.amount {
-                return Err(ProcessingChannelError::InvalidParameter(
+                return Err(ProcessingChannelError::InvalidParameter
+                    (
                     format!("Payment amount is too large, expect next hop amount [{}] less than received amount [{}]",
                     peeled_packet.current.amount , add_tlc.amount)
                 ));
             }
             if !forward_to_next_hop && peeled_packet.current.amount != add_tlc.amount {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "Payment amount mismatch".to_string(),
-                ));
+                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
         }
 
@@ -2050,6 +2075,14 @@ pub enum ProcessingChannelError {
     Musig2SigningError(#[from] SigningError),
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
+    #[error("The amount in the HTLC is not expected")]
+    FinalIncorrectHTLCAmount,
+    #[error("The tlc number exceed limit of this channel")]
+    TlcNumberExceedLimit,
+    #[error("The tlc flight value exceed limit of this channel")]
+    TlcValueInflightExceedLimit,
+    #[error("The tlc amount below minimal")]
+    TlcAmountIsTooLow,
 }
 
 bitflags! {
@@ -3243,10 +3276,7 @@ impl ChannelActorState {
             }
         };
         if tlc.amount == 0 {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Expect the amount of tlc with id {:?} is larger than zero",
-                tlc.id
-            )));
+            return Err(ProcessingChannelError::TlcAmountIsTooLow);
         }
         if tlc.is_offered() {
             // TODO: We should actually also consider all our fulfilled tlcs here.
@@ -3728,10 +3758,7 @@ impl ChannelActorState {
                 + self.get_active_received_tlcs(true).count();
 
             if active_tls_number as u64 + 1 > self.max_num_of_accept_tlcs {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Exceeding the maximum number of tlcs: {}",
-                    self.max_num_of_accept_tlcs
-                )));
+                return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
             if self
@@ -3741,10 +3768,7 @@ impl ChannelActorState {
                 + add_amount
                 > self.max_tlc_value_in_flight
             {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Exceeding the maximum amount of tlcs: {}",
-                    self.max_tlc_value_in_flight
-                )));
+                return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }
         Ok(())
