@@ -290,6 +290,24 @@ where
 
         match message {
             FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                if !state.is_public() {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Received AnnouncementSignatures message, but the channel is not public"
+                            .to_string(),
+                    ));
+                }
+                match state.state {
+                    ChannelState::ChannelReady() => {}
+                    ChannelState::AwaitingChannelReady(flags)
+                        if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                                "Received unexpected AnnouncementSignatures message in state {:?}, expecting state AwaitingChannelReady::CHANNEL_READY or ChannelReady",
+                                state.state
+                            )));
+                    }
+                }
+
                 // TODO: check announcement_signatures validity here.
                 let AnnouncementSignatures {
                     node_signature,
@@ -300,9 +318,7 @@ where
                     node_signature,
                     partial_signature,
                 );
-                state
-                    .maybe_broadcast_announcement_signatures(&self.network)
-                    .await;
+                state.maybe_public_channel_is_ready(&self.network).await;
                 Ok(())
             }
             FiberChannelMessage::AcceptChannel(accept_channel) => {
@@ -437,10 +453,7 @@ where
                     &channel_ready, &state.state
                 );
 
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    debug!("Running on_channel_ready as ChannelReady message is received");
-                    state.on_channel_ready(&self.network).await;
-                }
+                state.maybe_channel_is_ready(&self.network).await;
 
                 Ok(())
             }
@@ -1208,10 +1221,7 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    debug!("Running on_channel_ready as funding transaction confirmed");
-                    state.on_channel_ready(&self.network).await;
-                }
+                state.maybe_channel_is_ready(&self.network).await;
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
                 match state.state {
@@ -2182,6 +2192,18 @@ impl From<(&ChannelActorState, bool)> for Musig2VerifyContext {
 impl ChannelActorState {
     pub fn is_public(&self) -> bool {
         self.public_channel_info.is_some()
+    }
+
+    pub fn get_channel_announcement_message(&self) -> Option<&ChannelAnnouncement> {
+        self.public_channel_info
+            .as_ref()
+            .and_then(|info| info.channel_announcement.as_ref())
+    }
+
+    pub fn has_signed_channel_announcement(&self) -> bool {
+        self.get_channel_announcement_message()
+            .map(|msg| msg.is_signed())
+            .unwrap_or(false)
     }
 
     pub async fn try_create_channel_announcement_message(
@@ -4180,20 +4202,21 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub async fn maybe_broadcast_announcement_signatures(
-        &mut self,
-        network: &ActorRef<NetworkActorMessage>,
-    ) {
-        debug!("Running maybe_broadcast_announcement_signatures");
+    pub async fn maybe_public_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        debug!("Trying to create channel announcement message for public channel");
         if let Some(channel_annoucement) =
             self.try_create_channel_announcement_message(network).await
         {
             debug!(
-                "Channel {:?} is ready, broadcasting channel announcement message {:?}",
+                "Channel announcement message for {:?} created",
                 self.get_id(),
+            );
+            self.on_channel_ready(network).await;
+
+            debug!(
+                "Broadcasting channel announcement message {:?}",
                 &channel_annoucement,
             );
-
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::BroadcastMessage(
@@ -4202,7 +4225,6 @@ impl ChannelActorState {
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
             self.broadcast_channel_update(network).await;
         }
     }
@@ -4240,6 +4262,26 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
+    pub async fn maybe_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        match self.state {
+            ChannelState::AwaitingChannelReady(flags) => {
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    if !self.is_public() {
+                        self.on_channel_ready(network).await;
+                    } else {
+                        self.maybe_public_channel_is_ready(network).await;
+                    }
+                }
+            }
+            _ => {
+                panic!(
+                    "Invalid state {:?} for maybe_on_channel_ready (expected AwaitingChannelReady)",
+                    &self.state
+                );
+            }
+        }
+    }
+
     pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
@@ -4254,7 +4296,6 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        self.maybe_broadcast_announcement_signatures(network).await;
     }
 
     pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
