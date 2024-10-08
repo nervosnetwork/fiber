@@ -1,3 +1,4 @@
+use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
@@ -28,6 +29,7 @@ pub struct NodeInfo {
     pub chain_hash: Hash256,
     #[serde_as(as = "U64Hex")]
     pub auto_accept_min_ckb_funding_amount: u64,
+    pub udt_cfg_infos: UdtCfgInfos,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -129,6 +131,7 @@ where
                 node_id: node_info.node_id,
                 timestamp: node_info.timestamp,
                 chain_hash: node_info.anouncement_msg.chain_hash,
+                udt_cfg_infos: node_info.anouncement_msg.udt_cfg_infos.clone(),
                 auto_accept_min_ckb_funding_amount: node_info
                     .anouncement_msg
                     .auto_accept_min_ckb_funding_amount,

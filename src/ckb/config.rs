@@ -1,4 +1,3 @@
-use ckb_types::prelude::PackVec;
 use clap_serde_derive::ClapSerde;
 use secp256k1::SecretKey;
 use serde_with::serde_as;
@@ -8,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;
 use ckb_types::H256;
@@ -15,10 +15,9 @@ use ckb_types::{
     core::DepType,
     packed::{CellDep, OutPoint},
 };
-use ckb_types::{core::ScriptHashType, packed::CellDepVec};
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -107,7 +106,15 @@ impl CkbConfig {
 serde_with::serde_conv!(
     ScriptHashTypeWrapper,
     ScriptHashType,
-    |_: &ScriptHashType| { panic!("no support to serialize") },
+    |s: &ScriptHashType| -> String {
+        let v = match s {
+            ScriptHashType::Type => "type",
+            ScriptHashType::Data => "data",
+            ScriptHashType::Data1 => "data1",
+            ScriptHashType::Data2 => "data2",
+        };
+        v.to_string()
+    },
     |s: String| {
         let v = match s.to_lowercase().as_str() {
             "type" => ScriptHashType::Type,
@@ -121,7 +128,7 @@ serde_with::serde_conv!(
 );
 
 #[serde_as]
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct UdtScript {
     pub code_hash: H256,
     #[serde_as(as = "ScriptHashTypeWrapper")]
@@ -130,34 +137,22 @@ pub struct UdtScript {
     pub args: String,
 }
 
-#[derive(Deserialize, Clone, Debug)]
-struct UdtCellDep {
-    dep_type: String,
-    tx_hash: H256,
-    index: u32,
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct UdtCellDep {
+    pub dep_type: String,
+    pub tx_hash: H256,
+    pub index: u32,
 }
 
-serde_with::serde_conv!(
-    CellDepVecWrapper,
-    CellDepVec,
-    |_: &CellDepVec| { panic!("no support to serialize") },
-    |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
-        let cell_deps: Vec<CellDep> = s.iter().map(CellDep::from).collect();
-        Ok(cell_deps.pack())
-    }
-);
-
-#[serde_as]
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
     pub auto_accept_amount: Option<u128>,
-    #[serde_as(as = "CellDepVecWrapper")]
-    pub cell_deps: CellDepVec,
+    pub cell_deps: Vec<UdtCellDep>,
 }
 
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 
 impl FromStr for UdtCfgInfos {
@@ -184,5 +179,39 @@ impl From<&UdtCellDep> for CellDep {
                     .build(),
             )
             .build()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use ckb_types::packed;
+    use ckb_types::prelude::Unpack;
+
+    #[test]
+    fn test_udt_whitelist() {
+        let udt_whitelist = UdtCfgInfos(vec![UdtArgInfo {
+            name: "SimpleUDT".to_string(),
+            script: UdtScript {
+                code_hash: H256::from([0u8; 32]),
+                hash_type: ScriptHashType::Data,
+                args: "0x00".to_string(),
+            },
+            auto_accept_amount: Some(100),
+            cell_deps: vec![UdtCellDep {
+                dep_type: "code".to_string(),
+                tx_hash: H256::from([0u8; 32]),
+                index: 0,
+            }],
+        }]);
+
+        let serialized = serde_json::to_string(&udt_whitelist).expect("valid json");
+        let deserialized: UdtCfgInfos = serde_json::from_str(&serialized).expect("invalid json");
+
+        assert_eq!(udt_whitelist, deserialized);
+        let bytes: packed::Bytes = serialized.pack();
+        let deserialized: Vec<u8> = bytes.unpack();
+        let deserialized = serde_json::from_slice(&deserialized).expect("invalid json");
+        assert_eq!(udt_whitelist, deserialized);
     }
 }

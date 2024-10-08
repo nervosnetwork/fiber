@@ -4164,6 +4164,175 @@ impl From<Uint64> for Uint64Opt {
     }
 }
 #[derive(Clone)]
+pub struct Uint128Opt(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for Uint128Opt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for Uint128Opt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for Uint128Opt {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl ::core::default::Default for Uint128Opt {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        Uint128Opt::new_unchecked(v)
+    }
+}
+impl Uint128Opt {
+    const DEFAULT_VALUE: [u8; 0] = [];
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Uint128> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Uint128::new_unchecked(self.0.clone()))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> Uint128OptReader<'r> {
+        Uint128OptReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for Uint128Opt {
+    type Builder = Uint128OptBuilder;
+    const NAME: &'static str = "Uint128Opt";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        Uint128Opt(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        Uint128OptReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        Uint128OptReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder().set(self.to_opt())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct Uint128OptReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for Uint128OptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for Uint128OptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for Uint128OptReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        if let Some(v) = self.to_opt() {
+            write!(f, "{}(Some({}))", Self::NAME, v)
+        } else {
+            write!(f, "{}(None)", Self::NAME)
+        }
+    }
+}
+impl<'r> Uint128OptReader<'r> {
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    pub fn to_opt(&self) -> Option<Uint128Reader<'r>> {
+        if self.is_none() {
+            None
+        } else {
+            Some(Uint128Reader::new_unchecked(self.as_slice()))
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for Uint128OptReader<'r> {
+    type Entity = Uint128Opt;
+    const NAME: &'static str = "Uint128OptReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        Uint128OptReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        if !slice.is_empty() {
+            Uint128Reader::verify(&slice[..], compatible)?;
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Uint128OptBuilder(pub(crate) Option<Uint128>);
+impl Uint128OptBuilder {
+    pub fn set(mut self, v: Option<Uint128>) -> Self {
+        self.0 = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for Uint128OptBuilder {
+    type Entity = Uint128Opt;
+    const NAME: &'static str = "Uint128OptBuilder";
+    fn expected_length(&self) -> usize {
+        self.0
+            .as_ref()
+            .map(|ref inner| inner.as_slice().len())
+            .unwrap_or(0)
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        self.0
+            .as_ref()
+            .map(|ref inner| writer.write_all(inner.as_slice()))
+            .unwrap_or(Ok(()))
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        Uint128Opt::new_unchecked(inner.into())
+    }
+}
+impl From<Uint128> for Uint128Opt {
+    fn from(value: Uint128) -> Self {
+        Self::new_builder().set(Some(value)).build()
+    }
+}
+#[derive(Clone)]
 pub struct OpenChannel(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for OpenChannel {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -10729,6 +10898,7 @@ impl ::core::fmt::Display for NodeAnnouncement {
             "auto_accept_min_ckb_funding_amount",
             self.auto_accept_min_ckb_funding_amount()
         )?;
+        write!(f, ", {}: {}", "udt_cfg_infos", self.udt_cfg_infos())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10743,15 +10913,15 @@ impl ::core::default::Default for NodeAnnouncement {
     }
 }
 impl NodeAnnouncement {
-    const DEFAULT_VALUE: [u8; 165] = [
-        165, 0, 0, 0, 36, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 89, 0, 0, 0, 121, 0, 0,
-        0, 125, 0, 0, 0, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 173] = [
+        173, 0, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 52, 0, 0, 0, 60, 0, 0, 0, 93, 0, 0, 0, 125, 0, 0,
+        0, 129, 0, 0, 0, 161, 0, 0, 0, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10813,11 +10983,17 @@ impl NodeAnnouncement {
     pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
+        let end = molecule::unpack_number(&slice[36..]) as usize;
+        Uint64::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn udt_cfg_infos(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[36..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[36..]) as usize;
-            Uint64::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[40..]) as usize;
+            Bytes::new_unchecked(self.0.slice(start..end))
         } else {
-            Uint64::new_unchecked(self.0.slice(start..))
+            Bytes::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> NodeAnnouncementReader<'r> {
@@ -10855,6 +11031,7 @@ impl molecule::prelude::Entity for NodeAnnouncement {
             .address(self.address())
             .chain_hash(self.chain_hash())
             .auto_accept_min_ckb_funding_amount(self.auto_accept_min_ckb_funding_amount())
+            .udt_cfg_infos(self.udt_cfg_infos())
     }
 }
 #[derive(Clone, Copy)]
@@ -10889,6 +11066,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
             "auto_accept_min_ckb_funding_amount",
             self.auto_accept_min_ckb_funding_amount()
         )?;
+        write!(f, ", {}: {}", "udt_cfg_infos", self.udt_cfg_infos())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -10897,7 +11075,7 @@ impl<'r> ::core::fmt::Display for NodeAnnouncementReader<'r> {
     }
 }
 impl<'r> NodeAnnouncementReader<'r> {
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 9;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -10959,11 +11137,17 @@ impl<'r> NodeAnnouncementReader<'r> {
     pub fn auto_accept_min_ckb_funding_amount(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
+        let end = molecule::unpack_number(&slice[36..]) as usize;
+        Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn udt_cfg_infos(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[36..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[36..]) as usize;
-            Uint64Reader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[40..]) as usize;
+            BytesReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            Uint64Reader::new_unchecked(&self.as_slice()[start..])
+            BytesReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -11021,6 +11205,7 @@ impl<'r> molecule::prelude::Reader<'r> for NodeAnnouncementReader<'r> {
         BytesVecReader::verify(&slice[offsets[5]..offsets[6]], compatible)?;
         Byte32Reader::verify(&slice[offsets[6]..offsets[7]], compatible)?;
         Uint64Reader::verify(&slice[offsets[7]..offsets[8]], compatible)?;
+        BytesReader::verify(&slice[offsets[8]..offsets[9]], compatible)?;
         Ok(())
     }
 }
@@ -11034,9 +11219,10 @@ pub struct NodeAnnouncementBuilder {
     pub(crate) address: BytesVec,
     pub(crate) chain_hash: Byte32,
     pub(crate) auto_accept_min_ckb_funding_amount: Uint64,
+    pub(crate) udt_cfg_infos: Bytes,
 }
 impl NodeAnnouncementBuilder {
-    pub const FIELD_COUNT: usize = 8;
+    pub const FIELD_COUNT: usize = 9;
     pub fn signature(mut self, v: EcdsaSignature) -> Self {
         self.signature = v;
         self
@@ -11069,6 +11255,10 @@ impl NodeAnnouncementBuilder {
         self.auto_accept_min_ckb_funding_amount = v;
         self
     }
+    pub fn udt_cfg_infos(mut self, v: Bytes) -> Self {
+        self.udt_cfg_infos = v;
+        self
+    }
 }
 impl molecule::prelude::Builder for NodeAnnouncementBuilder {
     type Entity = NodeAnnouncement;
@@ -11083,6 +11273,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
             + self.address.as_slice().len()
             + self.chain_hash.as_slice().len()
             + self.auto_accept_min_ckb_funding_amount.as_slice().len()
+            + self.udt_cfg_infos.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -11103,6 +11294,8 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         total_size += self.chain_hash.as_slice().len();
         offsets.push(total_size);
         total_size += self.auto_accept_min_ckb_funding_amount.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.udt_cfg_infos.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -11115,6 +11308,7 @@ impl molecule::prelude::Builder for NodeAnnouncementBuilder {
         writer.write_all(self.address.as_slice())?;
         writer.write_all(self.chain_hash.as_slice())?;
         writer.write_all(self.auto_accept_min_ckb_funding_amount.as_slice())?;
+        writer.write_all(self.udt_cfg_infos.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -13665,13 +13859,14 @@ impl ::core::default::Default for BroadcastMessage {
     }
 }
 impl BroadcastMessage {
-    const DEFAULT_VALUE: [u8; 169] = [
-        0, 0, 0, 0, 165, 0, 0, 0, 36, 0, 0, 0, 40, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 89, 0, 0, 0,
-        121, 0, 0, 0, 125, 0, 0, 0, 157, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 177] = [
+        0, 0, 0, 0, 173, 0, 0, 0, 40, 0, 0, 0, 44, 0, 0, 0, 52, 0, 0, 0, 60, 0, 0, 0, 93, 0, 0, 0,
+        125, 0, 0, 0, 129, 0, 0, 0, 161, 0, 0, 0, 169, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
     ];
     pub const ITEMS_COUNT: usize = 3;
     pub fn item_id(&self) -> molecule::Number {

@@ -1,3 +1,6 @@
+use crate::ckb::config::UdtCfgInfos;
+use crate::ckb::contracts::get_udt_whitelist;
+
 use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66};
@@ -1412,7 +1415,7 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
     pub signature: Option<EcdsaSignature>,
@@ -1432,6 +1435,8 @@ pub struct NodeAnnouncement {
     pub chain_hash: Hash256,
     // If the other party funding more than this amount, we will automatically accept the channel.
     pub auto_accept_min_ckb_funding_amount: u64,
+    // UDT config info
+    pub udt_cfg_infos: UdtCfgInfos,
 }
 
 impl NodeAnnouncement {
@@ -1451,6 +1456,7 @@ impl NodeAnnouncement {
             chain_hash: get_chain_hash(),
             addresses,
             auto_accept_min_ckb_funding_amount,
+            udt_cfg_infos: get_udt_whitelist(),
         }
     }
 
@@ -1482,6 +1488,7 @@ impl NodeAnnouncement {
             chain_hash: self.chain_hash,
             addresses: self.addresses.clone(),
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
+            udt_cfg_infos: get_udt_whitelist(),
         };
         deterministically_hash(&unsigned_announcement)
     }
@@ -1503,6 +1510,11 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
             .chain_hash(node_announcement.chain_hash.into())
             .auto_accept_min_ckb_funding_amount(
                 node_announcement.auto_accept_min_ckb_funding_amount.pack(),
+            )
+            .udt_cfg_infos(
+                serde_json::to_string(&node_announcement.udt_cfg_infos)
+                    .expect("serialize error")
+                    .pack(),
             )
             .address(
                 BytesVec::new_builder()
@@ -1534,6 +1546,11 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
                 .unpack(),
             alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
+            udt_cfg_infos: {
+                let data: Vec<u8> = node_announcement.udt_cfg_infos().unpack();
+                serde_json::from_slice(&data)
+                    .map_err(|e| Error::AnyHow(anyhow!("Invalid udt config infos: {}", e)))?
+            },
             addresses: node_announcement
                 .address()
                 .into_iter()

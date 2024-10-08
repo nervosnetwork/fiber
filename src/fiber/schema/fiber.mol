@@ -7,6 +7,7 @@ array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
 option Uint64Opt (Uint64);
+option Uint128Opt (Uint128);
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -173,6 +174,8 @@ table NodeAnnouncement {
     chain_hash: Byte32,
     // Minimal auto accept ckb amount
     auto_accept_min_ckb_funding_amount: Uint64,
+    // UDT configs
+    udt_cfg_infos: Bytes,
 }
 
 table ChannelAnnouncement {

@@ -1,5 +1,4 @@
 mod actor;
-mod config;
 mod error;
 mod funding;
 
@@ -10,4 +9,5 @@ pub use funding::{FundingRequest, FundingTx};
 
 #[cfg(test)]
 pub use actor::{submit_tx, trace_tx, trace_tx_hash, MockChainActor};
+pub mod config;
 pub mod contracts;
