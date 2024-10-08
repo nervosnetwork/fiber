@@ -115,14 +115,6 @@ impl MockContext {
         debug!("Created mock context to test transactions.");
         context
     }
-
-    pub fn write(&self) -> RwLockWriteGuard<Context> {
-        self.context.write().unwrap()
-    }
-
-    pub fn read(&self) -> RwLockReadGuard<Context> {
-        self.context.read().unwrap()
-    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -511,8 +503,7 @@ pub fn init_contracts_context(
             network.unwrap_or(DEFAULT_CONTRACT_NETWORK),
             udt_whitelist.unwrap_or_default(),
         )
-    });
-    INSTANCE.get().unwrap()
+    })
 }
 
 #[cfg(test)]

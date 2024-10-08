@@ -28,7 +28,8 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::{submit_tx, trace_tx, trace_tx_hash, CkbChainMessage, MockChainActor},
+    ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
+    ckb::CkbChainMessage,
     fiber::network::NetworkActorStartArguments,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
