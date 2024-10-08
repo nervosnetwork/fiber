@@ -2449,7 +2449,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                public_channel_info: Some(PublicChannelInfo::new(
+                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
                     self.tlc_locktime_expiry_delta,
                     self.tlc_min_value,
                     self.tlc_max_value,

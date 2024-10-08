@@ -664,6 +664,10 @@ impl OpenChannel {
             self.reserved_ckb_amount
         }
     }
+
+    pub fn is_public(&self) -> bool {
+        self.channel_flags.contains(ChannelFlags::PUBLIC)
+    }
 }
 
 impl From<OpenChannel> for molecule_fiber::OpenChannel {

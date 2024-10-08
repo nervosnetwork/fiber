@@ -1,7 +1,7 @@
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     fiber::{network::get_chain_hash, types::ChannelUpdate},
@@ -449,11 +449,6 @@ where
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                debug!(
-                    "ChannelReady: {:?}, current state: {:?}",
-                    &channel_ready, &state.state
-                );
-
                 state.maybe_channel_is_ready(&self.network).await;
 
                 Ok(())
@@ -1304,9 +1299,9 @@ where
                 );
 
                 let counterpart_pubkeys = (&open_channel).into();
+                let public = open_channel.is_public();
                 let OpenChannel {
                     channel_id,
-                    channel_flags,
                     chain_hash,
                     commitment_fee_rate,
                     funding_fee_rate,
@@ -1333,7 +1328,6 @@ where
 
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
-                let public = channel_flags.contains(ChannelFlags::PUBLIC);
                 if public && channel_announcement_nonce.is_none()
                     || public && public_channel_info.is_none()
                 {
@@ -1603,6 +1597,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        trace!(
+            "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
+            &state.get_id(),
+            &message,
+            &state.state
+        );
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(state, message).await {
