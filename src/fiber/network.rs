@@ -55,12 +55,12 @@ use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    ChannelAnnouncementQuery, ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage,
-    FiberBroadcastMessageQuery, FiberMessage, FiberQueryInformation, GetBroadcastMessages,
-    GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
-    Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
-    QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
-    QueryChannelsWithinBlockRangeResult,
+    ChannelAnnouncement, ChannelAnnouncementQuery, ChannelUpdate, ChannelUpdateQuery,
+    EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery, FiberMessage,
+    FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
+    NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, Privkey, Pubkey,
+    QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult,
 };
 use super::FiberConfig;
 
@@ -419,7 +419,14 @@ pub enum NetworkActorEvent {
         u64,
     ),
     /// A channel is ready to use.
-    ChannelReady(Hash256, PeerId, OutPoint),
+    ChannelReady(
+        Hash256,
+        PeerId,
+        OutPoint,
+        BlockNumber,
+        u32,
+        Option<(ChannelAnnouncement, ChannelUpdate)>,
+    ),
     /// A channel is already closed.
     ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
@@ -1055,12 +1062,39 @@ where
                     }
                 }
             }
-            NetworkActorEvent::ChannelReady(channel_id, peer_id, channel_outpoint) => {
+            NetworkActorEvent::ChannelReady(
+                channel_id,
+                peer_id,
+                channel_outpoint,
+                block_number,
+                tx_index,
+                messages,
+            ) => {
                 info!(
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
                 );
 
+                // Adding this owned channel to the network graph.
+                match messages {
+                    Some((channel_announcement, channel_update)) => {
+                        // Add the channel to the network graph.
+                        let channel_info = ChannelInfo {
+                            funding_tx_block_number: block_number.into(),
+                            funding_tx_index: tx_index,
+                            announcement_msg: channel_announcement.clone(),
+                            node1_to_node2: None, // wait for channel update message
+                            node2_to_node1: None,
+                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                        };
+                        let mut graph = self.network_graph.write().await;
+                        graph.add_channel(channel_info);
+                        graph
+                            .process_channel_update(channel_update)
+                            .expect("process update of our own channel");
+                    }
+                    _ => {}
+                }
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
                     .outpoint_channel_map
