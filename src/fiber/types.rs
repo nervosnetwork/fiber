@@ -1,9 +1,11 @@
-use crate::ckb::config::UdtCfgInfos;
+use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
 use crate::ckb::contracts::get_udt_whitelist;
 
 use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
-use super::gen::fiber::{self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66};
+use super::gen::fiber::{
+    self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66, UdtCellDeps, Uint128Opt,
+};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
@@ -1494,6 +1496,120 @@ impl NodeAnnouncement {
     }
 }
 
+impl From<UdtCellDep> for molecule_fiber::UdtCellDep {
+    fn from(udt_cell_dep: UdtCellDep) -> Self {
+        molecule_fiber::UdtCellDep::new_builder()
+            .dep_type(udt_cell_dep.dep_type.into())
+            .tx_hash(udt_cell_dep.tx_hash.pack())
+            .index(udt_cell_dep.index.pack())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UdtCellDep> for UdtCellDep {
+    fn from(udt_cell_dep: molecule_fiber::UdtCellDep) -> Self {
+        UdtCellDep {
+            dep_type: udt_cell_dep
+                .dep_type()
+                .try_into()
+                .expect("invalid dep type"),
+            tx_hash: udt_cell_dep.tx_hash().unpack(),
+            index: udt_cell_dep.index().unpack(),
+        }
+    }
+}
+
+impl From<UdtScript> for molecule_fiber::UdtScript {
+    fn from(udt_script: UdtScript) -> Self {
+        molecule_fiber::UdtScript::new_builder()
+            .code_hash(udt_script.code_hash.pack())
+            .hash_type(udt_script.hash_type.into())
+            .args(udt_script.args.pack())
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UdtScript> for UdtScript {
+    fn from(udt_script: molecule_fiber::UdtScript) -> Self {
+        UdtScript {
+            code_hash: udt_script.code_hash().unpack(),
+            hash_type: udt_script
+                .hash_type()
+                .try_into()
+                .expect("invalid hash type"),
+            args: String::from_utf8(udt_script.args().unpack()).expect("invalid utf8"),
+        }
+    }
+}
+
+impl From<UdtArgInfo> for molecule_fiber::UdtArgInfo {
+    fn from(udt_arg_info: UdtArgInfo) -> Self {
+        molecule_fiber::UdtArgInfo::new_builder()
+            .name(udt_arg_info.name.pack())
+            .script(udt_arg_info.script.into())
+            .auto_accept_amount(
+                Uint128Opt::new_builder()
+                    .set(udt_arg_info.auto_accept_amount.map(|x| x.pack()))
+                    .build(),
+            )
+            .cell_deps(
+                UdtCellDeps::new_builder()
+                    .set(
+                        udt_arg_info
+                            .cell_deps
+                            .into_iter()
+                            .map(|cell_dep| cell_dep.into())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UdtArgInfo> for UdtArgInfo {
+    fn from(udt_arg_info: molecule_fiber::UdtArgInfo) -> Self {
+        UdtArgInfo {
+            name: String::from_utf8(udt_arg_info.name().unpack()).expect("invalid name"),
+            script: udt_arg_info.script().into(),
+            auto_accept_amount: udt_arg_info
+                .auto_accept_amount()
+                .to_opt()
+                .map(|x| x.unpack()),
+            cell_deps: udt_arg_info
+                .cell_deps()
+                .into_iter()
+                .map(|cell_dep| cell_dep.into())
+                .collect(),
+        }
+    }
+}
+
+impl From<UdtCfgInfos> for molecule_fiber::UdtCfgInfos {
+    fn from(udt_arg_info: UdtCfgInfos) -> Self {
+        molecule_fiber::UdtCfgInfos::new_builder()
+            .set(
+                udt_arg_info
+                    .0
+                    .into_iter()
+                    .map(|udt_arg_info| udt_arg_info.into())
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
+    fn from(udt_arg_infos: molecule_fiber::UdtCfgInfos) -> Self {
+        UdtCfgInfos(
+            udt_arg_infos
+                .into_iter()
+                .map(|udt_arg_info| udt_arg_info.into())
+                .collect(),
+        )
+    }
+}
+
 impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
         molecule_fiber::NodeAnnouncement::new_builder()
@@ -1511,11 +1627,7 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
             .auto_accept_min_ckb_funding_amount(
                 node_announcement.auto_accept_min_ckb_funding_amount.pack(),
             )
-            .udt_cfg_infos(
-                serde_json::to_string(&node_announcement.udt_cfg_infos)
-                    .expect("serialize error")
-                    .pack(),
-            )
+            .udt_cfg_infos(node_announcement.udt_cfg_infos.into())
             .address(
                 BytesVec::new_builder()
                     .set(
@@ -1546,11 +1658,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
                 .unpack(),
             alias: AnnouncedNodeName::from_slice(node_announcement.alias().as_slice())
                 .map_err(|e| Error::AnyHow(anyhow!("Invalid alias: {}", e)))?,
-            udt_cfg_infos: {
-                let data: Vec<u8> = node_announcement.udt_cfg_infos().unpack();
-                serde_json::from_slice(&data)
-                    .map_err(|e| Error::AnyHow(anyhow!("Invalid udt config infos: {}", e)))?
-            },
+            udt_cfg_infos: node_announcement.udt_cfg_infos().into(),
             addresses: node_announcement
                 .address()
                 .into_iter()

@@ -488,7 +488,7 @@ impl ContractsContext {
                 && udt.script.hash_type == _type
             {
                 let args = format!("0x{:x}", udt_script.args().raw_data());
-                let pattern = Regex::new(&udt.script.args).expect("invalid expressio");
+                let pattern = Regex::new(&udt.script.args).expect("invalid expression");
                 if pattern.is_match(&args) {
                     return Some(udt);
                 }

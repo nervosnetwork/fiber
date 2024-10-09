@@ -127,6 +127,26 @@ serde_with::serde_conv!(
     }
 );
 
+serde_with::serde_conv!(
+    DepTypeWrapper,
+    DepType,
+    |s: &DepType| -> String {
+        let v = match s {
+            DepType::Code => "code",
+            DepType::DepGroup => "dep_group",
+        };
+        v.to_string()
+    },
+    |s: String| {
+        let v = match s.to_lowercase().as_str() {
+            "code" => DepType::Code,
+            "dep_group" => DepType::DepGroup,
+            _ => return Err("invalid hash type"),
+        };
+        Ok(v)
+    }
+);
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct UdtScript {
@@ -137,9 +157,11 @@ pub struct UdtScript {
     pub args: String,
 }
 
+#[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct UdtCellDep {
-    pub dep_type: String,
+    #[serde_as(as = "DepTypeWrapper")]
+    pub dep_type: DepType,
     pub tx_hash: H256,
     pub index: u32,
 }
@@ -165,13 +187,8 @@ impl FromStr for UdtCfgInfos {
 
 impl From<&UdtCellDep> for CellDep {
     fn from(cell_dep: &UdtCellDep) -> Self {
-        let dep_type = match cell_dep.dep_type.as_str() {
-            "code" => DepType::Code,
-            "dep_group" => DepType::DepGroup,
-            _ => panic!("invalid dep type"),
-        };
         CellDep::new_builder()
-            .dep_type(dep_type.into())
+            .dep_type(cell_dep.dep_type.into())
             .out_point(
                 OutPoint::new_builder()
                     .tx_hash(cell_dep.tx_hash.pack())
@@ -185,9 +202,7 @@ impl From<&UdtCellDep> for CellDep {
 #[cfg(test)]
 mod test {
     use super::*;
-    use ckb_types::packed;
-    use ckb_types::prelude::Unpack;
-
+    use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
     #[test]
     fn test_udt_whitelist() {
         let udt_whitelist = UdtCfgInfos(vec![UdtArgInfo {
@@ -199,19 +214,15 @@ mod test {
             },
             auto_accept_amount: Some(100),
             cell_deps: vec![UdtCellDep {
-                dep_type: "code".to_string(),
+                dep_type: DepType::Code,
                 tx_hash: H256::from([0u8; 32]),
                 index: 0,
             }],
         }]);
 
-        let serialized = serde_json::to_string(&udt_whitelist).expect("valid json");
-        let deserialized: UdtCfgInfos = serde_json::from_str(&serialized).expect("invalid json");
-
-        assert_eq!(udt_whitelist, deserialized);
-        let bytes: packed::Bytes = serialized.pack();
-        let deserialized: Vec<u8> = bytes.unpack();
-        let deserialized = serde_json::from_slice(&deserialized).expect("invalid json");
+        let serialized = MoleculeUdtCfgInfos::from(udt_whitelist.clone()).as_bytes();
+        let deserialized =
+            UdtCfgInfos::from(MoleculeUdtCfgInfos::from_slice(&serialized).expect("invalid mol"));
         assert_eq!(udt_whitelist, deserialized);
     }
 }
