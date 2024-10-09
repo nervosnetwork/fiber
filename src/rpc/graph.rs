@@ -1,10 +1,11 @@
-use crate::ckb::config::UdtCfgInfos;
+use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
 use crate::fiber::types::{Hash256, Pubkey};
-use ckb_jsonrpc_types::{JsonBytes, Script};
+use ckb_jsonrpc_types::{DepType, JsonBytes, Script, ScriptHashType};
 use ckb_types::packed::OutPoint;
+use ckb_types::H256;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -16,6 +17,63 @@ use tokio::sync::RwLock;
 pub struct GraphNodesParams {
     limit: Option<usize>,
     after: Option<JsonBytes>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtScript {
+    pub code_hash: H256,
+    pub hash_type: ScriptHashType,
+    pub args: String,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtCellDep {
+    pub dep_type: DepType,
+    pub tx_hash: H256,
+    #[serde_as(as = "U32Hex")]
+    pub index: u32,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtArgInfo {
+    pub name: String,
+    pub script: UdtScript,
+    #[serde_as(as = "Option<U128Hex>")]
+    pub auto_accept_amount: Option<u128>,
+    pub cell_deps: Vec<UdtCellDep>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+
+impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
+    fn from(cfg: ConfigUdtCfgInfos) -> Self {
+        UdtCfgInfos(
+            cfg.0
+                .into_iter()
+                .map(|info| UdtArgInfo {
+                    name: info.name,
+                    script: UdtScript {
+                        code_hash: info.script.code_hash,
+                        hash_type: info.script.hash_type.into(),
+                        args: info.script.args,
+                    },
+                    cell_deps: info
+                        .cell_deps
+                        .into_iter()
+                        .map(|cell_dep| UdtCellDep {
+                            dep_type: cell_dep.dep_type.into(),
+                            tx_hash: cell_dep.tx_hash,
+                            index: cell_dep.index,
+                        })
+                        .collect(),
+                    auto_accept_amount: info.auto_accept_amount,
+                })
+                .collect::<Vec<UdtArgInfo>>(),
+        )
+    }
 }
 
 #[serde_as]
@@ -131,7 +189,7 @@ where
                 node_id: node_info.node_id,
                 timestamp: node_info.timestamp,
                 chain_hash: node_info.anouncement_msg.chain_hash,
-                udt_cfg_infos: node_info.anouncement_msg.udt_cfg_infos.clone(),
+                udt_cfg_infos: node_info.anouncement_msg.udt_cfg_infos.clone().into(),
                 auto_accept_min_ckb_funding_amount: node_info
                     .anouncement_msg
                     .auto_accept_min_ckb_funding_amount,
