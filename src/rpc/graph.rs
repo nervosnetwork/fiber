@@ -14,39 +14,39 @@ use tentacle::multiaddr::MultiAddr;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GraphNodesParams {
+pub(crate) struct GraphNodesParams {
     limit: Option<usize>,
     after: Option<JsonBytes>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UdtScript {
-    pub code_hash: H256,
-    pub hash_type: ScriptHashType,
-    pub args: String,
+struct UdtScript {
+    code_hash: H256,
+    hash_type: ScriptHashType,
+    args: String,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UdtCellDep {
-    pub dep_type: DepType,
-    pub tx_hash: H256,
+struct UdtCellDep {
+    dep_type: DepType,
+    tx_hash: H256,
     #[serde_as(as = "U32Hex")]
-    pub index: u32,
+    index: u32,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UdtArgInfo {
-    pub name: String,
-    pub script: UdtScript,
+struct UdtArgInfo {
+    name: String,
+    script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
-    pub auto_accept_amount: Option<u128>,
-    pub cell_deps: Vec<UdtCellDep>,
+    auto_accept_amount: Option<u128>,
+    cell_deps: Vec<UdtCellDep>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
+struct UdtCfgInfos(Vec<UdtArgInfo>);
 
 impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
     fn from(cfg: ConfigUdtCfgInfos) -> Self {
@@ -78,62 +78,62 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
-pub struct NodeInfo {
-    pub alias: String,
-    pub addresses: Vec<MultiAddr>,
-    pub node_id: Pubkey,
+struct NodeInfo {
+    alias: String,
+    addresses: Vec<MultiAddr>,
+    node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
-    pub chain_hash: Hash256,
+    timestamp: u64,
+    chain_hash: Hash256,
     #[serde_as(as = "U64Hex")]
-    pub auto_accept_min_ckb_funding_amount: u64,
-    pub udt_cfg_infos: UdtCfgInfos,
+    auto_accept_min_ckb_funding_amount: u64,
+    udt_cfg_infos: UdtCfgInfos,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct GraphNodesResult {
-    pub nodes: Vec<NodeInfo>,
-    pub last_cursor: JsonBytes,
+pub(crate) struct GraphNodesResult {
+    nodes: Vec<NodeInfo>,
+    last_cursor: JsonBytes,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct GraphChannelsParams {
+pub(crate) struct GraphChannelsParams {
     limit: Option<usize>,
     after: Option<JsonBytes>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
-pub struct ChannelInfo {
+struct ChannelInfo {
     #[serde_as(as = "EntityHex")]
-    pub channel_outpoint: OutPoint,
+    channel_outpoint: OutPoint,
     #[serde_as(as = "U64Hex")]
-    pub funding_tx_block_number: u64,
+    funding_tx_block_number: u64,
     #[serde_as(as = "U32Hex")]
-    pub funding_tx_index: u32,
-    pub node1: Pubkey,
-    pub node2: Pubkey,
+    funding_tx_index: u32,
+    node1: Pubkey,
+    node2: Pubkey,
     #[serde_as(as = "Option<U64Hex>")]
-    pub last_updated_timestamp: Option<u64>,
-    pub created_timestamp: u64,
+    last_updated_timestamp: Option<u64>,
+    created_timestamp: u64,
     #[serde_as(as = "Option<U64Hex>")]
-    pub node1_to_node2_fee_rate: Option<u64>,
+    node1_to_node2_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub node2_to_node1_fee_rate: Option<u64>,
+    node2_to_node1_fee_rate: Option<u64>,
     #[serde_as(as = "U128Hex")]
-    pub capacity: u128,
-    pub chain_hash: Hash256,
-    pub udt_type_script: Option<Script>,
+    capacity: u128,
+    chain_hash: Hash256,
+    udt_type_script: Option<Script>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct GraphChannelsResult {
-    pub channels: Vec<ChannelInfo>,
-    pub last_cursor: JsonBytes,
+pub(crate) struct GraphChannelsResult {
+    channels: Vec<ChannelInfo>,
+    last_cursor: JsonBytes,
 }
 
 #[rpc(server)]
-pub trait GraphRpc {
+trait GraphRpc {
     #[method(name = "graph_nodes")]
     async fn graph_nodes(
         &self,
@@ -147,7 +147,7 @@ pub trait GraphRpc {
     ) -> Result<GraphChannelsResult, ErrorObjectOwned>;
 }
 
-pub struct GraphRpcServerImpl<S>
+pub(crate) struct GraphRpcServerImpl<S>
 where
     S: NetworkGraphStateStore,
 {
@@ -159,7 +159,7 @@ impl<S> GraphRpcServerImpl<S>
 where
     S: NetworkGraphStateStore,
 {
-    pub fn new(network_graph: Arc<RwLock<NetworkGraph<S>>>, store: S) -> Self {
+    pub(crate) fn new(network_graph: Arc<RwLock<NetworkGraph<S>>>, store: S) -> Self {
         GraphRpcServerImpl {
             _store: store,
             network_graph,

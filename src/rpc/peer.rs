@@ -10,19 +10,19 @@ use serde_with::{serde_as, DisplayFromStr};
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ConnectPeerParams {
-    pub address: MultiAddr,
+pub(crate) struct ConnectPeerParams {
+    address: MultiAddr,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct DisconnectPeerParams {
+pub(crate) struct DisconnectPeerParams {
     #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    peer_id: PeerId,
 }
 
 #[rpc(server)]
-pub trait PeerRpc {
+trait PeerRpc {
     #[method(name = "connect_peer")]
     async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned>;
 
@@ -30,12 +30,12 @@ pub trait PeerRpc {
     async fn disconnect_peer(&self, params: DisconnectPeerParams) -> Result<(), ErrorObjectOwned>;
 }
 
-pub struct PeerRpcServerImpl {
+pub(crate) struct PeerRpcServerImpl {
     actor: ActorRef<NetworkActorMessage>,
 }
 
 impl PeerRpcServerImpl {
-    pub fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
+    pub(crate) fn new(actor: ActorRef<NetworkActorMessage>) -> Self {
         PeerRpcServerImpl { actor }
     }
 }
