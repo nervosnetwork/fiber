@@ -158,12 +158,18 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Broadcast node/channel information.
-    // The vector of PeerId is the list of peers that should receive the message.
-    // This is useful when some peers are preferred to receive the message.
-    // e.g. the ChannelUpdate message should be received by the counterparty of the channel.
-    // This message may be broadcasted to other peers if necessary.
-    BroadcastMessage(Vec<PeerId>, FiberBroadcastMessage),
+    // A ChannelAnnouncement is ready to broadcast, we need to
+    // update our network graph and broadcast it to the network.
+    // The channel counterparty should definitely be part of the
+    // nodes that are going to receive this message.
+    ProcessChannelAnnouncement(PeerId, BlockNumber, u32, ChannelAnnouncement),
+    // A ChannelUpdate is ready to broadcast, we need to update
+    // our network graph and broadcast it to the network.
+    // The channel counterparty should definitely be part of the
+    // nodes that are going to receive this message.
+    ProccessChannelUpdate(PeerId, ChannelUpdate),
+    // Broadcast node/channel information to the network.
+    BroadcastMessage(FiberBroadcastMessage),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
@@ -419,14 +425,7 @@ pub enum NetworkActorEvent {
         u64,
     ),
     /// A channel is ready to use.
-    ChannelReady(
-        Hash256,
-        PeerId,
-        OutPoint,
-        BlockNumber,
-        u32,
-        Option<(ChannelAnnouncement, ChannelUpdate)>,
-    ),
+    ChannelReady(Hash256, PeerId, OutPoint),
     /// A channel is already closed.
     ClosingTransactionPending(Hash256, PeerId, TransactionView),
 
@@ -1062,39 +1061,12 @@ where
                     }
                 }
             }
-            NetworkActorEvent::ChannelReady(
-                channel_id,
-                peer_id,
-                channel_outpoint,
-                block_number,
-                tx_index,
-                messages,
-            ) => {
+            NetworkActorEvent::ChannelReady(channel_id, peer_id, channel_outpoint) => {
                 info!(
                     "Channel ({:?}) to peer {:?} is now ready",
                     channel_id, peer_id
                 );
 
-                // Adding this owned channel to the network graph.
-                match messages {
-                    Some((channel_announcement, channel_update)) => {
-                        // Add the channel to the network graph.
-                        let channel_info = ChannelInfo {
-                            funding_tx_block_number: block_number.into(),
-                            funding_tx_index: tx_index,
-                            announcement_msg: channel_announcement.clone(),
-                            node1_to_node2: None, // wait for channel update message
-                            node2_to_node1: None,
-                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-                        };
-                        let mut graph = self.network_graph.write().await;
-                        graph.add_channel(channel_info);
-                        graph
-                            .process_channel_update(channel_update)
-                            .expect("process update of our own channel");
-                    }
-                    _ => {}
-                }
                 // FIXME(yukang): need to make sure ChannelReady is sent after the channel is reestablished
                 state
                     .outpoint_channel_map
@@ -1454,27 +1426,11 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::BroadcastMessage(peers, message) => {
-                // Send message to peers in the list anyway.
-                debug!("Broadcasting message {:?} to peers {:?}", &message, &peers);
-                for peer_id in &peers {
-                    if let Err(e) = state
-                        .send_message_to_peer(
-                            peer_id,
-                            FiberMessage::BroadcastMessage(message.clone()),
-                        )
-                        .await
-                    {
-                        error!(
-                            "Failed to broadcast message {:?} to peer {:?}: {:?}",
-                            &message, peer_id, e
-                        );
-                    }
-                }
-
+            NetworkActorCommand::BroadcastMessage(message) => {
                 const MAX_BROADCAST_SESSIONS: usize = 5;
-                let peer_ids =
-                    state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, peers.into_iter().collect());
+                // TODO: It is possible that the remote peer of the channel may repeatedly
+                // receive the same message.
+                let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
                 debug!("Broadcasting message random selected peers {:?}", &peer_ids);
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
@@ -1521,7 +1477,6 @@ where
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessage(
-                                vec![],
                                 FiberBroadcastMessage::NodeAnnouncement(message),
                             ),
                         ))
@@ -1635,6 +1590,73 @@ where
                     );
                 }
             },
+            NetworkActorCommand::ProcessChannelAnnouncement(
+                peer_id,
+                block_number,
+                tx_index,
+                channel_announcement,
+            ) => {
+                // Adding this owned channel to the network graph.
+                let channel_info = ChannelInfo {
+                    funding_tx_block_number: block_number.into(),
+                    funding_tx_index: tx_index,
+                    announcement_msg: channel_announcement.clone(),
+                    node1_to_node2: None, // wait for channel update message
+                    node2_to_node1: None,
+                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                };
+                let mut graph = self.network_graph.write().await;
+                graph.add_channel(channel_info);
+
+                // Send the channel announcement to other peer first.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                            peer_id,
+                            message: FiberMessage::BroadcastMessage(
+                                FiberBroadcastMessage::ChannelAnnouncement(
+                                    channel_announcement.clone(),
+                                ),
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                // Also broadcast channel announcement to the network.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(
+                            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+
+            NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                let mut graph = self.network_graph.write().await;
+                graph
+                    .process_channel_update(channel_update.clone())
+                    .expect("Valid channel update");
+
+                // Send the channel update to other peer first.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                            peer_id,
+                            message: FiberMessage::BroadcastMessage(
+                                FiberBroadcastMessage::ChannelUpdate(channel_update.clone()),
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                // Also broadcast channel update to the network.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(
+                            FiberBroadcastMessage::ChannelUpdate(channel_update),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
         };
         Ok(())
     }
@@ -1657,7 +1679,7 @@ where
         state
             .network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessage(vec![], message.clone()),
+                NetworkActorCommand::BroadcastMessage(message.clone()),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         self.process_broadcasted_message(&state.network, message)

@@ -51,7 +51,7 @@ use crate::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::{emit_service_event, sign_network_message},
-        types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
+        types::{AnnouncementSignatures, Shutdown},
     },
     NetworkServiceEvent,
 };
@@ -1253,9 +1253,9 @@ where
 
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::BroadcastMessage(
-                            vec![state.get_remote_peer_id()],
-                            FiberBroadcastMessage::ChannelUpdate(update),
+                        NetworkActorCommand::ProccessChannelUpdate(
+                            self.get_remote_peer_id(),
+                            update,
                         ),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -1600,9 +1600,6 @@ where
                                 channel.get_id(),
                                 channel.get_remote_peer_id(),
                                 channel.get_funding_transaction_outpoint(),
-                                channel.get_funding_transaction_block_number(),
-                                channel.get_funding_transaction_index(),
-                                channel.get_latest_channel_messages(),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -2227,15 +2224,6 @@ impl ChannelActorState {
         self.public_channel_info.is_some()
     }
 
-    fn get_latest_channel_messages(&self) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
-        self.public_channel_info.as_ref().and_then(|info| {
-            Some((
-                info.channel_announcement.as_ref()?.clone(),
-                info.channel_update.as_ref()?.clone(),
-            ))
-        })
-    }
-
     pub async fn try_create_channel_messages(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
@@ -2409,9 +2397,9 @@ impl ChannelActorState {
 
         network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessage(
-                    vec![self.get_remote_peer_id()],
-                    FiberBroadcastMessage::ChannelUpdate(channel_update),
+                NetworkActorCommand::ProccessChannelUpdate(
+                    self.get_remote_peer_id(),
+                    channel_update,
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4337,7 +4325,7 @@ impl ChannelActorState {
             self.try_create_channel_messages(network).await
         {
             debug!(
-                "Channel announcement message for {:?} created",
+                "Channel announcement/update message for {:?} created, public channel is ready",
                 self.get_id(),
             );
             self.on_channel_ready(network).await;
@@ -4348,9 +4336,11 @@ impl ChannelActorState {
             );
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![self.get_remote_peer_id()],
-                        FiberBroadcastMessage::ChannelAnnouncement(channel_announcement),
+                    NetworkActorCommand::ProcessChannelAnnouncement(
+                        self.get_remote_peer_id(),
+                        self.get_funding_transaction_block_number(),
+                        self.get_funding_transaction_index(),
+                        channel_announcement,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4361,9 +4351,9 @@ impl ChannelActorState {
 
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![self.get_remote_peer_id()],
-                        FiberBroadcastMessage::ChannelUpdate(channel_update),
+                    NetworkActorCommand::ProccessChannelUpdate(
+                        self.get_remote_peer_id(),
+                        channel_update,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4401,9 +4391,6 @@ impl ChannelActorState {
                     self.get_id(),
                     peer_id.clone(),
                     self.get_funding_transaction_outpoint(),
-                    self.get_funding_transaction_block_number(),
-                    self.get_funding_transaction_index(),
-                    self.get_latest_channel_messages(),
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
