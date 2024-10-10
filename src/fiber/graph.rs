@@ -326,6 +326,15 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
+    pub fn get_mut_channels_by_peer(
+        &mut self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = &mut ChannelInfo> {
+        self.channels
+            .values_mut()
+            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+    }
+
     pub fn get_channels_within_block_range(
         &self,
         start_block: u64,
@@ -448,6 +457,31 @@ where
             base_fee + 1
         } else {
             base_fee
+        }
+    }
+
+    pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
+        if let Some(channel) = self.channels.get_mut(channel_outpoint) {
+            if let Some(info) = channel.node1_to_node2.as_mut() {
+                info.enabled = false;
+            }
+            if let Some(info) = channel.node2_to_node1.as_mut() {
+                info.enabled = false;
+            }
+        }
+    }
+
+    pub(crate) fn mark_node_failed(&mut self, node_id: Pubkey) {
+        for channel in self.get_mut_channels_by_peer(node_id) {
+            if channel.node1() == node_id {
+                if let Some(info) = channel.node1_to_node2.as_mut() {
+                    info.enabled = false;
+                }
+            } else {
+                if let Some(info) = channel.node2_to_node1.as_mut() {
+                    info.enabled = false;
+                }
+            }
         }
     }
 

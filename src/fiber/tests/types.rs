@@ -1,8 +1,9 @@
 use crate::fiber::{
     gen::fiber as molecule_fiber,
     hash_algorithm::HashAlgorithm,
+    tests::test_utils::generate_pubkey,
     types::{
-        secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+        secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
         RemoveTlcFail, TlcFailDetail, TlcFailErrorCode,
     },
 };
@@ -99,8 +100,7 @@ fn test_peeled_onion_packet() {
 
 #[test]
 fn test_tlc_fail_error() {
-    let tlc_fail_detail =
-        TlcFailDetail::new(Hash256::default(), 0, TlcFailErrorCode::InvalidOnionVersion);
+    let tlc_fail_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.is_node());
     assert!(tlc_fail_detail.is_bad_onion());
     assert!(tlc_fail_detail.is_perm());
@@ -108,4 +108,13 @@ fn test_tlc_fail_error() {
 
     let convert_back: TlcFailDetail = tlc_fail.into();
     assert_eq!(tlc_fail_detail, convert_back);
+
+    let node_fail = TlcFailDetail::new_node_fail(
+        TlcFailErrorCode::PermanentNodeFailure,
+        generate_pubkey().into(),
+    );
+    assert!(node_fail.is_node());
+    let tlc_fail = RemoveTlcFail::from(node_fail.clone());
+    let convert_back: TlcFailDetail = tlc_fail.into();
+    assert_eq!(node_fail, convert_back);
 }

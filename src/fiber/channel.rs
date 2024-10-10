@@ -497,8 +497,7 @@ where
                             // TODO: there maybe more error types here
                             _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
                         };
-                        let error_detail =
-                            TlcFailDetail::new(state.get_id(), add_tlc.tlc_id, error_code);
+                        let error_detail = TlcFailDetail::new(error_code);
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
@@ -799,7 +798,7 @@ where
         onion_packet: Vec<u8>,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, String>>();
+        let (send, recv) = oneshot::channel::<Result<u64, RemoveTlcFail>>();
         let rpc_reply = RpcReplyPort::from(send);
         self.network
             .send_message(NetworkActorMessage::Command(
@@ -814,7 +813,7 @@ where
             .expect("network actor is alive");
         let res = match recv.await.expect("expect command replied") {
             Ok(tlc_id) => Ok(tlc_id),
-            Err(e) => Err(e.to_string()),
+            Err(e) => Err(e),
         };
         // If we failed to forward the onion packet, we should remove the tlc.
         if let Err(res) = res {

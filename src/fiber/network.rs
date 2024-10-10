@@ -60,7 +60,7 @@ use super::types::{
     GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
     Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
     QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
-    QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason, TlcFailDetail,
+    QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcFail, RemoveTlcReason, TlcFailDetail,
     TlcFailErrorCode,
 };
 use super::FiberConfig;
@@ -147,7 +147,10 @@ pub enum NetworkActorCommand {
     ControlFiberChannel(ChannelCommandWithId),
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
-    SendPaymentOnionPacket(SendOnionPacketCommand, RpcReplyPort<Result<u64, String>>),
+    SendPaymentOnionPacket(
+        SendOnionPacketCommand,
+        RpcReplyPort<Result<u64, RemoveTlcFail>>,
+    ),
     PeelPaymentOnionPacket(
         Vec<u8>, // onion_packet
         Hash256, // payment_hash
@@ -1898,7 +1901,7 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
-        reply: RpcReplyPort<Result<u64, String>>,
+        reply: RpcReplyPort<Result<u64, RemoveTlcFail>>,
     ) {
         let SendOnionPacketCommand {
             packet,
@@ -1919,8 +1922,12 @@ where
                             Are we connected to the peer?",
                             channel_outpoint
                         );
+                    let error_detail = TlcFailDetail::new_channel_fail(
+                        TlcFailErrorCode::PermanentChannelFailure,
+                        channel_outpoint.clone(),
+                    );
                     reply
-                        .send(Err("channel id not found".to_string()))
+                        .send(Err(error_detail.into()))
                         .expect("send add tlc response");
                     return;
                 }
@@ -1948,11 +1955,16 @@ where
 
             match recv.await.expect("recv error") {
                 Ok(res) => Ok(res.tlc_id),
-                Err(e) => Err(e.to_string()),
+                Err(_err) => {
+                    // FIXME: rework the error handling
+                    let error_detail = TlcFailDetail::new(TlcFailErrorCode::TemporaryNodeFailure);
+                    Err(error_detail.into())
+                }
             }
         } else {
             info!("onion packet is empty, ignore it");
-            Err("onion packet is empty".to_string())
+            let error_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionPayload);
+            Err(error_detail.into())
         };
         reply.send(res).expect("send error");
     }
@@ -1970,6 +1982,25 @@ where
                 }
             }
             self.store.insert_payment_session(payment_session);
+        }
+    }
+
+    async fn update_with_tcl_fail_detail(&self, tcl_error_detail: TlcFailDetail) {
+        let error_code = tcl_error_detail.error_code();
+        match error_code {
+            TlcFailErrorCode::PermanentChannelFailure => {
+                let channel_outpoint = tcl_error_detail
+                    .error_channel_outpoint()
+                    .expect("expect channel outpoint");
+                let mut graph = self.network_graph.write().await;
+                graph.mark_channel_failed(&channel_outpoint);
+            }
+            TlcFailErrorCode::PermanentNodeFailure => {
+                let node_id = tcl_error_detail.error_node_id().expect("expect node id");
+                let mut graph = self.network_graph.write().await;
+                graph.mark_node_failed(node_id);
+            }
+            _ => {}
         }
     }
 
@@ -2047,7 +2078,7 @@ where
             )
             .map_err(|err| Error::InvalidOnionPacket(err))?;
 
-            let (send, recv) = oneshot::channel::<Result<u64, String>>();
+            let (send, recv) = oneshot::channel::<Result<u64, RemoveTlcFail>>();
             let rpc_reply = RpcReplyPort::from(send);
             let command = SendOnionPacketCommand {
                 packet: peeled_packet.serialize(),
@@ -2055,31 +2086,28 @@ where
             };
             self.handle_onion_packet_send_command(state, command, rpc_reply)
                 .await;
-            let res = recv.await;
+            let res = recv.await.expect("msg recv error");
             info!(
                 "send_payment: {:?} => onion packet sent: {:?}",
                 payment_data.payment_hash, res,
             );
-            let res = match res {
-                Ok(Ok(tlc_id)) => Ok(tlc_id),
-                Ok(Err(err)) => Err(err),
-                Err(e) => Err(e.to_string()),
-            }
-            .map_err(|err| Error::SendPaymentError(err.to_string()));
             info!(
                 "send_payment: {:?} => result: {:?}",
                 payment_data.payment_hash, res
             );
             match res {
                 Err(e) => {
-                    error!("Failed to send onion packet: {:?}", e);
+                    let error_detail: TlcFailDetail = e.clone().into();
+                    error!("Failed to send onion packet with error: {:?}", e);
                     // This is the error implies we send payment request to the first hop failed
                     let err = format!(
                         "Failed to send onion packet: {:?} with error: {:?}",
-                        payment_data.payment_hash, e
+                        payment_data.payment_hash,
+                        error_detail.error_code_as_str()
                     );
                     payment_session.last_error = Some(err.clone());
                     error = Some(Err(Error::SendPaymentError(err)));
+                    self.update_with_tcl_fail_detail(error_detail).await;
                     continue;
                 }
                 Ok(_) => {

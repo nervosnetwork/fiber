@@ -1250,25 +1250,70 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TlcFailDetailData {}
+pub enum TlcFailDetailData {
+    ChannelFailed {
+        #[serde_as(as = "EntityHex")]
+        channel_outpoint: OutPoint,
+    },
+    NodeFailed {
+        node_id: Pubkey,
+    },
+}
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TlcFailDetail {
-    pub channel_id: Hash256,
-    pub tlc_id: u64,
     pub error_code: u16,
     pub extra_data: Option<TlcFailDetailData>,
 }
 
 impl TlcFailDetail {
-    pub fn new(channel_id: Hash256, tlc_id: u64, error_code: TlcFailErrorCode) -> Self {
+    pub fn new(error_code: TlcFailErrorCode) -> Self {
         TlcFailDetail {
-            channel_id,
-            tlc_id,
             error_code: error_code.into(),
             extra_data: None,
         }
+    }
+
+    pub fn new_node_fail(error_code: TlcFailErrorCode, node_id: Pubkey) -> Self {
+        TlcFailDetail {
+            error_code: error_code.into(),
+            extra_data: Some(TlcFailDetailData::NodeFailed { node_id }),
+        }
+    }
+
+    pub fn new_channel_fail(error_code: TlcFailErrorCode, channel_outpoint: OutPoint) -> Self {
+        TlcFailDetail {
+            error_code: error_code.into(),
+            extra_data: Some(TlcFailDetailData::ChannelFailed { channel_outpoint }),
+        }
+    }
+
+    pub fn error_node_id(&self) -> Option<Pubkey> {
+        match &self.extra_data {
+            Some(TlcFailDetailData::NodeFailed { node_id }) => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
+        match &self.extra_data {
+            Some(TlcFailDetailData::ChannelFailed { channel_outpoint }) => {
+                Some(channel_outpoint.clone())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn error_code(&self) -> TlcFailErrorCode {
+        self.error_code.into()
+    }
+
+    pub fn error_code_as_str(&self) -> String {
+        let error_code: TlcFailErrorCode = self.error_code.into();
+        error_code.as_ref().to_string()
     }
 
     pub fn set_extra_data(&mut self, extra_data: TlcFailDetailData) {
