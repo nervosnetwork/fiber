@@ -60,7 +60,8 @@ use super::types::{
     GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
     Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
     QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
-    QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
+    QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason, TlcFailDetail,
+    TlcFailErrorCode,
 };
 use super::FiberConfig;
 
@@ -1959,11 +1960,15 @@ where
     fn on_tlc_remove_received(&self, payment_hash: Hash256, remove_tlc: RemoveTlc) {
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
-                if matches!(remove_tlc.reason, RemoveTlcReason::RemoveTlcFulfill(_)) {
-                    payment_session.set_status(PaymentSessionStatus::Success);
-                } else {
-                    // FIXME(yukang): we should handle tlc fail reason here
-                    payment_session.set_failed_status(format!("{:?}", remove_tlc.reason));
+                match remove_tlc.reason {
+                    RemoveTlcReason::RemoveTlcFulfill(_) => {
+                        payment_session.set_status(PaymentSessionStatus::Success);
+                    }
+                    RemoveTlcReason::RemoveTlcFail(reason) => {
+                        let detail_error: TlcFailDetail = reason.into();
+                        let error_code: TlcFailErrorCode = detail_error.error_code.into();
+                        payment_session.set_failed_status(error_code.as_ref());
+                    }
                 }
                 payment_session.last_updated_time =
                     std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
@@ -2072,8 +2077,7 @@ where
             match res {
                 Err(e) => {
                     error!("Failed to send onion packet: {:?}", e);
-                    // for some error we may need to update the graph and then retry
-                    // TODO: update the graph here according to the error
+                    // This is the error implies we send payment request to the first hop failed
                     let err = format!(
                         "Failed to send onion packet: {:?} with error: {:?}",
                         payment_data.payment_hash, e

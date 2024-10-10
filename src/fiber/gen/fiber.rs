@@ -9345,8 +9345,7 @@ impl ::core::fmt::Debug for RemoveTlcFail {
 impl ::core::fmt::Display for RemoveTlcFail {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "error_code", self.error_code())?;
-        write!(f, ", {}: {}", "packet_data", self.packet_data())?;
+        write!(f, "{}: {}", "onion_packet", self.onion_packet())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -9361,10 +9360,8 @@ impl ::core::default::Default for RemoveTlcFail {
     }
 }
 impl RemoveTlcFail {
-    const DEFAULT_VALUE: [u8; 20] = [
-        20, 0, 0, 0, 12, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    ];
-    pub const FIELD_COUNT: usize = 2;
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -9381,17 +9378,11 @@ impl RemoveTlcFail {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn error_code(&self) -> Uint32 {
+    pub fn onion_packet(&self) -> Bytes {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Uint32::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn packet_data(&self) -> Bytes {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             Bytes::new_unchecked(self.0.slice(start..end))
         } else {
             Bytes::new_unchecked(self.0.slice(start..))
@@ -9423,9 +9414,7 @@ impl molecule::prelude::Entity for RemoveTlcFail {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder()
-            .error_code(self.error_code())
-            .packet_data(self.packet_data())
+        Self::new_builder().onion_packet(self.onion_packet())
     }
 }
 #[derive(Clone, Copy)]
@@ -9447,8 +9436,7 @@ impl<'r> ::core::fmt::Debug for RemoveTlcFailReader<'r> {
 impl<'r> ::core::fmt::Display for RemoveTlcFailReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "error_code", self.error_code())?;
-        write!(f, ", {}: {}", "packet_data", self.packet_data())?;
+        write!(f, "{}: {}", "onion_packet", self.onion_packet())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -9457,7 +9445,7 @@ impl<'r> ::core::fmt::Display for RemoveTlcFailReader<'r> {
     }
 }
 impl<'r> RemoveTlcFailReader<'r> {
-    pub const FIELD_COUNT: usize = 2;
+    pub const FIELD_COUNT: usize = 1;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -9474,17 +9462,11 @@ impl<'r> RemoveTlcFailReader<'r> {
     pub fn has_extra_fields(&self) -> bool {
         Self::FIELD_COUNT != self.field_count()
     }
-    pub fn error_code(&self) -> Uint32Reader<'r> {
+    pub fn onion_packet(&self) -> BytesReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[4..]) as usize;
-        let end = molecule::unpack_number(&slice[8..]) as usize;
-        Uint32Reader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn packet_data(&self) -> BytesReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[12..]) as usize;
+            let end = molecule::unpack_number(&slice[8..]) as usize;
             BytesReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             BytesReader::new_unchecked(&self.as_slice()[start..])
@@ -9537,24 +9519,18 @@ impl<'r> molecule::prelude::Reader<'r> for RemoveTlcFailReader<'r> {
         if offsets.windows(2).any(|i| i[0] > i[1]) {
             return ve!(Self, OffsetsNotMatch);
         }
-        Uint32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        BytesReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct RemoveTlcFailBuilder {
-    pub(crate) error_code: Uint32,
-    pub(crate) packet_data: Bytes,
+    pub(crate) onion_packet: Bytes,
 }
 impl RemoveTlcFailBuilder {
-    pub const FIELD_COUNT: usize = 2;
-    pub fn error_code(mut self, v: Uint32) -> Self {
-        self.error_code = v;
-        self
-    }
-    pub fn packet_data(mut self, v: Bytes) -> Self {
-        self.packet_data = v;
+    pub const FIELD_COUNT: usize = 1;
+    pub fn onion_packet(mut self, v: Bytes) -> Self {
+        self.onion_packet = v;
         self
     }
 }
@@ -9562,23 +9538,18 @@ impl molecule::prelude::Builder for RemoveTlcFailBuilder {
     type Entity = RemoveTlcFail;
     const NAME: &'static str = "RemoveTlcFailBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
-            + self.error_code.as_slice().len()
-            + self.packet_data.as_slice().len()
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.onion_packet.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
         let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
         offsets.push(total_size);
-        total_size += self.error_code.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.packet_data.as_slice().len();
+        total_size += self.onion_packet.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
-        writer.write_all(self.error_code.as_slice())?;
-        writer.write_all(self.packet_data.as_slice())?;
+        writer.write_all(self.onion_packet.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

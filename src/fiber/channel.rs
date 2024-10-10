@@ -5,7 +5,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     fiber::{
         network::{get_chain_hash, SendOnionPacketCommand},
-        types::{ChannelUpdate, RemoveTlcFail, TlcFailErrorCode},
+        types::{ChannelUpdate, RemoveTlcFail, TlcFailDetail, TlcFailErrorCode},
     },
     invoice::InvoiceStore,
 };
@@ -497,6 +497,8 @@ where
                             // TODO: there maybe more error types here
                             _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
                         };
+                        let error_detail =
+                            TlcFailDetail::new(state.get_id(), add_tlc.tlc_id, error_code);
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
@@ -514,7 +516,7 @@ where
                                                 channel_id: state.get_id(),
                                                 tlc_id,
                                                 reason: RemoveTlcReason::RemoveTlcFail(
-                                                    RemoveTlcFail::new(error_code, vec![]),
+                                                    error_detail.into(),
                                                 ),
                                             }),
                                         ),
@@ -827,10 +829,7 @@ where
                             RemoveTlcCommand {
                                 id: added_tlc_id,
                                 reason: RemoveTlcReason::RemoveTlcFail(RemoveTlcFail {
-                                    //FIXME: we should define the error code carefully according
-                                    //refer to https://github.com/lightning/bolts/blob/master/04-onion-routing.md#failure-messages
-                                    error_code: 1,
-                                    packet_data: vec![],
+                                    onion_packet: vec![],
                                 }),
                             },
                             port,

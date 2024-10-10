@@ -443,11 +443,11 @@ where
                                         RemoveTlcFulfill { payment_preimage },
                                     )
                                 }
-                                RemoveTlcReason::RemoveTlcFail { error_code } => {
+                                RemoveTlcReason::RemoveTlcFail { error_code: _ } => {
+                                    // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
                                         RemoveTlcFail {
-                                            error_code,
-                                            packet_data: vec![],
+                                            onion_packet: vec![],
                                         },
                                     )
                                 }

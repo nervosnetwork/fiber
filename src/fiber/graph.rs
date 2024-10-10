@@ -819,9 +819,9 @@ impl PaymentSession {
         self.status = status;
     }
 
-    pub fn set_failed_status(&mut self, error: String) {
+    pub fn set_failed_status(&mut self, error: &str) {
         self.status = PaymentSessionStatus::Failed;
-        self.last_error = Some(error);
+        self.last_error = Some(error.to_string());
     }
 }
 

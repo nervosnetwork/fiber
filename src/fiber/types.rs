@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use strum::{AsRefStr, IntoStaticStr};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -1245,42 +1246,30 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoveTlcFail {
+pub enum TlcFailDetailData {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TlcFailDetail {
+    pub channel_id: Hash256,
+    pub tlc_id: u64,
     pub error_code: u16,
-    pub packet_data: Vec<u8>,
+    pub extra_data: Option<TlcFailDetailData>,
 }
 
-impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
-    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
-        molecule_fiber::RemoveTlcFail::new_builder()
-            .error_code((remove_tlc_fail.error_code as u32).pack())
-            .packet_data(remove_tlc_fail.packet_data.pack())
-            .build()
+impl TlcFailDetail {
+    pub fn new(channel_id: Hash256, tlc_id: u64, error_code: TlcFailErrorCode) -> Self {
+        TlcFailDetail {
+            channel_id,
+            tlc_id,
+            error_code: error_code.into(),
+            extra_data: None,
+        }
     }
-}
 
-impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
-    type Error = Error;
-
-    fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
-        let error_code: u32 = remove_tlc_fail.error_code().unpack();
-        Ok(RemoveTlcFail {
-            error_code: error_code as u16,
-            packet_data: remove_tlc_fail.packet_data().unpack(),
-        })
+    pub fn set_extra_data(&mut self, extra_data: TlcFailDetailData) {
+        self.extra_data = Some(extra_data);
     }
-}
 
-// The onion packet is invalid
-const BADONION: u16 = 0x8000;
-// Permanent errors (otherwise transient)
-const PERM: u16 = 0x4000;
-// Node releated errors (otherwise channels)
-const NODE: u16 = 0x2000;
-//  Channel forwarding parameter was violated
-const UPDATE: u16 = 0x1000;
-
-impl RemoveTlcFail {
     pub fn is_node(&self) -> bool {
         self.error_code & NODE != 0
     }
@@ -1297,16 +1286,73 @@ impl RemoveTlcFail {
         self.error_code & UPDATE != 0
     }
 
-    pub fn new(error_code: TlcFailErrorCode, packet_data: Vec<u8>) -> Self {
+    fn serialize(&self) -> Vec<u8> {
+        deterministically_serialize(self)
+    }
+
+    fn deserialize(data: &[u8]) -> Option<Self> {
+        serde_json::from_slice(data).ok()
+    }
+}
+
+impl From<TlcFailDetail> for RemoveTlcFail {
+    fn from(tlc_fail: TlcFailDetail) -> Self {
+        RemoveTlcFail::new(tlc_fail.serialize())
+    }
+}
+
+impl From<RemoveTlcFail> for TlcFailDetail {
+    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
+        TlcFailDetail::deserialize(&remove_tlc_fail.onion_packet).expect("deserialize fail")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoveTlcFail {
+    // TODO: replace this with the real onion packet
+    // This is the onion packet we need to encode and send back to the sender
+    // currently it's the raw TlcFailDetail serialized data
+    // sender should decode it and get the real TlcFailDetail
+    pub onion_packet: Vec<u8>,
+}
+
+impl RemoveTlcFail {
+    pub fn new(packet_data: Vec<u8>) -> Self {
         RemoveTlcFail {
-            error_code: error_code.into(),
-            packet_data,
+            onion_packet: packet_data,
         }
     }
 }
 
+impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
+    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
+        molecule_fiber::RemoveTlcFail::new_builder()
+            .onion_packet(remove_tlc_fail.onion_packet.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
+    type Error = Error;
+
+    fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
+        Ok(RemoveTlcFail {
+            onion_packet: remove_tlc_fail.onion_packet().unpack(),
+        })
+    }
+}
+
+// The onion packet is invalid
+const BADONION: u16 = 0x8000;
+// Permanent errors (otherwise transient)
+const PERM: u16 = 0x4000;
+// Node releated errors (otherwise channels)
+const NODE: u16 = 0x2000;
+//  Channel forwarding parameter was violated
+const UPDATE: u16 = 0x1000;
+
 #[repr(u16)]
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, IntoStaticStr)]
 pub enum TlcFailErrorCode {
     TemporaryNodeFailure = NODE | 2,
     PermanentNodeFailure = PERM | NODE | 2,
@@ -1331,9 +1377,17 @@ pub enum TlcFailErrorCode {
     MppTimeout = 23,
     InvalidOnionBlinding = BADONION | PERM | 24,
 }
+
 impl From<TlcFailErrorCode> for u16 {
     fn from(error_code: TlcFailErrorCode) -> Self {
         error_code as u16
+    }
+}
+
+impl From<u16> for TlcFailErrorCode {
+    fn from(value: u16) -> Self {
+        TlcFailErrorCode::try_from(value)
+            .unwrap_or_else(|_| panic!("Invalid value for TlcFailErrorCode: {}", value))
     }
 }
 
@@ -3039,8 +3093,8 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{secp256k1_instance, Pubkey, RemoveTlcFail, TlcFailErrorCode};
-    use crate::fiber::test_utils::generate_seckey;
-    use crate::fiber::types::Privkey;
+    use crate::fiber::types::{Hash256, Privkey};
+    use crate::fiber::{test_utils::generate_seckey, types::TlcFailDetail};
     use ckb_types::packed::OutPointBuilder;
     use ckb_types::prelude::Builder;
     use secp256k1::{Secp256k1, SecretKey};
@@ -3133,14 +3187,14 @@ mod tests {
 
     #[test]
     fn test_tlc_fail_error() {
-        let packet_data: Vec<u8> = vec![42; 32];
-        let error = RemoveTlcFail::new(TlcFailErrorCode::InvalidOnionVersion, packet_data);
-        assert!(!error.is_node());
-        assert!(error.is_bad_onion());
-        assert!(error.is_perm());
-        let error_mol: super::molecule_fiber::RemoveTlcFail = error.clone().into();
+        let tlc_fail_detail =
+            TlcFailDetail::new(Hash256::default(), 0, TlcFailErrorCode::InvalidOnionVersion);
+        assert!(!tlc_fail_detail.is_node());
+        assert!(tlc_fail_detail.is_bad_onion());
+        assert!(tlc_fail_detail.is_perm());
+        let tlc_fail: RemoveTlcFail = tlc_fail_detail.clone().into();
 
-        let decoded: RemoveTlcFail = error_mol.try_into().expect("decode");
-        assert_eq!(error, decoded);
+        let convert_back: TlcFailDetail = tlc_fail.into();
+        assert_eq!(tlc_fail_detail, convert_back);
     }
 }

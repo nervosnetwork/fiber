@@ -128,8 +128,7 @@ struct RemoveTlcFulfill {
 }
 
 table RemoveTlcFail {
-    error_code:         Uint32,
-    packet_data:        Bytes,
+    onion_packet:        Bytes,
 }
 
 union RemoveTlcReason {
