@@ -77,6 +77,20 @@ impl MockNetworkGraph {
         }
     }
 
+    pub fn mark_node_failed(&mut self, node: usize) {
+        self.graph.mark_node_failed(self.keys[node].into());
+    }
+
+    pub fn mark_channel_failed(&mut self, node_a: usize, node_b: usize) {
+        let outpoint = self
+            .edges
+            .iter()
+            .find(|(a, b, _)| (*a == node_a && *b == node_b) || (*a == node_b && *b == node_a));
+        if let Some((_, _, outpoint)) = outpoint {
+            self.graph.mark_channel_failed(&outpoint);
+        }
+    }
+
     pub fn add_edge_with_config(
         &mut self,
         node_a: usize,
@@ -612,5 +626,132 @@ fn test_graph_find_path_udt() {
     assert_eq!(route[0].channel_outpoint, network.edges[0].2);
 
     let route = network.find_route(1, 3, 10, 100);
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_mark_failed_channel() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    let node3 = network.keys[3];
+
+    network.mark_channel_failed(2, 3);
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_err());
+
+    network.add_edge(0, 5, Some(500), Some(2));
+    network.add_edge(5, 3, Some(500), Some(2));
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+}
+
+#[test]
+fn test_graph_mark_failed_node() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(2, 4, Some(500), Some(2));
+
+    let node3 = network.keys[3];
+    let node4 = network.keys[4];
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+
+    // Test build route from node1 to node4 should be Ok
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node4.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+
+    network.mark_node_failed(2);
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_err());
+
+    // Test build route from node1 to node4
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node4.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
     assert!(route.is_err());
 }
