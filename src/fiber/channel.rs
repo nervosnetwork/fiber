@@ -503,7 +503,7 @@ where
                         // so we can safely send RemoveTlc message to the peer
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
                         // trying to add a duplicate tlc, so we use tlc count to make sure no new tlc was added
-                        // and don't send a wrong RemoveTlc message if there is already a tlc with the same id
+                        // and only send RemoveTlc message to peer if the TLC is not in our state
                         error!("Error handling AddTlc message: {:?}", e);
                         assert!(tlc_count == state.tlcs.len());
                         if state.get_received_tlc(tlc_id).is_none() {
