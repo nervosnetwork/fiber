@@ -26,120 +26,120 @@ use tentacle::secio::PeerId;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct OpenChannelParams {
+pub(crate) struct OpenChannelParams {
     #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
+    peer_id: PeerId,
     #[serde_as(as = "U128Hex")]
-    pub funding_amount: u128,
-    pub public: Option<bool>,
-    pub funding_udt_type_script: Option<Script>,
-    pub shutdown_script: Option<Script>,
+    funding_amount: u128,
+    public: Option<bool>,
+    funding_udt_type_script: Option<Script>,
+    shutdown_script: Option<Script>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub commitment_fee_rate: Option<u64>,
+    commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub funding_fee_rate: Option<u64>,
+    funding_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    tlc_locktime_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_min_value: Option<u128>,
+    tlc_min_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_max_value: Option<u128>,
+    tlc_max_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_fee_proportional_millionths: Option<u128>,
+    tlc_fee_proportional_millionths: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub max_tlc_value_in_flight: Option<u128>,
+    max_tlc_value_in_flight: Option<u128>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub max_num_of_accept_tlcs: Option<u64>,
+    max_num_of_accept_tlcs: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
-pub struct OpenChannelResult {
-    pub temporary_channel_id: Hash256,
+pub(crate) struct OpenChannelResult {
+    temporary_channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct AcceptChannelParams {
-    pub temporary_channel_id: Hash256,
+pub(crate) struct AcceptChannelParams {
+    temporary_channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
-    pub funding_amount: u128,
-    pub shutdown_script: Option<Script>,
+    funding_amount: u128,
+    shutdown_script: Option<Script>,
 }
 
 #[derive(Clone, Serialize)]
-pub struct AcceptChannelResult {
-    pub channel_id: Hash256,
+pub(crate) struct AcceptChannelResult {
+    channel_id: Hash256,
 }
 
-// TODO @quake remove this unnecessary struct and rpc after refactoring
+// TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
 #[derive(Serialize, Deserialize, Debug)]
-pub struct CommitmentSignedParams {
-    pub channel_id: Hash256,
+pub(crate) struct CommitmentSignedParams {
+    channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct ListChannelsParams {
+pub(crate) struct ListChannelsParams {
     #[serde_as(as = "Option<DisplayFromStr>")]
-    pub peer_id: Option<PeerId>,
+    peer_id: Option<PeerId>,
 }
 
 #[derive(Clone, Serialize)]
-pub struct ListChannelsResult {
-    pub channels: Vec<Channel>,
+pub(crate) struct ListChannelsResult {
+    channels: Vec<Channel>,
 }
 
 #[serde_as]
 #[derive(Clone, Serialize)]
-pub struct Channel {
-    pub channel_id: Hash256,
+pub(crate) struct Channel {
+    channel_id: Hash256,
     #[serde_as(as = "DisplayFromStr")]
-    pub peer_id: PeerId,
-    pub funding_udt_type_script: Option<Script>,
-    pub state: ChannelState,
+    peer_id: PeerId,
+    funding_udt_type_script: Option<Script>,
+    state: ChannelState,
     #[serde_as(as = "U128Hex")]
-    pub local_balance: u128,
+    local_balance: u128,
     #[serde_as(as = "U128Hex")]
-    pub offered_tlc_balance: u128,
+    offered_tlc_balance: u128,
     #[serde_as(as = "U128Hex")]
-    pub remote_balance: u128,
+    remote_balance: u128,
     #[serde_as(as = "U128Hex")]
-    pub received_tlc_balance: u128,
+    received_tlc_balance: u128,
     #[serde_as(as = "U64Hex")]
-    pub created_at: u64,
+    created_at: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct AddTlcParams {
-    pub channel_id: Hash256,
+pub(crate) struct AddTlcParams {
+    channel_id: Hash256,
     #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    pub payment_hash: Hash256,
-    pub expiry: LockTime,
-    pub hash_algorithm: Option<HashAlgorithm>,
+    amount: u128,
+    payment_hash: Hash256,
+    expiry: LockTime,
+    hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[serde_as]
 #[derive(Clone, Serialize)]
-pub struct AddTlcResult {
+pub(crate) struct AddTlcResult {
     #[serde_as(as = "U64Hex")]
-    pub tlc_id: u64,
+    tlc_id: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
-pub struct RemoveTlcParams {
-    pub channel_id: Hash256,
+pub(crate) struct RemoveTlcParams {
+    channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
-    pub tlc_id: u64,
-    pub reason: RemoveTlcReason,
+    tlc_id: u64,
+    reason: RemoveTlcReason,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
-pub enum RemoveTlcReason {
+enum RemoveTlcReason {
     RemoveTlcFulfill {
         payment_preimage: Hash256,
     },
@@ -151,26 +151,26 @@ pub enum RemoveTlcReason {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ShutdownChannelParams {
-    pub channel_id: Hash256,
-    pub close_script: Script,
-    pub force: Option<bool>,
+pub(crate) struct ShutdownChannelParams {
+    channel_id: Hash256,
+    close_script: Script,
+    force: Option<bool>,
     #[serde_as(as = "U64Hex")]
-    pub fee_rate: u64,
+    fee_rate: u64,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct UpdateChannelParams {
-    pub channel_id: Hash256,
+pub(crate) struct UpdateChannelParams {
+    channel_id: Hash256,
     #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    tlc_locktime_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_minimum_value: Option<u128>,
+    tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_maximum_value: Option<u128>,
+    tlc_maximum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
-    pub tlc_fee_proportional_millionths: Option<u128>,
+    tlc_fee_proportional_millionths: Option<u128>,
 }
 
 #[serde_as]
@@ -191,56 +191,56 @@ pub struct GetPaymentCommandResult {
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SendPaymentCommandParams {
+pub(crate) struct SendPaymentCommandParams {
     // the identifier of the payment target
-    pub target_pubkey: Option<Pubkey>,
+    target_pubkey: Option<Pubkey>,
 
     // the amount of the payment
     #[serde_as(as = "Option<U128Hex>")]
-    pub amount: Option<u128>,
+    amount: Option<u128>,
 
     // The hash to use within the payment's HTLC
     // FIXME: this should be optional when AMP is enabled
-    pub payment_hash: Option<Hash256>,
+    payment_hash: Option<Hash256>,
 
     // The CLTV delta from the current height that should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    pub final_cltv_delta: Option<u64>,
+    final_cltv_delta: Option<u64>,
 
     // the encoded invoice to send to the recipient
-    pub invoice: Option<String>,
+    invoice: Option<String>,
 
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
-    pub timeout: Option<u64>,
+    timeout: Option<u64>,
 
     // the maximum fee amounts in shannons that the sender is willing to pay
     #[serde_as(as = "Option<U128Hex>")]
-    pub max_fee_amount: Option<u128>,
+    max_fee_amount: Option<u128>,
 
     // max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
-    pub max_parts: Option<u64>,
+    max_parts: Option<u64>,
 
     // keysend payment
-    pub keysend: Option<bool>,
+    keysend: Option<bool>,
 
     // udt type script for the payment
-    pub udt_type_script: Option<Script>,
+    udt_type_script: Option<Script>,
 }
 
 #[serde_as]
 #[derive(Clone, Serialize)]
-pub struct SendPaymentResult {
-    pub payment_hash: Hash256,
-    pub status: PaymentSessionStatus,
+pub(crate) struct SendPaymentResult {
+    payment_hash: Hash256,
+    status: PaymentSessionStatus,
     #[serde_as(as = "U128Hex")]
-    pub last_update_time: u128,
-    pub failed_error: Option<String>,
+    last_update_time: u128,
+    failed_error: Option<String>,
 }
 
 #[rpc(server)]
-pub trait ChannelRpc {
+trait ChannelRpc {
     #[method(name = "open_channel")]
     async fn open_channel(
         &self,
@@ -291,13 +291,13 @@ pub trait ChannelRpc {
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
-pub struct ChannelRpcServerImpl<S> {
+pub(crate) struct ChannelRpcServerImpl<S> {
     actor: ActorRef<NetworkActorMessage>,
     store: S,
 }
 
 impl<S> ChannelRpcServerImpl<S> {
-    pub fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
+    pub(crate) fn new(actor: ActorRef<NetworkActorMessage>, store: S) -> Self {
         ChannelRpcServerImpl { actor, store }
     }
 }

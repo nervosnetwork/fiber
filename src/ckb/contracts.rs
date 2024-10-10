@@ -463,7 +463,7 @@ impl ContractsContext {
         res.build()
     }
 
-    fn get_udt_whitelist(&self) -> &UdtCfgInfos {
+    pub fn get_udt_whitelist(&self) -> &UdtCfgInfos {
         match self {
             #[cfg(test)]
             Self::Mock(mock) => &mock.contracts_context.udt_whitelist,
@@ -488,7 +488,7 @@ impl ContractsContext {
                 && udt.script.hash_type == _type
             {
                 let args = format!("0x{:x}", udt_script.args().raw_data());
-                let pattern = Regex::new(&udt.script.args).expect("invalid expressio");
+                let pattern = Regex::new(&udt.script.args).expect("invalid expression");
                 if pattern.is_match(&args) {
                     return Some(udt);
                 }
@@ -537,7 +537,19 @@ pub fn check_udt_script(script: &Script) -> bool {
 }
 
 pub fn get_udt_cell_deps(script: &Script) -> Option<CellDepVec> {
-    get_udt_info(script).map(|udt| udt.cell_deps.clone())
+    get_udt_info(script).map(|udt| {
+        udt.cell_deps
+            .iter()
+            .map(CellDep::from)
+            .collect::<Vec<_>>()
+            .pack()
+    })
+}
+
+pub fn get_udt_whitelist() -> UdtCfgInfos {
+    init_contracts_context(None, None)
+        .get_udt_whitelist()
+        .clone()
 }
 
 pub fn is_udt_type_auto_accept(script: &Script, amount: u128) -> bool {

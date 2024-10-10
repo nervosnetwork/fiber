@@ -14,41 +14,41 @@ use tentacle::secio::PublicKey;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct NewInvoiceParams {
+pub(crate) struct NewInvoiceParams {
     #[serde_as(as = "U128Hex")]
-    pub amount: u128,
-    pub description: Option<String>,
-    pub currency: Currency,
-    pub payment_preimage: Hash256,
+    amount: u128,
+    description: Option<String>,
+    currency: Currency,
+    payment_preimage: Hash256,
     #[serde_as(as = "Option<U64Hex>")]
-    pub expiry: Option<u64>,
-    pub fallback_address: Option<String>,
+    expiry: Option<u64>,
+    fallback_address: Option<String>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub final_cltv: Option<u64>,
+    final_cltv: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    pub final_htlc_timeout: Option<u64>,
-    pub udt_type_script: Option<Script>,
-    pub hash_algorithm: Option<HashAlgorithm>,
+    final_htlc_timeout: Option<u64>,
+    udt_type_script: Option<Script>,
+    hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NewInvoiceResult {
-    pub invoice_address: String,
-    pub invoice: CkbInvoice,
+pub(crate) struct NewInvoiceResult {
+    invoice_address: String,
+    invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct ParseInvoiceParams {
-    pub invoice: String,
+pub(crate) struct ParseInvoiceParams {
+    invoice: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct ParseInvoiceResult {
-    pub invoice: CkbInvoice,
+pub(crate) struct ParseInvoiceResult {
+    invoice: CkbInvoice,
 }
 
 #[rpc(server)]
-pub trait InvoiceRpc {
+trait InvoiceRpc {
     #[method(name = "new_invoice")]
     async fn new_invoice(
         &self,
@@ -62,13 +62,13 @@ pub trait InvoiceRpc {
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 }
 
-pub struct InvoiceRpcServerImpl<S> {
-    pub store: S,
-    pub public_key: Option<PublicKey>,
+pub(crate) struct InvoiceRpcServerImpl<S> {
+    store: S,
+    public_key: Option<PublicKey>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub fn new(store: S, public_key: Option<PublicKey>) -> Self {
+    pub(crate) fn new(store: S, public_key: Option<PublicKey>) -> Self {
         Self { store, public_key }
     }
 }

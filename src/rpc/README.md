@@ -297,6 +297,18 @@ Get all the nodes in the network graph.
     * `addresses`: An array of addresses of the node
     * `timestamp`: The timestamp when the node was added to the graph, in milliseconds
     * `chain_hash`: The chain hash of the node, used to identify the network chain the node is on
+    * `auto_accept_min_ckb_funding_amount`: The minimum CKB funding amount for auto-accepting a channel request
+    * `udt_cfg_infos`: An array of UDT configuration objects, each object contains the following fields:
+        * `name`: The name of the UDT
+        * `script`: The type script configuration of the UDT, with feilds of
+            * `code_hash`: The code hash of the UDT
+            * `hash_type`: The hash type of the UDT
+            * `args`: The arguments of the UDT
+        * `auto_accept_amount`: The funding amount for the UDT to auto accept a channel request
+        * `cell_deps`: The cell deps of the UDT, with fields of
+            * `tx_hash`: The tx hash of the cell dep
+            * `index`: The index of the cell dep
+            * `dep_type`: The dep type of the cell dep
 * `last_cursor`: The last public key of the returned nodes, used for pagination
 
 <a id="graph_channels"></a>
@@ -320,3 +332,5 @@ Get all the channels in the network graph.
     * `node2_to_node1_fee_rate`: The fee rate from the second node to the first node
     * `capacity`: The capacity of the channel
     * `chain_hash`: The chain hash of the channel, used to identify the network chain the channel is on
+    * `udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
+

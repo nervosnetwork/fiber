@@ -2357,7 +2357,13 @@ where
             _ => {
                 let alias = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = NodeAnnouncement::new(alias, addresses, &self.private_key, now);
+                let announcement = NodeAnnouncement::new(
+                    alias,
+                    addresses,
+                    &self.private_key,
+                    now,
+                    self.open_channel_auto_accept_min_ckb_funding_amount,
+                );
                 debug!(
                     "Created new node announcement message: {:?}, previous {:?}",
                     &announcement, self.last_node_announcement_message
@@ -2621,40 +2627,61 @@ where
         Ok((channel, temp_channel_id, new_id))
     }
 
+    // This function send the transaction to the network and then trace the transaction status.
+    // Either the sending or the tracing may fail, in which case the callback will be called with
+    // the error.
     async fn broadcast_tx_with_callback<F>(&self, transaction: TransactionView, callback: F)
     where
         F: Send + 'static + FnOnce(Result<TraceTxResponse, RactorErr<CkbChainMessage>>),
     {
-        debug!("Trying to broadcast transaction {:?}", &transaction);
         let chain = self.chain_actor.clone();
-        call_t!(
-            &chain,
-            CkbChainMessage::SendTx,
-            DEFAULT_CHAIN_ACTOR_TIMEOUT,
-            transaction.clone()
-        )
-        .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
-        .expect("valid tx to broadcast");
-
-        let tx_hash = transaction.hash();
-        info!("Transactoin sent to the network: {}", tx_hash);
-
-        // TODO: make number of confirmation to transaction configurable.
-        const NUM_CONFIRMATIONS: u64 = 4;
-        let request = TraceTxRequest {
-            tx_hash: tx_hash.clone(),
-            confirmations: NUM_CONFIRMATIONS,
-        };
-
         // Spawn a new task to avoid blocking current actor message processing.
         ractor::concurrency::tokio_primatives::spawn(async move {
-            debug!("Tracing transaction status {:?}", &request.tx_hash);
-            let result = call_t!(
-                chain,
-                CkbChainMessage::TraceTx,
+            debug!("Trying to broadcast transaction {:?}", &transaction);
+            let result = match call_t!(
+                &chain,
+                CkbChainMessage::SendTx,
                 DEFAULT_CHAIN_ACTOR_TIMEOUT,
-                request.clone()
-            );
+                transaction.clone()
+            )
+            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW)
+            {
+                Err(err) => {
+                    error!("Failed to send transaction to the network: {:?}", &err);
+                    // TODO: the caller of this function will deem the failure returned here as permanent.
+                    // But SendTx may only fail temporarily. We need to handle this case.
+                    Ok(TraceTxResponse {
+                        tx: None,
+                        status: TxStatus {
+                            status: Status::Rejected,
+                            block_number: None,
+                            block_hash: None,
+                            reason: Some(format!("Sending transaction failed: {:?}", &err)),
+                        },
+                    })
+                }
+                Ok(_) => {
+                    let tx_hash = transaction.hash();
+                    // TODO: make number of confirmation to transaction configurable.
+                    const NUM_CONFIRMATIONS: u64 = 4;
+                    let request = TraceTxRequest {
+                        tx_hash: tx_hash.clone(),
+                        confirmations: NUM_CONFIRMATIONS,
+                    };
+                    debug!(
+                        "Transaction sent to the network, waiting for it to be confirmed: {:?}",
+                        &request.tx_hash
+                    );
+                    call_t!(
+                        chain,
+                        CkbChainMessage::TraceTx,
+                        DEFAULT_CHAIN_ACTOR_TIMEOUT,
+                        request.clone()
+                    )
+                }
+            };
+
+            debug!("Transaction trace result: {:?}", &result);
             callback(result);
         });
     }
@@ -3756,7 +3783,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 1;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     fn create_fake_node_announcement_mesage_version2() -> NodeAnnouncement {
@@ -3768,7 +3795,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 2;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     fn create_fake_node_announcement_mesage_version3() -> NodeAnnouncement {
@@ -3780,7 +3807,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 3;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     // Manually mark syncing done to avoid waiting for the syncing process.

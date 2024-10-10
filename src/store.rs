@@ -593,6 +593,7 @@ mod tests {
                 vec![],
                 node_id,
                 1,
+                0,
             ),
             timestamp: 0,
         };

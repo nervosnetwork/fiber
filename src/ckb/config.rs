@@ -1,4 +1,3 @@
-use ckb_types::prelude::PackVec;
 use clap_serde_derive::ClapSerde;
 use secp256k1::SecretKey;
 use serde_with::serde_as;
@@ -8,6 +7,7 @@ use std::{
     str::FromStr,
 };
 
+use ckb_types::core::ScriptHashType;
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;
 use ckb_types::H256;
@@ -15,10 +15,9 @@ use ckb_types::{
     core::DepType,
     packed::{CellDep, OutPoint},
 };
-use ckb_types::{core::ScriptHashType, packed::CellDepVec};
 use clap_serde_derive::clap::{self};
 use molecule::prelude::Entity;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CKB_BASE_DIR_NAME: &str = "ckb";
 const DEFAULT_CKB_NODE_RPC_URL: &str = "http://127.0.0.1:8114";
@@ -107,7 +106,15 @@ impl CkbConfig {
 serde_with::serde_conv!(
     ScriptHashTypeWrapper,
     ScriptHashType,
-    |_: &ScriptHashType| { panic!("no support to serialize") },
+    |s: &ScriptHashType| -> String {
+        let v = match s {
+            ScriptHashType::Type => "type",
+            ScriptHashType::Data => "data",
+            ScriptHashType::Data1 => "data1",
+            ScriptHashType::Data2 => "data2",
+        };
+        v.to_string()
+    },
     |s: String| {
         let v = match s.to_lowercase().as_str() {
             "type" => ScriptHashType::Type,
@@ -120,8 +127,28 @@ serde_with::serde_conv!(
     }
 );
 
+serde_with::serde_conv!(
+    DepTypeWrapper,
+    DepType,
+    |s: &DepType| -> String {
+        let v = match s {
+            DepType::Code => "code",
+            DepType::DepGroup => "dep_group",
+        };
+        v.to_string()
+    },
+    |s: String| {
+        let v = match s.to_lowercase().as_str() {
+            "code" => DepType::Code,
+            "dep_group" => DepType::DepGroup,
+            _ => return Err("invalid hash type"),
+        };
+        Ok(v)
+    }
+);
+
 #[serde_as]
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct UdtScript {
     pub code_hash: H256,
     #[serde_as(as = "ScriptHashTypeWrapper")]
@@ -130,34 +157,24 @@ pub struct UdtScript {
     pub args: String,
 }
 
-#[derive(Deserialize, Clone, Debug)]
-struct UdtCellDep {
-    dep_type: String,
-    tx_hash: H256,
-    index: u32,
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct UdtCellDep {
+    #[serde_as(as = "DepTypeWrapper")]
+    pub dep_type: DepType,
+    pub tx_hash: H256,
+    pub index: u32,
 }
 
-serde_with::serde_conv!(
-    CellDepVecWrapper,
-    CellDepVec,
-    |_: &CellDepVec| { panic!("no support to serialize") },
-    |s: Vec<UdtCellDep>| -> Result<CellDepVec, &'static str> {
-        let cell_deps: Vec<CellDep> = s.iter().map(CellDep::from).collect();
-        Ok(cell_deps.pack())
-    }
-);
-
-#[serde_as]
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
     pub auto_accept_amount: Option<u128>,
-    #[serde_as(as = "CellDepVecWrapper")]
-    pub cell_deps: CellDepVec,
+    pub cell_deps: Vec<UdtCellDep>,
 }
 
-#[derive(Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 
 impl FromStr for UdtCfgInfos {
@@ -170,13 +187,8 @@ impl FromStr for UdtCfgInfos {
 
 impl From<&UdtCellDep> for CellDep {
     fn from(cell_dep: &UdtCellDep) -> Self {
-        let dep_type = match cell_dep.dep_type.as_str() {
-            "code" => DepType::Code,
-            "dep_group" => DepType::DepGroup,
-            _ => panic!("invalid dep type"),
-        };
         CellDep::new_builder()
-            .dep_type(dep_type.into())
+            .dep_type(cell_dep.dep_type.into())
             .out_point(
                 OutPoint::new_builder()
                     .tx_hash(cell_dep.tx_hash.pack())
@@ -184,5 +196,33 @@ impl From<&UdtCellDep> for CellDep {
                     .build(),
             )
             .build()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::fiber::gen::fiber::UdtCfgInfos as MoleculeUdtCfgInfos;
+    #[test]
+    fn test_udt_whitelist() {
+        let udt_whitelist = UdtCfgInfos(vec![UdtArgInfo {
+            name: "SimpleUDT".to_string(),
+            script: UdtScript {
+                code_hash: H256::from([0u8; 32]),
+                hash_type: ScriptHashType::Data,
+                args: "0x00".to_string(),
+            },
+            auto_accept_amount: Some(100),
+            cell_deps: vec![UdtCellDep {
+                dep_type: DepType::Code,
+                tx_hash: H256::from([0u8; 32]),
+                index: 0,
+            }],
+        }]);
+
+        let serialized = MoleculeUdtCfgInfos::from(udt_whitelist.clone()).as_bytes();
+        let deserialized =
+            UdtCfgInfos::from(MoleculeUdtCfgInfos::from_slice(&serialized).expect("invalid mol"));
+        assert_eq!(udt_whitelist, deserialized);
     }
 }

@@ -7,6 +7,7 @@ array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
 option Uint64Opt (Uint64);
+option Uint128Opt (Uint128);
 
 table OpenChannel {
     chain_hash:                  Byte32,
@@ -155,6 +156,29 @@ table AnnouncementSignatures {
     partial_signature: Byte32,
 }
 
+table UdtCellDep {
+    dep_type: byte,
+    tx_hash: Byte32,
+    index: Uint32,
+}
+
+table UdtScript {
+    code_hash: Byte32,
+    hash_type: byte,
+    args: Bytes,
+}
+
+vector UdtCellDeps <UdtCellDep>;
+
+table UdtArgInfo {
+    name: Bytes,
+    script: UdtScript,
+    auto_accept_amount: Uint128Opt,
+    cell_deps: UdtCellDeps,
+}
+
+vector UdtCfgInfos <UdtArgInfo>;
+
 table NodeAnnouncement {
     // Signature to this message.
     signature: EcdsaSignature,
@@ -171,6 +195,10 @@ table NodeAnnouncement {
     address: BytesVec,
     // Chain hash
     chain_hash: Byte32,
+    // Minimal auto accept ckb amount
+    auto_accept_min_ckb_funding_amount: Uint64,
+    // UDT configs
+    udt_cfg_infos: UdtCfgInfos,
 }
 
 table ChannelAnnouncement {
