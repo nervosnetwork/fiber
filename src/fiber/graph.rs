@@ -2,6 +2,7 @@ use super::network::{get_chain_hash, SendPaymentCommand};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
+use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
@@ -82,8 +83,16 @@ impl ChannelInfo {
             .max(self.node2_to_node1.as_ref().map(|n| n.timestamp))
     }
 
-    pub fn is_enabled(&self) -> bool {
-        self.node1_to_node2.is_some() && self.node2_to_node1.is_some()
+    // Whether this channel is explicitly disabled in either direction.
+    // TODO: we currently deem a channel as disabled if one direction is disabled.
+    // Is it possible that one direction is disabled while the other is not?
+    pub fn is_explicitly_disabled(&self) -> bool {
+        dbg!(self.node1_to_node2.as_ref(), self.node2_to_node1.as_ref());
+        match (&self.node1_to_node2, &self.node2_to_node1) {
+            (Some(update1), _) if !update1.enabled => true,
+            (_, Some(update2)) if !update2.enabled => true,
+            _ => false,
+        }
     }
 
     pub fn capacity(&self) -> u128 {
@@ -374,10 +383,12 @@ where
                 return Ok(());
             }
         }
+        let disabled = update.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG;
+
         *update_info = Some(ChannelUpdateInfo {
             version: update.version,
             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-            enabled: true,
+            enabled: !disabled,
             cltv_expiry_delta: update.tlc_locktime_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
@@ -390,6 +401,9 @@ where
             "Processed channel update: channel {:?}, update {:?}",
             &channel, &update
         );
+        if disabled {
+            self.channels.remove(channel_outpoint);
+        }
         Ok(())
     }
 
