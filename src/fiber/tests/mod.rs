@@ -7,3 +7,5 @@ mod serde_utils;
 mod types;
 
 pub mod test_utils;
+
+pub mod actor;
