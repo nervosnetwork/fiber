@@ -3,6 +3,7 @@ use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use ckb_jsonrpc_types::JsonBytes;
@@ -806,6 +807,7 @@ pub trait NetworkGraphStateStore {
     fn remove_connected_peer(&self, peer_id: &PeerId);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    fn get_payment_sessions_by_status(&self, status: PaymentSessionStatus) -> Vec<PaymentSession>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -820,6 +822,7 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
     pub request: SendPaymentData,
@@ -829,6 +832,10 @@ pub struct PaymentSession {
     pub status: PaymentSessionStatus,
     pub created_time: u128,
     pub last_updated_time: u128,
+    // The channel_outpoint and the tlc_id of the first hop
+    #[serde_as(as = "Option<EntityHex>")]
+    pub first_hop_channel_outpoint: Option<OutPoint>,
+    pub first_hop_tlc_id: Option<u64>,
 }
 
 impl PaymentSession {
@@ -842,6 +849,8 @@ impl PaymentSession {
             status: PaymentSessionStatus::Created,
             created_time: now,
             last_updated_time: now,
+            first_hop_channel_outpoint: None,
+            first_hop_tlc_id: None,
         }
     }
 
@@ -854,6 +863,11 @@ impl PaymentSession {
         self.last_updated_time = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
     }
 
+    pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+        self.first_hop_channel_outpoint = Some(channel_outpoint);
+        self.first_hop_tlc_id = Some(tlc_id);
+    }
+
     pub fn set_success_status(&mut self) {
         self.set_status(PaymentSessionStatus::Success);
         self.last_error = None;
@@ -862,5 +876,9 @@ impl PaymentSession {
     pub fn set_failed_status(&mut self, error: &str) {
         self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.retried_times < self.try_limit
     }
 }

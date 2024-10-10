@@ -172,6 +172,8 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    // Update the payment status of a payment session.
+    UpdatePaymentSession,
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     GetAndProcessChannelsWithinBlockRangeFromPeer(
@@ -1183,7 +1185,8 @@ where
                 state.maybe_finish_sync();
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
-                self.on_tlc_remove_received(payment_hash, remove_tlc);
+                self.on_tlc_remove_received(state, payment_hash, remove_tlc.reason)
+                    .await;
             }
         }
         Ok(())
@@ -1606,6 +1609,9 @@ where
                     );
                 }
             },
+            NetworkActorCommand::UpdatePaymentSession => {
+                self.update_payment_session(state).await;
+            }
         };
         Ok(())
     }
@@ -1969,15 +1975,78 @@ where
         reply.send(res).expect("send error");
     }
 
-    fn on_tlc_remove_received(&self, payment_hash: Hash256, remove_tlc: RemoveTlc) {
+    async fn update_payment_session(&self, state: &mut NetworkActorState<S>) {
+        for mut payment_session in self
+            .store
+            .get_payment_sessions_by_status(PaymentSessionStatus::Inflight)
+        {
+            if payment_session.status == PaymentSessionStatus::Inflight {
+                match (
+                    &payment_session.first_hop_channel_outpoint,
+                    &payment_session.first_hop_tlc_id,
+                ) {
+                    (Some(outpoint), Some(tlc_id)) => {
+                        if let Some(channel_id) = state.outpoint_channel_map.get(&outpoint) {
+                            let (send, recv) =
+                                oneshot::channel::<Result<RemoveTlcReason, String>>();
+                            let rpc_reply = RpcReplyPort::from(send);
+                            let command = ChannelCommand::GetTlcStatus(*tlc_id, rpc_reply);
+                            let _ = state.send_command_to_channel(*channel_id, command).await;
+                            let res = recv.await.expect("recv error");
+                            match res {
+                                Ok(reason) => match reason {
+                                    RemoveTlcReason::RemoveTlcFulfill(_) => {
+                                        payment_session.set_success_status();
+                                    }
+                                    RemoveTlcReason::RemoveTlcFail(_) => {
+                                        self.on_tlc_remove_received(
+                                            state,
+                                            payment_session.payment_hash(),
+                                            reason,
+                                        )
+                                        .await;
+                                    }
+                                },
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                    (_, _) => {}
+                }
+
+                if payment_session.can_retry() {
+                    let _ = self
+                        .try_payment_session(state, payment_session.clone())
+                        .await;
+                } else {
+                    payment_session.set_failed_status("Retry limit reached");
+                }
+                self.store.insert_payment_session(payment_session);
+            }
+        }
+    }
+
+    async fn on_tlc_remove_received(
+        &self,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        reason: RemoveTlcReason,
+    ) {
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
-                match remove_tlc.reason {
+                match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => payment_session.set_success_status(),
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error: TlcFailDetail = reason.into();
-                        let error_code: TlcFailErrorCode = detail_error.error_code.into();
-                        payment_session.set_failed_status(error_code.as_ref());
+                        self.update_with_tcl_fail_detail(detail_error.clone()).await;
+                        if payment_session.can_retry() {
+                            let _ = self
+                                .try_payment_session(state, payment_session.clone())
+                                .await;
+                        } else {
+                            let error_code: TlcFailErrorCode = detail_error.error_code.into();
+                            payment_session.set_failed_status(error_code.as_ref());
+                        }
                     }
                 }
             }
@@ -2023,44 +2092,25 @@ where
         }
     }
 
-    async fn on_send_payment(
+    async fn try_payment_session(
         &self,
         state: &mut NetworkActorState<S>,
-        payment_request: SendPaymentCommand,
+        mut payment_session: PaymentSession,
     ) -> Result<SendPaymentResponse, Error> {
         let graph = self.network_graph.read().await;
-        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
-            error!("Failed to validate payment request: {:?}", e);
-            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-        })?;
-
-        // initialize the payment session in db and begin the payment process lifecycle
-        if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
-            // we only allow retrying payment session with status failed
-            debug!("Payment session already exists: {:?}", payment_session);
-            if payment_session.status != PaymentSessionStatus::Failed {
-                return Err(Error::InvalidParameter(format!(
-                    "Payment session already exists: {} with payment session status: {:?}",
-                    payment_data.payment_hash, payment_session.status
-                )));
-            }
-        }
-
-        let mut payment_session = PaymentSession::new(payment_data.clone(), 5);
-        self.store.insert_payment_session(payment_session.clone());
-
+        let payment_data = payment_session.request.clone();
         let mut error = None;
-        for _i in 0..payment_session.try_limit {
+        while payment_session.retried_times < payment_session.try_limit {
             payment_session.retried_times += 1;
             let hops_infos = graph.build_route(payment_data.clone());
             let hops_infos = match hops_infos {
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
                     payment_session.set_status(PaymentSessionStatus::Failed);
-                    error = Some(Err(Error::SendPaymentError(format!(
+                    error = Some(format!(
                         "Failed to build route: {:?}",
                         payment_data.payment_hash
-                    ))));
+                    ));
                     break;
                 }
                 Ok(onion_path) => {
@@ -2068,6 +2118,10 @@ where
                     onion_path
                 }
             };
+            let first_channel_outpoint = hops_infos[0]
+                .channel_outpoint
+                .clone()
+                .expect("first hop channel outpoint");
 
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
@@ -2086,16 +2140,7 @@ where
             };
             self.handle_onion_packet_send_command(state, command, rpc_reply)
                 .await;
-            let res = recv.await.expect("msg recv error");
-            info!(
-                "send_payment: {:?} => onion packet sent: {:?}",
-                payment_data.payment_hash, res,
-            );
-            info!(
-                "send_payment: {:?} => result: {:?}",
-                payment_data.payment_hash, res
-            );
-            match res {
+            match recv.await.expect("msg recv error") {
                 Err(e) => {
                     let error_detail: TlcFailDetail = e.clone().into();
                     error!("Failed to send onion packet with error: {:?}", e);
@@ -2105,27 +2150,55 @@ where
                         payment_data.payment_hash,
                         error_detail.error_code_as_str()
                     );
-                    payment_session.last_error = Some(err.clone());
-                    error = Some(Err(Error::SendPaymentError(err)));
+                    error = Some(err);
                     self.update_with_tcl_fail_detail(error_detail).await;
                     continue;
                 }
-                Ok(_) => {
+                Ok(tlc_id) => {
                     payment_session.set_status(PaymentSessionStatus::Inflight);
+                    payment_session.set_first_hop_info(first_channel_outpoint, tlc_id);
                     self.store.insert_payment_session(payment_session.clone());
-                    let response = SendPaymentResponse {
+                    return Ok(SendPaymentResponse {
                         payment_hash: payment_data.payment_hash,
                         last_update_time: payment_session.last_updated_time,
                         status: PaymentSessionStatus::Inflight,
                         failed_error: None,
-                    };
-                    return Ok(response);
+                    });
                 }
             }
         }
         payment_session.set_status(PaymentSessionStatus::Failed);
+        let final_error = error.expect("expect error details");
+        payment_session.set_failed_status(&final_error);
         self.store.insert_payment_session(payment_session);
-        return error.expect("expect error details");
+        return Err(Error::SendPaymentError(final_error));
+    }
+
+    async fn on_send_payment(
+        &self,
+        state: &mut NetworkActorState<S>,
+        payment_request: SendPaymentCommand,
+    ) -> Result<SendPaymentResponse, Error> {
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
+
+        // initialize the payment session in db and begin the payment process lifecycle
+        if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
+            // we only allow retrying payment session with status failed
+            debug!("Payment session already exists: {:?}", payment_session);
+            if payment_session.status != PaymentSessionStatus::Failed {
+                return Err(Error::InvalidParameter(format!(
+                    "Payment session already exists: {} with payment session status: {:?}",
+                    payment_data.payment_hash, payment_session.status
+                )));
+            }
+        }
+
+        let payment_session = PaymentSession::new(payment_data.clone(), 5);
+        self.store.insert_payment_session(payment_session.clone());
+        self.try_payment_session(state, payment_session).await
     }
 }
 
