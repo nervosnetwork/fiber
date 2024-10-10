@@ -817,10 +817,16 @@ impl PaymentSession {
 
     pub fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
+        self.last_updated_time = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.set_status(PaymentSessionStatus::Success);
+        self.last_error = None;
     }
 
     pub fn set_failed_status(&mut self, error: &str) {
-        self.status = PaymentSessionStatus::Failed;
+        self.set_status(PaymentSessionStatus::Failed);
         self.last_error = Some(error.to_string());
     }
 }

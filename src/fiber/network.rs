@@ -1961,17 +1961,13 @@ where
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match remove_tlc.reason {
-                    RemoveTlcReason::RemoveTlcFulfill(_) => {
-                        payment_session.set_status(PaymentSessionStatus::Success);
-                    }
+                    RemoveTlcReason::RemoveTlcFulfill(_) => payment_session.set_success_status(),
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error: TlcFailDetail = reason.into();
                         let error_code: TlcFailErrorCode = detail_error.error_code.into();
                         payment_session.set_failed_status(error_code.as_ref());
                     }
                 }
-                payment_session.last_updated_time =
-                    std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
             }
             self.store.insert_payment_session(payment_session);
         }
@@ -2006,8 +2002,8 @@ where
             error!("Failed to validate payment request: {:?}", e);
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
-        // initialize the payment session in db and begin the payment process in a statemachine to
-        // handle the payment process
+
+        // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
             debug!("Payment session already exists: {:?}", payment_session);
