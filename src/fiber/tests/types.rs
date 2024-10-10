@@ -3,7 +3,7 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     types::{
         secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-        TlcFailDetail, TlcFailErrorCode, RemoveTlcFail
+        RemoveTlcFail, TlcFailDetail, TlcFailErrorCode,
     },
 };
 use ckb_types::packed::OutPointBuilder;
