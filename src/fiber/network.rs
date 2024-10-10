@@ -2164,7 +2164,13 @@ where
             _ => {
                 let alias = self.node_name.unwrap_or_default();
                 let addresses = self.announced_addrs.clone();
-                let announcement = NodeAnnouncement::new(alias, addresses, &self.private_key, now);
+                let announcement = NodeAnnouncement::new(
+                    alias,
+                    addresses,
+                    &self.private_key,
+                    now,
+                    self.open_channel_auto_accept_min_ckb_funding_amount,
+                );
                 debug!(
                     "Created new node announcement message: {:?}, previous {:?}",
                     &announcement, self.last_node_announcement_message
@@ -3563,7 +3569,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 1;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     fn create_fake_node_announcement_mesage_version2() -> NodeAnnouncement {
@@ -3575,7 +3581,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 2;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     fn create_fake_node_announcement_mesage_version3() -> NodeAnnouncement {
@@ -3587,7 +3593,7 @@ mod tests {
                 .map(|x| MultiAddr::from_str(x).expect("valid multiaddr"))
                 .collect();
         let version = 3;
-        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version)
+        NodeAnnouncement::new(node_name.into(), addresses, &priv_key, version, 0)
     }
 
     // Manually mark syncing done to avoid waiting for the syncing process.

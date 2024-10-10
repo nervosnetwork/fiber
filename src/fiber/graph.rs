@@ -853,6 +853,7 @@ mod tests {
                     vec![],
                     &secret_key1.into(),
                     0,
+                    0,
                 ),
             });
             for i in 1..keypairs.len() {
@@ -864,6 +865,7 @@ mod tests {
                         format!("node{i}").as_str().into(),
                         vec![],
                         &sk.into(),
+                        0,
                         0,
                     ),
                 };

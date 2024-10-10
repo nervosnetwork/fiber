@@ -16,92 +16,92 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
 #[derive(Serialize, Deserialize)]
-pub struct SendBtcParams {
-    pub btc_pay_req: String,
-    pub currency: Currency,
+pub(crate) struct SendBtcParams {
+    btc_pay_req: String,
+    currency: Currency,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendBTCResponse {
+pub(crate) struct SendBTCResponse {
     // Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
+    timestamp: u64,
     // Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
-    pub expiry: u64,
+    expiry: u64,
     // The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry: u64,
+    ckb_final_tlc_expiry: u64,
 
-    pub currency: Currency,
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    currency: Currency,
+    wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
-    pub btc_pay_req: String,
-    pub ckb_pay_req: String,
-    pub payment_hash: String,
+    btc_pay_req: String,
+    ckb_pay_req: String,
+    payment_hash: String,
 
     #[serde_as(as = "U128Hex")]
     // Amount required to pay in Satoshis, including fee
-    pub amount_sats: u128,
+    amount_sats: u128,
     #[serde_as(as = "U128Hex")]
-    pub fee_sats: u128,
+    fee_sats: u128,
 
-    pub status: CchOrderStatus,
+    status: CchOrderStatus,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
-pub struct ReceiveBtcParams {
+pub(crate) struct ReceiveBtcParams {
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
-    pub channel_id: Hash256,
+    payment_hash: String,
+    channel_id: Hash256,
     /// How many satoshis to receive, excluding cross-chain hub fee.
     #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
+    amount_sats: u128,
     /// Expiry set for the HTLC for the CKB payment to the payee.
     #[serde_as(as = "U64Hex")]
-    pub final_tlc_expiry: u64,
+    final_tlc_expiry: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetReceiveBtcOrderParams {
+pub(crate) struct GetReceiveBtcOrderParams {
     /// Payment hash for the HTLC for both CKB and BTC.
-    pub payment_hash: String,
+    payment_hash: String,
 }
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiveBTCResponse {
+pub(crate) struct ReceiveBTCResponse {
     // Seconds since epoch when the order is created
     #[serde_as(as = "U64Hex")]
-    pub timestamp: u64,
+    timestamp: u64,
     // Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
-    pub expiry: u64,
+    expiry: u64,
     // The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry: u64,
+    ckb_final_tlc_expiry: u64,
 
-    pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
+    wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
-    pub btc_pay_req: String,
-    pub payment_hash: String,
-    pub channel_id: Hash256,
+    btc_pay_req: String,
+    payment_hash: String,
+    channel_id: Hash256,
     #[serde_as(as = "Option<U64Hex>")]
-    pub tlc_id: Option<u64>,
+    tlc_id: Option<u64>,
 
     // Amount will be received by the payee
     #[serde_as(as = "U128Hex")]
-    pub amount_sats: u128,
+    amount_sats: u128,
     #[serde_as(as = "U128Hex")]
-    pub fee_sats: u128,
+    fee_sats: u128,
 
-    pub status: CchOrderStatus,
+    status: CchOrderStatus,
 }
 
 #[rpc(server)]
-pub trait CchRpc {
+trait CchRpc {
     #[method(name = "send_btc")]
     async fn send_btc(&self, params: SendBtcParams) -> Result<SendBTCResponse, ErrorObjectOwned>;
 
@@ -118,17 +118,17 @@ pub trait CchRpc {
     ) -> Result<ReceiveBTCResponse, ErrorObjectOwned>;
 }
 
-pub struct CchRpcServerImpl {
-    pub cch_actor: ActorRef<CchMessage>,
+pub(crate) struct CchRpcServerImpl {
+    cch_actor: ActorRef<CchMessage>,
 }
 
 impl CchRpcServerImpl {
-    pub fn new(cch_actor: ActorRef<CchMessage>) -> Self {
+    pub(crate) fn new(cch_actor: ActorRef<CchMessage>) -> Self {
         CchRpcServerImpl { cch_actor }
     }
 }
 
-pub const TIMEOUT: u64 = 1000;
+const TIMEOUT: u64 = 1000;
 
 #[async_trait]
 impl CchRpcServer for CchRpcServerImpl {
