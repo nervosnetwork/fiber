@@ -35,13 +35,13 @@ use crate::{
     FiberConfig, NetworkServiceEvent,
 };
 
-use super::graph::PaymentSession;
-use super::{
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::{
     channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
-use crate::fiber::graph::NetworkGraphStateStore;
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -672,20 +672,15 @@ impl InvoiceStore for MemoryStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::NetworkNode;
+#[tokio::test]
+async fn test_connect_to_other_node() {
+    let mut node_a = NetworkNode::new().await;
+    let node_b = NetworkNode::new().await;
+    node_a.connect_to(&node_b).await;
+}
 
-    #[tokio::test]
-    async fn test_connect_to_other_node() {
-        let mut node_a = NetworkNode::new().await;
-        let node_b = NetworkNode::new().await;
-        node_a.connect_to(&node_b).await;
-    }
-
-    #[tokio::test]
-    async fn test_restart_network_node() {
-        let mut node = NetworkNode::new().await;
-        node.restart().await;
-    }
+#[tokio::test]
+async fn test_restart_network_node() {
+    let mut node = NetworkNode::new().await;
+    node.restart().await;
 }

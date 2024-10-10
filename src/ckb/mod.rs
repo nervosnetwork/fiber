@@ -7,6 +7,7 @@ pub use config::{CkbConfig, DEFAULT_CKB_BASE_DIR_NAME};
 pub use error::{CkbChainError, FundingError};
 pub use funding::{FundingRequest, FundingTx};
 
+pub mod config;
 pub mod contracts;
 
 #[cfg(test)]

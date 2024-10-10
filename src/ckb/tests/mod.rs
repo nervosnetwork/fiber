@@ -1,4 +1,5 @@
 mod actor;
-// mod contracts;
+mod config;
+mod contracts;
 
 pub mod test_utils;
