@@ -28,19 +28,20 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::{submit_tx, trace_tx, trace_tx_hash, CkbChainMessage, MockChainActor},
+    ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
+    ckb::CkbChainMessage,
     fiber::network::NetworkActorStartArguments,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
 
-use super::graph::PaymentSession;
-use super::{
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::{
     channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     types::Hash256,
     NetworkActor, NetworkActorCommand, NetworkActorMessage,
 };
-use crate::fiber::graph::NetworkGraphStateStore;
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -671,20 +672,15 @@ impl InvoiceStore for MemoryStore {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::NetworkNode;
+#[tokio::test]
+async fn test_connect_to_other_node() {
+    let mut node_a = NetworkNode::new().await;
+    let node_b = NetworkNode::new().await;
+    node_a.connect_to(&node_b).await;
+}
 
-    #[tokio::test]
-    async fn test_connect_to_other_node() {
-        let mut node_a = NetworkNode::new().await;
-        let node_b = NetworkNode::new().await;
-        node_a.connect_to(&node_b).await;
-    }
-
-    #[tokio::test]
-    async fn test_restart_network_node() {
-        let mut node = NetworkNode::new().await;
-        node.restart().await;
-    }
+#[tokio::test]
+async fn test_restart_network_node() {
+    let mut node = NetworkNode::new().await;
+    node.restart().await;
 }

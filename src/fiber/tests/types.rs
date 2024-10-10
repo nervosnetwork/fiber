@@ -1,0 +1,111 @@
+use crate::fiber::{
+    gen::fiber as molecule_fiber,
+    hash_algorithm::HashAlgorithm,
+    types::{
+        secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+        TlcFailDetail, TlcFailErrorCode, RemoveTlcFail
+    },
+};
+use ckb_types::packed::OutPointBuilder;
+use ckb_types::prelude::Builder;
+use secp256k1::{Secp256k1, SecretKey};
+
+use super::test_utils::generate_seckey;
+
+#[test]
+fn test_serde_public_key() {
+    let sk = SecretKey::from_slice(&[42; 32]).unwrap();
+    let public_key = Pubkey::from(sk.public_key(secp256k1_instance()));
+    let pk_str = serde_json::to_string(&public_key).unwrap();
+    assert_eq!(
+        "\"035be5e9478209674a96e60f1f037f6176540fd001fa1d64694770c56a7709c42c\"",
+        &pk_str
+    );
+    let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
+    assert_eq!(pubkey, public_key)
+}
+
+#[test]
+fn test_add_tlc_serialization() {
+    let add_tlc = AddTlc {
+        channel_id: [42; 32].into(),
+        tlc_id: 42,
+        amount: 42,
+        payment_hash: [42; 32].into(),
+        expiry: 42.into(),
+        hash_algorithm: HashAlgorithm::Sha256,
+        onion_packet: vec![],
+    };
+    let add_tlc_mol: molecule_fiber::AddTlc = add_tlc.clone().into();
+    let add_tlc2 = add_tlc_mol.try_into().expect("decode");
+    assert_eq!(add_tlc, add_tlc2);
+}
+
+#[test]
+fn test_peeled_onion_packet() {
+    let secp = Secp256k1::new();
+    let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
+        .take(3)
+        .collect();
+    let payment_hash = [1; 32].into();
+    let hops_infos = vec![
+        PaymentHopData {
+            payment_hash,
+            amount: 2,
+            expiry: 3,
+            next_hop: Some(keys[1].pubkey().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: HashAlgorithm::Sha256,
+            preimage: None,
+        },
+        PaymentHopData {
+            payment_hash,
+            amount: 5,
+            expiry: 6,
+            next_hop: Some(keys[2].pubkey().into()),
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: HashAlgorithm::Sha256,
+            preimage: None,
+        },
+        PaymentHopData {
+            payment_hash,
+            amount: 8,
+            expiry: 9,
+            next_hop: None,
+            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            tlc_hash_algorithm: HashAlgorithm::Sha256,
+            preimage: None,
+        },
+    ];
+    let packet = PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)
+        .expect("create peeled packet");
+
+    let serialized = packet.serialize();
+    let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
+
+    assert_eq!(packet, deserialized);
+
+    assert_eq!(packet.current, hops_infos[0]);
+    assert!(!packet.is_last());
+
+    let packet = packet.peel(&keys[1], &secp).expect("peel");
+    assert_eq!(packet.current, hops_infos[1]);
+    assert!(!packet.is_last());
+
+    let packet = packet.peel(&keys[2], &secp).expect("peel");
+    assert_eq!(packet.current, hops_infos[2]);
+    assert!(packet.is_last());
+}
+
+#[test]
+fn test_tlc_fail_error() {
+    let tlc_fail_detail =
+        TlcFailDetail::new(Hash256::default(), 0, TlcFailErrorCode::InvalidOnionVersion);
+    assert!(!tlc_fail_detail.is_node());
+    assert!(tlc_fail_detail.is_bad_onion());
+    assert!(tlc_fail_detail.is_perm());
+    let tlc_fail: RemoveTlcFail = tlc_fail_detail.clone().into();
+
+    let convert_back: TlcFailDetail = tlc_fail.into();
+    assert_eq!(tlc_fail_detail, convert_back);
+}
