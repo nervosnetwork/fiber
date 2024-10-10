@@ -128,8 +128,8 @@ struct RemoveTlcFulfill {
     payment_preimage:   Byte32,
 }
 
-struct RemoveTlcFail {
-    error_code:         Uint32,
+table RemoveTlcFail {
+    onion_packet:        Bytes,
 }
 
 union RemoveTlcReason {

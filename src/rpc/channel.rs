@@ -3,9 +3,10 @@ use crate::fiber::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
         RemoveTlcCommand, ShutdownCommand, UpdateCommand,
     },
+    graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U32Hex, U64Hex},
+    serde_utils::{U128Hex, U16Hex, U64Hex},
     types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
@@ -143,8 +144,8 @@ enum RemoveTlcReason {
         payment_preimage: Hash256,
     },
     RemoveTlcFail {
-        #[serde_as(as = "U32Hex")]
-        error_code: u32,
+        #[serde_as(as = "U16Hex")]
+        error_code: u16,
     },
 }
 
@@ -170,6 +171,22 @@ pub(crate) struct UpdateChannelParams {
     tlc_maximum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetPaymentCommandParams {
+    pub payment_hash: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct GetPaymentCommandResult {
+    pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    #[serde_as(as = "U128Hex")]
+    pub last_update_time: u128,
+    pub failed_error: Option<String>,
 }
 
 #[serde_as]
@@ -212,10 +229,16 @@ pub(crate) struct SendPaymentCommandParams {
     udt_type_script: Option<Script>,
 }
 
+#[serde_as]
 #[derive(Clone, Serialize)]
 pub(crate) struct SendPaymentResult {
     payment_hash: Hash256,
+    status: PaymentSessionStatus,
+    #[serde_as(as = "U128Hex")]
+    last_update_time: u128,
+    failed_error: Option<String>,
 }
+
 #[rpc(server)]
 trait ChannelRpc {
     #[method(name = "open_channel")]
@@ -260,6 +283,12 @@ trait ChannelRpc {
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<SendPaymentResult, ErrorObjectOwned>;
+
+    #[method(name = "get_payment")]
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct ChannelRpcServerImpl<S> {
@@ -414,9 +443,12 @@ where
                                         RemoveTlcFulfill { payment_preimage },
                                     )
                                 }
-                                RemoveTlcReason::RemoveTlcFail { error_code } => {
+                                RemoveTlcReason::RemoveTlcFail { error_code: _ } => {
+                                    // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        RemoveTlcFail { error_code },
+                                        RemoveTlcFail {
+                                            onion_packet: vec![],
+                                        },
                                     )
                                 }
                             },
@@ -495,6 +527,27 @@ where
         };
         handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
             payment_hash: response.payment_hash,
+            status: response.status,
+            last_update_time: response.last_update_time,
+            failed_error: response.failed_error,
+        })
+    }
+
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                params.payment_hash,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
+            payment_hash: response.payment_hash,
+            status: response.status,
+            last_update_time: response.last_update_time,
+            failed_error: response.failed_error,
         })
     }
 }

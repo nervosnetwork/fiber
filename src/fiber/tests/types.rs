@@ -1,7 +1,11 @@
 use crate::fiber::{
     gen::fiber as molecule_fiber,
     hash_algorithm::HashAlgorithm,
-    types::{secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey},
+    tests::test_utils::generate_pubkey,
+    types::{
+        secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+        RemoveTlcFail, TlcFailDetail, TlcFailErrorCode,
+    },
 };
 use ckb_types::packed::OutPointBuilder;
 use ckb_types::prelude::Builder;
@@ -92,4 +96,25 @@ fn test_peeled_onion_packet() {
     let packet = packet.peel(&keys[2], &secp).expect("peel");
     assert_eq!(packet.current, hops_infos[2]);
     assert!(packet.is_last());
+}
+
+#[test]
+fn test_tlc_fail_error() {
+    let tlc_fail_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionVersion);
+    assert!(!tlc_fail_detail.is_node());
+    assert!(tlc_fail_detail.is_bad_onion());
+    assert!(tlc_fail_detail.is_perm());
+    let tlc_fail: RemoveTlcFail = tlc_fail_detail.clone().into();
+
+    let convert_back: TlcFailDetail = tlc_fail.into();
+    assert_eq!(tlc_fail_detail, convert_back);
+
+    let node_fail = TlcFailDetail::new_node_fail(
+        TlcFailErrorCode::PermanentNodeFailure,
+        generate_pubkey().into(),
+    );
+    assert!(node_fail.is_node());
+    let tlc_fail = RemoveTlcFail::from(node_fail.clone());
+    let convert_back: TlcFailDetail = tlc_fail.into();
+    assert_eq!(node_fail, convert_back);
 }

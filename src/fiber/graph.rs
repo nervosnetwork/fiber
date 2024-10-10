@@ -1,8 +1,9 @@
-use super::network::{get_chain_hash, SendPaymentCommand};
+use super::network::{get_chain_hash, SendPaymentData};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use ckb_jsonrpc_types::JsonBytes;
@@ -326,6 +327,15 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
+    pub fn get_mut_channels_by_peer(
+        &mut self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = &mut ChannelInfo> {
+        self.channels
+            .values_mut()
+            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+    }
+
     pub fn get_channels_within_block_range(
         &self,
         start_block: u64,
@@ -451,6 +461,31 @@ where
         }
     }
 
+    pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
+        if let Some(channel) = self.channels.get_mut(channel_outpoint) {
+            if let Some(info) = channel.node1_to_node2.as_mut() {
+                info.enabled = false;
+            }
+            if let Some(info) = channel.node2_to_node1.as_mut() {
+                info.enabled = false;
+            }
+        }
+    }
+
+    pub(crate) fn mark_node_failed(&mut self, node_id: Pubkey) {
+        for channel in self.get_mut_channels_by_peer(node_id) {
+            if channel.node1() == node_id {
+                if let Some(info) = channel.node1_to_node2.as_mut() {
+                    info.enabled = false;
+                }
+            } else {
+                if let Some(info) = channel.node2_to_node1.as_mut() {
+                    info.enabled = false;
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
@@ -458,28 +493,17 @@ where
         self.connected_peer_addresses.clear();
     }
 
-    pub fn init_payment_session(&self, payment_request: SendPaymentCommand) -> PaymentSession {
-        let payment_session = PaymentSession::new(payment_request, 3);
-        if let Some(session) = self
-            .store
-            .get_payment_session(payment_session.payment_hash())
-        {
-            return session;
-        } else {
-            self.store.insert_payment_session(payment_session.clone());
-            payment_session
-        }
-    }
-
     /// Returns a list of `PaymentHopData` for all nodes in the route, including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_request: SendPaymentCommand,
+        payment_request: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
-            .check_valid()
-            .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
+        let target = payment_request.target_pubkey;
+        let amount = payment_request.amount;
+        let preimage = payment_request.preimage;
+        let payment_hash = payment_request.payment_hash;
+        let udt_type_script = payment_request.udt_type_script;
         let invoice = payment_request
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
@@ -783,27 +807,78 @@ pub trait NetworkGraphStateStore {
     fn remove_connected_peer(&self, peer_id: &PeerId);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    fn get_payment_sessions_by_status(&self, status: PaymentSessionStatus) -> Vec<PaymentSession>;
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentSessionStatus {
+    // initial status, payment session is created, no HTLC is sent
+    Created,
+    // related HTLC is send and waiting for the response
+    Inflight,
+    // related HTLC is successfully settled
+    Success,
+    // related HTLC is failed
+    Failed,
+}
+
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
-    pub command: SendPaymentCommand,
+    pub request: SendPaymentData,
     pub retried_times: u32,
     pub last_error: Option<String>,
     pub try_limit: u32,
+    pub status: PaymentSessionStatus,
+    pub created_time: u128,
+    pub last_updated_time: u128,
+    // The channel_outpoint and the tlc_id of the first hop
+    #[serde_as(as = "Option<EntityHex>")]
+    pub first_hop_channel_outpoint: Option<OutPoint>,
+    pub first_hop_tlc_id: Option<u64>,
 }
 
 impl PaymentSession {
-    pub fn new(command: SendPaymentCommand, try_limit: u32) -> Self {
+    pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
         Self {
-            command,
+            request,
             retried_times: 0,
             last_error: None,
             try_limit,
+            status: PaymentSessionStatus::Created,
+            created_time: now,
+            last_updated_time: now,
+            first_hop_channel_outpoint: None,
+            first_hop_tlc_id: None,
         }
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        self.command.payment_hash()
+        self.request.payment_hash
+    }
+
+    pub fn set_status(&mut self, status: PaymentSessionStatus) {
+        self.status = status;
+        self.last_updated_time = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+    }
+
+    pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+        self.first_hop_channel_outpoint = Some(channel_outpoint);
+        self.first_hop_tlc_id = Some(tlc_id);
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.set_status(PaymentSessionStatus::Success);
+        self.last_error = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str) {
+        self.set_status(PaymentSessionStatus::Failed);
+        self.last_error = Some(error.to_string());
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.retried_times < self.try_limit
     }
 }

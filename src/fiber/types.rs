@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use strum::{AsRefStr, IntoStaticStr};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -1249,15 +1250,134 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TlcFailDetailData {
+    ChannelFailed {
+        #[serde_as(as = "EntityHex")]
+        channel_outpoint: OutPoint,
+    },
+    NodeFailed {
+        node_id: Pubkey,
+    },
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TlcFailDetail {
+    pub error_code: u16,
+    pub extra_data: Option<TlcFailDetailData>,
+}
+
+impl TlcFailDetail {
+    pub fn new(error_code: TlcFailErrorCode) -> Self {
+        TlcFailDetail {
+            error_code: error_code.into(),
+            extra_data: None,
+        }
+    }
+
+    pub fn new_node_fail(error_code: TlcFailErrorCode, node_id: Pubkey) -> Self {
+        TlcFailDetail {
+            error_code: error_code.into(),
+            extra_data: Some(TlcFailDetailData::NodeFailed { node_id }),
+        }
+    }
+
+    pub fn new_channel_fail(error_code: TlcFailErrorCode, channel_outpoint: OutPoint) -> Self {
+        TlcFailDetail {
+            error_code: error_code.into(),
+            extra_data: Some(TlcFailDetailData::ChannelFailed { channel_outpoint }),
+        }
+    }
+
+    pub fn error_node_id(&self) -> Option<Pubkey> {
+        match &self.extra_data {
+            Some(TlcFailDetailData::NodeFailed { node_id }) => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
+        match &self.extra_data {
+            Some(TlcFailDetailData::ChannelFailed { channel_outpoint }) => {
+                Some(channel_outpoint.clone())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn error_code(&self) -> TlcFailErrorCode {
+        self.error_code.into()
+    }
+
+    pub fn error_code_as_str(&self) -> String {
+        let error_code: TlcFailErrorCode = self.error_code.into();
+        error_code.as_ref().to_string()
+    }
+
+    pub fn set_extra_data(&mut self, extra_data: TlcFailDetailData) {
+        self.extra_data = Some(extra_data);
+    }
+
+    pub fn is_node(&self) -> bool {
+        self.error_code & NODE != 0
+    }
+
+    pub fn is_bad_onion(&self) -> bool {
+        self.error_code & BADONION != 0
+    }
+
+    pub fn is_perm(&self) -> bool {
+        self.error_code & PERM != 0
+    }
+
+    pub fn is_update(&self) -> bool {
+        self.error_code & UPDATE != 0
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        deterministically_serialize(self)
+    }
+
+    fn deserialize(data: &[u8]) -> Option<Self> {
+        serde_json::from_slice(data).ok()
+    }
+}
+
+impl From<TlcFailDetail> for RemoveTlcFail {
+    fn from(tlc_fail: TlcFailDetail) -> Self {
+        RemoveTlcFail::new(tlc_fail.serialize())
+    }
+}
+
+impl From<RemoveTlcFail> for TlcFailDetail {
+    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
+        TlcFailDetail::deserialize(&remove_tlc_fail.onion_packet).expect("deserialize fail")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
-    pub error_code: u32,
+    // TODO: replace this with the real onion packet
+    // This is the onion packet we need to encode and send back to the sender
+    // currently it's the raw TlcFailDetail serialized data
+    // sender should decode it and get the real TlcFailDetail
+    pub onion_packet: Vec<u8>,
+}
+
+impl RemoveTlcFail {
+    pub fn new(packet_data: Vec<u8>) -> Self {
+        RemoveTlcFail {
+            onion_packet: packet_data,
+        }
+    }
 }
 
 impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
     fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
         molecule_fiber::RemoveTlcFail::new_builder()
-            .error_code(remove_tlc_fail.error_code.pack())
+            .onion_packet(remove_tlc_fail.onion_packet.pack())
             .build()
     }
 }
@@ -1267,12 +1387,61 @@ impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
 
     fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
         Ok(RemoveTlcFail {
-            error_code: remove_tlc_fail.error_code().unpack(),
+            onion_packet: remove_tlc_fail.onion_packet().unpack(),
         })
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// The onion packet is invalid
+const BADONION: u16 = 0x8000;
+// Permanent errors (otherwise transient)
+const PERM: u16 = 0x4000;
+// Node releated errors (otherwise channels)
+const NODE: u16 = 0x2000;
+//  Channel forwarding parameter was violated
+const UPDATE: u16 = 0x1000;
+
+#[repr(u16)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, IntoStaticStr)]
+pub enum TlcFailErrorCode {
+    TemporaryNodeFailure = NODE | 2,
+    PermanentNodeFailure = PERM | NODE | 2,
+    RequiredNodeFeatureMissing = PERM | NODE | 3,
+    InvalidOnionVersion = BADONION | PERM | 4,
+    InvalidOnionHmac = BADONION | PERM | 5,
+    InvalidOnionKey = BADONION | PERM | 6,
+    TemporaryChannelFailure = UPDATE | 7,
+    PermanentChannelFailure = PERM | 8,
+    RequiredChannelFeatureMissing = PERM | 9,
+    UnknownNextPeer = PERM | 10,
+    AmountBelowMinimum = UPDATE | 11,
+    FeeInsufficient = UPDATE | 12,
+    IncorrectCltvExpiry = UPDATE | 13,
+    ExpiryTooSoon = UPDATE | 14,
+    IncorrectOrUnknownPaymentDetails = PERM | 15,
+    FinalIncorrectCltvExpiry = 18,
+    FinalIncorrectHtlcAmount = 19,
+    ChannelDisabled = UPDATE | 20,
+    ExpiryTooFar = 21,
+    InvalidOnionPayload = PERM | 22,
+    MppTimeout = 23,
+    InvalidOnionBlinding = BADONION | PERM | 24,
+}
+
+impl From<TlcFailErrorCode> for u16 {
+    fn from(error_code: TlcFailErrorCode) -> Self {
+        error_code as u16
+    }
+}
+
+impl From<u16> for TlcFailErrorCode {
+    fn from(value: u16) -> Self {
+        TlcFailErrorCode::try_from(value)
+            .unwrap_or_else(|_| panic!("Invalid value for TlcFailErrorCode: {}", value))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(RemoveTlcFail),
@@ -2989,7 +3158,8 @@ impl<T: HopData> OnionPacket<T> {
 }
 
 impl<T: HopData> PeeledOnionPacket<T> {
-    /// - `hops_info`: the first is the instruction for the origin node itself. Remaining elements are for each node to receive the packet.
+    /// - `hops_info`: the first is the instruction for the origin node itself.
+    ///                Remaining elements are for each node to receive the packet.
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<T>,
