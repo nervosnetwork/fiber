@@ -22,6 +22,9 @@ pub mod actors;
 
 pub mod tasks;
 
+#[cfg(test)]
+mod tests;
+
 use git_version::git_version;
 
 const GIT_VERSION: &str = git_version!();
