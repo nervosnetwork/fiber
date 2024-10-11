@@ -1,4 +1,4 @@
-use super::network::{get_chain_hash, SendPaymentData};
+use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
@@ -824,8 +824,8 @@ pub struct PaymentSession {
     pub last_error: Option<String>,
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
-    pub created_time: u128,
-    pub last_updated_time: u128,
+    pub created_at: u128,
+    pub last_updated_at: u128,
     // The channel_outpoint and the tlc_id of the first hop
     #[serde_as(as = "Option<EntityHex>")]
     pub first_hop_channel_outpoint: Option<OutPoint>,
@@ -841,8 +841,8 @@ impl PaymentSession {
             last_error: None,
             try_limit,
             status: PaymentSessionStatus::Created,
-            created_time: now,
-            last_updated_time: now,
+            created_at: now,
+            last_updated_at: now,
             first_hop_channel_outpoint: None,
             first_hop_tlc_id: None,
         }
@@ -854,7 +854,7 @@ impl PaymentSession {
 
     pub fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_time = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
     }
 
     pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
@@ -874,5 +874,17 @@ impl PaymentSession {
 
     pub fn can_retry(&self) -> bool {
         self.retried_times < self.try_limit
+    }
+}
+
+impl From<PaymentSession> for SendPaymentResponse {
+    fn from(session: PaymentSession) -> Self {
+        Self {
+            payment_hash: session.request.payment_hash,
+            status: session.status,
+            failed_error: session.last_error,
+            created_at: session.created_at,
+            last_updated_at: session.last_updated_at,
+        }
     }
 }

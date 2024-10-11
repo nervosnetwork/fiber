@@ -108,7 +108,8 @@ pub struct AcceptChannelResponse {
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
     pub status: PaymentSessionStatus,
-    pub last_update_time: u128,
+    pub created_at: u128,
+    pub last_updated_at: u128,
     pub failed_error: Option<String>,
 }
 
@@ -1182,6 +1183,7 @@ where
                 state.maybe_finish_sync();
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
+                // When a node is restarted, RemoveTLC will also be resent if necessary
                 self.on_tlc_remove_received(state, payment_hash, remove_tlc.reason)
                     .await;
             }
@@ -2020,17 +2022,8 @@ where
     }
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
-        let payment_session = self.store.get_payment_session(*payment_hash);
-        match payment_session {
-            Some(payment_session) => {
-                let response = SendPaymentResponse {
-                    payment_hash: payment_session.payment_hash(),
-                    last_update_time: payment_session.last_updated_time,
-                    status: payment_session.status,
-                    failed_error: payment_session.last_error.clone(),
-                };
-                Ok(response)
-            }
+        match self.store.get_payment_session(*payment_hash) {
+            Some(payment_session) => Ok(payment_session.into()),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash
@@ -2135,12 +2128,7 @@ where
         let payment_session = PaymentSession::new(payment_data.clone(), 5);
         self.store.insert_payment_session(payment_session.clone());
         let session = self.try_payment_session(state, payment_session).await?;
-        return Ok(SendPaymentResponse {
-            payment_hash: payment_data.payment_hash,
-            last_update_time: session.last_updated_time,
-            status: session.status,
-            failed_error: session.last_error.clone(),
-        });
+        return Ok(session.into());
     }
 }
 
@@ -2199,7 +2187,8 @@ impl NetworkSyncState {
                     // TODO: we may want more than one successful syncing.
                     false
                 } else {
-                    debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
+                    debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}",
+                            peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
                     true
                 }
             } else {

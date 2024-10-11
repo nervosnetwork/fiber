@@ -185,7 +185,9 @@ pub struct GetPaymentCommandResult {
     pub payment_hash: Hash256,
     pub status: PaymentSessionStatus,
     #[serde_as(as = "U128Hex")]
-    pub last_update_time: u128,
+    created_at: u128,
+    #[serde_as(as = "U128Hex")]
+    pub last_updated_at: u128,
     pub failed_error: Option<String>,
 }
 
@@ -227,16 +229,6 @@ pub(crate) struct SendPaymentCommandParams {
 
     // udt type script for the payment
     udt_type_script: Option<Script>,
-}
-
-#[serde_as]
-#[derive(Clone, Serialize)]
-pub(crate) struct SendPaymentResult {
-    payment_hash: Hash256,
-    status: PaymentSessionStatus,
-    #[serde_as(as = "U128Hex")]
-    last_update_time: u128,
-    failed_error: Option<String>,
 }
 
 #[rpc(server)]
@@ -282,7 +274,7 @@ trait ChannelRpc {
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
-    ) -> Result<SendPaymentResult, ErrorObjectOwned>;
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
     #[method(name = "get_payment")]
     async fn get_payment(
@@ -507,7 +499,7 @@ where
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
-    ) -> Result<SendPaymentResult, ErrorObjectOwned> {
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
@@ -525,10 +517,11 @@ where
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
             status: response.status,
-            last_update_time: response.last_update_time,
+            created_at: response.created_at,
+            last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
         })
     }
@@ -546,7 +539,8 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
             status: response.status,
-            last_update_time: response.last_update_time,
+            last_updated_at: response.last_updated_at,
+            created_at: response.created_at,
             failed_error: response.failed_error,
         })
     }
