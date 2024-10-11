@@ -1927,6 +1927,7 @@ where
                     let error_detail = TlcFailDetail::new_channel_fail(
                         TlcFailErrorCode::PermanentChannelFailure,
                         channel_outpoint.clone(),
+                        None,
                     );
                     reply
                         .send(Err(error_detail.into()))
@@ -1934,7 +1935,7 @@ where
                     return;
                 }
             };
-            let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
+            let (send, recv) = oneshot::channel::<Result<AddTlcResponse, RemoveTlcFail>>();
             let rpc_reply = RpcReplyPort::from(send);
             let command = ChannelCommand::AddTlc(
                 AddTlcCommand {
@@ -1957,11 +1958,7 @@ where
 
             match recv.await.expect("recv error") {
                 Ok(res) => Ok(res.tlc_id),
-                Err(_err) => {
-                    // FIXME: rework the error handling
-                    let error_detail = TlcFailDetail::new(TlcFailErrorCode::TemporaryNodeFailure);
-                    Err(error_detail.into())
-                }
+                Err(err) => Err(err),
             }
         } else {
             info!("onion packet is empty, ignore it");

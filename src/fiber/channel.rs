@@ -113,7 +113,10 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
+    AddTlc(
+        AddTlcCommand,
+        RpcReplyPort<Result<AddTlcResponse, RemoveTlcFail>>,
+    ),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
@@ -1279,7 +1282,14 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = reply.send(Err(err.to_string()));
+                        let channel_update =
+                            state.get_signed_channel_update_message(&self.network).await;
+                        let detail_error = TlcFailDetail::new_channel_fail(
+                            TlcFailErrorCode::PermanentNodeFailure,
+                            state.get_funding_transaction_outpoint(),
+                            channel_update,
+                        );
+                        let _ = reply.send(Err(detail_error.into()));
                         Err(err)
                     }
                 }
@@ -4374,12 +4384,15 @@ impl ChannelActorState {
         }
     }
 
-    pub async fn broadcast_channel_update(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn get_signed_channel_update_message(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> Option<ChannelUpdate> {
         let mut channel_update = match self.get_unsigned_channel_update_message() {
             Some(message) => message,
             _ => {
                 warn!("Failed to generate channel update message");
-                return;
+                return None;
             }
         };
 
@@ -4396,15 +4409,20 @@ impl ChannelActorState {
             "Broadcasting channel update message to peers: {:?}",
             &channel_update
         );
+        Some(channel_update)
+    }
 
-        network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessage(
-                    vec![self.get_remote_peer_id()],
-                    FiberBroadcastMessage::ChannelUpdate(channel_update),
-                ),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    pub async fn broadcast_channel_update(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        if let Some(channel_update) = self.get_signed_channel_update_message(network).await {
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::BroadcastMessage(
+                        vec![self.get_remote_peer_id()],
+                        FiberBroadcastMessage::ChannelUpdate(channel_update),
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
     }
 
     pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {

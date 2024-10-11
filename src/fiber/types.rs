@@ -18,6 +18,7 @@ use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
+use core::fmt::{self, Formatter};
 use fiber_sphinx::SphinxError;
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
@@ -1251,11 +1252,12 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TlcFailDetailData {
     ChannelFailed {
         #[serde_as(as = "EntityHex")]
         channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
     },
     NodeFailed {
         node_id: Pubkey,
@@ -1263,7 +1265,7 @@ pub enum TlcFailDetailData {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TlcFailDetail {
     pub error_code: TlcFailErrorCode,
     pub extra_data: Option<TlcFailDetailData>,
@@ -1284,10 +1286,17 @@ impl TlcFailDetail {
         }
     }
 
-    pub fn new_channel_fail(error_code: TlcFailErrorCode, channel_outpoint: OutPoint) -> Self {
+    pub fn new_channel_fail(
+        error_code: TlcFailErrorCode,
+        channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
+    ) -> Self {
         TlcFailDetail {
             error_code: error_code.into(),
-            extra_data: Some(TlcFailDetailData::ChannelFailed { channel_outpoint }),
+            extra_data: Some(TlcFailDetailData::ChannelFailed {
+                channel_outpoint,
+                channel_update,
+            }),
         }
     }
 
@@ -1300,9 +1309,9 @@ impl TlcFailDetail {
 
     pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
         match &self.extra_data {
-            Some(TlcFailDetailData::ChannelFailed { channel_outpoint }) => {
-                Some(channel_outpoint.clone())
-            }
+            Some(TlcFailDetailData::ChannelFailed {
+                channel_outpoint, ..
+            }) => Some(channel_outpoint.clone()),
             _ => None,
         }
     }
@@ -1392,13 +1401,19 @@ impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
     }
 }
 
+impl std::fmt::Display for RemoveTlcFail {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "RemoveTlcFail")
+    }
+}
+
 // The onion packet is invalid
 const BADONION: u16 = 0x8000;
 // Permanent errors (otherwise transient)
 const PERM: u16 = 0x4000;
 // Node releated errors (otherwise channels)
 const NODE: u16 = 0x2000;
-//  Channel forwarding parameter was violated
+// Channel forwarding parameter was violated
 const UPDATE: u16 = 0x1000;
 
 #[repr(u16)]
