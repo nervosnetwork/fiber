@@ -469,44 +469,13 @@ where
                         Ok(())
                     }
                     Err(e) => {
-                        let error_code = match e {
-                            ProcessingChannelError::PeelingOnionPacketError(_) => {
-                                TlcFailErrorCode::InvalidOnionPayload
-                            }
-                            ProcessingChannelError::InvalidParameter(_) => {
-                                TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
-                            }
-                            ProcessingChannelError::FinalIncorrectHTLCAmount => {
-                                TlcFailErrorCode::FinalIncorrectHtlcAmount
-                            }
-                            ProcessingChannelError::TlcAmountIsTooLow => {
-                                TlcFailErrorCode::AmountBelowMinimum
-                            }
-                            ProcessingChannelError::TlcNumberExceedLimit
-                            | ProcessingChannelError::TlcValueInflightExceedLimit => {
-                                TlcFailErrorCode::TemporaryChannelFailure
-                            }
-                            ProcessingChannelError::InvalidState(_) => match state.state {
-                                ChannelState::Closed(_) => TlcFailErrorCode::ChannelDisabled,
-                                ChannelState::ShuttingDown(_) | ChannelState::ChannelReady() => {
-                                    // we expect `ShuttingDown` and `ChannelReady` are both OK for tlc forwarding,
-                                    // so here are the unreachable point in normal workflow,
-                                    // set `TemporaryNodeFailure` for general temporary failure of the processing node here
-                                    TlcFailErrorCode::TemporaryNodeFailure
-                                }
-                                // otherwise, channel maybe not ready
-                                _ => TlcFailErrorCode::TemporaryChannelFailure,
-                            },
-                            // TODO: there maybe more error types here
-                            _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
-                        };
-                        let error_detail = TlcFailDetail::new(error_code);
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
                         // trying to add a duplicate tlc, so we use tlc count to make sure no new tlc was added
                         // and only send RemoveTlc message to peer if the TLC is not in our state
                         error!("Error handling AddTlc message: {:?}", e);
+                        let error_detail = self.get_tlc_detail_error(state, &e).await;
                         assert!(tlc_count == state.tlcs.len());
                         if state.get_received_tlc(tlc_id).is_none() {
                             self.network
@@ -691,6 +660,53 @@ where
                 Ok(())
             }
         }
+    }
+
+    async fn get_tlc_detail_error(
+        &self,
+        state: &mut ChannelActorState,
+        error: &ProcessingChannelError,
+    ) -> TlcFailDetail {
+        let error_code = match error {
+            ProcessingChannelError::PeelingOnionPacketError(_) => {
+                TlcFailErrorCode::InvalidOnionPayload
+            }
+            ProcessingChannelError::InvalidParameter(_) => {
+                TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
+            }
+            ProcessingChannelError::FinalIncorrectHTLCAmount => {
+                TlcFailErrorCode::FinalIncorrectHtlcAmount
+            }
+            ProcessingChannelError::TlcAmountIsTooLow => TlcFailErrorCode::AmountBelowMinimum,
+            ProcessingChannelError::TlcNumberExceedLimit
+            | ProcessingChannelError::TlcValueInflightExceedLimit => {
+                TlcFailErrorCode::TemporaryChannelFailure
+            }
+            ProcessingChannelError::InvalidState(_) => match state.state {
+                ChannelState::Closed(_) => TlcFailErrorCode::ChannelDisabled,
+                ChannelState::ShuttingDown(_) | ChannelState::ChannelReady() => {
+                    // we expect `ShuttingDown` and `ChannelReady` are both OK for tlc forwarding,
+                    // so here are the unreachable point in normal workflow,
+                    // set `TemporaryNodeFailure` for general temporary failure of the processing node here
+                    TlcFailErrorCode::TemporaryNodeFailure
+                }
+                // otherwise, channel maybe not ready
+                _ => TlcFailErrorCode::TemporaryChannelFailure,
+            },
+            // TODO: there maybe more error types here
+            _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
+        };
+
+        let channel_update = if error_code.is_update() {
+            state.get_signed_channel_update_message(&self.network).await
+        } else {
+            None
+        };
+        TlcFailDetail::new_channel_fail(
+            error_code,
+            state.get_funding_transaction_outpoint(),
+            channel_update,
+        )
     }
 
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
@@ -1282,14 +1298,8 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        let channel_update =
-                            state.get_signed_channel_update_message(&self.network).await;
-                        let detail_error = TlcFailDetail::new_channel_fail(
-                            TlcFailErrorCode::PermanentNodeFailure,
-                            state.get_funding_transaction_outpoint(),
-                            channel_update,
-                        );
-                        let _ = reply.send(Err(RemoveTlcFail::new(detail_error)));
+                        let error_detail = self.get_tlc_detail_error(state, &err).await;
+                        let _ = reply.send(Err(RemoveTlcFail::new(error_detail)));
                         Err(err)
                     }
                 }

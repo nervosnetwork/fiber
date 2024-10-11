@@ -1329,22 +1329,6 @@ impl TlcFailDetail {
         self.extra_data = Some(extra_data);
     }
 
-    pub fn is_node(&self) -> bool {
-        self.error_code as u16 & NODE != 0
-    }
-
-    pub fn is_bad_onion(&self) -> bool {
-        self.error_code as u16 & BADONION != 0
-    }
-
-    pub fn is_perm(&self) -> bool {
-        self.error_code as u16 & PERM != 0
-    }
-
-    pub fn is_update(&self) -> bool {
-        self.error_code as u16 & UPDATE != 0
-    }
-
     fn serialize(&self) -> Vec<u8> {
         deterministically_serialize(self)
     }
@@ -1433,6 +1417,24 @@ pub enum TlcFailErrorCode {
     InvalidOnionPayload = PERM | 22,
     MppTimeout = 23,
     InvalidOnionBlinding = BADONION | PERM | 24,
+}
+
+impl TlcFailErrorCode {
+    pub fn is_node(&self) -> bool {
+        *self as u16 & NODE != 0
+    }
+
+    pub fn is_bad_onion(&self) -> bool {
+        *self as u16 & BADONION != 0
+    }
+
+    pub fn is_perm(&self) -> bool {
+        *self as u16 & PERM != 0
+    }
+
+    pub fn is_update(&self) -> bool {
+        *self as u16 & UPDATE != 0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

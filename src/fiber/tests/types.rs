@@ -101,9 +101,9 @@ fn test_peeled_onion_packet() {
 #[test]
 fn test_tlc_fail_error() {
     let tlc_fail_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionVersion);
-    assert!(!tlc_fail_detail.is_node());
-    assert!(tlc_fail_detail.is_bad_onion());
-    assert!(tlc_fail_detail.is_perm());
+    assert!(!tlc_fail_detail.error_code.is_node());
+    assert!(tlc_fail_detail.error_code.is_bad_onion());
+    assert!(tlc_fail_detail.error_code.is_perm());
     let tlc_fail = RemoveTlcFail::new(tlc_fail_detail.clone());
 
     let convert_back: TlcFailDetail = tlc_fail.decode().expect("decoded fail");
@@ -113,7 +113,7 @@ fn test_tlc_fail_error() {
         TlcFailErrorCode::PermanentNodeFailure,
         generate_pubkey().into(),
     );
-    assert!(node_fail.is_node());
+    assert!(node_fail.error_code.is_node());
     let tlc_fail = RemoveTlcFail::new(node_fail.clone());
     let convert_back = tlc_fail.decode().expect("decoded fail");
     assert_eq!(node_fail, convert_back);
