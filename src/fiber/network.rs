@@ -1992,8 +1992,7 @@ where
                                 debug!("Failed to retry payment session: {:?}", res);
                             }
                         } else {
-                            let error_code: TlcFailErrorCode = detail_error.error_code.into();
-                            payment_session.set_failed_status(error_code.as_ref());
+                            payment_session.set_failed_status(detail_error.error_code.as_ref());
                         }
                     }
                 }
@@ -2003,8 +2002,7 @@ where
     }
 
     async fn update_with_tcl_fail_detail(&self, tcl_error_detail: TlcFailDetail) {
-        let error_code = tcl_error_detail.error_code();
-        match error_code {
+        match tcl_error_detail.error_code() {
             TlcFailErrorCode::PermanentChannelFailure => {
                 let channel_outpoint = tcl_error_detail
                     .error_channel_outpoint()

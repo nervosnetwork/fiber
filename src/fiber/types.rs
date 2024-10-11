@@ -1265,14 +1265,14 @@ pub enum TlcFailDetailData {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TlcFailDetail {
-    pub error_code: u16,
+    pub error_code: TlcFailErrorCode,
     pub extra_data: Option<TlcFailDetailData>,
 }
 
 impl TlcFailDetail {
     pub fn new(error_code: TlcFailErrorCode) -> Self {
         TlcFailDetail {
-            error_code: error_code.into(),
+            error_code: error_code,
             extra_data: None,
         }
     }
@@ -1308,7 +1308,7 @@ impl TlcFailDetail {
     }
 
     pub fn error_code(&self) -> TlcFailErrorCode {
-        self.error_code.into()
+        self.error_code
     }
 
     pub fn error_code_as_str(&self) -> String {
@@ -1321,19 +1321,19 @@ impl TlcFailDetail {
     }
 
     pub fn is_node(&self) -> bool {
-        self.error_code & NODE != 0
+        self.error_code as u16 & NODE != 0
     }
 
     pub fn is_bad_onion(&self) -> bool {
-        self.error_code & BADONION != 0
+        self.error_code as u16 & BADONION != 0
     }
 
     pub fn is_perm(&self) -> bool {
-        self.error_code & PERM != 0
+        self.error_code as u16 & PERM != 0
     }
 
     pub fn is_update(&self) -> bool {
-        self.error_code & UPDATE != 0
+        self.error_code as u16 & UPDATE != 0
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -1426,19 +1426,6 @@ pub enum TlcFailErrorCode {
     InvalidOnionPayload = PERM | 22,
     MppTimeout = 23,
     InvalidOnionBlinding = BADONION | PERM | 24,
-}
-
-impl From<TlcFailErrorCode> for u16 {
-    fn from(error_code: TlcFailErrorCode) -> Self {
-        error_code as u16
-    }
-}
-
-impl From<u16> for TlcFailErrorCode {
-    fn from(value: u16) -> Self {
-        TlcFailErrorCode::try_from(value)
-            .unwrap_or_else(|_| panic!("Invalid value for TlcFailErrorCode: {}", value))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
