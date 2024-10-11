@@ -1354,18 +1354,6 @@ impl TlcFailDetail {
     }
 }
 
-impl From<TlcFailDetail> for RemoveTlcFail {
-    fn from(tlc_fail: TlcFailDetail) -> Self {
-        RemoveTlcFail::new(tlc_fail.serialize())
-    }
-}
-
-impl From<RemoveTlcFail> for TlcFailDetail {
-    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
-        TlcFailDetail::deserialize(&remove_tlc_fail.onion_packet).expect("deserialize fail")
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
     // TODO: replace this with the real onion packet
@@ -1376,10 +1364,14 @@ pub struct RemoveTlcFail {
 }
 
 impl RemoveTlcFail {
-    pub fn new(packet_data: Vec<u8>) -> Self {
+    pub fn new(tlc_fail: TlcFailDetail) -> Self {
         RemoveTlcFail {
-            onion_packet: packet_data,
+            onion_packet: tlc_fail.serialize(),
         }
+    }
+
+    pub fn decode(&self) -> Option<TlcFailDetail> {
+        TlcFailDetail::deserialize(&self.onion_packet)
     }
 }
 

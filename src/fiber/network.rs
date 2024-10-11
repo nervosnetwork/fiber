@@ -1930,7 +1930,7 @@ where
                         None,
                     );
                     reply
-                        .send(Err(error_detail.into()))
+                        .send(Err(RemoveTlcFail::new(error_detail)))
                         .expect("send add tlc response");
                     return;
                 }
@@ -1963,7 +1963,7 @@ where
         } else {
             info!("onion packet is empty, ignore it");
             let error_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionPayload);
-            Err(error_detail.into())
+            Err(RemoveTlcFail::new(error_detail))
         };
         reply.send(res).expect("send error");
     }
@@ -1979,8 +1979,8 @@ where
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => payment_session.set_success_status(),
                     RemoveTlcReason::RemoveTlcFail(reason) => {
-                        let detail_error: TlcFailDetail = reason.into();
-                        self.update_with_tcl_fail_detail(detail_error.clone()).await;
+                        let detail_error = reason.decode().expect("decoded error");
+                        self.update_with_tcl_fail_detail(&detail_error).await;
                         if payment_session.can_retry() {
                             let res = self
                                 .try_payment_session(state, payment_session.clone())
@@ -1998,7 +1998,7 @@ where
         }
     }
 
-    async fn update_with_tcl_fail_detail(&self, tcl_error_detail: TlcFailDetail) {
+    async fn update_with_tcl_fail_detail(&self, tcl_error_detail: &TlcFailDetail) {
         match tcl_error_detail.error_code() {
             TlcFailErrorCode::PermanentChannelFailure => {
                 let channel_outpoint = tcl_error_detail
@@ -2071,7 +2071,7 @@ where
                 .await;
             match recv.await.expect("msg recv error") {
                 Err(e) => {
-                    let error_detail: TlcFailDetail = e.clone().into();
+                    let error_detail = e.decode().expect("decoded error");
                     error!("Failed to send onion packet with error: {:?}", e);
                     // This is the error implies we send payment request to the first hop failed
                     let err = format!(
@@ -2080,7 +2080,7 @@ where
                         error_detail.error_code_as_str()
                     );
                     error = Some(err);
-                    self.update_with_tcl_fail_detail(error_detail).await;
+                    self.update_with_tcl_fail_detail(&error_detail).await;
                     continue;
                 }
                 Ok(tlc_id) => {

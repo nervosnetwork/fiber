@@ -104,9 +104,9 @@ fn test_tlc_fail_error() {
     assert!(!tlc_fail_detail.is_node());
     assert!(tlc_fail_detail.is_bad_onion());
     assert!(tlc_fail_detail.is_perm());
-    let tlc_fail: RemoveTlcFail = tlc_fail_detail.clone().into();
+    let tlc_fail = RemoveTlcFail::new(tlc_fail_detail.clone());
 
-    let convert_back: TlcFailDetail = tlc_fail.into();
+    let convert_back: TlcFailDetail = tlc_fail.decode().expect("decoded fail");
     assert_eq!(tlc_fail_detail, convert_back);
 
     let node_fail = TlcFailDetail::new_node_fail(
@@ -114,7 +114,7 @@ fn test_tlc_fail_error() {
         generate_pubkey().into(),
     );
     assert!(node_fail.is_node());
-    let tlc_fail = RemoveTlcFail::from(node_fail.clone());
-    let convert_back: TlcFailDetail = tlc_fail.into();
+    let tlc_fail = RemoveTlcFail::new(node_fail.clone());
+    let convert_back = tlc_fail.decode().expect("decoded fail");
     assert_eq!(node_fail, convert_back);
 }

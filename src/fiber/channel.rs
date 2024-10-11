@@ -518,7 +518,7 @@ where
                                                 channel_id: state.get_id(),
                                                 tlc_id,
                                                 reason: RemoveTlcReason::RemoveTlcFail(
-                                                    error_detail.into(),
+                                                    RemoveTlcFail::new(error_detail),
                                                 ),
                                             }),
                                         ),
@@ -1289,7 +1289,7 @@ where
                             state.get_funding_transaction_outpoint(),
                             channel_update,
                         );
-                        let _ = reply.send(Err(detail_error.into()));
+                        let _ = reply.send(Err(RemoveTlcFail::new(detail_error)));
                         Err(err)
                     }
                 }
