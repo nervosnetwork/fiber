@@ -572,15 +572,10 @@ where
             current_expiry += expiry;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
-        let next_hop = if !route.is_empty() {
-            Some(route[0].target)
-        } else {
-            None
-        };
         onion_infos.push(PaymentHopData {
             amount: current_amount,
             payment_hash,
-            next_hop,
+            next_hop: Some(route[0].target),
             tlc_hash_algorithm: hash_algorithm,
             expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),

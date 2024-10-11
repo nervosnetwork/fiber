@@ -15,7 +15,6 @@ use secp256k1::{Message, Secp256k1};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::borrow::Cow;
-
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1984,9 +1983,12 @@ where
                         let detail_error: TlcFailDetail = reason.into();
                         self.update_with_tcl_fail_detail(detail_error.clone()).await;
                         if payment_session.can_retry() {
-                            let _ = self
+                            let res = self
                                 .try_payment_session(state, payment_session.clone())
                                 .await;
+                            if res.is_err() {
+                                debug!("Failed to retry payment session: {:?}", res);
+                            }
                         } else {
                             let error_code: TlcFailErrorCode = detail_error.error_code.into();
                             payment_session.set_failed_status(error_code.as_ref());
@@ -2040,27 +2042,22 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         mut payment_session: PaymentSession,
-    ) -> Result<SendPaymentResponse, Error> {
+    ) -> Result<PaymentSession, Error> {
         let graph = self.network_graph.read().await;
         let payment_data = payment_session.request.clone();
         let mut error = None;
-        while payment_session.retried_times < payment_session.try_limit {
+        while payment_session.can_retry() {
             payment_session.retried_times += 1;
-            let hops_infos = graph.build_route(payment_data.clone());
-            let hops_infos = match hops_infos {
+            let hops_infos = match graph.build_route(payment_data.clone()) {
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
-                    payment_session.set_status(PaymentSessionStatus::Failed);
                     error = Some(format!(
                         "Failed to build route: {:?}",
                         payment_data.payment_hash
                     ));
                     break;
                 }
-                Ok(onion_path) => {
-                    assert!(!onion_path.is_empty());
-                    onion_path
-                }
+                Ok(onion_path) => onion_path,
             };
             let first_channel_outpoint = hops_infos[0]
                 .channel_outpoint
@@ -2102,12 +2099,7 @@ where
                     payment_session.set_status(PaymentSessionStatus::Inflight);
                     payment_session.set_first_hop_info(first_channel_outpoint, tlc_id);
                     self.store.insert_payment_session(payment_session.clone());
-                    return Ok(SendPaymentResponse {
-                        payment_hash: payment_data.payment_hash,
-                        last_update_time: payment_session.last_updated_time,
-                        status: PaymentSessionStatus::Inflight,
-                        failed_error: None,
-                    });
+                    return Ok(payment_session);
                 }
             }
         }
@@ -2142,7 +2134,13 @@ where
 
         let payment_session = PaymentSession::new(payment_data.clone(), 5);
         self.store.insert_payment_session(payment_session.clone());
-        self.try_payment_session(state, payment_session).await
+        let session = self.try_payment_session(state, payment_session).await?;
+        return Ok(SendPaymentResponse {
+            payment_hash: payment_data.payment_hash,
+            last_update_time: session.last_updated_time,
+            status: session.status,
+            failed_error: session.last_error.clone(),
+        });
     }
 }
 
