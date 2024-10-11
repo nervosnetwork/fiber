@@ -117,7 +117,6 @@ pub enum ChannelCommand {
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
-    GetTlcStatus(u64, RpcReplyPort<Result<RemoveTlcReason, String>>),
 }
 
 #[derive(Debug)]
@@ -1324,24 +1323,6 @@ where
                         Err(err)
                     }
                 }
-            }
-            ChannelCommand::GetTlcStatus(tlc_id, reply) => {
-                let status = match state
-                    .tlcs
-                    .iter()
-                    .find(|&(id, _details)| *id == TLCId::Offered(tlc_id))
-                {
-                    Some((_, details)) => {
-                        if let Some((_, remove_at)) = &details.removed_at {
-                            Ok(remove_at.clone())
-                        } else {
-                            Err("TLC is still active".to_string())
-                        }
-                    }
-                    None => Err("TLC not found".to_string()),
-                };
-                let _ = reply.send(status);
-                Ok(())
             }
         }
     }

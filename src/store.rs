@@ -1,9 +1,7 @@
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-        graph::{
-            ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession, PaymentSessionStatus,
-        },
+        graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -511,24 +509,6 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
-    }
-
-    fn get_payment_sessions_by_status(&self, status: PaymentSessionStatus) -> Vec<PaymentSession> {
-        let prefix = vec![PAYMENT_SESSION_PREFIX];
-        let iter = self
-            .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(key, _)| key.starts_with(&prefix));
-        iter.filter_map(|(_key, value)| {
-            let payment_session: PaymentSession = serde_json::from_slice(value.as_ref())
-                .expect("deserialize ChannelState should be OK");
-            if payment_session.status == status {
-                Some(payment_session)
-            } else {
-                None
-            }
-        })
-        .collect()
     }
 }
 

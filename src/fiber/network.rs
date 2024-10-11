@@ -172,8 +172,6 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
-    // Update the payment status of a payment session.
-    UpdatePaymentSession,
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     GetAndProcessChannelsWithinBlockRangeFromPeer(
@@ -1609,9 +1607,6 @@ where
                     );
                 }
             },
-            NetworkActorCommand::UpdatePaymentSession => {
-                self.update_payment_session(state).await;
-            }
         };
         Ok(())
     }
@@ -1973,57 +1968,6 @@ where
             Err(error_detail.into())
         };
         reply.send(res).expect("send error");
-    }
-
-    async fn update_payment_session(&self, state: &mut NetworkActorState<S>) {
-        for mut payment_session in self
-            .store
-            .get_payment_sessions_by_status(PaymentSessionStatus::Inflight)
-        {
-            if payment_session.status == PaymentSessionStatus::Inflight {
-                match (
-                    &payment_session.first_hop_channel_outpoint,
-                    &payment_session.first_hop_tlc_id,
-                ) {
-                    (Some(outpoint), Some(tlc_id)) => {
-                        if let Some(channel_id) = state.outpoint_channel_map.get(&outpoint) {
-                            let (send, recv) =
-                                oneshot::channel::<Result<RemoveTlcReason, String>>();
-                            let rpc_reply = RpcReplyPort::from(send);
-                            let command = ChannelCommand::GetTlcStatus(*tlc_id, rpc_reply);
-                            let _ = state.send_command_to_channel(*channel_id, command).await;
-                            let res = recv.await.expect("recv error");
-                            match res {
-                                Ok(reason) => match reason {
-                                    RemoveTlcReason::RemoveTlcFulfill(_) => {
-                                        payment_session.set_success_status();
-                                    }
-                                    RemoveTlcReason::RemoveTlcFail(_) => {
-                                        self.on_tlc_remove_received(
-                                            state,
-                                            payment_session.payment_hash(),
-                                            reason,
-                                        )
-                                        .await;
-                                    }
-                                },
-                                Err(_) => {}
-                            }
-                        }
-                    }
-                    (_, _) => {}
-                }
-
-                if payment_session.can_retry() {
-                    let _ = self
-                        .try_payment_session(state, payment_session.clone())
-                        .await;
-                } else {
-                    payment_session.set_failed_status("Retry limit reached");
-                }
-                self.store.insert_payment_session(payment_session);
-            }
-        }
     }
 
     async fn on_tlc_remove_received(

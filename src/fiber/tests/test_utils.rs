@@ -1,4 +1,3 @@
-use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo};
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
@@ -579,16 +578,6 @@ impl NetworkGraphStateStore for MemoryStore {
             .write()
             .unwrap()
             .insert(session.payment_hash(), session);
-    }
-
-    fn get_payment_sessions_by_status(&self, status: PaymentSessionStatus) -> Vec<PaymentSession> {
-        self.payment_sessions
-            .read()
-            .unwrap()
-            .values()
-            .filter(|session| session.status == status)
-            .cloned()
-            .collect()
     }
 }
 

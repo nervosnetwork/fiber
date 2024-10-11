@@ -807,7 +807,6 @@ pub trait NetworkGraphStateStore {
     fn remove_connected_peer(&self, peer_id: &PeerId);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
-    fn get_payment_sessions_by_status(&self, status: PaymentSessionStatus) -> Vec<PaymentSession>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
