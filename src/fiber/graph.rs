@@ -225,6 +225,16 @@ where
         self.last_update_timestamp
     }
 
+    pub(crate) fn process_node_announcement(&mut self, node_announcement: NodeAnnouncement) {
+        let node_id = node_announcement.node_id;
+        let node_info = NodeInfo {
+            node_id,
+            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            anouncement_msg: node_announcement,
+        };
+        self.add_node(node_info);
+    }
+
     pub fn add_node(&mut self, node_info: NodeInfo) {
         debug!("Adding node to network graph: {:?}", node_info);
 
@@ -611,10 +621,16 @@ where
             ));
         }
         let Some(source_node) = self.nodes.get(&source) else {
-            return Err(GraphError::PathFind("source node not found".to_string()));
+            return Err(GraphError::PathFind(format!(
+                "source node not found: {:?}",
+                &source
+            )));
         };
         let Some(_target_node) = self.nodes.get(&target) else {
-            return Err(GraphError::PathFind("target node not found".to_string()));
+            return Err(GraphError::PathFind(format!(
+                "target node not found: {:?}",
+                &target
+            )));
         };
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
