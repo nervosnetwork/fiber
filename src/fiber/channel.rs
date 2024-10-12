@@ -545,7 +545,7 @@ where
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let res = recv.await.expect("network actor is alive");
+                    let res = recv.await.expect("remove tlc replied");
                     info!("remove tlc from previous channel: {:?}", &res);
                 } else {
                     // only the original sender of the TLC should send `TlcRemoveReceived` event
@@ -799,9 +799,14 @@ where
                 forward_to_next_hop = true;
             }
 
-            let forward_amount = add_tlc.amount;
+            let received_amount = add_tlc.amount;
+            let forward_amount = peeled_packet.current.amount;
+            debug!(
+                "received_amount: {} forward_amount: {}",
+                add_tlc.amount, forward_amount
+            );
             if forward_to_next_hop {
-                let forward_fee = forward_amount - peeled_packet.current.amount;
+                let forward_fee = received_amount.saturating_sub(forward_amount);
                 let fee_rate: u128 = state
                     .public_channel_info
                     .as_ref()
@@ -816,7 +821,7 @@ where
                     return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
                 }
             }
-            if !forward_to_next_hop && forward_amount != add_tlc.amount {
+            if !forward_to_next_hop && received_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
         }
@@ -859,7 +864,7 @@ where
                     rpc_reply,
                 ),
             ))
-            .expect("network actor is alive");
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         let res = match recv.await.expect("expect command replied") {
             Ok(tlc_id) => Ok(tlc_id),
             Err(e) => Err(e),
@@ -884,7 +889,7 @@ where
                         ),
                     }),
                 ))
-                .expect("network actor is alive");
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             let _ = recv.await.expect("RemoveTlc command replied");
         }
         Ok(())

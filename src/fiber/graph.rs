@@ -451,17 +451,6 @@ where
         self.source
     }
 
-    pub fn calculate_fee(&self, amount: u128, fee_proportational_millionths: u128) -> u128 {
-        let fee = fee_proportational_millionths * amount;
-        let base_fee = fee / 1_000_000;
-        let remainder = fee % 1_000_000;
-        if remainder > 0 {
-            base_fee + 1
-        } else {
-            base_fee
-        }
-    }
-
     pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
         if let Some(channel) = self.channels.get_mut(channel_outpoint) {
             if let Some(info) = channel.node1_to_node2.as_mut() {
@@ -646,19 +635,14 @@ where
             for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
                 edges_expanded += 1;
                 // if charge inbound fees for exit hop
-                let fee_rate = channel_update.fee_rate;
-                let next_hop_received_amount = cur_hop.amount_received;
-                let fee = self.calculate_fee(next_hop_received_amount, fee_rate as u128);
-                let amount_to_send = next_hop_received_amount + fee;
-
-                debug!(
-                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} channel_capacity: {:?} htlc_max_value: {:?}",
-                    fee_rate, next_hop_received_amount, fee, amount_to_send, channel_info.capacity(), channel_update.htlc_maximum_value
-                );
-
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
                     continue;
                 }
+
+                let fee_rate = channel_update.fee_rate;
+                let next_hop_received_amount = cur_hop.amount_received;
+                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128);
+                let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
@@ -722,7 +706,7 @@ where
                         continue;
                     }
                 }
-                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
+                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, distance, fee);
                 // TODO: update weight and distance here
                 let node: NodeHeapElement = NodeHeapElement {
                     node_id: from,

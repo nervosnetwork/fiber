@@ -1974,25 +1974,26 @@ where
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
-                    RemoveTlcReason::RemoveTlcFulfill(_) => payment_session.set_success_status(),
+                    RemoveTlcReason::RemoveTlcFulfill(_) => {
+                        payment_session.set_success_status();
+                        self.store.insert_payment_session(payment_session);
+                    }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
                         self.update_with_tcl_fail_detail(&detail_error).await;
                         if payment_session.can_retry() && !detail_error.error_code.payment_failed()
                         {
-                            let res = self
-                                .try_payment_session(state, payment_session.clone())
-                                .await;
+                            let res = self.try_payment_session(state, payment_session).await;
                             if res.is_err() {
                                 debug!("Failed to retry payment session: {:?}", res);
                             }
                         } else {
                             payment_session.set_failed_status(detail_error.error_code.as_ref());
+                            self.store.insert_payment_session(payment_session);
                         }
                     }
                 }
             }
-            self.store.insert_payment_session(payment_session);
         }
     }
 
