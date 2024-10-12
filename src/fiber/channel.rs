@@ -621,7 +621,6 @@ where
                 }
                 state.update_state(ChannelState::ShuttingDown(flags));
                 state.maybe_transition_to_shutdown(&self.network)?;
-
                 Ok(())
             }
             FiberChannelMessage::ClosingSigned(closing) => {
@@ -683,11 +682,14 @@ where
                 TlcFailErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::InvalidState(_) => match state.state {
-                ChannelState::Closed(_) => TlcFailErrorCode::ChannelDisabled,
-                ChannelState::ShuttingDown(_) | ChannelState::ChannelReady() => {
-                    // we expect `ShuttingDown` and `ChannelReady` are both OK for tlc forwarding,
+                ChannelState::Closed(_) => TlcFailErrorCode::PermanentChannelFailure,
+                // ShuttingDown is a temporary state
+                ChannelState::ShuttingDown(_) => TlcFailErrorCode::TemporaryChannelFailure,
+                ChannelState::ChannelReady() => {
+                    // we expect `ChannelReady` will be both OK for tlc forwarding,
                     // so here are the unreachable point in normal workflow,
                     // set `TemporaryNodeFailure` for general temporary failure of the processing node here
+                    assert!(false, "unreachable point in normal workflow");
                     TlcFailErrorCode::TemporaryNodeFailure
                 }
                 // otherwise, channel maybe not ready
@@ -3762,7 +3764,7 @@ impl ChannelActorState {
 
     pub fn check_for_tlc_update(&self, add_tlc_amount: Option<u128>) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady() | ChannelState::ShuttingDown(_) => {}
+            ChannelState::ChannelReady() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
                     "Invalid state {:?} for adding tlc",

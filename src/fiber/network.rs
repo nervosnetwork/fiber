@@ -1925,7 +1925,7 @@ where
                             channel_outpoint
                         );
                     let error_detail = TlcFailDetail::new_channel_fail(
-                        TlcFailErrorCode::PermanentChannelFailure,
+                        TlcFailErrorCode::UnknownNextPeer,
                         channel_outpoint.clone(),
                         None,
                     );
@@ -1956,10 +1956,7 @@ where
                 .await
                 .expect("send command failed");
 
-            match recv.await.expect("recv error") {
-                Ok(res) => Ok(res.tlc_id),
-                Err(err) => Err(err),
-            }
+            recv.await.expect("recv error").map(|res| res.tlc_id)
         } else {
             info!("onion packet is empty, ignore it");
             let error_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionPayload);

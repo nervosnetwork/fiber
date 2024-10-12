@@ -1338,12 +1338,17 @@ impl TlcFailDetail {
     }
 }
 
+// This is the onion packet we need to encode and send back to the sender
+// currently it's the raw TlcFailDetail serialized data from the TlcFailDetail struct
+// sender should decode it and get the TlcFailDetail, then decide what to do
+// Note: this supposed to be only accessible by the sender, and it's not reliable since it
+// is not placed on-chain due to the possibility of hop failure.
+//
+// FIXME: a better name like `TlcFailOnionPacket`?, since it's not only caused by removing tlc now,
+//        maybe we will replace it later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
     // TODO: replace this with the real onion packet
-    // This is the onion packet we need to encode and send back to the sender
-    // currently it's the raw TlcFailDetail serialized data
-    // sender should decode it and get the real TlcFailDetail
     pub onion_packet: Vec<u8>,
 }
 
@@ -1397,11 +1402,14 @@ const UPDATE: u16 = 0x1000;
 pub enum TlcFailErrorCode {
     TemporaryNodeFailure = NODE | 2,
     PermanentNodeFailure = PERM | NODE | 2,
+    // unused right now
     RequiredNodeFeatureMissing = PERM | NODE | 3,
+    // unused right now, maybe need to add onion version in future?
     InvalidOnionVersion = BADONION | PERM | 4,
     InvalidOnionHmac = BADONION | PERM | 5,
     InvalidOnionKey = BADONION | PERM | 6,
     TemporaryChannelFailure = UPDATE | 7,
+    // used for shutting down the channel
     PermanentChannelFailure = PERM | 8,
     RequiredChannelFeatureMissing = PERM | 9,
     UnknownNextPeer = PERM | 10,
