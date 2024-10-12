@@ -2,6 +2,7 @@ use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
+use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
@@ -552,7 +553,7 @@ where
                 }
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
-                let fee = self.calculate_fee(current_amount, fee_rate as u128);
+                let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.cltv_expiry_delta;
                 (fee, expiry)
             };

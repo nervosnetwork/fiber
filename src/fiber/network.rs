@@ -60,7 +60,7 @@ use super::types::{
     Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
     QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
     QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcFail, RemoveTlcReason, TlcFailDetail,
-    TlcFailErrorCode,
+    TlcFailDetailData, TlcFailErrorCode,
 };
 use super::FiberConfig;
 
@@ -1978,7 +1978,8 @@ where
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
                         self.update_with_tcl_fail_detail(&detail_error).await;
-                        if payment_session.can_retry() {
+                        if payment_session.can_retry() && !detail_error.error_code.payment_failed()
+                        {
                             let res = self
                                 .try_payment_session(state, payment_session.clone())
                                 .await;
@@ -1996,8 +1997,24 @@ where
     }
 
     async fn update_with_tcl_fail_detail(&self, tcl_error_detail: &TlcFailDetail) {
+        let error_code = tcl_error_detail.error_code();
+        // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
+        // we now still update the graph, maybe we need to remove it later?
+        if error_code.is_update() {
+            if let Some(extra_data) = &tcl_error_detail.extra_data {
+                match extra_data {
+                    TlcFailDetailData::ChannelFailed { channel_update, .. } => {
+                        if let Some(channel_update) = channel_update {
+                            let mut graph = self.network_graph.write().await;
+                            let _ = graph.process_channel_update(channel_update.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         match tcl_error_detail.error_code() {
-            TlcFailErrorCode::PermanentChannelFailure => {
+            TlcFailErrorCode::PermanentChannelFailure | TlcFailErrorCode::ChannelDisabled => {
                 let channel_outpoint = tcl_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");

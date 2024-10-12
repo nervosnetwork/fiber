@@ -1415,6 +1415,7 @@ pub enum TlcFailErrorCode {
     UnknownNextPeer = PERM | 10,
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
+    // TODO: cltv expiry check
     IncorrectCltvExpiry = UPDATE | 13,
     ExpiryTooSoon = UPDATE | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
@@ -1442,6 +1443,16 @@ impl TlcFailErrorCode {
 
     pub fn is_update(&self) -> bool {
         *self as u16 & UPDATE != 0
+    }
+
+    pub fn payment_failed(&self) -> bool {
+        match self {
+            TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
+            | TlcFailErrorCode::FinalIncorrectCltvExpiry
+            | TlcFailErrorCode::FinalIncorrectHtlcAmount
+            | TlcFailErrorCode::MppTimeout => true,
+            _ => false,
+        }
     }
 }
 

@@ -4,6 +4,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     fiber::{
+        fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
         types::{ChannelUpdate, RemoveTlcFail, TlcFailDetail, TlcFailErrorCode},
     },
@@ -670,7 +671,9 @@ where
             ProcessingChannelError::PeelingOnionPacketError(_) => {
                 TlcFailErrorCode::InvalidOnionPayload
             }
-            ProcessingChannelError::InvalidParameter(_) => {
+            ProcessingChannelError::TlcForwardFeeIsTooLow => TlcFailErrorCode::FeeInsufficient,
+            ProcessingChannelError::FinalIncorrectPreimage
+            | ProcessingChannelError::FinalIncorrectPaymentHash => {
                 TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
             }
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
@@ -713,7 +716,6 @@ where
 
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
         let tlcs = state.get_tlcs_for_settle_down();
-        info!("try_to_settle_down_tlc get tlcs: {:?}", &tlcs);
         for tlc_info in tlcs {
             let tlc = tlc_info.tlc.clone();
             let preimage = if let Some(preimage) = tlc.payment_preimage {
@@ -721,6 +723,10 @@ where
             } else if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
                 preimage
             } else {
+                error!(
+                    "No preimage found for payment hash: {:?}",
+                    &tlc.payment_hash
+                );
                 continue;
             };
             let command = RemoveTlcCommand {
@@ -772,23 +778,45 @@ where
                 ));
             }
             // TODO: check the expiry time, if expired, we should return an error.
-
             if peeled_packet.is_last() {
                 // if this is the last hop, store the preimage.
-                preimage = peeled_packet.current.preimage;
+                // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
+                // here we can do error check early here for better error handling.
+                preimage = peeled_packet
+                    .current
+                    .preimage
+                    .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+                if let Some(preimage) = preimage {
+                    let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+                    if add_tlc.payment_hash != filled_payment_hash {
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                    }
+                } else {
+                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+                }
             } else {
                 peeled_packet_bytes = Some(peeled_packet.serialize());
                 forward_to_next_hop = true;
             }
 
-            if forward_to_next_hop && peeled_packet.current.amount > add_tlc.amount {
-                return Err(ProcessingChannelError::InvalidParameter
-                    (
-                    format!("Payment amount is too large, expect next hop amount [{}] less than received amount [{}]",
-                    peeled_packet.current.amount , add_tlc.amount)
-                ));
+            let forward_amount = add_tlc.amount;
+            if forward_to_next_hop {
+                let forward_fee = forward_amount - peeled_packet.current.amount;
+                let fee_rate: u128 = state
+                    .public_channel_info
+                    .as_ref()
+                    .map(|info| info.tlc_fee_proportional_millionths.unwrap_or_default())
+                    .unwrap_or_default();
+                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                if forward_fee < expected_fee {
+                    error!(
+                        "too low forward_fee: {}, expected_fee: {}",
+                        forward_fee, expected_fee
+                    );
+                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                }
             }
-            if !forward_to_next_hop && peeled_packet.current.amount != add_tlc.amount {
+            if !forward_to_next_hop && forward_amount != add_tlc.amount {
                 return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
         }
@@ -1085,7 +1113,6 @@ where
         };
 
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-
         if command.force {
             if let Some(transaction) = &state.latest_commitment_transaction {
                 self.network
@@ -2097,6 +2124,12 @@ pub enum ProcessingChannelError {
     PeelingOnionPacketError(String),
     #[error("The amount in the HTLC is not expected")]
     FinalIncorrectHTLCAmount,
+    #[error("The payment_hash is not expected for final hop")]
+    FinalIncorrectPaymentHash,
+    #[error("The payment_hash and preimage does not match for final hop")]
+    FinalIncorrectPreimage,
+    #[error("The tlc forward fee is tow low")]
+    TlcForwardFeeIsTooLow,
     #[error("The tlc number exceed limit of this channel")]
     TlcNumberExceedLimit,
     #[error("The tlc flight value exceed limit of this channel")]
@@ -3396,10 +3429,7 @@ impl ChannelActorState {
                                 .hash(fulfill.payment_preimage)
                                 .into();
                             if current.tlc.payment_hash != filled_payment_hash {
-                                return Err(ProcessingChannelError::InvalidParameter(format!(
-                                    "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
-                                    fulfill.payment_preimage, filled_payment_hash, current.tlc.payment_hash,
-                                )));
+                                return Err(ProcessingChannelError::FinalIncorrectPreimage);
                             }
                         }
                     }
