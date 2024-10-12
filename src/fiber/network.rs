@@ -1,6 +1,6 @@
 use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
-use ckb_jsonrpc_types::{Status, TxStatus};
+use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
 use ckb_types::core::TransactionView;
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
@@ -55,12 +55,12 @@ use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
-    ChannelAnnouncementQuery, ChannelUpdateQuery, EcdsaSignature, FiberBroadcastMessage,
-    FiberBroadcastMessageQuery, FiberMessage, FiberQueryInformation, GetBroadcastMessages,
-    GetBroadcastMessagesResult, Hash256, NodeAnnouncement, NodeAnnouncementQuery, OpenChannel,
-    Privkey, Pubkey, QueryBroadcastMessagesWithinTimeRange,
-    QueryBroadcastMessagesWithinTimeRangeResult, QueryChannelsWithinBlockRange,
-    QueryChannelsWithinBlockRangeResult,
+    ChannelAnnouncement, ChannelAnnouncementQuery, ChannelUpdate, ChannelUpdateQuery,
+    EcdsaSignature, FiberBroadcastMessage, FiberBroadcastMessageQuery, FiberMessage,
+    FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
+    NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, Privkey, Pubkey,
+    QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult,
 };
 use super::FiberConfig;
 
@@ -81,6 +81,10 @@ use crate::{unwrap_or_return, Error};
 pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
+
+// tx index is not returned on older ckb version, using dummy tx index instead.
+// Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
+const DUMMY_FUNDING_TX_INDEX: u32 = 0;
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -154,12 +158,18 @@ pub enum NetworkActorCommand {
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
-    // Broadcast node/channel information.
-    // The vector of PeerId is the list of peers that should receive the message.
-    // This is useful when some peers are preferred to receive the message.
-    // e.g. the ChannelUpdate message should be received by the counterparty of the channel.
-    // This message may be broadcasted to other peers if necessary.
-    BroadcastMessage(Vec<PeerId>, FiberBroadcastMessage),
+    // A ChannelAnnouncement is ready to broadcast, we need to
+    // update our network graph and broadcast it to the network.
+    // The channel counterparty should definitely be part of the
+    // nodes that are going to receive this message.
+    ProcessChannelAnnouncement(PeerId, BlockNumber, u32, ChannelAnnouncement),
+    // A ChannelUpdate is ready to broadcast, we need to update
+    // our network graph and broadcast it to the network.
+    // The channel counterparty should definitely be part of the
+    // nodes that are going to receive this message.
+    ProccessChannelUpdate(PeerId, ChannelUpdate),
+    // Broadcast node/channel information to the network.
+    BroadcastMessage(FiberBroadcastMessage),
     // Broadcast local information to the network.
     BroadcastLocalInfo(LocalInfoKind),
     SignMessage([u8; 32], RpcReplyPort<EcdsaSignature>),
@@ -422,8 +432,9 @@ pub enum NetworkActorEvent {
     /// Both parties are now able to broadcast a valid funding transaction.
     FundingTransactionPending(Transaction, OutPoint, Hash256),
 
-    /// A funding transaction has been confirmed.
-    FundingTransactionConfirmed(OutPoint),
+    /// A funding transaction has been confirmed. The transaction was included in the
+    /// block with the given transaction index.
+    FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
 
     /// A funding transaction has been confirmed.
     FundingTransactionFailed(OutPoint),
@@ -1080,8 +1091,10 @@ where
                     .on_funding_transaction_pending(transaction, outpoint.clone(), channel_id)
                     .await;
             }
-            NetworkActorEvent::FundingTransactionConfirmed(outpoint) => {
-                state.on_funding_transaction_confirmed(outpoint).await;
+            NetworkActorEvent::FundingTransactionConfirmed(outpoint, block_number, tx_index) => {
+                state
+                    .on_funding_transaction_confirmed(outpoint, block_number, tx_index)
+                    .await;
             }
             NetworkActorEvent::CommitmentTransactionPending(transaction, channel_id) => {
                 state
@@ -1413,27 +1426,11 @@ where
                     ))
                     .expect("network actor alive");
             }
-            NetworkActorCommand::BroadcastMessage(peers, message) => {
-                // Send message to peers in the list anyway.
-                debug!("Broadcasting message {:?} to peers {:?}", &message, &peers);
-                for peer_id in &peers {
-                    if let Err(e) = state
-                        .send_message_to_peer(
-                            peer_id,
-                            FiberMessage::BroadcastMessage(message.clone()),
-                        )
-                        .await
-                    {
-                        error!(
-                            "Failed to broadcast message {:?} to peer {:?}: {:?}",
-                            &message, peer_id, e
-                        );
-                    }
-                }
-
+            NetworkActorCommand::BroadcastMessage(message) => {
                 const MAX_BROADCAST_SESSIONS: usize = 5;
-                let peer_ids =
-                    state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, peers.into_iter().collect());
+                // TODO: It is possible that the remote peer of the channel may repeatedly
+                // receive the same message.
+                let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
                 debug!("Broadcasting message random selected peers {:?}", &peer_ids);
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
@@ -1480,7 +1477,6 @@ where
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessage(
-                                vec![],
                                 FiberBroadcastMessage::NodeAnnouncement(message),
                             ),
                         ))
@@ -1594,6 +1590,73 @@ where
                     );
                 }
             },
+            NetworkActorCommand::ProcessChannelAnnouncement(
+                peer_id,
+                block_number,
+                tx_index,
+                channel_announcement,
+            ) => {
+                // Adding this owned channel to the network graph.
+                let channel_info = ChannelInfo {
+                    funding_tx_block_number: block_number.into(),
+                    funding_tx_index: tx_index,
+                    announcement_msg: channel_announcement.clone(),
+                    node1_to_node2: None, // wait for channel update message
+                    node2_to_node1: None,
+                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                };
+                let mut graph = self.network_graph.write().await;
+                graph.add_channel(channel_info);
+
+                // Send the channel announcement to other peer first.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                            peer_id,
+                            message: FiberMessage::BroadcastMessage(
+                                FiberBroadcastMessage::ChannelAnnouncement(
+                                    channel_announcement.clone(),
+                                ),
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                // Also broadcast channel announcement to the network.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(
+                            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+
+            NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                let mut graph = self.network_graph.write().await;
+                graph
+                    .process_channel_update(channel_update.clone())
+                    .expect("Valid channel update");
+
+                // Send the channel update to other peer first.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId {
+                            peer_id,
+                            message: FiberMessage::BroadcastMessage(
+                                FiberBroadcastMessage::ChannelUpdate(channel_update.clone()),
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                // Also broadcast channel update to the network.
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::BroadcastMessage(
+                            FiberBroadcastMessage::ChannelUpdate(channel_update),
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
         };
         Ok(())
     }
@@ -1616,7 +1679,7 @@ where
         state
             .network
             .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::BroadcastMessage(vec![], message.clone()),
+                NetworkActorCommand::BroadcastMessage(message.clone()),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         self.process_broadcasted_message(&state.network, message)
@@ -1752,12 +1815,7 @@ where
                                 block_number: Some(block_number),
                                 ..
                             },
-                    }) => (
-                        tx,
-                        block_number.into(),
-                        // tx index is not returned on older ckb version, using dummy tx index instead
-                        0u32,
-                    ),
+                    }) => (tx, block_number.into(), DUMMY_FUNDING_TX_INDEX),
                     err => {
                         return Err(Error::InvalidParameter(format!(
                             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
@@ -2413,7 +2471,7 @@ where
             ChannelInitializationParameter::AcceptChannel(AcceptChannelParameter {
                 funding_amount,
                 reserved_ckb_amount,
-                public_channel_info: Some(PublicChannelInfo::new(
+                public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
                     self.tlc_locktime_expiry_delta,
                     self.tlc_min_value,
                     self.tlc_max_value,
@@ -2969,12 +3027,17 @@ where
                     status:
                         TxStatus {
                             status: Status::Committed,
+                            block_number: Some(block_number),
                             ..
                         },
                     ..
                 }) => {
                     info!("Funding transaction {:?} confirmed", &tx_hash);
-                    NetworkActorEvent::FundingTransactionConfirmed(outpoint)
+                    NetworkActorEvent::FundingTransactionConfirmed(
+                        outpoint,
+                        block_number.into(),
+                        DUMMY_FUNDING_TX_INDEX,
+                    )
                 }
                 Ok(status) => {
                     error!(
@@ -3045,7 +3108,12 @@ where
         .await;
     }
 
-    async fn on_funding_transaction_confirmed(&mut self, outpoint: OutPoint) {
+    async fn on_funding_transaction_confirmed(
+        &mut self,
+        outpoint: OutPoint,
+        block_number: BlockNumber,
+        tx_index: u32,
+    ) {
         debug!("Funding transaction is confirmed: {:?}", &outpoint);
         let channel_id = match self.pending_channels.remove(&outpoint) {
             Some(channel_id) => channel_id,
@@ -3060,7 +3128,10 @@ where
         self.send_message_to_channel_actor(
             channel_id,
             None,
-            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed),
+            ChannelActorMessage::Event(ChannelEvent::FundingTransactionConfirmed(
+                block_number,
+                tx_index,
+            )),
         )
         .await;
     }
