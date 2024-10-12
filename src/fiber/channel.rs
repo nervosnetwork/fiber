@@ -1,6 +1,7 @@
 use bitflags::bitflags;
+use ckb_jsonrpc_types::BlockNumber;
 use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     fiber::{
@@ -54,7 +55,7 @@ use crate::{
         config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::{emit_service_event, sign_network_message},
-        types::{AnnouncementSignatures, FiberBroadcastMessage, Shutdown},
+        types::{AnnouncementSignatures, Shutdown},
     },
     NetworkServiceEvent,
 };
@@ -68,9 +69,9 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
-        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256,
+        LockTime, OpenChannel, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
@@ -84,6 +85,9 @@ pub const FUNDING_CELL_WITNESS_LEN: usize = 16 + 32 + 64;
 // so that we can get previous commitment point/number without checking if the channel
 // is funded or not.
 pub const INITIAL_COMMITMENT_NUMBER: u64 = 0;
+
+// The channel is disabled, and no more tlcs can be added to the channel.
+pub const CHANNEL_DISABLED_FLAG: u32 = 1;
 
 #[derive(Debug)]
 pub enum ChannelActorMessage {
@@ -155,6 +159,7 @@ pub struct ShutdownCommand {
 
 #[derive(Debug)]
 pub struct UpdateCommand {
+    pub enabled: Option<bool>,
     pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
@@ -297,6 +302,24 @@ where
 
         match message {
             FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
+                if !state.is_public() {
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Received AnnouncementSignatures message, but the channel is not public"
+                            .to_string(),
+                    ));
+                }
+                match state.state {
+                    ChannelState::ChannelReady() => {}
+                    ChannelState::AwaitingChannelReady(flags)
+                        if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) => {}
+                    _ => {
+                        return Err(ProcessingChannelError::InvalidState(format!(
+                                "Received unexpected AnnouncementSignatures message in state {:?}, expecting state AwaitingChannelReady::CHANNEL_READY or ChannelReady",
+                                state.state
+                            )));
+                    }
+                }
+
                 // TODO: check announcement_signatures validity here.
                 let AnnouncementSignatures {
                     node_signature,
@@ -307,9 +330,7 @@ where
                     node_signature,
                     partial_signature,
                 );
-                state
-                    .maybe_broadcast_announcement_signatures(&self.network)
-                    .await;
+                state.maybe_public_channel_is_ready(&self.network).await;
                 Ok(())
             }
             FiberChannelMessage::AcceptChannel(accept_channel) => {
@@ -418,7 +439,7 @@ where
                 state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
-            FiberChannelMessage::ChannelReady(channel_ready) => {
+            FiberChannelMessage::ChannelReady(_channel_ready) => {
                 let flags = match state.state {
                     ChannelState::AwaitingTxSignatures(flags) => {
                         if flags.contains(AwaitingTxSignaturesFlags::TX_SIGNATURES_SENT) {
@@ -439,15 +460,7 @@ where
                 };
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                debug!(
-                    "ChannelReady: {:?}, current state: {:?}",
-                    &channel_ready, &state.state
-                );
-
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    debug!("Running on_channel_ready as ChannelReady message is received");
-                    state.on_channel_ready(&self.network).await;
-                }
+                state.maybe_channel_is_ready(&self.network).await;
 
                 Ok(())
             }
@@ -703,7 +716,7 @@ where
         };
 
         let channel_update = if error_code.is_update() {
-            state.get_signed_channel_update_message(&self.network).await
+            Some(state.generate_channel_update(&self.network).await)
         } else {
             None
         };
@@ -1183,6 +1196,7 @@ where
         }
 
         let UpdateCommand {
+            enabled,
             tlc_locktime_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
@@ -1191,24 +1205,30 @@ where
 
         let mut updated = false;
 
+        if let Some(enabled) = enabled {
+            updated |= state.update_our_enabled(enabled);
+        }
+
         if let Some(delta) = tlc_locktime_expiry_delta {
-            updated = updated || state.update_our_locktime_expiry_delta(delta);
+            updated |= state.update_our_locktime_expiry_delta(delta);
         }
 
         if let Some(value) = tlc_minimum_value {
-            updated = updated || state.update_our_tlc_min_value(value);
+            updated |= state.update_our_tlc_min_value(value);
         }
 
         if let Some(value) = tlc_maximum_value {
-            updated = updated || state.update_our_tlc_max_value(value);
+            updated |= state.update_our_tlc_max_value(value);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {
-            updated = updated || state.update_our_tlc_fee_proportional_millionths(fee);
+            updated |= state.update_our_tlc_fee_proportional_millionths(fee);
         }
 
         if updated {
-            state.broadcast_channel_update(&self.network).await;
+            state
+                .generate_and_broadcast_channel_update(&self.network)
+                .await;
         }
 
         Ok(())
@@ -1388,7 +1408,7 @@ where
         event: ChannelEvent,
     ) -> Result<(), ProcessingChannelError> {
         match event {
-            ChannelEvent::FundingTransactionConfirmed => {
+            ChannelEvent::FundingTransactionConfirmed(block_number, tx_index) => {
                 debug!("Funding transaction confirmed");
                 let flags = match state.state {
                     ChannelState::AwaitingChannelReady(flags) => flags,
@@ -1402,6 +1422,7 @@ where
                             "Expecting funding transaction confirmed event in state AwaitingChannelReady or after TX_SIGNATURES_SENT, but got state {:?}", &state.state)));
                     }
                 };
+                state.funding_tx_confirmed_at = Some((block_number, tx_index));
                 self.network
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1414,10 +1435,7 @@ where
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | AwaitingChannelReadyFlags::OUR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
-                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
-                    debug!("Running on_channel_ready as funding transaction confirmed");
-                    state.on_channel_ready(&self.network).await;
-                }
+                state.maybe_channel_is_ready(&self.network).await;
             }
             ChannelEvent::CommitmentTransactionConfirmed => {
                 match state.state {
@@ -1436,6 +1454,18 @@ where
                 myself.stop(Some("PeerDisconnected".to_string()));
             }
             ChannelEvent::ClosingTransactionConfirmed => {
+                // Broadcast the channel update message which disables the channel.
+                let update = state.generate_disabled_channel_update(&self.network).await;
+
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ProccessChannelUpdate(
+                            self.get_remote_peer_id(),
+                            update,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
                 myself.stop(Some("ChannelClosed".to_string()));
             }
         }
@@ -1496,9 +1526,9 @@ where
                 );
 
                 let counterpart_pubkeys = (&open_channel).into();
+                let public = open_channel.is_public();
                 let OpenChannel {
                     channel_id,
-                    channel_flags,
                     chain_hash,
                     commitment_fee_rate,
                     funding_fee_rate,
@@ -1525,7 +1555,6 @@ where
 
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
-                let public = channel_flags.contains(ChannelFlags::PUBLIC);
                 if public && channel_announcement_nonce.is_none()
                     || public && public_channel_info.is_none()
                 {
@@ -1792,6 +1821,12 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        trace!(
+            "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
+            &state.get_id(),
+            &message,
+            &state.state
+        );
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(state, message).await {
@@ -1948,6 +1983,8 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_tx: Option<Transaction>,
 
+    pub funding_tx_confirmed_at: Option<(BlockNumber, u32)>,
+
     #[serde_as(as = "Option<EntityHex>")]
     pub funding_udt_type_script: Option<Script>,
 
@@ -2060,6 +2097,7 @@ pub struct ShutdownInfo {
 // the config to the network via another ChannelUpdate message.
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
+    pub enabled: bool,
     // The fee rate for tlc transfers. We only have these values set when
     // this is a public channel. Both sides may set this value differently.
     // This is a fee that is paid by the sender of the tlc.
@@ -2079,6 +2117,7 @@ pub struct PublicChannelInfo {
     pub remote_channel_announcement_nonce: Option<PubNonce>,
 
     pub channel_announcement: Option<ChannelAnnouncement>,
+    pub channel_update: Option<ChannelUpdate>,
 }
 
 impl PublicChannelInfo {
@@ -2093,6 +2132,7 @@ impl PublicChannelInfo {
             tlc_max_value: Some(tlc_max_value),
             tlc_min_value: Some(tlc_min_value),
             tlc_locktime_expiry_delta: Some(tlc_locktime_expiry_delta),
+            enabled: true,
             ..Default::default()
         }
     }
@@ -2104,7 +2144,7 @@ pub struct ClosedChannel {}
 #[derive(Debug)]
 pub enum ChannelEvent {
     PeerDisconnected,
-    FundingTransactionConfirmed,
+    FundingTransactionConfirmed(BlockNumber, u32),
     CommitmentTransactionConfirmed,
     ClosingTransactionConfirmed,
 }
@@ -2404,6 +2444,17 @@ impl ChannelActorState {
         self.public_channel_info.is_some()
     }
 
+    pub async fn try_create_channel_messages(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> Option<(ChannelAnnouncement, ChannelUpdate)> {
+        let channel_announcement = self
+            .try_create_channel_announcement_message(network)
+            .await?;
+        let channel_update = self.try_create_channel_update_message(network).await?;
+        Some((channel_announcement, channel_update))
+    }
+
     pub async fn try_create_channel_announcement_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
@@ -2413,13 +2464,186 @@ impl ChannelActorState {
             return None;
         }
 
-        let channel_announcement = self.get_or_create_channel_announcement_message();
-        if channel_announcement.is_signed() {
-            return Some(channel_announcement.clone());
+        let mut channel_announcement = match self
+            .public_channel_info
+            .as_ref()
+            .and_then(|state| state.channel_announcement.clone())
+        {
+            // Skipping creating new signed channel announcement if it exists
+            Some(x) if x.is_signed() => return Some(x),
+            // We have created a channel announcement, but it's not signed by the other
+            // party yet. We should try to complete the signatures next.
+            Some(x) => x,
+            // We have not created a channel announcement yet.
+            None => {
+                let channel_outpoint = self.get_funding_transaction_outpoint();
+                let capacity = if self.funding_udt_type_script.is_some() {
+                    self.to_local_amount + self.to_remote_amount
+                } else {
+                    self.to_local_amount
+                        + self.to_remote_amount
+                        + self.local_reserved_ckb_amount as u128
+                        + self.remote_reserved_ckb_amount as u128
+                };
+
+                let (node1_id, node2_id) = if self.local_is_node1() {
+                    (self.local_pubkey, self.remote_pubkey)
+                } else {
+                    (self.remote_pubkey, self.local_pubkey)
+                };
+                let channel_announcement = ChannelAnnouncement::new_unsigned(
+                    &node1_id,
+                    &node2_id,
+                    channel_outpoint,
+                    Default::default(),
+                    &self.get_funding_lock_script_xonly_key(),
+                    capacity,
+                    self.funding_udt_type_script.clone(),
+                );
+                debug!(
+                    "Created unsigned channel announcement for channel {:?}: {:?}",
+                    &self.get_id(),
+                    &channel_announcement,
+                );
+                channel_announcement
+            }
+        };
+
+        debug!(
+            "Trying to complete channel announcement signatures for channel {:?}: {:?}",
+            &self.get_id(),
+            channel_announcement,
+        );
+
+        let local_nonce = self
+            .get_channel_announcement_musig2_secnonce()
+            .public_nonce();
+        debug!(
+            "Local nonce: {:?}, remote nonce: {:?}, remote signatures: {:?}",
+            &local_nonce,
+            self.get_remote_channel_announcement_nonce(),
+            self.get_remote_channel_announcement_signature()
+        );
+        let remote_nonce = self.get_remote_channel_announcement_nonce()?;
+        let agg_nonce =
+            AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce.clone()));
+
+        let key_agg_ctx = self.get_musig2_agg_context();
+
+        let message = channel_announcement.message_to_sign();
+
+        let (local_node_signature, local_partial_signature) = self
+            .get_or_create_local_channel_announcement_signature(
+                remote_nonce.clone(),
+                message,
+                network,
+            )
+            .await;
+
+        let (remote_node_signature, remote_partial_signature) =
+            self.get_remote_channel_announcement_signature()?;
+
+        debug!("Aggregating partial signatures for channel {:?}", &self.id);
+
+        if self.local_is_node1() {
+            channel_announcement.node1_signature = Some(local_node_signature);
+            channel_announcement.node2_signature = Some(remote_node_signature);
+        } else {
+            channel_announcement.node1_signature = Some(remote_node_signature);
+            channel_announcement.node2_signature = Some(local_node_signature);
         }
 
-        self.try_to_complete_channel_announcement_message(&channel_announcement, network)
-            .await
+        let partial_signatures =
+            self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
+
+        let signature =
+            aggregate_partial_signatures(&key_agg_ctx, &agg_nonce, partial_signatures, message)
+                .expect("aggregate partial signatures");
+
+        channel_announcement.ckb_signature = Some(signature);
+
+        self.public_channel_state_mut().channel_announcement = Some(channel_announcement.clone());
+
+        Some(channel_announcement)
+    }
+
+    async fn do_generate_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+        // The function that would change the channel update parameters.
+        f: impl FnOnce(&mut ChannelUpdate),
+    ) -> ChannelUpdate {
+        let mut channel_update = self
+            .get_unsigned_channel_update_message()
+            .expect("public channel can generate channel update message");
+        f(&mut channel_update);
+        let node_signature =
+            sign_network_message(network.clone(), channel_update.message_to_sign())
+                .await
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+        channel_update.signature = Some(node_signature);
+        self.public_channel_state_mut().channel_update = Some(channel_update.clone());
+        channel_update
+    }
+
+    async fn generate_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ChannelUpdate {
+        self.do_generate_channel_update(network, |_update| {}).await
+    }
+
+    async fn generate_disabled_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ChannelUpdate {
+        self.do_generate_channel_update(network, |update| {
+            update.channel_flags = CHANNEL_DISABLED_FLAG
+        })
+        .await
+    }
+
+    pub async fn generate_and_broadcast_channel_update(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) {
+        let channel_update = self.generate_channel_update(network).await;
+
+        debug!(
+            "Broadcasting channel update message to peers: {:?}",
+            &channel_update
+        );
+
+        network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ProccessChannelUpdate(
+                    self.get_remote_peer_id(),
+                    channel_update,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    }
+
+    pub async fn try_create_channel_update_message(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> Option<ChannelUpdate> {
+        if !self.is_public() {
+            debug!("Ignoring non-public channel update");
+            return None;
+        }
+
+        match self
+            .public_channel_info
+            .as_ref()
+            .and_then(|state| state.channel_update.clone())
+        {
+            Some(x) => return Some(x),
+            _ => {}
+        };
+
+        Some(self.generate_channel_update(network).await)
     }
 
     pub fn get_unsigned_channel_update_message(&self) -> Option<ChannelUpdate> {
@@ -2500,6 +2724,7 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
+            funding_tx_confirmed_at: None,
             is_acceptor: true,
             funding_udt_type_script,
             to_local_amount: local_value,
@@ -2567,6 +2792,7 @@ impl ChannelActorState {
             local_pubkey,
             remote_pubkey,
             funding_tx: None,
+            funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
             to_local_amount: value,
@@ -2755,116 +2981,6 @@ impl ChannelActorState {
         self.local_pubkey < self.remote_pubkey
     }
 
-    fn get_or_create_channel_announcement_message(&mut self) -> ChannelAnnouncement {
-        match self
-            .public_channel_info
-            .as_ref()
-            .and_then(|state| state.channel_announcement.clone())
-        {
-            Some(x) => return x,
-            _ => {}
-        };
-
-        let channel_outpoint = self.get_funding_transaction_outpoint();
-        let capacity = if self.funding_udt_type_script.is_some() {
-            self.to_local_amount + self.to_remote_amount
-        } else {
-            self.to_local_amount
-                + self.to_remote_amount
-                + self.local_reserved_ckb_amount as u128
-                + self.remote_reserved_ckb_amount as u128
-        };
-
-        let (node1_id, node2_id) = if self.local_is_node1() {
-            (self.local_pubkey, self.remote_pubkey)
-        } else {
-            (self.remote_pubkey, self.local_pubkey)
-        };
-        let channel_announcement = ChannelAnnouncement::new_unsigned(
-            &node1_id,
-            &node2_id,
-            channel_outpoint,
-            Default::default(),
-            &self.get_funding_lock_script_xonly_key(),
-            capacity,
-            self.funding_udt_type_script.clone(),
-        );
-        self.public_channel_info
-            .as_mut()
-            .unwrap()
-            .channel_announcement = Some(channel_announcement.clone());
-        debug!(
-            "Creating channel announcement for channel {:?}: {:?}",
-            &self.get_id(),
-            &channel_announcement,
-        );
-        channel_announcement
-    }
-
-    async fn try_to_complete_channel_announcement_message(
-        &mut self,
-        channel_announcement: &ChannelAnnouncement,
-        network: &ActorRef<NetworkActorMessage>,
-    ) -> Option<ChannelAnnouncement> {
-        debug!(
-            "Trying to complete channel announcement for channel {:?}: {:?}",
-            &self.get_id(),
-            channel_announcement,
-        );
-        let mut channel_announcement = channel_announcement.clone();
-
-        let local_nonce = self
-            .get_channel_announcement_musig2_secnonce()
-            .public_nonce();
-        debug!(
-            "Local nonce: {:?}, remote nonce: {:?}, remote signatures: {:?}",
-            &local_nonce,
-            self.get_remote_channel_announcement_nonce(),
-            self.get_remote_channel_announcement_signature()
-        );
-        let remote_nonce = self.get_remote_channel_announcement_nonce()?;
-        let agg_nonce =
-            AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce.clone()));
-
-        let key_agg_ctx = self.get_musig2_agg_context();
-
-        let message = channel_announcement.message_to_sign();
-
-        let (local_node_signature, local_partial_signature) = self
-            .get_or_create_local_channel_announcement_signature(
-                remote_nonce.clone(),
-                message,
-                network,
-            )
-            .await;
-
-        let (remote_node_signature, remote_partial_signature) =
-            self.get_remote_channel_announcement_signature()?;
-
-        debug!("Aggregating partial signatures for channel {:?}", &self.id);
-
-        if self.local_is_node1() {
-            channel_announcement.node1_signature = Some(local_node_signature);
-            channel_announcement.node2_signature = Some(remote_node_signature);
-        } else {
-            channel_announcement.node1_signature = Some(remote_node_signature);
-            channel_announcement.node2_signature = Some(local_node_signature);
-        }
-
-        let partial_signatures =
-            self.order_things_for_musig2(local_partial_signature, remote_partial_signature);
-
-        let signature =
-            aggregate_partial_signatures(&key_agg_ctx, &agg_nonce, partial_signatures, message)
-                .expect("aggregate partial signatures");
-
-        channel_announcement.ckb_signature = Some(signature);
-
-        self.public_channel_state_mut().channel_announcement = Some(channel_announcement.clone());
-
-        Some(channel_announcement)
-    }
-
     async fn get_or_create_local_channel_announcement_signature(
         &mut self,
         remote_nonce: PubNonce,
@@ -3001,6 +3117,21 @@ impl ChannelActorState {
             Some(old_value) if old_value == value => false,
             _ => {
                 self.public_channel_state_mut().tlc_min_value = Some(value);
+                true
+            }
+        }
+    }
+
+    fn get_our_enabled(&self) -> Option<bool> {
+        self.public_channel_info.as_ref().map(|state| state.enabled)
+    }
+
+    fn update_our_enabled(&mut self, enabled: bool) -> bool {
+        let old_value = self.get_our_enabled();
+        match old_value {
+            Some(old_value) if old_value == enabled => false,
+            _ => {
+                self.public_channel_state_mut().enabled = enabled;
                 true
             }
         }
@@ -3468,6 +3599,14 @@ impl ChannelActorState {
         );
         // By convention, the funding tx output for the channel is the first output.
         OutPoint::new(tx.calc_tx_hash(), 0)
+    }
+
+    pub fn get_funding_transaction_block_number(&self) -> BlockNumber {
+        self.funding_tx_confirmed_at.unwrap().0
+    }
+
+    pub fn get_funding_transaction_index(&self) -> u32 {
+        self.funding_tx_confirmed_at.unwrap().1
     }
 
     pub fn get_local_shutdown_script(&self) -> Script {
@@ -4410,70 +4549,64 @@ impl ChannelActorState {
         Ok(())
     }
 
-    async fn maybe_broadcast_announcement_signatures(
-        &mut self,
-        network: &ActorRef<NetworkActorMessage>,
-    ) {
-        debug!("Running maybe_broadcast_announcement_signatures");
-        if let Some(channel_annoucement) =
-            self.try_create_channel_announcement_message(network).await
+    async fn maybe_public_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        debug!("Trying to create channel announcement message for public channel");
+        if let Some((channel_announcement, channel_update)) =
+            self.try_create_channel_messages(network).await
         {
             debug!(
-                "Channel {:?} is ready, broadcasting channel announcement message {:?}",
+                "Channel announcement/update message for {:?} created, public channel is ready",
                 self.get_id(),
-                &channel_annoucement,
+            );
+            self.on_channel_ready(network).await;
+
+            debug!(
+                "Broadcasting channel announcement message {:?}",
+                &channel_announcement,
+            );
+            network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ProcessChannelAnnouncement(
+                        self.get_remote_peer_id(),
+                        self.get_funding_transaction_block_number(),
+                        self.get_funding_transaction_index(),
+                        channel_announcement,
+                    ),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            debug!(
+                "Broadcasting channel update message to peers: {:?}",
+                &channel_update
             );
 
             network
                 .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![self.get_remote_peer_id()],
-                        FiberBroadcastMessage::ChannelAnnouncement(channel_annoucement),
+                    NetworkActorCommand::ProccessChannelUpdate(
+                        self.get_remote_peer_id(),
+                        channel_update,
                     ),
                 ))
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-            self.broadcast_channel_update(network).await;
         }
     }
 
-    async fn get_signed_channel_update_message(
-        &self,
-        network: &ActorRef<NetworkActorMessage>,
-    ) -> Option<ChannelUpdate> {
-        let mut channel_update = match self.get_unsigned_channel_update_message() {
-            Some(message) => message,
-            _ => {
-                warn!("Failed to generate channel update message");
-                return None;
+    async fn maybe_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+        match self.state {
+            ChannelState::AwaitingChannelReady(flags) => {
+                if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
+                    if !self.is_public() {
+                        self.on_channel_ready(network).await;
+                    } else {
+                        self.maybe_public_channel_is_ready(network).await;
+                    }
+                }
             }
-        };
-
-        debug!("Generated channel update message: {:?}", &channel_update);
-        let node_signature =
-            sign_network_message(network.clone(), channel_update.message_to_sign())
-                .await
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-
-        channel_update.signature = Some(node_signature);
-
-        debug!(
-            "Broadcasting channel update message to peers: {:?}",
-            &channel_update
-        );
-        Some(channel_update)
-    }
-
-    async fn broadcast_channel_update(&self, network: &ActorRef<NetworkActorMessage>) {
-        if let Some(channel_update) = self.get_signed_channel_update_message(network).await {
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::BroadcastMessage(
-                        vec![self.get_remote_peer_id()],
-                        FiberBroadcastMessage::ChannelUpdate(channel_update),
-                    ),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            _ => {
+                panic!(
+                    "Invalid state {:?} for maybe_on_channel_ready (expected AwaitingChannelReady)",
+                    &self.state
+                );
+            }
         }
     }
 
@@ -4491,7 +4624,6 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        self.maybe_broadcast_announcement_signatures(network).await;
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {

@@ -161,8 +161,9 @@ pub(crate) struct ShutdownChannelParams {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub(crate) struct UpdateChannelParams {
+pub struct UpdateChannelParams {
     channel_id: Hash256,
+    enabled: Option<bool>,
     #[serde_as(as = "Option<U64Hex>")]
     tlc_locktime_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -483,6 +484,7 @@ where
                     channel_id: params.channel_id,
                     command: ChannelCommand::Update(
                         UpdateCommand {
+                            enabled: params.enabled,
                             tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,

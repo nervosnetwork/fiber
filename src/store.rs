@@ -389,9 +389,15 @@ impl NetworkGraphStateStore for Store {
             .take(limit);
         let mut last_key = Vec::new();
         let channels = iter
-            .map(|(col_key, value)| {
-                last_key = col_key.to_vec();
-                serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
+            .filter_map(|(col_key, value)| {
+                let channel: ChannelInfo = serde_json::from_slice(value.as_ref())
+                    .expect("deserialize ChannelInfo should be OK");
+                if !channel.is_explicitly_disabled() {
+                    last_key = col_key.to_vec();
+                    Some(channel)
+                } else {
+                    None
+                }
             })
             .collect();
         (channels, JsonBytes::from_bytes(last_key.into()))
