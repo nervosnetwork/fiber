@@ -716,7 +716,7 @@ where
         };
 
         let channel_update = if error_code.is_update() {
-            Some(state.generate_channel_update(&self.network).await)
+            state.try_create_channel_update_message(&self.network).await
         } else {
             None
         };
@@ -790,7 +790,7 @@ where
                     "Payment hash mismatch".to_string(),
                 ));
             }
-            // TODO: check the expiry time, if expired, we should return an error.
+            // TODO: check the expiry time, if it's expired, we should return an error.
             if peeled_packet.is_last() {
                 // if this is the last hop, store the preimage.
                 // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
@@ -819,6 +819,7 @@ where
                 add_tlc.amount, forward_amount
             );
             if forward_to_next_hop {
+                assert!(received_amount >= forward_amount);
                 let forward_fee = received_amount.saturating_sub(forward_amount);
                 let fee_rate: u128 = state
                     .public_channel_info
