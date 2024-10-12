@@ -3795,10 +3795,16 @@ impl ChannelActorState {
     pub fn check_for_tlc_update(&self, add_tlc_amount: Option<u128>) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ChannelReady() => {}
+            ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                    "Invalid state {:?} for adding tlc",
-                    self.state
+                    "Invalid state {:?} for {} tlc",
+                    self.state,
+                    if add_tlc_amount.is_some() {
+                        "adding"
+                    } else {
+                        "removing"
+                    }
                 )))
             }
         }
