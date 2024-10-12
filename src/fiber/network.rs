@@ -1474,6 +1474,9 @@ where
             NetworkActorCommand::BroadcastLocalInfo(kind) => match kind {
                 LocalInfoKind::NodeAnnouncement => {
                     let message = state.get_or_create_new_node_announcement_message();
+                    // Need also to update our own graph with the new node announcement.
+                    let mut graph = self.network_graph.write().await;
+                    graph.process_node_announcement(message.clone());
                     myself
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::BroadcastMessage(
@@ -1596,6 +1599,13 @@ where
                 tx_index,
                 channel_announcement,
             ) => {
+                debug!(
+                    "Received channel announcement message for channel (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
+                    &peer_id,
+                    &block_number,
+                    &tx_index,
+                    &channel_announcement
+                );
                 // Adding this owned channel to the network graph.
                 let channel_info = ChannelInfo {
                     funding_tx_block_number: block_number.into(),
@@ -1692,7 +1702,7 @@ where
         message: FiberBroadcastMessage,
     ) -> Result<(), Error> {
         match message {
-            FiberBroadcastMessage::NodeAnnouncement(ref node_announcement) => {
+            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
                 let message = node_announcement.message_to_sign();
                 if !self
                     .network_graph
@@ -1714,20 +1724,18 @@ where
                             &node_announcement
                         );
 
-                        // Add the node to the network graph.
-                        let node_info = NodeInfo {
-                            node_id: node_announcement.node_id,
-                            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
-                            anouncement_msg: node_announcement.clone(),
-                        };
-                        self.network_graph.write().await.add_node(node_info);
-
-                        // TODO: bookkeeping how many nodes we have connected to. Stop connnecting once we surpass a threshold.
+                        // TODO: bookkeeping how many nodes we have connected to. Stop connecting once we surpass a threshold.
                         for addr in &node_announcement.addresses {
                             network.send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::ConnectPeer(addr.clone()),
                             ))?;
                         }
+
+                        // Add the node to the network graph.
+                        self.network_graph
+                            .write()
+                            .await
+                            .process_node_announcement(node_announcement);
                         Ok(())
                     }
                     _ => {
@@ -3290,7 +3298,8 @@ where
             debug!("Tentacle service shutdown");
         });
 
-        let graph = self.network_graph.read().await;
+        let mut graph = self.network_graph.write().await;
+
         let peers_to_sync_network_graph = graph
             .get_peers_to_sync_network_graph()
             .into_iter()
@@ -3314,7 +3323,7 @@ where
             last_update,
             peers_to_sync_network_graph,
         );
-        let state = NetworkActorState {
+        let mut state = NetworkActorState {
             store: self.store.clone(),
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
@@ -3349,6 +3358,10 @@ where
             sync_status,
             broadcasted_message_queue: Default::default(),
         };
+
+        // Save our own NodeInfo to the network graph.
+        let node_announcement = state.get_or_create_new_node_announcement_message();
+        graph.process_node_announcement(node_announcement);
 
         // load the connected peers from the network graph
         let peers = graph.get_connected_peers();
