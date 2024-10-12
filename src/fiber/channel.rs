@@ -3994,7 +3994,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn handle_accept_channel_message(
+    fn handle_accept_channel_message(
         &mut self,
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
@@ -4151,7 +4151,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn handle_commitment_signed_message(
+    fn handle_commitment_signed_message(
         &mut self,
         commitment_signed: CommitmentSigned,
         network: &ActorRef<NetworkActorMessage>,
@@ -4275,7 +4275,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn maybe_transition_to_tx_signatures(
+    fn maybe_transition_to_tx_signatures(
         &mut self,
         flags: SigningCommitmentFlags,
         network: &ActorRef<NetworkActorMessage>,
@@ -4296,7 +4296,7 @@ impl ChannelActorState {
     // TODO: currently witnesses in the tx_signatures molecule message are a list of bytes.
     // It is unclear how can we compose two partial sets witnesses into a complete
     // set of witnesses.
-    pub fn handle_tx_signatures(
+    fn handle_tx_signatures(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         // If partial_witnesses is given, then it is the counterparty that send a message
@@ -4367,7 +4367,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub async fn maybe_broadcast_announcement_signatures(
+    async fn maybe_broadcast_announcement_signatures(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) {
@@ -4395,7 +4395,7 @@ impl ChannelActorState {
     }
 
     async fn get_signed_channel_update_message(
-        &mut self,
+        &self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelUpdate> {
         let mut channel_update = match self.get_unsigned_channel_update_message() {
@@ -4407,7 +4407,6 @@ impl ChannelActorState {
         };
 
         debug!("Generated channel update message: {:?}", &channel_update);
-
         let node_signature =
             sign_network_message(network.clone(), channel_update.message_to_sign())
                 .await
@@ -4422,7 +4421,7 @@ impl ChannelActorState {
         Some(channel_update)
     }
 
-    pub async fn broadcast_channel_update(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn broadcast_channel_update(&self, network: &ActorRef<NetworkActorMessage>) {
         if let Some(channel_update) = self.get_signed_channel_update_message(network).await {
             network
                 .send_message(NetworkActorMessage::new_command(
@@ -4435,7 +4434,7 @@ impl ChannelActorState {
         }
     }
 
-    pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
@@ -4452,7 +4451,7 @@ impl ChannelActorState {
         self.maybe_broadcast_announcement_signatures(network).await;
     }
 
-    pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
+    fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
         debug!(
             "Setting remote commitment point #{} (counting from 0)): {:?}",
             self.remote_commitment_points.len(),
@@ -4465,7 +4464,7 @@ impl ChannelActorState {
         self.remote_commitment_points.push(commitment_point);
     }
 
-    pub fn handle_revoke_and_ack_message(
+    fn handle_revoke_and_ack_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
@@ -4696,7 +4695,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
+    fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         // TODO: check if the tx is valid
         let tx = tx.clone().into_view();
 
@@ -4750,7 +4749,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn maybe_complete_tx_collaboration(
+    fn maybe_complete_tx_collaboration(
         &mut self,
         tx: Transaction,
         network: &ActorRef<NetworkActorMessage>,
@@ -4817,7 +4816,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn fill_in_channel_id(&mut self) {
+    fn fill_in_channel_id(&mut self) {
         assert!(
             self.remote_channel_parameters.is_some(),
             "Counterparty pubkeys is required to derive actual channel id"
@@ -4869,7 +4868,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
+    fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
         let local_shutdown_info = self.local_shutdown_info.as_ref().unwrap();
         let remote_shutdown_info = self.remote_shutdown_info.as_ref().unwrap();
 
@@ -4982,7 +4981,7 @@ impl ChannelActorState {
     // and the second element is the message to be signed by the each party,
     // so as to consume the funding cell. The last element is the witnesses for the
     // commitment transaction.
-    pub fn build_commitment_and_settlement_tx(
+    fn build_commitment_and_settlement_tx(
         &self,
         local: bool,
     ) -> (TransactionView, TransactionView) {
@@ -5205,7 +5204,7 @@ impl ChannelActorState {
         })
     }
 
-    pub fn build_and_sign_commitment_tx(
+    fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
@@ -5247,7 +5246,7 @@ impl ChannelActorState {
 
     /// Verify the partial signature from the peer and create a complete transaction
     /// with valid witnesses.
-    pub fn verify_and_complete_tx(
+    fn verify_and_complete_tx(
         &self,
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
