@@ -288,14 +288,14 @@ where
                 );
             }
         }
-        if let Some(node) = self.nodes.get_mut(&channel_info.node1()) {
+        if let Some(node) = self.nodes.get(&channel_info.node1()) {
             self.store.insert_node(node.clone());
         } else {
             // It is possible that the node announcement is after broadcasted after the channel announcement.
             // So don't just ignore the channel even if we didn't find the node info here.
             warn!("Node1 not found for channel {:?}", &channel_info);
         }
-        if let Some(node) = self.nodes.get_mut(&channel_info.node2()) {
+        if let Some(node) = self.nodes.get(&channel_info.node2()) {
             self.store.insert_node(node.clone());
         } else {
             warn!("Node2 not found for channel {:?}", &channel_info);
