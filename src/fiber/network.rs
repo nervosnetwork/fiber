@@ -2183,8 +2183,7 @@ where
                         error!("Failed to send onion packet with error: {:?}", e);
                         // This is the error implies we send payment request to the first hop failed
                         let err = format!(
-                            "Failed to send onion packet: {:?} with error {:?}",
-                            payment_hash,
+                            "Failed to send onion packet with error {:?}",
                             error_detail.error_code_as_str()
                         );
                         error = Some(err);
