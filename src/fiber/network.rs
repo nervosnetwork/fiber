@@ -1270,7 +1270,7 @@ where
 
             // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
             NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
-                self.handle_onion_packet_send_command(state, command, reply)
+                self.handle_send_onion_packet_command(state, command, reply)
                     .await;
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
@@ -1965,7 +1965,7 @@ where
         }
     }
 
-    async fn handle_onion_packet_send_command(
+    async fn handle_send_onion_packet_command(
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
@@ -2138,17 +2138,19 @@ where
         mut payment_session: PaymentSession,
     ) -> Result<PaymentSession, Error> {
         let payment_data = payment_session.request.clone();
+        let payment_hash = payment_data.payment_hash;
         let mut error = None;
         while payment_session.can_retry() {
             payment_session.retried_times += 1;
-            let graph = self.network_graph.read().await;
-            let hops_infos = match graph.build_route(payment_data.clone()) {
+            let hops_infos = match self
+                .network_graph
+                .read()
+                .await
+                .build_route(payment_data.clone())
+            {
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
-                    error = Some(format!(
-                        "Failed to build route: {:?}",
-                        payment_data.payment_hash
-                    ));
+                    error = Some(format!("Failed to build route: {:?}", payment_hash));
                     break;
                 }
                 Ok(onion_path) => onion_path,
@@ -2173,22 +2175,21 @@ where
                 packet: peeled_packet.serialize(),
                 previous_tlc: None,
             };
-            self.handle_onion_packet_send_command(state, command, rpc_reply)
+            self.handle_send_onion_packet_command(state, command, rpc_reply)
                 .await;
             match recv.await.expect("msg recv error") {
                 Err(e) => {
-                    let error_detail = e.decode().expect("decoded error");
-                    error!("Failed to send onion packet with error: {:?}", e);
-                    // This is the error implies we send payment request to the first hop failed
-                    let err = format!(
-                        "Failed to send onion packet: {:?} with error: {:?}",
-                        payment_data.payment_hash,
-                        error_detail.error_code_as_str()
-                    );
-                    error = Some(err);
-                    // drop the graph lock so that `update_with_tcl_fail` can acquire it
-                    drop(graph);
-                    self.update_with_tcl_fail(&error_detail).await;
+                    if let Some(error_detail) = e.decode() {
+                        error!("Failed to send onion packet with error: {:?}", e);
+                        // This is the error implies we send payment request to the first hop failed
+                        let err = format!(
+                            "Failed to send onion packet: {:?} with error {:?}",
+                            payment_hash,
+                            error_detail.error_code_as_str()
+                        );
+                        error = Some(err);
+                        self.update_with_tcl_fail(&error_detail).await;
+                    }
                     continue;
                 }
                 Ok(tlc_id) => {

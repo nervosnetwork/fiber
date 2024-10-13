@@ -7,7 +7,7 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{U128Hex, U16Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
+    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -438,11 +438,7 @@ where
                                 }
                                 RemoveTlcReason::RemoveTlcFail { error_code: _ } => {
                                     // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
-                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        RemoveTlcFail {
-                                            onion_packet: vec![],
-                                        },
-                                    )
+                                    unimplemented!("RemoveTlcFail is only for internal use");
                                 }
                             },
                         },

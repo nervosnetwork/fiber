@@ -1342,14 +1342,13 @@ impl TlcErr {
     }
 }
 
-// This is the onion packet we need to encode and send back to the sender
-// currently it's the raw TlcErr serialized data from the TlcErr struct
-// sender should decode it and get the TlcErr, then decide what to do
+// This is the onion packet we need to encode and send back to the sender,
+// currently it's the raw TlcErr serialized data from the TlcErr struct,
+// sender should decode it and get the TlcErr, then decide what to do with the error
 // Note: this supposed to be only accessible by the sender, and it's not reliable since it
-// is not placed on-chain due to the possibility of hop failure.
+//       is not placed on-chain due to the possibility of hop failure.
 //
-// FIXME: a better name like `TlcFailOnionPacket`?, since it's not only caused by removing tlc now,
-//        maybe we will replace it later.
+// FIXME: a better name like `TlcFailOnionPacket`?, since it's not only caused by removing tlc now
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFail {
     // TODO: replace this with the real onion packet

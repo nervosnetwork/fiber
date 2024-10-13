@@ -652,15 +652,11 @@ where
             next_hop: None,
             incoming_cltv_height: 0,
         });
-        loop {
-            nodes_visited += 1;
-            let Some(cur_hop) = nodes_heap.pop() else {
-                break;
-            };
-
+        while let Some(cur_hop) = nodes_heap.pop() {
             if cur_hop.node_id == source {
                 break;
             }
+            nodes_visited += 1;
 
             for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
                 edges_expanded += 1;

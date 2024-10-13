@@ -488,9 +488,9 @@ where
                         // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
                         // trying to add a duplicate tlc, so we use tlc count to make sure no new tlc was added
                         // and only send RemoveTlc message to peer if the TLC is not in our state
+                        assert!(tlc_count == state.tlcs.len());
                         error!("Error handling AddTlc message: {:?}", e);
                         let error_detail = self.get_tlc_detail_error(state, &e).await;
-                        assert!(tlc_count == state.tlcs.len());
                         if state.get_received_tlc(tlc_id).is_none() {
                             self.network
                                 .send_message(NetworkActorMessage::new_command(
@@ -893,9 +893,7 @@ where
                         command: ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: added_tlc_id,
-                                reason: RemoveTlcReason::RemoveTlcFail(RemoveTlcFail {
-                                    onion_packet: vec![],
-                                }),
+                                reason: RemoveTlcReason::RemoveTlcFail(res),
                             },
                             port,
                         ),
