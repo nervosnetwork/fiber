@@ -7,7 +7,7 @@ use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
-        types::{ChannelUpdate, RemoveTlcFail, TlcErr, TlcErrorCode},
+        types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
     },
     invoice::InvoiceStore,
 };
@@ -120,7 +120,7 @@ pub enum ChannelCommand {
     CommitmentSigned(),
     AddTlc(
         AddTlcCommand,
-        RpcReplyPort<Result<AddTlcResponse, RemoveTlcFail>>,
+        RpcReplyPort<Result<AddTlcResponse, TlcErrPacket>>,
     ),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
@@ -501,7 +501,7 @@ where
                                                 channel_id: state.get_id(),
                                                 tlc_id,
                                                 reason: RemoveTlcReason::RemoveTlcFail(
-                                                    RemoveTlcFail::new(error_detail),
+                                                    TlcErrPacket::new(error_detail),
                                                 ),
                                             }),
                                         ),
@@ -864,7 +864,7 @@ where
         onion_packet: Vec<u8>,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, RemoveTlcFail>>();
+        let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
         self.network
             .send_message(NetworkActorMessage::Command(
@@ -1350,7 +1350,7 @@ where
                     }
                     Err(err) => {
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(RemoveTlcFail::new(error_detail)));
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail)));
                         Err(err)
                     }
                 }

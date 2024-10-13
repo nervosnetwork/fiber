@@ -59,8 +59,8 @@ use super::types::{
     FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
     NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, Privkey, Pubkey,
     QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
-    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcFail,
-    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
+    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
 };
 use super::FiberConfig;
 
@@ -153,7 +153,7 @@ pub enum NetworkActorCommand {
     // is for the current node.
     SendPaymentOnionPacket(
         SendOnionPacketCommand,
-        RpcReplyPort<Result<u64, RemoveTlcFail>>,
+        RpcReplyPort<Result<u64, TlcErrPacket>>,
     ),
     PeelPaymentOnionPacket(
         Vec<u8>, // onion_packet
@@ -1969,17 +1969,17 @@ where
         &self,
         state: &mut NetworkActorState<S>,
         command: SendOnionPacketCommand,
-        reply: RpcReplyPort<Result<u64, RemoveTlcFail>>,
+        reply: RpcReplyPort<Result<u64, TlcErrPacket>>,
     ) {
         let SendOnionPacketCommand {
             packet,
             previous_tlc,
         } = command;
 
-        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
+        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
             let error_detail = TlcErr::new(TlcErrorCode::InvalidOnionPayload);
             reply
-                .send(Err(RemoveTlcFail::new(error_detail)))
+                .send(Err(TlcErrPacket::new(error_detail)))
                 .expect("send error failed");
         };
 
@@ -1995,14 +1995,14 @@ where
             return invalid_onion_error(reply);
         };
 
-        let unknown_next_peer = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
+        let unknown_next_peer = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
             let error_detail = TlcErr::new_channel_fail(
                 TlcErrorCode::UnknownNextPeer,
                 channel_outpoint.clone(),
                 None,
             );
             reply
-                .send(Err(RemoveTlcFail::new(error_detail)))
+                .send(Err(TlcErrPacket::new(error_detail)))
                 .expect("send add tlc response");
         };
 
@@ -2016,7 +2016,7 @@ where
                 return unknown_next_peer(reply);
             }
         };
-        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, RemoveTlcFail>>();
+        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
@@ -2045,7 +2045,7 @@ where
                 );
                 let error_detail = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
                 return reply
-                    .send(Err(RemoveTlcFail::new(error_detail)))
+                    .send(Err(TlcErrPacket::new(error_detail)))
                     .expect("send add tlc response");
             }
         }
@@ -2169,7 +2169,7 @@ where
             )
             .map_err(|err| Error::InvalidOnionPacket(err))?;
 
-            let (send, recv) = oneshot::channel::<Result<u64, RemoveTlcFail>>();
+            let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
             let rpc_reply = RpcReplyPort::from(send);
             let command = SendOnionPacketCommand {
                 packet: peeled_packet.serialize(),

@@ -1344,20 +1344,18 @@ impl TlcErr {
 
 // This is the onion packet we need to encode and send back to the sender,
 // currently it's the raw TlcErr serialized data from the TlcErr struct,
-// sender should decode it and get the TlcErr, then decide what to do with the error
+// sender should decode it and then decide what to do with the error.
 // Note: this supposed to be only accessible by the sender, and it's not reliable since it
 //       is not placed on-chain due to the possibility of hop failure.
-//
-// FIXME: a better name like `TlcFailOnionPacket`?, since it's not only caused by removing tlc now
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoveTlcFail {
+pub struct TlcErrPacket {
     // TODO: replace this with the real onion packet
     pub onion_packet: Vec<u8>,
 }
 
-impl RemoveTlcFail {
+impl TlcErrPacket {
     pub fn new(tlc_fail: TlcErr) -> Self {
-        RemoveTlcFail {
+        TlcErrPacket {
             onion_packet: tlc_fail.serialize(),
         }
     }
@@ -1367,27 +1365,27 @@ impl RemoveTlcFail {
     }
 }
 
-impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
-    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
-        molecule_fiber::RemoveTlcFail::new_builder()
+impl From<TlcErrPacket> for molecule_fiber::TlcErrPacket {
+    fn from(remove_tlc_fail: TlcErrPacket) -> Self {
+        molecule_fiber::TlcErrPacket::new_builder()
             .onion_packet(remove_tlc_fail.onion_packet.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
+impl TryFrom<molecule_fiber::TlcErrPacket> for TlcErrPacket {
     type Error = Error;
 
-    fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
-        Ok(RemoveTlcFail {
+    fn try_from(remove_tlc_fail: molecule_fiber::TlcErrPacket) -> Result<Self, Self::Error> {
+        Ok(TlcErrPacket {
             onion_packet: remove_tlc_fail.onion_packet().unpack(),
         })
     }
 }
 
-impl std::fmt::Display for RemoveTlcFail {
+impl std::fmt::Display for TlcErrPacket {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "RemoveTlcFail")
+        write!(f, "TlcErrPacket")
     }
 }
 
@@ -1462,7 +1460,7 @@ impl TlcErrorCode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
-    RemoveTlcFail(RemoveTlcFail),
+    RemoveTlcFail(TlcErrPacket),
 }
 
 impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
@@ -1472,7 +1470,7 @@ impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
                 molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
             }
             RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail.into())
+                molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail.into())
             }
         }
     }
@@ -1494,7 +1492,7 @@ impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
             molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => Ok(
                 RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.try_into()?),
             ),
-            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail) => {
+            molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail) => {
                 Ok(RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.try_into()?))
             }
         }
