@@ -14,6 +14,11 @@ assert {
   res.body.channels: length 0
 }
 
+script:pre-request {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 1000));
+}
+
 script:post-response {
   console.log("list channel result: ", res.body);
 }
