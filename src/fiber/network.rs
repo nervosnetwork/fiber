@@ -2103,10 +2103,13 @@ where
             }
         }
         match tcl_error_detail.error_code() {
-            TlcFailErrorCode::PermanentChannelFailure | TlcFailErrorCode::ChannelDisabled => {
+            TlcFailErrorCode::PermanentChannelFailure
+            | TlcFailErrorCode::ChannelDisabled
+            | TlcFailErrorCode::UnknownNextPeer => {
                 let channel_outpoint = tcl_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
+                debug!("mark channel failed: {:?}", channel_outpoint);
                 let mut graph = self.network_graph.write().await;
                 graph.mark_channel_failed(&channel_outpoint);
             }
@@ -2134,11 +2137,11 @@ where
         state: &mut NetworkActorState<S>,
         mut payment_session: PaymentSession,
     ) -> Result<PaymentSession, Error> {
-        let graph = self.network_graph.read().await;
         let payment_data = payment_session.request.clone();
         let mut error = None;
         while payment_session.can_retry() {
             payment_session.retried_times += 1;
+            let graph = self.network_graph.read().await;
             let hops_infos = match graph.build_route(payment_data.clone()) {
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
@@ -2183,6 +2186,8 @@ where
                         error_detail.error_code_as_str()
                     );
                     error = Some(err);
+                    // drop the graph lock so that `update_with_tcl_fail_detail` can acquire it
+                    drop(graph);
                     self.update_with_tcl_fail_detail(&error_detail).await;
                     continue;
                 }
