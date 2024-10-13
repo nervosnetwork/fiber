@@ -60,7 +60,7 @@ use super::types::{
     NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, Privkey, Pubkey,
     QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
     QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcFail,
-    RemoveTlcReason, TlcFailDetail, TlcFailDetailData, TlcFailErrorCode,
+    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::FiberConfig;
 
@@ -1977,7 +1977,7 @@ where
         } = command;
 
         let invalid_onion_error = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
-            let error_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionPayload);
+            let error_detail = TlcErr::new(TlcErrorCode::InvalidOnionPayload);
             reply
                 .send(Err(RemoveTlcFail::new(error_detail)))
                 .expect("send error failed");
@@ -1996,8 +1996,8 @@ where
         };
 
         let unknown_next_peer = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
-            let error_detail = TlcFailDetail::new_channel_fail(
-                TlcFailErrorCode::UnknownNextPeer,
+            let error_detail = TlcErr::new_channel_fail(
+                TlcErrorCode::UnknownNextPeer,
                 channel_outpoint.clone(),
                 None,
             );
@@ -2043,7 +2043,7 @@ where
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err
                 );
-                let error_detail = TlcFailDetail::new(TlcFailErrorCode::TemporaryNodeFailure);
+                let error_detail = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
                 return reply
                     .send(Err(RemoveTlcFail::new(error_detail)))
                     .expect("send add tlc response");
@@ -2068,7 +2068,7 @@ where
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
-                        self.update_with_tcl_fail_detail(&detail_error).await;
+                        self.update_with_tcl_fail(&detail_error).await;
                         if payment_session.can_retry() && !detail_error.error_code.payment_failed()
                         {
                             let res = self.try_payment_session(state, payment_session).await;
@@ -2085,14 +2085,14 @@ where
         }
     }
 
-    async fn update_with_tcl_fail_detail(&self, tcl_error_detail: &TlcFailDetail) {
+    async fn update_with_tcl_fail(&self, tcl_error_detail: &TlcErr) {
         let error_code = tcl_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
         if error_code.is_update() {
             if let Some(extra_data) = &tcl_error_detail.extra_data {
                 match extra_data {
-                    TlcFailDetailData::ChannelFailed { channel_update, .. } => {
+                    TlcErrData::ChannelFailed { channel_update, .. } => {
                         if let Some(channel_update) = channel_update {
                             let mut graph = self.network_graph.write().await;
                             let _ = graph.process_channel_update(channel_update.clone());
@@ -2103,9 +2103,9 @@ where
             }
         }
         match tcl_error_detail.error_code() {
-            TlcFailErrorCode::PermanentChannelFailure
-            | TlcFailErrorCode::ChannelDisabled
-            | TlcFailErrorCode::UnknownNextPeer => {
+            TlcErrorCode::PermanentChannelFailure
+            | TlcErrorCode::ChannelDisabled
+            | TlcErrorCode::UnknownNextPeer => {
                 let channel_outpoint = tcl_error_detail
                     .error_channel_outpoint()
                     .expect("expect channel outpoint");
@@ -2113,7 +2113,7 @@ where
                 let mut graph = self.network_graph.write().await;
                 graph.mark_channel_failed(&channel_outpoint);
             }
-            TlcFailErrorCode::PermanentNodeFailure => {
+            TlcErrorCode::PermanentNodeFailure => {
                 let node_id = tcl_error_detail.error_node_id().expect("expect node id");
                 let mut graph = self.network_graph.write().await;
                 graph.mark_node_failed(node_id);
@@ -2186,9 +2186,9 @@ where
                         error_detail.error_code_as_str()
                     );
                     error = Some(err);
-                    // drop the graph lock so that `update_with_tcl_fail_detail` can acquire it
+                    // drop the graph lock so that `update_with_tcl_fail` can acquire it
                     drop(graph);
-                    self.update_with_tcl_fail_detail(&error_detail).await;
+                    self.update_with_tcl_fail(&error_detail).await;
                     continue;
                 }
                 Ok(tlc_id) => {

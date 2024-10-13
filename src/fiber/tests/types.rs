@@ -4,7 +4,7 @@ use crate::fiber::{
     tests::test_utils::generate_pubkey,
     types::{
         secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-        RemoveTlcFail, TlcFailDetail, TlcFailErrorCode,
+        RemoveTlcFail, TlcErr, TlcErrorCode,
     },
 };
 use ckb_types::packed::OutPointBuilder;
@@ -100,19 +100,17 @@ fn test_peeled_onion_packet() {
 
 #[test]
 fn test_tlc_fail_error() {
-    let tlc_fail_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionVersion);
+    let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     assert!(!tlc_fail_detail.error_code.is_node());
     assert!(tlc_fail_detail.error_code.is_bad_onion());
     assert!(tlc_fail_detail.error_code.is_perm());
     let tlc_fail = RemoveTlcFail::new(tlc_fail_detail.clone());
 
-    let convert_back: TlcFailDetail = tlc_fail.decode().expect("decoded fail");
+    let convert_back: TlcErr = tlc_fail.decode().expect("decoded fail");
     assert_eq!(tlc_fail_detail, convert_back);
 
-    let node_fail = TlcFailDetail::new_node_fail(
-        TlcFailErrorCode::PermanentNodeFailure,
-        generate_pubkey().into(),
-    );
+    let node_fail =
+        TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, generate_pubkey().into());
     assert!(node_fail.error_code.is_node());
     let tlc_fail = RemoveTlcFail::new(node_fail.clone());
     let convert_back = tlc_fail.decode().expect("decoded fail");

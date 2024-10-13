@@ -1257,7 +1257,7 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum TlcFailDetailData {
+pub enum TlcErrData {
     ChannelFailed {
         #[serde_as(as = "EntityHex")]
         channel_outpoint: OutPoint,
@@ -1270,34 +1270,34 @@ pub enum TlcFailDetailData {
 
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TlcFailDetail {
-    pub error_code: TlcFailErrorCode,
-    pub extra_data: Option<TlcFailDetailData>,
+pub struct TlcErr {
+    pub error_code: TlcErrorCode,
+    pub extra_data: Option<TlcErrData>,
 }
 
-impl TlcFailDetail {
-    pub fn new(error_code: TlcFailErrorCode) -> Self {
-        TlcFailDetail {
+impl TlcErr {
+    pub fn new(error_code: TlcErrorCode) -> Self {
+        TlcErr {
             error_code: error_code,
             extra_data: None,
         }
     }
 
-    pub fn new_node_fail(error_code: TlcFailErrorCode, node_id: Pubkey) -> Self {
-        TlcFailDetail {
+    pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
+        TlcErr {
             error_code: error_code.into(),
-            extra_data: Some(TlcFailDetailData::NodeFailed { node_id }),
+            extra_data: Some(TlcErrData::NodeFailed { node_id }),
         }
     }
 
     pub fn new_channel_fail(
-        error_code: TlcFailErrorCode,
+        error_code: TlcErrorCode,
         channel_outpoint: OutPoint,
         channel_update: Option<ChannelUpdate>,
     ) -> Self {
-        TlcFailDetail {
+        TlcErr {
             error_code: error_code.into(),
-            extra_data: Some(TlcFailDetailData::ChannelFailed {
+            extra_data: Some(TlcErrData::ChannelFailed {
                 channel_outpoint,
                 channel_update,
             }),
@@ -1306,30 +1306,30 @@ impl TlcFailDetail {
 
     pub fn error_node_id(&self) -> Option<Pubkey> {
         match &self.extra_data {
-            Some(TlcFailDetailData::NodeFailed { node_id }) => Some(*node_id),
+            Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
             _ => None,
         }
     }
 
     pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
         match &self.extra_data {
-            Some(TlcFailDetailData::ChannelFailed {
+            Some(TlcErrData::ChannelFailed {
                 channel_outpoint, ..
             }) => Some(channel_outpoint.clone()),
             _ => None,
         }
     }
 
-    pub fn error_code(&self) -> TlcFailErrorCode {
+    pub fn error_code(&self) -> TlcErrorCode {
         self.error_code
     }
 
     pub fn error_code_as_str(&self) -> String {
-        let error_code: TlcFailErrorCode = self.error_code.into();
+        let error_code: TlcErrorCode = self.error_code.into();
         error_code.as_ref().to_string()
     }
 
-    pub fn set_extra_data(&mut self, extra_data: TlcFailDetailData) {
+    pub fn set_extra_data(&mut self, extra_data: TlcErrData) {
         self.extra_data = Some(extra_data);
     }
 
@@ -1343,8 +1343,8 @@ impl TlcFailDetail {
 }
 
 // This is the onion packet we need to encode and send back to the sender
-// currently it's the raw TlcFailDetail serialized data from the TlcFailDetail struct
-// sender should decode it and get the TlcFailDetail, then decide what to do
+// currently it's the raw TlcErr serialized data from the TlcErr struct
+// sender should decode it and get the TlcErr, then decide what to do
 // Note: this supposed to be only accessible by the sender, and it's not reliable since it
 // is not placed on-chain due to the possibility of hop failure.
 //
@@ -1357,14 +1357,14 @@ pub struct RemoveTlcFail {
 }
 
 impl RemoveTlcFail {
-    pub fn new(tlc_fail: TlcFailDetail) -> Self {
+    pub fn new(tlc_fail: TlcErr) -> Self {
         RemoveTlcFail {
             onion_packet: tlc_fail.serialize(),
         }
     }
 
-    pub fn decode(&self) -> Option<TlcFailDetail> {
-        TlcFailDetail::deserialize(&self.onion_packet)
+    pub fn decode(&self) -> Option<TlcErr> {
+        TlcErr::deserialize(&self.onion_packet)
     }
 }
 
@@ -1403,7 +1403,7 @@ const UPDATE: u16 = 0x1000;
 
 #[repr(u16)]
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, IntoStaticStr)]
-pub enum TlcFailErrorCode {
+pub enum TlcErrorCode {
     TemporaryNodeFailure = NODE | 2,
     PermanentNodeFailure = PERM | NODE | 2,
     // unused right now
@@ -1432,7 +1432,7 @@ pub enum TlcFailErrorCode {
     InvalidOnionBlinding = BADONION | PERM | 24,
 }
 
-impl TlcFailErrorCode {
+impl TlcErrorCode {
     pub fn is_node(&self) -> bool {
         *self as u16 & NODE != 0
     }
@@ -1451,10 +1451,10 @@ impl TlcFailErrorCode {
 
     pub fn payment_failed(&self) -> bool {
         match self {
-            TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcFailErrorCode::FinalIncorrectCltvExpiry
-            | TlcFailErrorCode::FinalIncorrectHtlcAmount
-            | TlcFailErrorCode::MppTimeout => true,
+            TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            | TlcErrorCode::FinalIncorrectCltvExpiry
+            | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::MppTimeout => true,
             _ => false,
         }
     }

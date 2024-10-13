@@ -7,7 +7,7 @@ use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
-        types::{ChannelUpdate, RemoveTlcFail, TlcFailDetail, TlcFailErrorCode},
+        types::{ChannelUpdate, RemoveTlcFail, TlcErr, TlcErrorCode},
     },
     invoice::InvoiceStore,
 };
@@ -679,40 +679,38 @@ where
         &self,
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
-    ) -> TlcFailDetail {
+    ) -> TlcErr {
         let error_code = match error {
-            ProcessingChannelError::PeelingOnionPacketError(_) => {
-                TlcFailErrorCode::InvalidOnionPayload
-            }
-            ProcessingChannelError::TlcForwardFeeIsTooLow => TlcFailErrorCode::FeeInsufficient,
+            ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
+            ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
             ProcessingChannelError::FinalIncorrectPreimage
             | ProcessingChannelError::FinalIncorrectPaymentHash => {
-                TlcFailErrorCode::IncorrectOrUnknownPaymentDetails
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
-                TlcFailErrorCode::FinalIncorrectHtlcAmount
+                TlcErrorCode::FinalIncorrectHtlcAmount
             }
-            ProcessingChannelError::TlcAmountIsTooLow => TlcFailErrorCode::AmountBelowMinimum,
+            ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
             | ProcessingChannelError::TlcValueInflightExceedLimit => {
-                TlcFailErrorCode::TemporaryChannelFailure
+                TlcErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::InvalidState(_) => match state.state {
-                ChannelState::Closed(_) => TlcFailErrorCode::PermanentChannelFailure,
+                ChannelState::Closed(_) => TlcErrorCode::PermanentChannelFailure,
                 // ShuttingDown is a temporary state
-                ChannelState::ShuttingDown(_) => TlcFailErrorCode::TemporaryChannelFailure,
+                ChannelState::ShuttingDown(_) => TlcErrorCode::TemporaryChannelFailure,
                 ChannelState::ChannelReady() => {
                     // we expect `ChannelReady` will be both OK for tlc forwarding,
                     // so here are the unreachable point in normal workflow,
                     // set `TemporaryNodeFailure` for general temporary failure of the processing node here
                     assert!(false, "unreachable point in normal workflow");
-                    TlcFailErrorCode::TemporaryNodeFailure
+                    TlcErrorCode::TemporaryNodeFailure
                 }
                 // otherwise, channel maybe not ready
-                _ => TlcFailErrorCode::TemporaryChannelFailure,
+                _ => TlcErrorCode::TemporaryChannelFailure,
             },
             // TODO: there maybe more error types here
-            _ => TlcFailErrorCode::IncorrectOrUnknownPaymentDetails,
+            _ => TlcErrorCode::IncorrectOrUnknownPaymentDetails,
         };
 
         let channel_update = if error_code.is_update() {
@@ -720,7 +718,7 @@ where
         } else {
             None
         };
-        TlcFailDetail::new_channel_fail(
+        TlcErr::new_channel_fail(
             error_code,
             state.get_funding_transaction_outpoint(),
             channel_update,
