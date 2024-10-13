@@ -1,3 +1,4 @@
+use super::history::PaymentHistory;
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::Pubkey;
@@ -145,6 +146,8 @@ pub struct NetworkGraph<S> {
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
+    #[allow(dead_code)]
+    history: PaymentHistory,
 }
 
 #[derive(Error, Debug)]
@@ -177,6 +180,7 @@ where
             connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: get_chain_hash(),
+            history: PaymentHistory::new(),
         };
         network_graph.load_from_store();
         network_graph

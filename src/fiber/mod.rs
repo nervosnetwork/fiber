@@ -9,6 +9,7 @@ pub use network::{
 
 mod fee;
 pub mod graph;
+mod history;
 mod key;
 mod path;
 
