@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::marker::PhantomData;
 use std::str::FromStr;
-use strum::{AsRefStr, IntoStaticStr};
+use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -1399,7 +1399,7 @@ const NODE: u16 = 0x2000;
 const UPDATE: u16 = 0x1000;
 
 #[repr(u16)]
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, IntoStaticStr)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, EnumString)]
 pub enum TlcErrorCode {
     TemporaryNodeFailure = NODE | 2,
     PermanentNodeFailure = PERM | NODE | 2,

@@ -1,3 +1,4 @@
+use super::test_utils::generate_seckey;
 use crate::fiber::{
     gen::fiber as molecule_fiber,
     hash_algorithm::HashAlgorithm,
@@ -10,8 +11,7 @@ use crate::fiber::{
 use ckb_types::packed::OutPointBuilder;
 use ckb_types::prelude::Builder;
 use secp256k1::{Secp256k1, SecretKey};
-
-use super::test_utils::generate_seckey;
+use std::str::FromStr;
 
 #[test]
 fn test_serde_public_key() {
@@ -115,4 +115,8 @@ fn test_tlc_fail_error() {
     let tlc_fail = TlcErrPacket::new(node_fail.clone());
     let convert_back = tlc_fail.decode().expect("decoded fail");
     assert_eq!(node_fail, convert_back);
+
+    let error_code = TlcErrorCode::PermanentNodeFailure;
+    let convert = TlcErrorCode::from_str("PermanentNodeFailure").expect("convert error");
+    assert_eq!(error_code, convert);
 }

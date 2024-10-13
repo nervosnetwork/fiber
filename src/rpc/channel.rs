@@ -6,8 +6,8 @@ use crate::fiber::{
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U16Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill},
+    serde_utils::{U128Hex, U64Hex},
+    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -22,6 +22,7 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::cmp::Reverse;
+use std::str::FromStr;
 use tentacle::secio::PeerId;
 
 #[serde_as]
@@ -128,7 +129,7 @@ pub(crate) struct AddTlcResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct RemoveTlcParams {
     channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
@@ -137,16 +138,11 @@ pub(crate) struct RemoveTlcParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 enum RemoveTlcReason {
-    RemoveTlcFulfill {
-        payment_preimage: Hash256,
-    },
-    RemoveTlcFail {
-        #[serde_as(as = "U16Hex")]
-        error_code: u16,
-    },
+    RemoveTlcFulfill { payment_preimage: Hash256 },
+    RemoveTlcFail { error_code: String },
 }
 
 #[serde_as]
@@ -423,6 +419,15 @@ where
     }
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+        let err_code = match &params.reason {
+            RemoveTlcReason::RemoveTlcFail { error_code } => {
+                let Ok(err) = TlcErrorCode::from_str(&error_code) else {
+                    return log_and_error!(params, format!("invalid error code: {}", error_code));
+                };
+                Some(err)
+            }
+            _ => None,
+        };
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -430,15 +435,21 @@ where
                     command: ChannelCommand::RemoveTlc(
                         RemoveTlcCommand {
                             id: params.tlc_id,
-                            reason: match params.reason {
+                            reason: match &params.reason {
                                 RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
-                                        RemoveTlcFulfill { payment_preimage },
+                                        RemoveTlcFulfill {
+                                            payment_preimage: *payment_preimage,
+                                        },
                                     )
                                 }
-                                RemoveTlcReason::RemoveTlcFail { error_code: _ } => {
+                                RemoveTlcReason::RemoveTlcFail { .. } => {
                                     // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
-                                    unimplemented!("RemoveTlcFail is only for internal use");
+                                    crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
+                                        TlcErrPacket::new(TlcErr::new(
+                                            err_code.expect("expect error code"),
+                                        )),
+                                    )
                                 }
                             },
                         },
