@@ -1975,60 +1975,82 @@ where
             packet,
             previous_tlc,
         } = command;
-        let res = if let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&packet) {
-            let info = peeled_packet.current;
-            debug!("Processing onion packet info: {:?}", info);
 
-            let channel_outpoint = &info
-                .channel_outpoint
-                .expect("valid onion packet contains channel outpoint");
-            let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
-                Some(channel_id) => channel_id,
-                None => {
-                    error!(
-                            "Failed to process onion packet: channel id not found for channel outpoint {:?}. \
-                            Are we connected to the peer?",
-                            channel_outpoint
-                        );
-                    let error_detail = TlcFailDetail::new_channel_fail(
-                        TlcFailErrorCode::UnknownNextPeer,
-                        channel_outpoint.clone(),
-                        None,
-                    );
-                    reply
-                        .send(Err(RemoveTlcFail::new(error_detail)))
-                        .expect("send add tlc response");
-                    return;
-                }
-            };
-            let (send, recv) = oneshot::channel::<Result<AddTlcResponse, RemoveTlcFail>>();
-            let rpc_reply = RpcReplyPort::from(send);
-            let command = ChannelCommand::AddTlc(
-                AddTlcCommand {
-                    amount: info.amount,
-                    preimage: None,
-                    payment_hash: Some(info.payment_hash),
-                    expiry: info.expiry.into(),
-                    hash_algorithm: info.tlc_hash_algorithm,
-                    onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
-                    previous_tlc,
-                },
-                rpc_reply,
-            );
-
-            // we have already checked the channel_id is valid
-            state
-                .send_command_to_channel(*channel_id, command)
-                .await
-                .expect("send command failed");
-
-            recv.await.expect("recv error").map(|res| res.tlc_id)
-        } else {
-            info!("onion packet is empty, ignore it");
+        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
             let error_detail = TlcFailDetail::new(TlcFailErrorCode::InvalidOnionPayload);
-            Err(RemoveTlcFail::new(error_detail))
+            reply
+                .send(Err(RemoveTlcFail::new(error_detail)))
+                .expect("send error failed");
         };
-        reply.send(res).expect("send error");
+
+        let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&packet) else {
+            info!("onion packet is empty, ignore it");
+            return invalid_onion_error(reply);
+        };
+
+        let info = peeled_packet.current;
+        debug!("Processing onion packet info: {:?}", info);
+
+        let Some(channel_outpoint) = &info.channel_outpoint else {
+            return invalid_onion_error(reply);
+        };
+
+        let unknown_next_peer = |reply: RpcReplyPort<Result<u64, RemoveTlcFail>>| {
+            let error_detail = TlcFailDetail::new_channel_fail(
+                TlcFailErrorCode::UnknownNextPeer,
+                channel_outpoint.clone(),
+                None,
+            );
+            reply
+                .send(Err(RemoveTlcFail::new(error_detail)))
+                .expect("send add tlc response");
+        };
+
+        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+            Some(channel_id) => channel_id,
+            None => {
+                error!(
+                        "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
+                        channel_outpoint
+                    );
+                return unknown_next_peer(reply);
+            }
+        };
+        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, RemoveTlcFail>>();
+        let rpc_reply = RpcReplyPort::from(send);
+        let command = ChannelCommand::AddTlc(
+            AddTlcCommand {
+                amount: info.amount,
+                preimage: None,
+                payment_hash: Some(info.payment_hash),
+                expiry: info.expiry.into(),
+                hash_algorithm: info.tlc_hash_algorithm,
+                onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
+                previous_tlc,
+            },
+            rpc_reply,
+        );
+
+        // we have already checked the channel_id is valid,
+        match state.send_command_to_channel(*channel_id, command).await {
+            Ok(()) => {}
+            Err(Error::ChannelNotFound(_)) => {
+                return unknown_next_peer(reply);
+            }
+            Err(err) => {
+                // must be some error fron tentacle, set it as temporary node failure
+                error!(
+                    "Failed to send onion packet to channel: {:?} with err: {:?}",
+                    channel_id, err
+                );
+                let error_detail = TlcFailDetail::new(TlcFailErrorCode::TemporaryNodeFailure);
+                return reply
+                    .send(Err(RemoveTlcFail::new(error_detail)))
+                    .expect("send add tlc response");
+            }
+        }
+        let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
+        reply.send(add_tlc_res).expect("send error");
     }
 
     async fn on_tlc_remove_received(
@@ -2377,7 +2399,8 @@ pub struct NetworkActorState<S> {
     peer_pubkey_map: HashMap<PeerId, Pubkey>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
-    // Outpoint to channel id mapping.
+    // Outpoint to channel id mapping, only contains channels with state of Ready.
+    // We need to remove the channel from this map when the channel is closed or peer disconnected.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
@@ -3028,11 +3051,27 @@ where
         self.maybe_sync_network_graph(remote_peer_id).await;
     }
 
+    fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
+        self.channels.remove(channel_id).map(|channel| {
+            if let Some(outpoint) = self.outpoint_channel_map.iter().find_map(|(k, v)| {
+                if v == channel_id {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            }) {
+                self.outpoint_channel_map.remove(&outpoint);
+            }
+            channel
+        })
+    }
+
     fn on_peer_disconnected(&mut self, id: &PeerId) {
+        info!("Peer {:?} disconnected", id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
-                    if let Some(channel) = self.channels.remove(&channel_id) {
+                    if let Some(channel) = self.remove_channel(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
                             ChannelEvent::PeerDisconnected,
                         ));
@@ -3169,7 +3208,7 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
     ) {
-        self.channels.remove(channel_id);
+        self.remove_channel(channel_id);
         if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
                 set.remove(channel_id);
