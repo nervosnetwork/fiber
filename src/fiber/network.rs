@@ -69,7 +69,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::graph::{ChannelInfo, NodeInfo, PaymentSession};
+use crate::fiber::graph::{ChannelInfo, PaymentSession};
 use crate::fiber::types::{
     secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
     TxSignatures,
