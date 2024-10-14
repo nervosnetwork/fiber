@@ -157,8 +157,8 @@ impl CkbInvoice {
         hash
     }
 
-    /// Checks if the signature is valid for the included payee public key or if none exists if it's
-    /// valid for the recovered signature (which should always be true?).
+    /// Checks if the signature is valid for the included payee public key
+    /// and also check the invoice data is consistent with the signature
     fn validate_signature(&self) -> bool {
         if self.signature.is_none() {
             return true;

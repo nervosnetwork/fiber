@@ -216,6 +216,63 @@ fn test_invoice_builder() {
     assert_eq!(invoice.amount, Some(1280));
     assert_eq!(invoice.payment_hash(), &gen_payment_hash);
     assert_eq!(invoice.data.attrs.len(), 7);
+    assert_eq!(invoice.check_signature().is_ok(), true);
+}
+
+#[test]
+fn test_invoice_check_signature() {
+    let gen_payment_hash = rand_sha256_hash();
+    let (public_key, private_key) = gen_rand_keypair();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::Description("description".to_string()))
+        .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_eq!(invoice.check_signature(), Ok(()));
+    let payee_pubkey = invoice.payee_pub_key();
+    assert_eq!(payee_pubkey, Some(&public_key));
+
+    // modify the some element then check signature will fail
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.data.attrs[0] = Attribute::FinalHtlcTimeout(6);
+    assert_eq!(
+        invoice_clone.check_signature(),
+        Err(InvoiceError::InvalidSignature)
+    );
+
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.amount = Some(1281);
+    assert_eq!(
+        invoice_clone.check_signature(),
+        Err(InvoiceError::InvalidSignature)
+    );
+
+    // if the invoice is not signed, check_signature will skipped
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .build()
+        .unwrap();
+
+    assert_eq!(invoice.check_signature(), Ok(()));
+    // modify the some element then check signature will also skip
+    let mut invoice_clone = invoice.clone();
+    invoice_clone.amount = Some(1281);
+    assert_eq!(invoice_clone.check_signature(), Ok(()));
 }
 
 #[test]
