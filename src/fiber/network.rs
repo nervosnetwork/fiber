@@ -70,8 +70,10 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
-use crate::fiber::types::{secp256k1_instance, FiberChannelMessage, TxSignatures};
-use crate::fiber::types::{PaymentOnionPacket, PeeledPaymentOnionPacket};
+use crate::fiber::types::{
+    secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
+    TxSignatures,
+};
 use crate::fiber::KeyPair;
 use crate::invoice::{CkbInvoice, InvoiceStore};
 use crate::{unwrap_or_return, Error};

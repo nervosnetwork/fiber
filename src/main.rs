@@ -1,31 +1,27 @@
 use ckb_hash::blake2b_256;
+use core::default::Default;
+use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::contracts::{get_script_by_contract, init_contracts_context, Contract};
+use fnn::ckb::CkbChainActor;
 use fnn::fiber::graph::NetworkGraph;
+use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
 use fnn::store::Store;
+use fnn::tasks::{
+    cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
+};
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
+use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
 use ractor::Actor;
 use secp256k1::Secp256k1;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use tentacle::multiaddr::Multiaddr;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
 use tracing::{debug, error, info, info_span, trace};
-use tracing_subscriber::field::MakeExt;
-use tracing_subscriber::{fmt, EnvFilter};
-
-use std::str::FromStr;
-
-use core::default::Default;
-use fnn::actors::RootActor;
-use fnn::ckb::CkbChainActor;
-use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
-use fnn::tasks::{
-    cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
-};
-use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
-use std::sync::Arc;
-use std::time::Duration;
-use tracing_subscriber::fmt::format;
+use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
 #[tokio::main]
 pub async fn main() {
@@ -33,20 +29,19 @@ pub async fn main() {
     // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
     // here we map it with the node prefix
     let node_formatter = format::debug_fn(|writer, field, value| {
-        if field.name() == "id" {
-            write!(
-                writer,
-                "{}: {:?} on {}",
-                field,
-                value,
-                fnn::get_node_prefix()
-            )
+        let prefix = if field.name() == "id" {
+            let r = fnn::get_node_prefix();
+            if !r.is_empty() {
+                format!(" on {}", r)
+            } else {
+                "".to_string()
+            }
         } else {
-            write!(writer, "{}: {:?}", field, value)
-        }
+            "".to_string()
+        };
+        write!(writer, "{}: {:?}{}", field, value, prefix)
     })
     .delimited(", ");
-
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .pretty()
