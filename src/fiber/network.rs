@@ -2192,14 +2192,12 @@ where
                     continue;
                 }
                 Ok(tlc_id) => {
-                    payment_session.set_status(PaymentSessionStatus::Inflight);
-                    payment_session.set_first_hop_info(first_channel_outpoint, tlc_id);
+                    payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
                     self.store.insert_payment_session(payment_session.clone());
                     return Ok(payment_session);
                 }
             }
         }
-        payment_session.set_status(PaymentSessionStatus::Failed);
         let final_error = error.expect("expect error details");
         payment_session.set_failed_status(&final_error);
         self.store.insert_payment_session(payment_session);

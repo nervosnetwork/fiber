@@ -867,12 +867,13 @@ impl PaymentSession {
         self.request.payment_hash
     }
 
-    pub fn set_status(&mut self, status: PaymentSessionStatus) {
+    fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
         self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
     }
 
-    pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+    pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+        self.set_status(PaymentSessionStatus::Inflight);
         self.first_hop_channel_outpoint = Some(channel_outpoint);
         self.first_hop_tlc_id = Some(tlc_id);
     }

@@ -38,4 +38,15 @@ impl PaymentHistory {
     pub fn get_result(&self, pubkey: &Pubkey) -> Option<&PaymentResult> {
         self.latest_results.get(pubkey)
     }
+
+    #[allow(dead_code)]
+    pub fn get_probability(
+        &self,
+        _from: &Pubkey,
+        _to: &Pubkey,
+        _amount: u128,
+        _capacity: u128,
+    ) -> f64 {
+        return 0.0;
+    }
 }
