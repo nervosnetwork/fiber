@@ -16,19 +16,18 @@ pub(crate) struct PaymentResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaymentHistory {
-    pub latest_results: HashMap<Pubkey, PaymentResult>,
+    pub inner: HashMap<Pubkey, PaymentResult>,
 }
 
 impl PaymentHistory {
     pub fn new() -> Self {
         PaymentHistory {
-            latest_results: HashMap::new(),
+            inner: HashMap::new(),
         }
     }
 
-    #[allow(dead_code)]
     pub fn add_result(&mut self, source: Pubkey, target: Pubkey, result: PairResult) {
-        let payment_result = self.latest_results.entry(source).or_insert(PaymentResult {
+        let payment_result = self.inner.entry(source).or_insert(PaymentResult {
             pairs: HashMap::new(),
         });
         payment_result.pairs.insert(target, result);
@@ -36,7 +35,7 @@ impl PaymentHistory {
 
     #[allow(dead_code)]
     pub fn get_result(&self, pubkey: &Pubkey) -> Option<&PaymentResult> {
-        self.latest_results.get(pubkey)
+        self.inner.get(pubkey)
     }
 
     #[allow(dead_code)]

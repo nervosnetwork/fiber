@@ -50,7 +50,7 @@ use super::channel::{
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
-use super::graph::{NetworkGraph, NetworkGraphStateStore};
+use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
@@ -1199,7 +1199,7 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_tlc_remove_received(state, payment_hash, remove_tlc.reason)
+                self.on_remove_tlc_event(state, payment_hash, remove_tlc.reason)
                     .await;
             }
         }
@@ -2055,7 +2055,7 @@ where
         reply.send(add_tlc_res).expect("send error");
     }
 
-    async fn on_tlc_remove_received(
+    async fn on_remove_tlc_event(
         &self,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
@@ -2066,11 +2066,19 @@ where
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
                         payment_session.set_success_status();
+                        self.network_graph
+                            .write()
+                            .await
+                            .record_payment_success(&payment_session);
                         self.store.insert_payment_session(payment_session);
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
                         self.update_with_tcl_fail(&detail_error).await;
+                        self.network_graph
+                            .write()
+                            .await
+                            .record_payment_fail(&payment_session, detail_error.clone());
                         if payment_session.can_retry() && !detail_error.error_code.payment_failed()
                         {
                             let res = self.try_payment_session(state, payment_session).await;
@@ -2096,8 +2104,11 @@ where
                 match extra_data {
                     TlcErrData::ChannelFailed { channel_update, .. } => {
                         if let Some(channel_update) = channel_update {
-                            let mut graph = self.network_graph.write().await;
-                            let _ = graph.process_channel_update(channel_update.clone());
+                            let _ = self
+                                .network_graph
+                                .write()
+                                .await
+                                .process_channel_update(channel_update.clone());
                         }
                     }
                     _ => {}
@@ -2162,6 +2173,7 @@ where
                 .clone()
                 .expect("first hop channel outpoint");
 
+            let session_route = SessionRoute::new(&hops_infos);
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
             let peeled_packet = PeeledPaymentOnionPacket::create(
@@ -2194,7 +2206,11 @@ where
                     continue;
                 }
                 Ok(tlc_id) => {
-                    payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
+                    payment_session.set_inflight_status(
+                        first_channel_outpoint,
+                        tlc_id,
+                        session_route,
+                    );
                     self.store.insert_payment_session(payment_session.clone());
                     return Ok(payment_session);
                 }
