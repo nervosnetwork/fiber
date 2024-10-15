@@ -5,6 +5,7 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
+#[cfg(not(test))]
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serializer};
 use std::{fs, path::PathBuf};
@@ -251,6 +252,7 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
+#[cfg(not(test))]
 static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
 
 impl FiberConfig {
@@ -266,13 +268,22 @@ impl FiberConfig {
         }
     }
 
+    fn inner_read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+        self.create_base_dir()?;
+        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
+    }
+
+    // `OnceCell` will make all actors in UI tests use the same secret key.
+    // which is not what we want. So we disable it in tests.
+    #[cfg(test)]
+    pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
+        self.inner_read_or_generate_secret_key()
+    }
+
+    #[cfg(not(test))]
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
         FIBER_SECRET_KEY
-            .get_or_try_init(|| {
-                self.create_base_dir()?;
-                super::key::KeyPair::read_or_generate(&self.base_dir().join("sk"))
-                    .map_err(Into::into)
-            })
+            .get_or_try_init(|| self.inner_read_or_generate_secret_key())
             .map(|key| key.clone())
     }
 
