@@ -5,6 +5,7 @@ use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serializer};
 use std::{fs, path::PathBuf};
 use tentacle::secio::{PublicKey, SecioKeyPair};
@@ -250,6 +251,8 @@ impl<'de> serde::Deserialize<'de> for AnnouncedNodeName {
     }
 }
 
+static FIBER_SECRET_KEY: OnceCell<super::KeyPair> = OnceCell::new();
+
 impl FiberConfig {
     pub fn base_dir(&self) -> &PathBuf {
         self.base_dir.as_ref().expect("have set base dir")
@@ -264,8 +267,13 @@ impl FiberConfig {
     }
 
     pub fn read_or_generate_secret_key(&self) -> Result<super::KeyPair> {
-        self.create_base_dir()?;
-        super::key::KeyPair::read_or_generate(&self.base_dir().join("sk")).map_err(Into::into)
+        FIBER_SECRET_KEY
+            .get_or_try_init(|| {
+                self.create_base_dir()?;
+                super::key::KeyPair::read_or_generate(&self.base_dir().join("sk"))
+                    .map_err(Into::into)
+            })
+            .map(|key| key.clone())
     }
 
     pub fn store_path(&self) -> PathBuf {
