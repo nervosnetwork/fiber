@@ -11,7 +11,7 @@ use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
-use fnn::{start_cch, start_ldk, start_network, start_rpc, Config};
+use fnn::{start_cch, start_network, start_rpc, Config};
 use ractor::Actor;
 use secp256k1::Secp256k1;
 use std::str::FromStr;
@@ -54,11 +54,6 @@ pub async fn main() {
 
     let config = Config::parse();
     debug!("Parsed config: {:?}", &config);
-
-    if let Some(ldk_config) = config.ldk {
-        info!("Starting ldk");
-        start_ldk(ldk_config).await;
-    }
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
