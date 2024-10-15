@@ -9,11 +9,10 @@ use home::home_dir;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::{ckb::CkbConfig, CchConfig, FiberConfig, LdkConfig, RpcConfig};
+use crate::{ckb::CkbConfig, CchConfig, FiberConfig, RpcConfig};
 
 const DEFAULT_CONFIG_FILE_NAME: &str = "config.yml";
 const DEFAULT_FIBER_DIR_NAME: &str = "fiber";
-const DEFAULT_LDK_DIR_NAME: &str = "ldk";
 const DEFAULT_CCH_DIR_NAME: &str = "cch";
 
 fn get_default_base_dir() -> PathBuf {
@@ -32,8 +31,6 @@ fn get_default_config_file() -> PathBuf {
 enum Service {
     #[serde(alias = "fiber", alias = "FIBER")]
     FIBER,
-    #[serde(alias = "ldk", alias = "LDK")]
-    LDK,
     #[serde(alias = "cch", alias = "CCH")]
     CCH,
     #[serde(alias = "rpc", alias = "RPC")]
@@ -47,7 +44,6 @@ impl FromStr for Service {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "fiber" | "FIBER" => Ok(Self::FIBER),
-            "ldk" | "LDK" => Ok(Self::LDK),
             "cch" | "CCH" => Ok(Self::CCH),
             "rpc" | "RPC" => Ok(Self::RPC),
             "ckb" | "CKB" => Ok(Self::CkbChain),
@@ -70,17 +66,13 @@ struct Args {
     #[arg(short = 'd', long = "dir", help = format!("base directory for all [default: {:?}]", get_default_base_dir()))]
     base_dir: Option<std::path::PathBuf>,
 
-    /// services to run (can be any of `ckb`/`ldk`, separated by `,`)
+    /// services to run (can be any of `ckb`, separated by `,`)
     #[arg(short, long, value_parser, num_args = 0.., value_delimiter = ',')]
     services: Vec<Service>,
 
     /// config for fiber network
     #[command(flatten)]
     pub fiber: <FiberConfig as ClapSerde>::Opt,
-
-    /// config for ldk (lightning network for bitcoin)
-    #[command(flatten)]
-    pub ldk: <LdkConfig as ClapSerde>::Opt,
 
     /// config for cch (cross chain hub)
     #[command(flatten)]
@@ -99,7 +91,6 @@ struct Args {
 struct SerializedConfig {
     services: Option<Vec<Service>>,
     fiber: Option<<FiberConfig as ClapSerde>::Opt>,
-    ldk: Option<<LdkConfig as ClapSerde>::Opt>,
     cch: Option<<CchConfig as ClapSerde>::Opt>,
     rpc: Option<<RpcConfig as ClapSerde>::Opt>,
     ckb: Option<<CkbConfig as ClapSerde>::Opt>,
@@ -109,8 +100,6 @@ struct SerializedConfig {
 pub struct Config {
     // fiber config, None represents that we should not run fiber service
     pub fiber: Option<FiberConfig>,
-    // ldk config, None represents that we should not run ldk service
-    pub ldk: Option<LdkConfig>,
     // cch config, None represents that we should not run cch service
     pub cch: Option<CchConfig>,
     // rpc server config, None represents that we should not run rpc service
@@ -169,18 +158,16 @@ impl Config {
             print_help_and_exit(1)
         };
 
-        // Set default fiber/ldk base directory. These may be overridden by values explicitly set by the user.
+        // Set default fiber/ckb base directory. These may be overridden by values explicitly set by the user.
         args.fiber.base_dir = Some(Some(base_dir.join(DEFAULT_FIBER_DIR_NAME)));
-        args.ldk.base_dir = Some(Some(base_dir.join(DEFAULT_LDK_DIR_NAME)));
         args.ckb.base_dir = Some(Some(base_dir.join(crate::ckb::DEFAULT_CKB_BASE_DIR_NAME)));
         args.cch.base_dir = Some(Some(base_dir.join(DEFAULT_CCH_DIR_NAME)));
 
-        let (fiber, ldk, cch, rpc, ckb) = config_from_file
+        let (fiber, cch, rpc, ckb) = config_from_file
             .map(|x| {
                 let SerializedConfig {
                     services: _,
                     fiber,
-                    ldk,
                     cch,
                     rpc,
                     ckb,
@@ -188,29 +175,25 @@ impl Config {
                 (
                     // Successfully read config file, merging these options with the default ones.
                     fiber.map(|c| FiberConfig::from(c).merge(&mut args.fiber)),
-                    ldk.map(|c| LdkConfig::from(c).merge(&mut args.ldk)),
                     cch.map(|c| CchConfig::from(c).merge(&mut args.cch)),
                     rpc.map(|c| RpcConfig::from(c).merge(&mut args.rpc)),
                     ckb.map(|c| CkbConfig::from(c).merge(&mut args.ckb)),
                 )
             })
-            .unwrap_or((None, None, None, None, None));
-        let (fiber, ldk, cch, rpc, ckb) = (
+            .unwrap_or((None, None, None, None));
+        let (fiber, cch, rpc, ckb) = (
             fiber.unwrap_or(FiberConfig::from(&mut args.fiber)),
-            ldk.unwrap_or(LdkConfig::from(&mut args.ldk)),
             cch.unwrap_or(CchConfig::from(&mut args.cch)),
             rpc.unwrap_or(RpcConfig::from(&mut args.rpc)),
             ckb.unwrap_or(CkbConfig::from(&mut args.ckb)),
         );
 
         let fiber = services.contains(&Service::FIBER).then_some(fiber);
-        let ldk = services.contains(&Service::LDK).then_some(ldk);
         let cch = services.contains(&Service::CCH).then_some(cch);
         let rpc = services.contains(&Service::RPC).then_some(rpc);
         let ckb = services.contains(&Service::CkbChain).then_some(ckb);
         Self {
             fiber,
-            ldk,
             cch,
             rpc,
             ckb,

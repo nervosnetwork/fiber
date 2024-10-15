@@ -54,7 +54,7 @@ table OpenChannel {
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
     max_tlc_value_in_flight:     Uint128,
-    max_num_of_accept_tlcs:      Uint64,
+    max_tlc_number_in_flight:      Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Byte33,
@@ -75,7 +75,7 @@ table OpenChannel {
 - funding_fee_rate: Funding transaction fee rate, in shannons per kilo-bytes.
 - commitment_fee_rate: Commitment transaction fee rate, in shannons per kilo-bytes.
 - max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs (Time Locked Contracts) that the channel initiator can accept in this channel.
-- max_num_of_accept_tlcs: The maximum number of unconfirmed TLCs that the channel initiator can accept in this channel.
+- max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel initiator can accept in this channel.
 - min_tlc_value: The minimum value of TLCs that the channel initiator can accept.
 - to_self_delay: The delay time for the channel initiator to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel initiator, used for generating 2-2 multisig contracts.
@@ -98,7 +98,7 @@ table AcceptChannel {
     channel_id:                  Byte32,
     funding_amount:              Uint128,
     max_tlc_value_in_flight:     Uint128,
-    max_num_of_accept_tlcs:      Uint64,
+    max_tlc_number_in_flight:      Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Byte33,
@@ -114,7 +114,7 @@ table AcceptChannel {
 - channel_id: The ID of the channel, must match the channel_id in OpenChannel.
 - funding_amount: The amount of assets the channel receiver wants to contribute, can be 0, indicating no contribution.
 - max_tlc_value_in_flight: The maximum total value of unconfirmed TLCs that the channel receiver can accept in this channel.
-- max_num_of_accept_tlcs: The maximum number of unconfirmed TLCs that the channel receiver can accept in this channel.
+- max_tlc_number_in_flight: The maximum number of unconfirmed TLCs that the channel receiver can accept in this channel.
 - min_tlc_value: The minimum value of TLCs that the channel receiver can accept.
 - to_self_delay: The delay time for the channel receiver to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel receiver, used for generating 2-2 multisig contracts.
