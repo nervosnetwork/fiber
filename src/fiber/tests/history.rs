@@ -350,3 +350,155 @@ fn test_history_internal_fail_interval() {
         })
     );
 }
+
+#[test]
+fn test_history_internal_result_construct() {
+    let mut history = PaymentHistory::new(None);
+    let source: Pubkey = generate_pubkey().into();
+    let target1: Pubkey = generate_pubkey().into();
+    let target2: Pubkey = generate_pubkey().into();
+
+    let mut internal_result = InternalResult::default();
+    internal_result.add(source.clone(), target1.clone(), 11, 10, true);
+    internal_result.add(source.clone(), target2.clone(), 12, 13, false);
+    history.apply_internal_result(internal_result);
+
+    assert_eq!(
+        history.get_result(&source),
+        Some(&PaymentResult {
+            pairs: vec![
+                (
+                    target1,
+                    PairResult {
+                        fail_time: 0,
+                        fail_amount: 0,
+                        success_time: 11,
+                        success_amount: 10,
+                    }
+                ),
+                (
+                    target2,
+                    PairResult {
+                        fail_time: 12,
+                        fail_amount: 13,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                )
+            ]
+            .into_iter()
+            .collect()
+        })
+    );
+}
+
+#[test]
+fn test_history_test_set_node_fail() {
+    let mut history = PaymentHistory::new(None);
+    let source: Pubkey = generate_pubkey().into();
+    let target1: Pubkey = generate_pubkey().into();
+    let target2: Pubkey = generate_pubkey().into();
+
+    let result1 = PairResult {
+        fail_time: 1,
+        fail_amount: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+    history.add_result(source.clone(), target1.clone(), result1);
+    let result2 = PairResult {
+        fail_time: 5,
+        fail_amount: 6,
+        success_time: 7,
+        success_amount: 8,
+    };
+    history.add_result(source.clone(), target2.clone(), result2);
+
+    history.set_node_fail(target2, 100);
+    assert_eq!(
+        history.get_result(&source),
+        Some(&PaymentResult {
+            pairs: vec![
+                (target1, result1),
+                (
+                    target2,
+                    PairResult {
+                        fail_time: 100,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                )
+            ]
+            .into_iter()
+            .collect()
+        })
+    );
+
+    history.set_node_fail(target1, 101);
+    assert_eq!(
+        history.get_result(&source),
+        Some(&PaymentResult {
+            pairs: vec![
+                (
+                    target1,
+                    PairResult {
+                        fail_time: 101,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                ),
+                (
+                    target2,
+                    PairResult {
+                        fail_time: 100,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                )
+            ]
+            .into_iter()
+            .collect()
+        })
+    );
+
+    history.set_node_fail(source, 102);
+    assert_eq!(
+        history.get_result(&source),
+        Some(&PaymentResult {
+            pairs: vec![
+                (
+                    target1,
+                    PairResult {
+                        fail_time: 102,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                ),
+                (
+                    target2,
+                    PairResult {
+                        fail_time: 102,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    }
+                )
+            ]
+            .into_iter()
+            .collect()
+        })
+    );
+}
+
+#[test]
+fn test_history_get_probability() {
+    let history = PaymentHistory::new(None);
+    let source: Pubkey = generate_pubkey().into();
+    let target1: Pubkey = generate_pubkey().into();
+    let prob = history.get_probability(&source, &target1, 10, 10);
+    assert_eq!(prob, 0.0);
+}

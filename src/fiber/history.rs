@@ -2,6 +2,8 @@ use crate::fiber::types::Pubkey;
 use std::collections::HashMap;
 use tracing::debug;
 
+use super::graph::SessionRouteNode;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct PairResult {
     pub(crate) fail_time: u128,
@@ -17,9 +19,66 @@ pub(crate) struct InternalPairResult {
     pub(crate) amount: u128,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InternalResult {
     pub pairs: HashMap<(Pubkey, Pubkey), InternalPairResult>,
+}
+
+impl InternalResult {
+    pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u128, amount: u128, success: bool) {
+        let pair = InternalPairResult {
+            success,
+            time,
+            amount,
+        };
+        self.pairs.insert((from, target), pair);
+    }
+
+    pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey) {
+        self.add(
+            from,
+            target,
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+            0,
+            false,
+        );
+        self.add(
+            target,
+            from,
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+            0,
+            false,
+        )
+    }
+
+    pub fn fail_node(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+        if index > 0 {
+            self.add_fail_pair(route[index - 1].pubkey, route[index].pubkey);
+        }
+        if index + 1 < route.len() {
+            self.add_fail_pair(route[index].pubkey, route[index + 1].pubkey);
+        }
+    }
+
+    pub fn fail_pair(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+        if index > 0 {
+            self.add_fail_pair(route[index - 1].pubkey, route[index].pubkey);
+        }
+    }
+
+    pub fn succeed_range_pairs(&mut self, route: &Vec<SessionRouteNode>, start: usize, end: usize) {
+        for i in start..=end {
+            if i > 0 {
+                self.add(
+                    route[i - 1].pubkey,
+                    route[i].pubkey,
+                    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                    route[i].amount,
+                    true,
+                );
+            }
+        }
+    }
 }
 
 impl From<InternalPairResult> for PairResult {
@@ -66,6 +125,22 @@ impl PaymentHistory {
             pairs: HashMap::new(),
         });
         payment_result.pairs.insert(target, result);
+    }
+
+    #[allow(dead_code)]
+    pub fn set_node_fail(&mut self, node: Pubkey, time: u128) {
+        for (from, result) in self.inner.iter_mut() {
+            for (target, pairs) in result.pairs.iter_mut() {
+                if *from == node || *target == node {
+                    *pairs = PairResult {
+                        fail_time: time,
+                        fail_amount: 0,
+                        success_time: 0,
+                        success_amount: 0,
+                    };
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]

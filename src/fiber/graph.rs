@@ -1,7 +1,7 @@
-use super::history::{PairResult, PaymentHistory};
+use super::history::{InternalResult, PaymentHistory};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
-use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
+use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TlcErrorCode};
 use super::types::{Pubkey, TlcErr};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::fee::calculate_tlc_forward_fee;
@@ -505,18 +505,19 @@ where
 
     pub(crate) fn record_payment_success(&mut self, payment_session: &PaymentSession) {
         let session_route = &payment_session.route;
+        let mut internal_result = InternalResult::default();
         for i in 0..session_route.nodes.len() - 1 {
             let node = &session_route.nodes[i];
             let next = &session_route.nodes[i + 1].pubkey;
-            let result = PairResult {
-                fail_time: 0,
-                fail_amount: 0,
-                success_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-                success_amount: node.amount,
-            };
-
-            self.history.add_result(node.pubkey, *next, result);
+            internal_result.add(
+                node.pubkey,
+                *next,
+                std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                node.amount,
+                true,
+            );
         }
+        self.history.apply_internal_result(internal_result);
     }
 
     pub(crate) fn record_payment_fail(
@@ -539,29 +540,61 @@ where
             return;
         };
 
+        let mut result = InternalResult::default();
+        let route_nodes = &payment_session.route.nodes;
+        let num_hops = route_nodes.len();
         match index {
             0 => {
-                // the first node failed, we should mark the channel failed
-                //match tlc_err.error_code {}
+                match tlc_err.error_code {
+                    // we received an error from the first node, we trust our own node
+                    // so we need to penalize the first node
+                    TlcErrorCode::InvalidOnionVersion
+                    | TlcErrorCode::InvalidOnionHmac
+                    | TlcErrorCode::InvalidOnionKey => {
+                        result.fail_node(route_nodes, index);
+                    }
+                    _ => {
+                        // we can not penalize our own node, the whole payment session need to retry
+                        debug!("first hop failed with error: {:?}", tlc_err);
+                    }
+                }
+            }
+            _ if index == num_hops - 1 => {
+                // the last node failed
+                match tlc_err.error_code {
+                    TlcErrorCode::FinalIncorrectCltvExpiry
+                    | TlcErrorCode::FinalIncorrectHtlcAmount => {
+                        if num_hops == 2 {
+                            result.fail_node(route_nodes, 1);
+                        } else {
+                            assert!(num_hops > 2);
+                            result.fail_pair(route_nodes, num_hops - 1);
+                            result.succeed_range_pairs(route_nodes, 0, num_hops - 2);
+                        }
+                    }
+                    TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
+                        result.succeed_range_pairs(route_nodes, 0, num_hops - 1);
+                    }
+                    _ => {
+                        result.fail_node(route_nodes, num_hops - 1);
+                        result.succeed_range_pairs(route_nodes, 0, num_hops - 2);
+                    }
+                }
             }
             _ => {
-                todo!()
+                match tlc_err.error_code {
+                    // we received an error from the first node, we trust our own node
+                    // so we need to penalize the first node
+                    TlcErrorCode::InvalidOnionVersion
+                    | TlcErrorCode::InvalidOnionHmac
+                    | TlcErrorCode::InvalidOnionKey => {
+                        result.fail_pair(route_nodes, index);
+                    }
+                    _ => {}
+                }
             }
         }
-
-        let session_route = &payment_session.route;
-        for i in 0..index {
-            let node = &session_route.nodes[i];
-            let next = &session_route.nodes[i + 1].pubkey;
-            let result = PairResult {
-                fail_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-                fail_amount: node.amount,
-                success_time: 0,
-                success_amount: 0,
-            };
-
-            self.history.add_result(node.pubkey, *next, result);
-        }
+        self.history.apply_internal_result(result);
     }
 
     #[cfg(test)]
