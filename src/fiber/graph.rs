@@ -732,8 +732,6 @@ where
                         continue;
                     }
                 }
-                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, distance, fee);
-                // TODO: update weight and distance here
                 let node: NodeHeapElement = NodeHeapElement {
                     node_id: from,
                     weight,

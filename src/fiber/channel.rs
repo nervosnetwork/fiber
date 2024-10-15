@@ -485,11 +485,11 @@ where
                     Err(e) => {
                         // we assume that TLC was not inserted into our state,
                         // so we can safely send RemoveTlc message to the peer
-                        // note we can not use get_received_tlc_by_id here, because this new add_tlc may be
-                        // trying to add a duplicate tlc, so we use tlc count to make sure no new tlc was added
+                        // note this new add_tlc may be trying to add a duplicate tlc,
+                        // so we use tlc count to make sure no new tlc was added
                         // and only send RemoveTlc message to peer if the TLC is not in our state
-                        assert!(tlc_count == state.tlcs.len());
                         error!("Error handling AddTlc message: {:?}", e);
+                        assert!(tlc_count == state.tlcs.len());
                         let error_detail = self.get_tlc_detail_error(state, &e).await;
                         if state.get_received_tlc(tlc_id).is_none() {
                             self.network
@@ -766,7 +766,6 @@ where
         // try to fulfill the payment, find the corresponding payment preimage from payment hash.
         let mut preimage = None;
         let mut peeled_packet_bytes: Option<Vec<u8>> = None;
-        let mut forward_to_next_hop = false;
 
         if !add_tlc.onion_packet.is_empty() {
             // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
@@ -779,7 +778,7 @@ where
                     tx
                 )
             ))
-            .expect("call network")
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
             .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
 
             // check the payment hash and amount
@@ -788,8 +787,20 @@ where
                     "Payment hash mismatch".to_string(),
                 ));
             }
+
+            let received_amount = add_tlc.amount;
+            let forward_amount = peeled_packet.current.amount;
+            debug!(
+                "received_amount: {} forward_amount: {}",
+                add_tlc.amount, forward_amount
+            );
+
             // TODO: check the expiry time, if it's expired, we should return an error.
             if peeled_packet.is_last() {
+                if forward_amount != add_tlc.amount {
+                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                }
+
                 // if this is the last hop, store the preimage.
                 // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
                 // here we can do error check early here for better error handling.
@@ -807,16 +818,6 @@ where
                 }
             } else {
                 peeled_packet_bytes = Some(peeled_packet.serialize());
-                forward_to_next_hop = true;
-            }
-
-            let received_amount = add_tlc.amount;
-            let forward_amount = peeled_packet.current.amount;
-            debug!(
-                "received_amount: {} forward_amount: {}",
-                add_tlc.amount, forward_amount
-            );
-            if forward_to_next_hop {
                 assert!(received_amount >= forward_amount);
                 let forward_fee = received_amount.saturating_sub(forward_amount);
                 let fee_rate: u128 = state
@@ -832,9 +833,6 @@ where
                     );
                     return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
                 }
-            }
-            if !forward_to_next_hop && received_amount != add_tlc.amount {
-                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
             }
         }
 
