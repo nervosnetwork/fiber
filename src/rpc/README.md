@@ -74,7 +74,7 @@ Attempts to open a channel with a peer.
 * `tlc_max_value` - The maximum value for a TLC, an optional parameter
 * `tlc_fee_proportional_millionths` - The fee proportional millionths for a TLC, an optional parameter
 * `max_tlc_value_in_flight` - The maximum value in flight for TLCs, an optional parameter
-* `max_num_of_accept_tlcs` - The maximum number of TLCs that can be accepted, an optional parameter
+* `max_tlc_number_in_flight` - The maximum number of TLCs that can be accepted, an optional parameter
 
 ###### Returns
 

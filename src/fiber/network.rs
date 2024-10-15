@@ -216,7 +216,7 @@ pub struct OpenChannelCommand {
     pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
-    pub max_num_of_accept_tlcs: Option<u64>,
+    pub max_tlc_number_in_flight: Option<u64>,
 }
 
 #[serde_as]
@@ -2370,7 +2370,7 @@ where
             tlc_max_value,
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
-            max_num_of_accept_tlcs,
+            max_tlc_number_in_flight,
         } = open_channel;
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -2416,7 +2416,7 @@ where
                 commitment_fee_rate,
                 funding_fee_rate,
                 max_tlc_value_in_flight,
-                max_num_of_accept_tlcs,
+                max_tlc_number_in_flight,
             }),
             network.clone().get_cell(),
         )
