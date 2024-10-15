@@ -179,7 +179,7 @@ where
             connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: get_chain_hash(),
-            history: PaymentHistory::new(),
+            history: PaymentHistory::new(None),
         };
         network_graph.load_from_store();
         network_graph
@@ -569,7 +569,7 @@ where
         self.channels.clear();
         self.nodes.clear();
         self.connected_peer_addresses.clear();
-        self.history = PaymentHistory::new();
+        self.history = PaymentHistory::new(None);
     }
 
     /// Returns a list of `PaymentHopData` for all nodes in the route,
@@ -972,7 +972,7 @@ impl PaymentSession {
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
     }
 
     pub fn set_inflight_status(
