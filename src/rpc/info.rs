@@ -18,9 +18,6 @@ use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
 use super::graph::UdtCfgInfos;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct NodeInfoParams {}
-
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct NodeInfoResult {
@@ -68,7 +65,7 @@ impl<S> InfoRpcServerImpl<S> {
 #[rpc(server)]
 trait InfoRpc {
     #[method(name = "node_info")]
-    async fn node_info(&self, params: NodeInfoParams) -> Result<NodeInfoResult, ErrorObjectOwned>;
+    async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned>;
 }
 
 #[async_trait]
@@ -76,14 +73,14 @@ impl<S> InfoRpcServer for InfoRpcServerImpl<S>
 where
     S: ChannelActorStateStore + Send + Sync + 'static,
 {
-    async fn node_info(&self, _params: NodeInfoParams) -> Result<NodeInfoResult, ErrorObjectOwned> {
+    async fn node_info(&self) -> Result<NodeInfoResult, ErrorObjectOwned> {
         let version = env!("CARGO_PKG_VERSION").to_string();
         let commit_hash = crate::get_git_versin().to_string();
 
         let message =
             |rpc_reply| NetworkActorMessage::Command(NetworkActorCommand::NodeInfo((), rpc_reply));
 
-        handle_actor_call!(self.actor, message, _params).map(|response| NodeInfoResult {
+        handle_actor_call!(self.actor, message, ()).map(|response| NodeInfoResult {
             version,
             commit_hash,
             public_key: response.public_key,

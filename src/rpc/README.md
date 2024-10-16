@@ -338,13 +338,16 @@ Returns a struct with these fields:
 * `open_channel_auto_accept_min_ckb_funding_amount`: The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount`: The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
 * `tlc_locktime_expiry_delta`: The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_min_value`: The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_max_value`: The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_min_value`: The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no minimum value limit.
+* `tlc_max_value`: The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
 * `tlc_fee_proportional_millionths`: The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
 * `channel_count`: The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count`: The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count`: The number of peers connected to the node, serialized as a hexadecimal string.
-* `network_sync_status`: The synchronization status of the node within the network.
+* `network_sync_status`: The synchronization status of the node within the network, possible values are :
+    * `NotRunning`: The syncing is not running, but we have all the information to start syncing.
+    * `Running`: We should start running the syncing immediately or the syncing is already in progress.
+    * `Done`: Syncing done, unless we restart the node, we don't have to sync again
 * `udt_cfg_infos`: An array of UDT configuration objects, each object contains the following fields:
     * `name`: The name of the UDT
     * `script`: The type script configuration of the UDT, with feilds of
