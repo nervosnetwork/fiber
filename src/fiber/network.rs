@@ -2078,7 +2078,8 @@ impl NetworkSyncState {
                     // TODO: we may want more than one successful syncing.
                     false
                 } else {
-                    debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}", peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
+                    debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}",
+                        peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
                     true
                 }
             } else {
