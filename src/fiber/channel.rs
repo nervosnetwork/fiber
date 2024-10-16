@@ -729,6 +729,19 @@ where
         let tlcs = state.get_tlcs_for_settle_down();
         for tlc_info in tlcs {
             let tlc = tlc_info.tlc.clone();
+            if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+                if invoice.is_expired() {
+                    let command = RemoveTlcCommand {
+                        id: tlc.get_id(),
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(
+                            TlcErrorCode::InvoiceExpired,
+                        ))),
+                    };
+                    let result = self.handle_remove_tlc_command(state, command);
+                    info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+                }
+            }
+
             let preimage = if let Some(preimage) = tlc.payment_preimage {
                 preimage
             } else if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {

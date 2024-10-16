@@ -280,6 +280,12 @@ impl SendPaymentData {
             .transpose()
             .map_err(|_| "invoice is invalid".to_string())?;
 
+        if let Some(invoice) = invoice.clone() {
+            if invoice.is_expired() {
+                return Err("invoice is expired".to_string());
+            }
+        }
+
         fn validate_field<T: PartialEq + Clone>(
             field: Option<T>,
             invoice_field: Option<T>,

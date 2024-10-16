@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::fiber::graph::{NetworkGraphStateStore, PaymentSessionStatus};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::Hash256;
@@ -32,7 +33,7 @@ pub(crate) struct NewInvoiceParams {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct NewInvoiceResult {
+pub(crate) struct InvoiceResult {
     invoice_address: String,
     invoice: CkbInvoice,
 }
@@ -47,19 +48,45 @@ pub(crate) struct ParseInvoiceResult {
     invoice: CkbInvoice,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetInvoiceParams {
+    payment_hash: Hash256,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+enum InvoiceStatus {
+    Unpaid,
+    Inflight,
+    Paid,
+    Expired,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct GetInvoiceResult {
+    invoice_address: String,
+    invoice: CkbInvoice,
+    status: InvoiceStatus,
+}
+
 #[rpc(server)]
 trait InvoiceRpc {
     #[method(name = "new_invoice")]
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
-    ) -> Result<NewInvoiceResult, ErrorObjectOwned>;
+    ) -> Result<InvoiceResult, ErrorObjectOwned>;
 
     #[method(name = "parse_invoice")]
     async fn parse_invoice(
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
+
+    #[method(name = "get_invoice")]
+    async fn get_invoice(
+        &self,
+        payment_hash: GetInvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
@@ -76,12 +103,12 @@ impl<S> InvoiceRpcServerImpl<S> {
 #[async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
-    S: InvoiceStore + Send + Sync + 'static,
+    S: InvoiceStore + NetworkGraphStateStore + Send + Sync + 'static,
 {
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
-    ) -> Result<NewInvoiceResult, ErrorObjectOwned> {
+    ) -> Result<InvoiceResult, ErrorObjectOwned> {
         let mut invoice_builder = InvoiceBuilder::new(params.currency)
             .amount(Some(params.amount))
             .payment_preimage(params.payment_preimage);
@@ -116,7 +143,7 @@ where
                 .store
                 .insert_invoice(invoice.clone(), Some(params.payment_preimage))
             {
-                Ok(_) => Ok(NewInvoiceResult {
+                Ok(_) => Ok(InvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice,
                 }),
@@ -147,6 +174,41 @@ where
                 CALL_EXECUTION_FAILED_CODE,
                 e.to_string(),
                 Some(params),
+            )),
+        }
+    }
+
+    async fn get_invoice(
+        &self,
+        params: GetInvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        let payment_hash = params.payment_hash;
+        match self.store.get_invoice(&payment_hash) {
+            Some(invoice) => {
+                let invoice_status = if invoice.is_expired() {
+                    InvoiceStatus::Expired
+                } else {
+                    InvoiceStatus::Unpaid
+                };
+                let payment_session = self.store.get_payment_session(payment_hash);
+                let status = match payment_session {
+                    Some(session) => match session.status {
+                        PaymentSessionStatus::Inflight => InvoiceStatus::Inflight,
+                        PaymentSessionStatus::Success => InvoiceStatus::Paid,
+                        _ => invoice_status,
+                    },
+                    None => invoice_status,
+                };
+                Ok(GetInvoiceResult {
+                    invoice_address: invoice.to_string(),
+                    invoice,
+                    status,
+                })
+            }
+            None => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "invoice not found".to_string(),
+                Some(payment_hash),
             )),
         }
     }

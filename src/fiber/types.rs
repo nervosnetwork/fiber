@@ -1420,6 +1420,7 @@ pub enum TlcErrorCode {
     IncorrectCltvExpiry = UPDATE | 13,
     ExpiryTooSoon = UPDATE | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
+    InvoiceExpired = PERM | 16,
     FinalIncorrectCltvExpiry = 18,
     FinalIncorrectHtlcAmount = 19,
     ChannelDisabled = UPDATE | 20,
@@ -1451,6 +1452,7 @@ impl TlcErrorCode {
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
             | TlcErrorCode::FinalIncorrectCltvExpiry
             | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::InvoiceExpired
             | TlcErrorCode::MppTimeout => true,
             _ => false,
         }
