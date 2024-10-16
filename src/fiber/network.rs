@@ -2176,12 +2176,18 @@ where
             let session_route = SessionRoute::new(&hops_infos);
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-            let peeled_packet = PeeledPaymentOnionPacket::create(
+            let peeled_packet = match PeeledPaymentOnionPacket::create(
                 session_key,
                 hops_infos,
                 &Secp256k1::signing_only(),
-            )
-            .map_err(|err| Error::InvalidOnionPacket(err))?;
+            ) {
+                Ok(packet) => packet,
+                Err(e) => {
+                    error!("Failed to create onion packet: {:?}", e);
+                    error = Some(format!("Failed to create onion packet: {:?}", payment_hash));
+                    break;
+                }
+            };
 
             let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
             let rpc_reply = RpcReplyPort::from(send);
