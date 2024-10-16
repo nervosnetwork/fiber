@@ -1,44 +1,58 @@
-use super::test_utils::generate_pubkey;
-use crate::fiber::history::InternalPairResult;
-use crate::fiber::history::InternalResult;
-use crate::fiber::history::PaymentResult;
-use crate::fiber::history::{PairResult, PaymentHistory};
-use crate::fiber::types::Pubkey;
+use crate::fiber::history::{ChannelTimedResult, PaymentHistory};
+use ckb_types::packed::{OutPoint, OutPointBuilder};
+use ckb_types::prelude::Builder;
+use ckb_types::prelude::Pack;
 
 #[test]
 fn test_history() {
     let mut history = PaymentHistory::new(None);
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
+    let outpoint = OutPoint::default();
 
-    let result1 = PairResult {
+    let result1 = ChannelTimedResult {
         fail_time: 1,
         fail_amount: 2,
         success_time: 3,
         success_amount: 4,
     };
-    history.add_result(source.clone(), target1.clone(), result1);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(target1, result1)].into_iter().collect()
-        })
-    );
+    history.add_result(&outpoint, result1);
+    assert_eq!(history.get_result(&outpoint), Some(&result1));
 
-    let target2: Pubkey = generate_pubkey().into();
-    let result2 = PairResult {
+    let outpoint2 = OutPointBuilder::default().tx_hash([1u8; 32].pack()).build();
+    let result2 = ChannelTimedResult {
         fail_time: 5,
         fail_amount: 6,
         success_time: 7,
         success_amount: 8,
     };
-    history.add_result(source.clone(), target2.clone(), result2);
+
+    history.add_result(&outpoint2, result2);
+    assert_eq!(history.get_result(&outpoint2), Some(&result2));
+}
+
+#[test]
+fn test_history_apply_channel_result() {
+    let mut history = PaymentHistory::new(None);
+    let outpoint = OutPoint::default();
+    history.apply_channel_result(&outpoint, 10, false, 11);
     assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(target1, result1.clone()), (target2, result2)]
-                .into_iter()
-                .collect()
+        history.get_result(&outpoint),
+        Some(&ChannelTimedResult {
+            fail_time: 11,
+            fail_amount: 10,
+            success_time: 0,
+            success_amount: 0,
+        })
+    );
+
+    let outpoint2 = OutPointBuilder::default().tx_hash([1u8; 32].pack()).build();
+    history.apply_channel_result(&outpoint2, 10, true, 12);
+    assert_eq!(
+        history.get_result(&outpoint2),
+        Some(&ChannelTimedResult {
+            fail_time: 0,
+            fail_amount: 0,
+            success_time: 12,
+            success_amount: 10,
         })
     );
 }
@@ -46,459 +60,57 @@ fn test_history() {
 #[test]
 fn test_history_interal_success_fail() {
     let mut history = PaymentHistory::new(None);
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: true,
-                amount: 10,
-                time: 11,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 0,
-                    fail_amount: 0,
-                    success_time: 11,
-                    success_amount: 10,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 10,
-                time: 12,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 12,
-                    fail_amount: 10,
-                    success_time: 11,
-                    success_amount: 9, // success_amount - 1
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: true,
-                amount: 11,
-                time: 13,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 12,
-                    fail_amount: 12, // success_amount + 1
-                    success_time: 13,
-                    success_amount: 11
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-}
-
-#[test]
-fn test_history_internal_result() {
-    let mut history = PaymentHistory::new(Some(2));
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: true,
-                amount: 10,
-                time: 11,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 0,
-                    fail_amount: 0,
-                    success_time: 11,
-                    success_amount: 10,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let target2: Pubkey = generate_pubkey().into();
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target2.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 1,
-                time: 13,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![
-                (
-                    target1,
-                    PairResult {
-                        fail_time: 0,
-                        fail_amount: 0,
-                        success_time: 11,
-                        success_amount: 10,
-                    }
-                ),
-                (
-                    target2,
-                    PairResult {
-                        fail_time: 13,
-                        fail_amount: 1,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                )
-            ]
-            .into_iter()
-            .collect()
-        })
-    );
-}
-
-#[test]
-fn test_history_internal_fail_interval() {
-    let mut history = PaymentHistory::new(Some(2));
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 1,
-                time: 13,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 13,
-                    fail_amount: 1,
-                    success_time: 0,
-                    success_amount: 0,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 2,
-                time: 14,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-
-    // does not apply since the interval is less than min_fail_relax_interval
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 13,
-                    fail_amount: 1,
-                    success_time: 0,
-                    success_amount: 0,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 0,
-                time: 14,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    // will apply since amount is less
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_time: 14,
-                    fail_amount: 0,
-                    success_time: 0,
-                    success_amount: 0,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-
-    let internal_result = InternalResult {
-        pairs: vec![(
-            (source.clone(), target1.clone()),
-            InternalPairResult {
-                success: false,
-                amount: 10,
-                time: 20,
-            },
-        )]
-        .into_iter()
-        .collect(),
-    };
-    history.apply_internal_result(internal_result);
-    // will apply since interval is large enough
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![(
-                target1,
-                PairResult {
-                    fail_amount: 10,
-                    fail_time: 20,
-                    success_time: 0,
-                    success_amount: 0,
-                }
-            ),]
-            .into_iter()
-            .collect()
-        })
-    );
-}
-
-#[test]
-fn test_history_internal_result_construct() {
-    let mut history = PaymentHistory::new(None);
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-    let target2: Pubkey = generate_pubkey().into();
-
-    let mut internal_result = InternalResult::default();
-    internal_result.add(source.clone(), target1.clone(), 11, 10, true);
-    internal_result.add(source.clone(), target2.clone(), 12, 13, false);
-    history.apply_internal_result(internal_result);
-
-    assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![
-                (
-                    target1,
-                    PairResult {
-                        fail_time: 0,
-                        fail_amount: 0,
-                        success_time: 11,
-                        success_amount: 10,
-                    }
-                ),
-                (
-                    target2,
-                    PairResult {
-                        fail_time: 12,
-                        fail_amount: 13,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                )
-            ]
-            .into_iter()
-            .collect()
-        })
-    );
-}
-
-#[test]
-fn test_history_test_set_node_fail() {
-    let mut history = PaymentHistory::new(None);
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-    let target2: Pubkey = generate_pubkey().into();
-
-    let result1 = PairResult {
+    let outpoint = OutPoint::default();
+    let result = ChannelTimedResult {
         fail_time: 1,
         fail_amount: 2,
         success_time: 3,
         success_amount: 4,
     };
-    history.add_result(source.clone(), target1.clone(), result1);
-    let result2 = PairResult {
-        fail_time: 5,
-        fail_amount: 6,
-        success_time: 7,
-        success_amount: 8,
-    };
-    history.add_result(source.clone(), target2.clone(), result2);
+    history.add_result(&outpoint, result);
 
-    history.set_node_fail(target2, 100);
+    history.apply_channel_result(&outpoint, 10, true, 11);
     assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![
-                (target1, result1),
-                (
-                    target2,
-                    PairResult {
-                        fail_time: 100,
-                        fail_amount: 0,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                )
-            ]
-            .into_iter()
-            .collect()
+        history.get_result(&outpoint),
+        Some(&ChannelTimedResult {
+            fail_time: 1,
+            fail_amount: 11, // amount + 1
+            success_time: 11,
+            success_amount: 10,
         })
     );
 
-    history.set_node_fail(target1, 101);
+    // time is too short
+    history.apply_channel_result(&outpoint, 12, false, 13);
     assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![
-                (
-                    target1,
-                    PairResult {
-                        fail_time: 101,
-                        fail_amount: 0,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                ),
-                (
-                    target2,
-                    PairResult {
-                        fail_time: 100,
-                        fail_amount: 0,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                )
-            ]
-            .into_iter()
-            .collect()
+        history.get_result(&outpoint),
+        Some(&ChannelTimedResult {
+            fail_time: 1,
+            fail_amount: 11,
+            success_time: 11,
+            success_amount: 10,
         })
     );
 
-    history.set_node_fail(source, 102);
+    history.apply_channel_result(&outpoint, 12, false, 61 * 1000);
     assert_eq!(
-        history.get_result(&source),
-        Some(&PaymentResult {
-            pairs: vec![
-                (
-                    target1,
-                    PairResult {
-                        fail_time: 102,
-                        fail_amount: 0,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                ),
-                (
-                    target2,
-                    PairResult {
-                        fail_time: 102,
-                        fail_amount: 0,
-                        success_time: 0,
-                        success_amount: 0,
-                    }
-                )
-            ]
-            .into_iter()
-            .collect()
+        history.get_result(&outpoint),
+        Some(&ChannelTimedResult {
+            fail_time: 61 * 1000,
+            fail_amount: 12,
+            success_time: 11,   // will not update
+            success_amount: 10, // will not update
         })
     );
-}
 
-#[test]
-fn test_history_get_probability() {
-    let history = PaymentHistory::new(None);
-    let source: Pubkey = generate_pubkey().into();
-    let target1: Pubkey = generate_pubkey().into();
-    let prob = history.get_probability(&source, &target1, 10, 10);
-    assert_eq!(prob, 0.0);
+    history.apply_channel_result(&outpoint, 9, false, 61 * 1000 * 2);
+    assert_eq!(
+        history.get_result(&outpoint),
+        Some(&ChannelTimedResult {
+            fail_time: 61 * 1000 * 2,
+            fail_amount: 9,
+            success_time: 11,
+            success_amount: 8, // amount - 1
+        })
+    );
 }

@@ -1,7 +1,7 @@
-use super::history::{InternalResult, PaymentHistory};
+use super::history::PaymentHistory;
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
-use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TlcErrorCode};
+use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use super::types::{Pubkey, TlcErr};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::fee::calculate_tlc_forward_fee;
@@ -505,19 +505,14 @@ where
 
     pub(crate) fn record_payment_success(&mut self, payment_session: &PaymentSession) {
         let session_route = &payment_session.route;
-        let mut internal_result = InternalResult::default();
-        for i in 0..session_route.nodes.len() - 1 {
-            let node = &session_route.nodes[i];
-            let next = &session_route.nodes[i + 1].pubkey;
-            internal_result.add(
-                node.pubkey,
-                *next,
-                std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-                node.amount,
+        for channel in session_route.channels.iter() {
+            self.history.apply_channel_result(
+                &channel.channel_outpoint,
+                channel.amount,
                 true,
+                std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
             );
         }
-        self.history.apply_internal_result(internal_result);
     }
 
     pub(crate) fn record_payment_fail(
@@ -525,76 +520,34 @@ where
         payment_session: &PaymentSession,
         tlc_err: TlcErr,
     ) {
-        // first let's find out the node that failed
-        // TODO: with the real onion packet, we may use the decrypt times to find out the failed node?
-        let Some(failed_node) = tlc_err.error_node_id() else {
-            return;
-        };
+        if let Some(failed_channel) = tlc_err.error_channel_outpoint() {
+            let Some(index) = payment_session
+                .route
+                .channels
+                .iter()
+                .position(|s| s.channel_outpoint == failed_channel)
+            else {
+                return;
+            };
 
-        let Some(index) = payment_session
-            .route
-            .nodes
-            .iter()
-            .position(|node| node.pubkey == failed_node)
-        else {
-            return;
-        };
+            for s in payment_session.route.channels[..index].iter() {
+                self.history.apply_channel_result(
+                    &s.channel_outpoint,
+                    s.amount,
+                    true,
+                    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                );
+            }
 
-        let mut result = InternalResult::default();
-        let route_nodes = &payment_session.route.nodes;
-        let num_hops = route_nodes.len();
-        match index {
-            0 => {
-                match tlc_err.error_code {
-                    // we received an error from the first node, we trust our own node
-                    // so we need to penalize the first node
-                    TlcErrorCode::InvalidOnionVersion
-                    | TlcErrorCode::InvalidOnionHmac
-                    | TlcErrorCode::InvalidOnionKey => {
-                        result.fail_node(route_nodes, index);
-                    }
-                    _ => {
-                        // we can not penalize our own node, the whole payment session need to retry
-                        debug!("first hop failed with error: {:?}", tlc_err);
-                    }
-                }
-            }
-            _ if index == num_hops - 1 => {
-                // the last node failed
-                match tlc_err.error_code {
-                    TlcErrorCode::FinalIncorrectCltvExpiry
-                    | TlcErrorCode::FinalIncorrectHtlcAmount => {
-                        if num_hops == 2 {
-                            result.fail_node(route_nodes, 1);
-                        } else {
-                            assert!(num_hops > 2);
-                            result.fail_pair(route_nodes, num_hops - 1);
-                            result.succeed_range_pairs(route_nodes, 0, num_hops - 2);
-                        }
-                    }
-                    TlcErrorCode::IncorrectOrUnknownPaymentDetails => {
-                        result.succeed_range_pairs(route_nodes, 0, num_hops - 1);
-                    }
-                    _ => {
-                        result.fail_node(route_nodes, num_hops - 1);
-                        result.succeed_range_pairs(route_nodes, 0, num_hops - 2);
-                    }
-                }
-            }
-            _ => {
-                match tlc_err.error_code {
-                    // we received an error from the first node, we trust our own node
-                    // so we need to penalize the first node
-                    TlcErrorCode::InvalidOnionVersion
-                    | TlcErrorCode::InvalidOnionHmac
-                    | TlcErrorCode::InvalidOnionKey => {
-                        result.fail_pair(route_nodes, index);
-                    }
-                    _ => {}
-                }
+            if let Some(s) = payment_session.route.channels.get(index) {
+                self.history.apply_channel_result(
+                    &s.channel_outpoint,
+                    s.amount,
+                    false,
+                    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                );
             }
         }
-        self.history.apply_internal_result(result);
     }
 
     #[cfg(test)]
@@ -936,9 +889,11 @@ pub enum PaymentSessionStatus {
     Failed,
 }
 
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRouteNode {
-    pub pubkey: Pubkey,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
     pub amount: u128,
 }
 
@@ -946,22 +901,25 @@ pub struct SessionRouteNode {
 // We store in the payment session and then will use it to track the payment history.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
-    pub nodes: Vec<SessionRouteNode>,
+    pub channels: Vec<SessionRouteNode>,
 }
 
 impl SessionRoute {
     pub fn new(payment_hops: &Vec<PaymentHopData>) -> Self {
         let mut router = Self::default();
         for hop in payment_hops {
-            if let Some(key) = hop.next_hop {
-                router.add_node(key, hop.amount);
+            if let Some(outpoint) = &hop.channel_outpoint {
+                router.add_node(outpoint.clone(), hop.amount);
             }
         }
         router
     }
 
-    fn add_node(&mut self, pubkey: Pubkey, amount: u128) {
-        self.nodes.push(SessionRouteNode { pubkey, amount });
+    fn add_node(&mut self, channel_outpoint: OutPoint, amount: u128) {
+        self.channels.push(SessionRouteNode {
+            channel_outpoint,
+            amount,
+        });
     }
 }
 
