@@ -2,12 +2,12 @@ mod cch;
 mod channel;
 mod config;
 mod graph;
+mod info;
 mod invoice;
 mod peer;
 mod utils;
 
-use std::sync::Arc;
-
+use crate::rpc::info::InfoRpcServer;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -21,10 +21,12 @@ use cch::{CchRpcServer, CchRpcServerImpl};
 use channel::{ChannelRpcServer, ChannelRpcServerImpl};
 pub use config::RpcConfig;
 use graph::{GraphRpcServer, GraphRpcServerImpl};
+use info::InfoRpcServerImpl;
 use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
 use jsonrpsee::server::{Server, ServerHandle};
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
+use std::sync::Arc;
 use tentacle::secio::PublicKey;
 use tokio::sync::{mpsc::Sender, RwLock};
 
@@ -71,9 +73,11 @@ pub async fn start_rpc<
     let server = build_server(listening_addr);
     let mut methods = InvoiceRpcServerImpl::new(store.clone(), node_publick_key).into_rpc();
     if let Some(network_actor) = network_actor {
+        let info = InfoRpcServerImpl::new(network_actor.clone(), store.clone());
         let peer = PeerRpcServerImpl::new(network_actor.clone());
         let channel = ChannelRpcServerImpl::new(network_actor, store.clone());
-        let network_graph = GraphRpcServerImpl::new(network_graph, store);
+        let network_graph = GraphRpcServerImpl::new(network_graph, store.clone());
+        methods.merge(info.into_rpc()).unwrap();
         methods.merge(peer.into_rpc()).unwrap();
         methods.merge(channel.into_rpc()).unwrap();
         methods.merge(network_graph.into_rpc()).unwrap();
