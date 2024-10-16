@@ -37,7 +37,7 @@ struct UdtCellDep {
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct UdtArgInfo {
+pub(crate) struct UdtArgInfo {
     name: String,
     script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
@@ -46,7 +46,7 @@ struct UdtArgInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct UdtCfgInfos(Vec<UdtArgInfo>);
+pub(crate) struct UdtCfgInfos(Vec<UdtArgInfo>);
 
 impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
     fn from(cfg: ConfigUdtCfgInfos) -> Self {

@@ -34,6 +34,9 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `graph_nodes`](#graph_nodes)
         * [Method `graph_channels`](#graph_channels)
 
+    * [Module Info](#module-info)
+        * [Method `node_info`](#node_info)
+
 ## RPC Modules
 
 ### Module `Cch`
@@ -310,3 +313,46 @@ Get all the channels in the network graph.
     * `chain_hash`: The chain hash of the channel, used to identify the network chain the channel is on
     * `udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
 
+
+### Module `Info`
+
+<a id="node_info"></a>
+#### Method `node_info`
+
+Get the node information.
+
+###### Params
+No
+
+###### Returns
+
+Returns a struct with these fields:
+
+* `version`: The version of the node software.
+* `commit_hash`: The commit hash of the node software.
+* `public_key`: The public key of the node.
+* `node_name`: The optional name of the node.
+* `peer_id`: The peer ID of the node, serialized as a string.
+* `addresses`: A list of multi-addresses associated with the node.
+* `chain_hash`: The hash of the blockchain that the node is connected to.
+* `open_channel_auto_accept_min_ckb_funding_amount`: The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
+* `auto_accept_channel_ckb_funding_amount`: The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
+* `tlc_locktime_expiry_delta`: The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_min_value`: The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_max_value`: The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_fee_proportional_millionths`: The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+* `channel_count`: The number of channels associated with the node, serialized as a hexadecimal string.
+* `pending_channel_count`: The number of pending channels associated with the node, serialized as a hexadecimal string.
+* `peers_count`: The number of peers connected to the node, serialized as a hexadecimal string.
+* `network_sync_status`: The synchronization status of the node within the network.
+* `udt_cfg_infos`: An array of UDT configuration objects, each object contains the following fields:
+    * `name`: The name of the UDT
+    * `script`: The type script configuration of the UDT, with feilds of
+        * `code_hash`: The code hash of the UDT
+        * `hash_type`: The hash type of the UDT
+        * `args`: The arguments of the UDT
+    * `auto_accept_amount`: The funding amount for the UDT to auto accept a channel request
+    * `cell_deps`: The cell deps of the UDT, with fields of
+        * `tx_hash`: The tx hash of the cell dep
+        * `index`: The index of the cell dep
+        * `dep_type`: The dep type of the cell dep
