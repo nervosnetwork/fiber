@@ -99,6 +99,13 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 
+// This is the approximate number of peers that we need to keep connection to to make the
+// network operating normally.
+const NUM_PEERS_IN_CONNECTION: usize = 40;
+
+// The duration for which we will try to maintain the number of peers in connection.
+const MAINTAINING_CONNECTED_PEERS_INTERVAL: Duration = Duration::from_secs(3600);
+
 pub(crate) fn get_chain_hash() -> Hash256 {
     Default::default()
 }
@@ -155,6 +162,7 @@ pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
     DisconnectPeer(PeerId),
+    MaintainConnectedPeers(),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1229,6 +1237,41 @@ where
                 }
             }
 
+            NetworkActorCommand::MaintainConnectedPeers() => {
+                let num_connected_peers = state.peer_session_map.len();
+                if num_connected_peers >= NUM_PEERS_IN_CONNECTION {
+                    debug!(
+                        "Already connected to {} peers, skipping connecting to more peers",
+                        num_connected_peers,
+                    );
+                    return Ok(());
+                }
+                // Even though we have connected to some peers, we still try to select
+                // NUM_PEERS_IN_CONNECTION, because unless we're extremely lucky, we will connect
+                // to much less than 2 * NUM_PEERS_IN_CONNECTION peers. That should still be OK,
+                // because we will not be connecting to more peers in the next run.
+                let peers_to_connect = state
+                    .state_to_be_persisted
+                    .sample_n_peers_to_connect(NUM_PEERS_IN_CONNECTION);
+                for (peer_id, addresses) in peers_to_connect {
+                    if let Some(session) = state.get_peer_session(&peer_id) {
+                        debug!(
+                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                            peer_id, session
+                        );
+                        continue;
+                    }
+                    for addr in addresses {
+                        state
+                            .network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.clone()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
+                }
+            }
+
             NetworkActorCommand::OpenChannel(open_channel, reply) => {
                 match state.create_outbound_channel(open_channel).await {
                     Ok((_, channel_id)) => {
@@ -2188,7 +2231,7 @@ enum RequestState {
 
 pub struct NetworkActorState<S> {
     store: S,
-    persistent_state: PersistentNetworkActorState,
+    state_to_be_persisted: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
@@ -2301,11 +2344,10 @@ impl PersistentNetworkActorState {
             .collect()
     }
 
-    fn get_peers_to_connect(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
-        const NUM_PEERS_TO_CONNECT: usize = 20;
+    fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
         self.peer_store
             .iter()
-            .take(NUM_PEERS_TO_CONNECT)
+            .take(n)
             .map(|(id, addr)| (id.clone(), addr.clone()))
             .collect()
     }
@@ -2997,13 +3039,12 @@ where
     }
 
     fn on_node_announcement(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
-        self.maybe_connect_to_peer(&peer_id, &addresses);
         self.save_peer_addresses(peer_id, addresses);
     }
 
     fn save_peer_addresses(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
         if self
-            .persistent_state
+            .state_to_be_persisted
             .save_peer_addresses(peer_id, addresses)
         {
             self.persist_state();
@@ -3012,34 +3053,7 @@ where
 
     fn persist_state(&self) {
         self.store
-            .insert_network_actor_state(&self.peer_id, self.persistent_state.clone());
-    }
-
-    fn maybe_connect_to_peer(&mut self, peer_id: &PeerId, addresses: &[Multiaddr]) {
-        // TODO: Make this configurable and add more complex connection logic,
-        // e.g. if a peer is banned, we should not connect to it.
-        const MAX_CONNECTED_PEERS: usize = 40;
-        if self.peer_session_map.len() >= MAX_CONNECTED_PEERS {
-            debug!(
-                "Already connected to {} peers, skipping connection to peer {:?}",
-                MAX_CONNECTED_PEERS, peer_id
-            );
-            return;
-        }
-        if let Some(session) = self.get_peer_session(peer_id) {
-            debug!(
-                "Peer {:?} already connected with session id {:?}, skipping connection",
-                peer_id, session
-            );
-            return;
-        }
-        for addr in addresses {
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ConnectPeer(addr.clone()),
-                ))
-                .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        }
+            .insert_network_actor_state(&self.peer_id, self.state_to_be_persisted.clone());
     }
 
     async fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
@@ -3531,11 +3545,12 @@ where
 
         let mut graph = self.network_graph.write().await;
 
-        let persistent_state = self
+        let mut state_to_be_persisted = self
             .store
             .get_network_actor_state(&my_peer_id)
             .unwrap_or_default();
-        let mut peers_to_connect = persistent_state.get_peers_to_connect();
+        let mut peers_to_connect =
+            state_to_be_persisted.sample_n_peers_to_connect(NUM_PEERS_IN_CONNECTION);
         let bootnodes = config.bootnode_addrs.clone();
         for bootnode in &bootnodes {
             let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
@@ -3544,14 +3559,23 @@ where
             // add this address to the list of addresses to connect to.
             // Otherwise, create a new list out of this address.
             peers_to_connect
-                .entry(peer_id.clone())
+                .entry(peer_id)
                 .or_insert_with(Vec::new)
                 .push(addr);
         }
 
+        for (peer_id, addrs) in peers_to_connect {
+            state_to_be_persisted.save_peer_addresses(peer_id, addrs.clone());
+            for addr in addrs {
+                myself.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ConnectPeer(addr),
+                ))?;
+            }
+        }
+
         // Don't sync graph with bootnodes, as that may overload the bootnodes.
         // Instead select a few peers from the persistent state to sync graph.
-        let peers_to_sync_graph = persistent_state.get_peers_to_sync_graph();
+        let peers_to_sync_graph = state_to_be_persisted.get_peers_to_sync_graph();
 
         let height = graph.get_best_height();
         let last_update = graph.get_last_update_timestamp();
@@ -3577,7 +3601,7 @@ where
 
         let mut state = NetworkActorState {
             store: self.store.clone(),
-            persistent_state,
+            state_to_be_persisted,
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
@@ -3616,14 +3640,6 @@ where
         let node_announcement = state.get_or_create_new_node_announcement_message();
         graph.process_node_announcement(node_announcement);
 
-        for (_peer_id, addrs) in peers_to_connect {
-            for addr in addrs {
-                myself.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ConnectPeer(addr),
-                ))?;
-            }
-        }
-
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
@@ -3633,6 +3649,12 @@ where
             });
         }
 
+        myself.send_interval(MAINTAINING_CONNECTED_PEERS_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnectedPeers())
+        });
+
+        // Save bootnodes to the network actor state.
+        state.persist_state();
         Ok(state)
     }
 
