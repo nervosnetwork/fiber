@@ -1019,8 +1019,9 @@ checksum = "758eadf691a5e85efcc41927c947f52d924e61837874a8e103d285f4e81e775d"
 
 [[package]]
 name = "ckb-testtool"
-version = "0.13.1"
-source = "git+https://github.com/quake/ckb-testtool?branch=quake/rng#3167c7c826b8674ad54d0678ef5432ea2d2dc45b"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "233fb21b974e7534f8b291da85bf15186295d2e2fb420283670f94ff2e510e5c"
 dependencies = [
  "ckb-always-success-script",
  "ckb-chain-spec",
