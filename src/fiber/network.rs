@@ -2318,7 +2318,7 @@ impl PersistentNetworkActorState {
 
     /// Save peer addresses to the peer store. If the peer addresses are updated,
     /// return true, otherwise return false.
-    fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
+    pub(crate) fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
         match self.peer_store.entry(peer_id) {
             Entry::Occupied(mut entry) => {
                 if entry.get() == &addr {
@@ -2335,7 +2335,7 @@ impl PersistentNetworkActorState {
         }
     }
 
-    fn get_peers_to_sync_graph(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
+    pub(crate) fn get_peers_to_sync_graph(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
         const NUM_PEERS_TO_SYNC_NETWORK_GRAPH: usize = 5;
         self.peer_store
             .iter()
@@ -2344,7 +2344,7 @@ impl PersistentNetworkActorState {
             .collect()
     }
 
-    fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
         self.peer_store
             .iter()
             .take(n)

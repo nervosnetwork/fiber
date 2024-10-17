@@ -2,7 +2,8 @@ use super::test_utils::{init_tracing, NetworkNode};
 use crate::{
     fiber::{
         graph::{ChannelInfo, NetworkGraphStateStore},
-        network::get_chain_hash,
+        network::{get_chain_hash, NetworkActorStateStore},
+        tests::test_utils::NetworkNodeConfigBuilder,
         types::{
             ChannelAnnouncement, ChannelUpdate, FiberBroadcastMessage, FiberMessage,
             NodeAnnouncement, Privkey, Pubkey,
@@ -21,8 +22,11 @@ use ckb_types::{
     packed::OutPoint,
     prelude::{Builder, Entity, Pack},
 };
-use std::str::FromStr;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use std::{borrow::Cow, str::FromStr};
+use tentacle::{
+    multiaddr::{MultiAddr, Protocol},
+    secio::PeerId,
+};
 
 fn get_test_priv_key() -> Privkey {
     Privkey::from_slice(&[42u8; 32])
@@ -35,6 +39,21 @@ fn get_test_pub_key() -> Pubkey {
 fn get_test_peer_id() -> PeerId {
     let pub_key = get_test_pub_key().into();
     PeerId::from_public_key(&pub_key)
+}
+
+fn get_fake_peer_id_and_address() -> (PeerId, MultiAddr) {
+    let peer_id = PeerId::random();
+    let mut address = MultiAddr::from_str(&format!(
+        "/ip4/{}.{}.{}.{}/tcp/{}",
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+        rand::random::<u16>()
+    ))
+    .expect("valid multiaddr");
+    address.push(Protocol::P2P(Cow::Owned(peer_id.clone().into_bytes())));
+    (peer_id, address)
 }
 
 fn create_fake_channel_announcement_mesage(
@@ -519,4 +538,33 @@ async fn test_sync_node_announcement_after_restart() {
 
     let node = node2.store.get_nodes(Some(test_pub_key));
     assert!(!node.is_empty());
+}
+
+#[tokio::test]
+async fn test_persisting_network_state() {
+    let mut node = NetworkNode::new().await;
+    let state = node.store.clone();
+    let peer_id = node.peer_id.clone();
+    node.stop().await;
+    assert!(state.get_network_actor_state(&peer_id).is_some())
+}
+
+#[tokio::test]
+async fn test_persisting_bootnode() {
+    let (boot_peer_id, address) = get_fake_peer_id_and_address();
+    let address_string = format!("{}", &address);
+
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| config.bootnode_addrs = vec![address_string])
+            .build(),
+    )
+    .await;
+    let state = node.store.clone();
+    let peer_id = node.peer_id.clone();
+    node.stop().await;
+
+    let state = state.get_network_actor_state(&peer_id).unwrap();
+    let peers = state.sample_n_peers_to_connect(1);
+    assert_eq!(peers.get(&boot_peer_id), Some(&vec![address]));
 }
