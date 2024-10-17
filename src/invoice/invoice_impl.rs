@@ -19,6 +19,7 @@ use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, PublicKey, Secp256k1,
 };
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -34,6 +35,18 @@ pub enum CkbInvoiceStatus {
     Expired,
     Received,
     Paid,
+}
+
+impl Display for CkbInvoiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CkbInvoiceStatus::Open => write!(f, "Open"),
+            CkbInvoiceStatus::Cancelled => write!(f, "Cancelled"),
+            CkbInvoiceStatus::Expired => write!(f, "Expired"),
+            CkbInvoiceStatus::Received => write!(f, "Received"),
+            CkbInvoiceStatus::Paid => write!(f, "Paid"),
+        }
+    }
 }
 
 /// The currency of the invoice, can also used to represent the CKB network chain.

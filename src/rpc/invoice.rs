@@ -48,7 +48,7 @@ pub(crate) struct ParseInvoiceResult {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GetInvoiceParams {
+pub struct InvoiceParams {
     payment_hash: Hash256,
 }
 
@@ -76,7 +76,13 @@ trait InvoiceRpc {
     #[method(name = "get_invoice")]
     async fn get_invoice(
         &self,
-        payment_hash: GetInvoiceParams,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
+
+    #[method(name = "cancel_invoice")]
+    async fn cancel_invoice(
+        &self,
+        payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 }
 
@@ -171,7 +177,7 @@ where
 
     async fn get_invoice(
         &self,
-        params: GetInvoiceParams,
+        params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         let payment_hash = params.payment_hash;
         match self.store.get_invoice(&payment_hash) {
@@ -189,6 +195,55 @@ where
                     invoice_address: invoice.to_string(),
                     invoice,
                     status,
+                })
+            }
+            None => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "invoice not found".to_string(),
+                Some(payment_hash),
+            )),
+        }
+    }
+
+    async fn cancel_invoice(
+        &self,
+        params: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        let payment_hash = params.payment_hash;
+        match self.store.get_invoice(&payment_hash) {
+            Some(invoice) => {
+                let status = match self
+                    .store
+                    .get_invoice_status(&payment_hash)
+                    .expect("no invoice status found")
+                {
+                    CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+                    status => status,
+                };
+
+                let new_status = match status {
+                    CkbInvoiceStatus::Paid | CkbInvoiceStatus::Cancelled => {
+                        return Err(ErrorObjectOwned::owned(
+                            CALL_EXECUTION_FAILED_CODE,
+                            format!("invoice can not be canceled, current status: {}", status),
+                            Some(payment_hash),
+                        ));
+                    }
+                    _ => CkbInvoiceStatus::Cancelled,
+                };
+                self.store
+                    .update_invoice_status(&payment_hash, new_status)
+                    .map_err(|e| {
+                        ErrorObjectOwned::owned(
+                            CALL_EXECUTION_FAILED_CODE,
+                            e.to_string(),
+                            Some(payment_hash),
+                        )
+                    })?;
+                Ok(GetInvoiceResult {
+                    invoice_address: invoice.to_string(),
+                    invoice,
+                    status: new_status,
                 })
             }
             None => Err(ErrorObjectOwned::owned(
