@@ -62,7 +62,7 @@ pub async fn main() {
     let store = Store::new(config.fiber.as_ref().unwrap().store_path());
     let subscribers = ChannelSubscribers::default();
 
-    let (fiber_command_sender, network_graph, public_key) = match config.fiber {
+    let (fiber_command_sender, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
@@ -159,13 +159,9 @@ pub async fn main() {
                 debug!("Event processing service exited");
             });
 
-            (
-                Some(network_actor),
-                Some(network_graph),
-                Some(node_public_key),
-            )
+            (Some(network_actor), Some(network_graph))
         }
-        None => (None, None, None),
+        None => (None, None),
     };
 
     let cch_actor = match config.cch {
@@ -213,7 +209,7 @@ pub async fn main() {
 
     // Start rpc service
     let rpc_server_handle = match config.rpc {
-        Some(config) => {
+        Some(rpc_config) => {
             if fiber_command_sender.is_none() && cch_actor.is_none() {
                 error!("Rpc service requires ckb and cch service to be started. Exiting.");
                 return;
@@ -221,12 +217,12 @@ pub async fn main() {
 
             info!("Starting rpc");
             let handle = start_rpc(
-                config,
+                rpc_config,
+                config.fiber,
                 fiber_command_sender,
                 cch_actor,
                 store,
                 network_graph.unwrap(),
-                public_key,
             )
             .await;
             Some(handle)

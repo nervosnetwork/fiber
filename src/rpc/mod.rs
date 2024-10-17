@@ -16,6 +16,7 @@ use crate::{
         NetworkActorMessage,
     },
     invoice::{InvoiceCommand, InvoiceStore},
+    FiberConfig,
 };
 use cch::{CchRpcServer, CchRpcServerImpl};
 use channel::{ChannelRpcServer, ChannelRpcServerImpl};
@@ -27,7 +28,6 @@ use jsonrpsee::server::{Server, ServerHandle};
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
 use std::sync::Arc;
-use tentacle::secio::PublicKey;
 use tokio::sync::{mpsc::Sender, RwLock};
 
 pub type InvoiceCommandWithReply = (InvoiceCommand, Sender<crate::Result<String>>);
@@ -63,15 +63,15 @@ pub async fn start_rpc<
     S: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
 >(
     config: RpcConfig,
+    fiber_config: Option<FiberConfig>,
     network_actor: Option<ActorRef<NetworkActorMessage>>,
     cch_actor: Option<ActorRef<CchMessage>>,
     store: S,
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
-    node_publick_key: Option<PublicKey>,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let server = build_server(listening_addr);
-    let mut methods = InvoiceRpcServerImpl::new(store.clone(), node_publick_key).into_rpc();
+    let mut methods = InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc();
     if let Some(network_actor) = network_actor {
         let info = InfoRpcServerImpl::new(network_actor.clone(), store.clone());
         let peer = PeerRpcServerImpl::new(network_actor.clone());
