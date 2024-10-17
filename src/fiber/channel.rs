@@ -683,6 +683,11 @@ where
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
+            ProcessingChannelError::FinalInvoiceInvalid(status) => match status {
+                CkbInvoiceStatus::Expired => TlcErrorCode::InvoiceExpired,
+                CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
+                _ => TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+            },
             ProcessingChannelError::FinalIncorrectPreimage
             | ProcessingChannelError::FinalIncorrectPaymentHash => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
@@ -837,8 +842,9 @@ where
 
                 let payment_hash = add_tlc.payment_hash;
                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                    if self.get_invoice_status(&invoice) != CkbInvoiceStatus::Open {
-                        return Err(ProcessingChannelError::FinalInvoiceInvalid);
+                    let invoice_status = self.get_invoice_status(&invoice);
+                    if invoice_status != CkbInvoiceStatus::Open {
+                        return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                     }
                     update_invoice_payment_hash = Some(payment_hash);
                 }
@@ -2229,7 +2235,7 @@ pub enum ProcessingChannelError {
     #[error("The tlc forward fee is tow low")]
     TlcForwardFeeIsTooLow,
     #[error("The invoice status is invalid")]
-    FinalInvoiceInvalid,
+    FinalInvoiceInvalid(CkbInvoiceStatus),
     #[error("The tlc number exceed limit of this channel")]
     TlcNumberExceedLimit,
     #[error("The tlc flight value exceed limit of this channel")]
