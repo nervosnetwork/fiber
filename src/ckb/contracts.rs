@@ -22,7 +22,7 @@ use super::{
 };
 
 #[cfg(test)]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MockContext {
     context: Arc<RwLock<Context>>,
     contracts_context: Arc<ContractsInfo>,
@@ -74,20 +74,15 @@ impl MockContext {
     }
 
     pub fn new() -> Self {
-        let mut context = Context::default();
+        let mut context = Context::new_with_deterministic_rng();
 
-        let (map, script_cell_deps) = Self::get_contract_binaries().into_iter().enumerate().fold(
+        let (map, script_cell_deps) = Self::get_contract_binaries().into_iter().fold(
             (HashMap::new(), HashMap::new()),
-            |(mut map, mut script_cell_deps), (i, (contract, binary))| {
-                use ckb_hash::blake2b_256;
-                use rand::{rngs::StdRng, SeedableRng};
-                let i = i + 123_456_789;
-                let seed = blake2b_256(i.to_le_bytes());
-                let mut rng = StdRng::from_seed(seed);
+            |(mut map, mut script_cell_deps), (contract, binary)| {
                 // Use a deterministic RNG to ensure that the outpoints are the same for all nodes.
                 // Otherwise, cell deps may differ for different nodes, which would make
                 // different nodes sign different messages (as transaction hashes differ).
-                let out_point = context.deploy_cell_with_rng(binary, &mut rng);
+                let out_point = context.deploy_cell(binary);
                 let script = context
                     .build_script(&out_point, Default::default())
                     .expect("valid script");
