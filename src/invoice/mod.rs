@@ -9,5 +9,7 @@ mod tests;
 
 pub use command::*;
 pub use errors::InvoiceError;
-pub use invoice_impl::{Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceSignature};
+pub use invoice_impl::{
+    Attribute, CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceSignature,
+};
 pub use store::*;

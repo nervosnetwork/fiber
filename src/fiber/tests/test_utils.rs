@@ -670,6 +670,18 @@ impl InvoiceStore for MemoryStore {
             .get(hash)
             .cloned()
     }
+
+    fn get_invoice_status(&self, _id: &Hash256) -> Option<crate::invoice::CkbInvoiceStatus> {
+        unimplemented!()
+    }
+
+    fn update_invoice_status(
+        &self,
+        _id: &Hash256,
+        _status: crate::invoice::CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        unimplemented!()
+    }
 }
 
 #[tokio::test]
