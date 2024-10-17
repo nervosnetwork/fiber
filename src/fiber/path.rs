@@ -60,6 +60,7 @@ impl PartialEq for NodeHeapElement {
             && self.amount_received == other.amount_received
             && self.fee_charged == other.fee_charged
             && self.probability == other.probability
+            && self.incoming_cltv_height == other.incoming_cltv_height
             && self.next_hop == other.next_hop
     }
 }

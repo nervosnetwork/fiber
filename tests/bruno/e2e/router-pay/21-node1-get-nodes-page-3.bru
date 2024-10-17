@@ -1,7 +1,8 @@
+
 meta {
   name: Node1 send get_nodes rpc request
   type: http
-  seq: 18
+  seq: 21
 }
 
 post {
@@ -21,7 +22,8 @@ body:json {
     "jsonrpc": "2.0",
     "method": "graph_nodes",
     "params": [{
-        "limit": 2
+        "limit": 2,
+        "after": "{{last_cursor_2}}"
     }]
   }
 }
@@ -39,8 +41,7 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("get result: ", res.body.result);
-  if (res.body.result.nodes.length != 2) {
+  if (res.body.result.nodes.length != 0) {
     throw new Error("Assertion failed: nodes number is not right");
   }
-  bru.setVar("last_cursor", res.body.result.last_cursor);
 }

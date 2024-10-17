@@ -379,7 +379,7 @@ impl NetworkGraphStateStore for Store {
             .take_while(|(key, _)| key.starts_with(&channel_prefix))
             .filter_map(|(col_key, value)| {
                 if let Some(key) = &outpoint_key {
-                    if !col_key.starts_with(&key) {
+                    if !col_key.starts_with(key) {
                         return None;
                     }
                 }
@@ -433,7 +433,7 @@ impl NetworkGraphStateStore for Store {
             .take_while(|(key, _)| key.starts_with(&node_prefix))
             .filter_map(|(col_key, value)| {
                 if let Some(key) = &node_key {
-                    if !col_key.starts_with(&key) {
+                    if !col_key.starts_with(key) {
                         return None;
                     }
                 }
