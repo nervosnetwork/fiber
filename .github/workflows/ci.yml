@@ -12,6 +12,17 @@ jobs:
       - uses: dsherret/rust-toolchain-file@v1
       - run: cargo check
 
+  cargo-shear:
+    name: Cargo Shear
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: dsherret/rust-toolchain-file@v1
+      - uses: cargo-bins/cargo-binstall@main
+      - run: |
+          cargo binstall --no-confirm cargo-shear --force
+          cargo shear
+
   test:
     name: Test
     runs-on: ubuntu-latest
