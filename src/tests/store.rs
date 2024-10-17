@@ -98,6 +98,13 @@ fn test_store_invoice() {
 
     let invalid_hash = gen_sha256_hash();
     assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
+
+    assert_eq!(store.get_invoice_status(hash), Some(CkbInvoiceStatus::Open));
+    assert_eq!(store.get_invoice_status(&gen_sha256_hash()), None);
+
+    let status = CkbInvoiceStatus::Paid;
+    store.update_invoice_status(hash, status).unwrap();
+    assert_eq!(store.get_invoice_status(hash), Some(status));
 }
 
 #[test]

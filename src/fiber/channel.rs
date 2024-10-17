@@ -9,7 +9,7 @@ use crate::{
         network::{get_chain_hash, SendOnionPacketCommand},
         types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
     },
-    invoice::InvoiceStore,
+    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
 };
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::Since;
@@ -727,18 +727,33 @@ where
 
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
         let tlcs = state.get_tlcs_for_settle_down();
+        let mut update_invoice_payment_hash = false;
         for tlc_info in tlcs {
             let tlc = tlc_info.tlc.clone();
             if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
-                if invoice.is_expired() {
-                    let command = RemoveTlcCommand {
-                        id: tlc.get_id(),
-                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(
-                            TlcErrorCode::InvoiceExpired,
-                        ))),
-                    };
-                    let result = self.handle_remove_tlc_command(state, command);
-                    info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+                let status = self.get_invoice_status(&invoice);
+                match status {
+                    CkbInvoiceStatus::Expired | CkbInvoiceStatus::Cancelled => {
+                        let error_code = match status {
+                            CkbInvoiceStatus::Expired => TlcErrorCode::InvoiceExpired,
+                            CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
+                            _ => unreachable!(),
+                        };
+                        let command = RemoveTlcCommand {
+                            id: tlc.get_id(),
+                            reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(
+                                error_code,
+                            ))),
+                        };
+                        let result = self.handle_remove_tlc_command(state, command);
+                        info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+                    }
+                    CkbInvoiceStatus::Paid => {
+                        unreachable!("Paid invoice shold not be paid again");
+                    }
+                    _ => {
+                        update_invoice_payment_hash = true;
+                    }
                 }
             }
 
@@ -761,6 +776,11 @@ where
             };
             let result = self.handle_remove_tlc_command(state, command);
             info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+            if result.is_ok() && update_invoice_payment_hash {
+                let _ = self
+                    .store
+                    .update_invoice_status(&tlc.payment_hash, CkbInvoiceStatus::Paid);
+            }
             // we only handle one tlc at a time.
             break;
         }
@@ -779,6 +799,7 @@ where
         // try to fulfill the payment, find the corresponding payment preimage from payment hash.
         let mut preimage = None;
         let mut peeled_packet_bytes: Option<Vec<u8>> = None;
+        let mut update_invoice_payment_hash: Option<Hash256> = None;
 
         if !add_tlc.onion_packet.is_empty() {
             // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
@@ -812,6 +833,14 @@ where
             if peeled_packet.is_last() {
                 if forward_amount != add_tlc.amount {
                     return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                }
+
+                let payment_hash = add_tlc.payment_hash;
+                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                    if self.get_invoice_status(&invoice) != CkbInvoiceStatus::Open {
+                        return Err(ProcessingChannelError::FinalInvoiceInvalid);
+                    }
+                    update_invoice_payment_hash = Some(payment_hash);
                 }
 
                 // if this is the last hop, store the preimage.
@@ -851,6 +880,11 @@ where
 
         let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
         state.insert_tlc(tlc.clone())?;
+        if let Some(payment_hash) = update_invoice_payment_hash {
+            self.store
+                .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                .expect("update invoice status failed");
+        }
         if let Some(ref udt_type_script) = state.funding_udt_type_script {
             self.subscribers
                 .pending_received_tlcs_subscribers
@@ -1498,6 +1532,17 @@ where
                 let funding_amount = funding_amount - reserved_ckb_amount as u128;
                 Ok((funding_amount, reserved_ckb_amount))
             }
+        }
+    }
+
+    fn get_invoice_status(&self, invoice: &CkbInvoice) -> CkbInvoiceStatus {
+        match self
+            .store
+            .get_invoice_status(&invoice.payment_hash())
+            .expect("no invoice status found")
+        {
+            CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+            status => status,
         }
     }
 }
@@ -2183,6 +2228,8 @@ pub enum ProcessingChannelError {
     FinalIncorrectPreimage,
     #[error("The tlc forward fee is tow low")]
     TlcForwardFeeIsTooLow,
+    #[error("The invoice status is invalid")]
+    FinalInvoiceInvalid,
     #[error("The tlc number exceed limit of this channel")]
     TlcNumberExceedLimit,
     #[error("The tlc flight value exceed limit of this channel")]
