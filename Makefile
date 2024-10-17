@@ -1,9 +1,9 @@
 CARGO_TARGET_DIR ?= target
 COVERAGE_PROFRAW_DIR ?= ${CARGO_TARGET_DIR}/coverage
 GRCOV_OUTPUT ?= coverage-report.info
-GRCOV_EXCL_START = ^\s*((log::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\($$
+GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\($$
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
-GRCOV_EXCL_LINE = \s*((log::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
+GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
 .PHONY: clippy
 clippy:
@@ -28,6 +28,7 @@ coverage-run-unittests:
 	mkdir -p "${COVERAGE_PROFRAW_DIR}"
 	rm -f "${COVERAGE_PROFRAW_DIR}/*.profraw"
 	RUSTFLAGS="${RUSTFLAGS} -Cinstrument-coverage" \
+		RUST_LOG=off \
 		LLVM_PROFILE_FILE="${COVERAGE_PROFRAW_DIR}/unittests-%p-%m.profraw" \
 			cargo test --all
 
@@ -44,4 +45,6 @@ coverage-collect-data:
 		-o "${GRCOV_OUTPUT}"
 
 coverage-generate-report:
-	genhtml -o "${GRCOV_OUTPUT:.info=}" "${GRCOV_OUTPUT}"
+	genhtml --ignore-errors inconsistent --ignore-errors corrupt --ignore-errors range --ignore-errors unmapped -o "${GRCOV_OUTPUT:.info=}" "${GRCOV_OUTPUT}"
+
+coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
