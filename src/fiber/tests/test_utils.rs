@@ -347,7 +347,8 @@ impl NetworkNode {
     }
 
     pub async fn stop(&mut self) {
-        self.network_actor.kill();
+        self.network_actor
+            .stop(Some("stopping actor on request".to_string()));
         let my_peer_id = self.peer_id.clone();
         self.expect_event(
             |event| matches!(event, NetworkServiceEvent::NetworkStopped(id) if id == &my_peer_id),
