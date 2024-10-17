@@ -2074,7 +2074,7 @@ where
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
-                        self.update_with_tcl_fail(&detail_error).await;
+                        self.update_graph_with_tlc_fail(&detail_error).await;
                         self.network_graph
                             .write()
                             .await
@@ -2095,7 +2095,7 @@ where
         }
     }
 
-    async fn update_with_tcl_fail(&self, tcl_error_detail: &TlcErr) {
+    async fn update_graph_with_tlc_fail(&self, tcl_error_detail: &TlcErr) {
         let error_code = tcl_error_detail.error_code();
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
@@ -2207,7 +2207,7 @@ where
                             error_detail.error_code_as_str()
                         );
                         error = Some(err);
-                        self.update_with_tcl_fail(&error_detail).await;
+                        self.update_graph_with_tlc_fail(&error_detail).await;
                     }
                     continue;
                 }

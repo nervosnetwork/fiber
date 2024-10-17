@@ -5,7 +5,7 @@ use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement
 use super::types::{Pubkey, TlcErr};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::fee::calculate_tlc_forward_fee;
-use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
@@ -772,9 +772,8 @@ where
                     };
 
                 let probability = cur_hop.probability
-                    * ProbabilityEvaluator::evaluate_probability(
-                        from,
-                        cur_hop.node_id,
+                    * self.history.get_probability(
+                        channel_info.out_point(),
                         amount_to_send,
                         channel_info.capacity(),
                     );
