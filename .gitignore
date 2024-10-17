@@ -8,3 +8,5 @@
 /tests/nodes/*/config.yml
 /tests/deploy/udt-init/target
 tests/nodes/.ports
+/coverage-report
+/coverage-report.info
