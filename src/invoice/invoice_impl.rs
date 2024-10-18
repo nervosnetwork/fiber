@@ -222,6 +222,13 @@ impl CkbInvoice {
         &self.data.payment_hash
     }
 
+    pub fn is_expired(&self) -> bool {
+        self.expiry_time().map_or(false, |expiry| {
+            self.data.timestamp + expiry.as_millis()
+                < std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+        })
+    }
+
     /// Check that the invoice is signed correctly and that key recovery works
     pub fn check_signature(&self) -> Result<(), InvoiceError> {
         if self.signature.is_none() {

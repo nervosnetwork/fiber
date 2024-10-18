@@ -16,7 +16,7 @@ macro_rules! handle_actor_call {
         match call!($actor, $message) {
             Ok(result) => match result {
                 Ok(res) => Ok(res),
-                Err(e) => log_and_error!($params, e),
+                Err(e) => log_and_error!($params, e.to_string()),
             },
             Err(e) => log_and_error!($params, e.to_string()),
         }
