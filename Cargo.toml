@@ -38,17 +38,18 @@ tokio = { version = "1", features = [
     "signal",
 ] }
 home = "0.5.9"
-ckb-sdk = "3.1.0"
+ckb-sdk = "3.4.0"
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 tentacle = "0.6"
 futures = "0.3.30"
 once_cell = "1.19.0"
 tokio-util = { version = "0.7.10", features = ["rt"] }
-molecule = { version = "0.7.5", default-features = false }
-ckb-types = "0.114.0"
-ckb-jsonrpc-types = "0.114.0"
-ckb-crypto = "0.114.0"
+molecule = { version = "0.8.0", default-features = false }
+ckb-types = "0.118.0"
+ckb-gen-types = "0.118.0"
+ckb-jsonrpc-types = "0.118.0"
+ckb-crypto = "0.118.0"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "snappy",
 ], default-features = false }
@@ -81,7 +82,7 @@ panic = "abort"
 
 [dev-dependencies]
 tempfile = "3.10.1"
-ckb-testtool = { git = "https://github.com/contrun/capsule.git", branch = "determinisitic-rng" }
+ckb-testtool = "0.13.2"
 
 [lints.clippy]
 needless-return = "allow"

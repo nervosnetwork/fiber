@@ -1,7 +1,7 @@
 meta {
   name: Node1 send payment with router
   type: http
-  seq: 12
+  seq: 23
 }
 
 post {
@@ -22,20 +22,27 @@ body:json {
     "method": "send_payment",
     "params": [
       {
-        "target_pubkey": "03032b99943822e721a651c5a5b9621043017daa9dc3ec81d83215fd2e25121187",
-        "amount": "0x190",
-        "payment_hash": "{{payment_hash}}"
+        "invoice": "{{encoded_invoice}}"
       }
     ]
   }
 }
 
 assert {
-  res.body.error: isUndefined
+  res.body.error: isDefined
 }
+
+
+script:pre-request {
+  // sleep for a while
+  await new Promise(r => setTimeout(r, 1000));
+}
+
 
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("12 step result: ", res.body);
+  if (!(res.body.error.message.includes("invoice is expired"))) {
+    throw new Error("Assertion failed: error message is not right");
+  }
 }

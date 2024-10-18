@@ -643,7 +643,7 @@ pub struct OpenChannel {
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
     pub max_tlc_value_in_flight: u128,
-    pub max_num_of_accept_tlcs: u64,
+    pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
     pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
@@ -683,7 +683,7 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
-            .max_num_of_accept_tlcs(open_channel.max_num_of_accept_tlcs.pack())
+            .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
             .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
             .to_self_delay(open_channel.to_local_delay.into())
@@ -719,7 +719,7 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
-            max_num_of_accept_tlcs: open_channel.max_num_of_accept_tlcs().unpack(),
+            max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: open_channel.min_tlc_value().unpack(),
             to_local_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
@@ -752,7 +752,7 @@ pub struct AcceptChannel {
     pub funding_amount: u128,
     pub reserved_ckb_amount: u64,
     pub max_tlc_value_in_flight: u128,
-    pub max_num_of_accept_tlcs: u64,
+    pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
     pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
@@ -774,7 +774,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .funding_amount(accept_channel.funding_amount.pack())
             .reserved_ckb_amount(accept_channel.reserved_ckb_amount.pack())
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
-            .max_num_of_accept_tlcs(accept_channel.max_num_of_accept_tlcs.pack())
+            .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
             .min_tlc_value(accept_channel.min_tlc_value.pack())
             .to_self_delay(accept_channel.to_local_delay.into())
@@ -809,7 +809,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             shutdown_script: accept_channel.shutdown_script(),
             reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
-            max_num_of_accept_tlcs: accept_channel.max_num_of_accept_tlcs().unpack(),
+            max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
             to_local_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
@@ -1420,6 +1420,7 @@ pub enum TlcErrorCode {
     IncorrectCltvExpiry = UPDATE | 13,
     ExpiryTooSoon = UPDATE | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
+    InvoiceExpired = PERM | 16,
     FinalIncorrectCltvExpiry = 18,
     FinalIncorrectHtlcAmount = 19,
     ChannelDisabled = UPDATE | 20,
@@ -1451,6 +1452,7 @@ impl TlcErrorCode {
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
             | TlcErrorCode::FinalIncorrectCltvExpiry
             | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::InvoiceExpired
             | TlcErrorCode::MppTimeout => true,
             _ => false,
         }

@@ -4383,8 +4383,8 @@ impl ::core::fmt::Display for OpenChannel {
         write!(
             f,
             ", {}: {}",
-            "max_num_of_accept_tlcs",
-            self.max_num_of_accept_tlcs()
+            "max_tlc_number_in_flight",
+            self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
         write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
@@ -4531,7 +4531,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn max_num_of_accept_tlcs(&self) -> Uint64 {
+    pub fn max_tlc_number_in_flight(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
@@ -4649,7 +4649,7 @@ impl molecule::prelude::Entity for OpenChannel {
             .funding_fee_rate(self.funding_fee_rate())
             .commitment_fee_rate(self.commitment_fee_rate())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
-            .max_num_of_accept_tlcs(self.max_num_of_accept_tlcs())
+            .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
             .to_self_delay(self.to_self_delay())
             .funding_pubkey(self.funding_pubkey())
@@ -4715,8 +4715,8 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "max_num_of_accept_tlcs",
-            self.max_num_of_accept_tlcs()
+            "max_tlc_number_in_flight",
+            self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
         write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
@@ -4834,7 +4834,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[40..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn max_num_of_accept_tlcs(&self) -> Uint64Reader<'r> {
+    pub fn max_tlc_number_in_flight(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[40..]) as usize;
         let end = molecule::unpack_number(&slice[44..]) as usize;
@@ -4999,7 +4999,7 @@ pub struct OpenChannelBuilder {
     pub(crate) funding_fee_rate: Uint64,
     pub(crate) commitment_fee_rate: Uint64,
     pub(crate) max_tlc_value_in_flight: Uint128,
-    pub(crate) max_num_of_accept_tlcs: Uint64,
+    pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
     pub(crate) to_self_delay: Uint64,
     pub(crate) funding_pubkey: Pubkey,
@@ -5051,8 +5051,8 @@ impl OpenChannelBuilder {
         self.max_tlc_value_in_flight = v;
         self
     }
-    pub fn max_num_of_accept_tlcs(mut self, v: Uint64) -> Self {
-        self.max_num_of_accept_tlcs = v;
+    pub fn max_tlc_number_in_flight(mut self, v: Uint64) -> Self {
+        self.max_tlc_number_in_flight = v;
         self
     }
     pub fn min_tlc_value(mut self, v: Uint128) -> Self {
@@ -5118,7 +5118,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.funding_fee_rate.as_slice().len()
             + self.commitment_fee_rate.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
-            + self.max_num_of_accept_tlcs.as_slice().len()
+            + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
             + self.to_self_delay.as_slice().len()
             + self.funding_pubkey.as_slice().len()
@@ -5154,7 +5154,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.max_tlc_value_in_flight.as_slice().len();
         offsets.push(total_size);
-        total_size += self.max_num_of_accept_tlcs.as_slice().len();
+        total_size += self.max_tlc_number_in_flight.as_slice().len();
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
@@ -5192,7 +5192,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.funding_fee_rate.as_slice())?;
         writer.write_all(self.commitment_fee_rate.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
-        writer.write_all(self.max_num_of_accept_tlcs.as_slice())?;
+        writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
         writer.write_all(self.to_self_delay.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;
@@ -5251,8 +5251,8 @@ impl ::core::fmt::Display for AcceptChannel {
         write!(
             f,
             ", {}: {}",
-            "max_num_of_accept_tlcs",
-            self.max_num_of_accept_tlcs()
+            "max_tlc_number_in_flight",
+            self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
         write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
@@ -5371,7 +5371,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[24..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn max_num_of_accept_tlcs(&self) -> Uint64 {
+    pub fn max_tlc_number_in_flight(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
         let end = molecule::unpack_number(&slice[28..]) as usize;
@@ -5479,7 +5479,7 @@ impl molecule::prelude::Entity for AcceptChannel {
             .shutdown_script(self.shutdown_script())
             .reserved_ckb_amount(self.reserved_ckb_amount())
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
-            .max_num_of_accept_tlcs(self.max_num_of_accept_tlcs())
+            .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
             .to_self_delay(self.to_self_delay())
             .funding_pubkey(self.funding_pubkey())
@@ -5530,8 +5530,8 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
         write!(
             f,
             ", {}: {}",
-            "max_num_of_accept_tlcs",
-            self.max_num_of_accept_tlcs()
+            "max_tlc_number_in_flight",
+            self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
         write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
@@ -5624,7 +5624,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[24..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn max_num_of_accept_tlcs(&self) -> Uint64Reader<'r> {
+    pub fn max_tlc_number_in_flight(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[24..]) as usize;
         let end = molecule::unpack_number(&slice[28..]) as usize;
@@ -5774,7 +5774,7 @@ pub struct AcceptChannelBuilder {
     pub(crate) shutdown_script: Script,
     pub(crate) reserved_ckb_amount: Uint64,
     pub(crate) max_tlc_value_in_flight: Uint128,
-    pub(crate) max_num_of_accept_tlcs: Uint64,
+    pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
     pub(crate) to_self_delay: Uint64,
     pub(crate) funding_pubkey: Pubkey,
@@ -5809,8 +5809,8 @@ impl AcceptChannelBuilder {
         self.max_tlc_value_in_flight = v;
         self
     }
-    pub fn max_num_of_accept_tlcs(mut self, v: Uint64) -> Self {
-        self.max_num_of_accept_tlcs = v;
+    pub fn max_tlc_number_in_flight(mut self, v: Uint64) -> Self {
+        self.max_tlc_number_in_flight = v;
         self
     }
     pub fn min_tlc_value(mut self, v: Uint128) -> Self {
@@ -5868,7 +5868,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
             + self.shutdown_script.as_slice().len()
             + self.reserved_ckb_amount.as_slice().len()
             + self.max_tlc_value_in_flight.as_slice().len()
-            + self.max_num_of_accept_tlcs.as_slice().len()
+            + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
             + self.to_self_delay.as_slice().len()
             + self.funding_pubkey.as_slice().len()
@@ -5895,7 +5895,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.max_tlc_value_in_flight.as_slice().len();
         offsets.push(total_size);
-        total_size += self.max_num_of_accept_tlcs.as_slice().len();
+        total_size += self.max_tlc_number_in_flight.as_slice().len();
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
@@ -5927,7 +5927,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         writer.write_all(self.shutdown_script.as_slice())?;
         writer.write_all(self.reserved_ckb_amount.as_slice())?;
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
-        writer.write_all(self.max_num_of_accept_tlcs.as_slice())?;
+        writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
         writer.write_all(self.to_self_delay.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;

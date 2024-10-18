@@ -1,3 +1,4 @@
+use crate::ckb::config::UdtCfgInfos;
 use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
@@ -64,7 +65,7 @@ use super::types::{
 };
 use super::FiberConfig;
 
-use crate::ckb::contracts::{check_udt_script, is_udt_type_auto_accept};
+use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
@@ -123,6 +124,26 @@ pub struct SendPaymentResponse {
 #[derive(Debug)]
 pub enum LocalInfoKind {
     NodeAnnouncement,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeInfoResponse {
+    pub node_name: Option<AnnouncedNodeName>,
+    pub peer_id: PeerId,
+    pub public_key: Pubkey,
+    pub addresses: Vec<MultiAddr>,
+    pub chain_hash: Hash256,
+    pub open_channel_auto_accept_min_ckb_funding_amount: u64,
+    pub auto_accept_channel_ckb_funding_amount: u64,
+    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_min_value: u128,
+    pub tlc_max_value: u128,
+    pub tlc_fee_proportional_millionths: u128,
+    pub channel_count: u32,
+    pub pending_channel_count: u32,
+    pub peers_count: u32,
+    pub network_sync_status: String,
+    pub udt_cfg_infos: UdtCfgInfos,
 }
 
 /// The struct here is used both internally and as an API to the outside world.
@@ -197,6 +218,7 @@ pub enum NetworkActorCommand {
     StartSyncing,
     StopSyncing,
     MarkSyncingDone,
+    NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
 
 pub async fn sign_network_message(
@@ -224,7 +246,7 @@ pub struct OpenChannelCommand {
     pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
-    pub max_num_of_accept_tlcs: Option<u64>,
+    pub max_tlc_number_in_flight: Option<u64>,
 }
 
 #[serde_as]
@@ -279,6 +301,12 @@ impl SendPaymentData {
             .map(|invoice| invoice.parse::<CkbInvoice>())
             .transpose()
             .map_err(|_| "invoice is invalid".to_string())?;
+
+        if let Some(invoice) = invoice.clone() {
+            if invoice.is_expired() {
+                return Err("invoice is expired".to_string());
+            }
+        }
 
         fn validate_field<T: PartialEq + Clone>(
             field: Option<T>,
@@ -1683,6 +1711,29 @@ where
                     ))
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
+            NetworkActorCommand::NodeInfo(_, rpc) => {
+                let response = NodeInfoResponse {
+                    node_name: state.node_name.clone(),
+                    peer_id: state.peer_id.clone(),
+                    public_key: state.get_public_key().clone(),
+                    addresses: state.announced_addrs.clone(),
+                    chain_hash: get_chain_hash(),
+                    open_channel_auto_accept_min_ckb_funding_amount: state
+                        .open_channel_auto_accept_min_ckb_funding_amount,
+                    auto_accept_channel_ckb_funding_amount: state
+                        .auto_accept_channel_ckb_funding_amount,
+                    tlc_locktime_expiry_delta: state.tlc_locktime_expiry_delta,
+                    tlc_min_value: state.tlc_min_value,
+                    tlc_max_value: state.tlc_max_value,
+                    tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
+                    channel_count: state.channels.len() as u32,
+                    pending_channel_count: state.pending_channels.len() as u32,
+                    peers_count: state.peer_session_map.len() as u32,
+                    network_sync_status: state.sync_status.as_str().to_string(),
+                    udt_cfg_infos: get_udt_whitelist(),
+                };
+                let _ = rpc.send(Ok(response));
+            }
         };
         Ok(())
     }
@@ -2393,6 +2444,14 @@ impl NetworkSyncStatus {
             NetworkSyncStatus::Done => false,
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            NetworkSyncStatus::NotRunning(_) => "NotRunning",
+            NetworkSyncStatus::Running(_) => "Running",
+            NetworkSyncStatus::Done => "Done",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2651,7 +2710,7 @@ where
             tlc_max_value,
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
-            max_num_of_accept_tlcs,
+            max_tlc_number_in_flight,
         } = open_channel;
         let remote_pubkey =
             self.get_peer_pubkey(&peer_id)
@@ -2697,7 +2756,7 @@ where
                 commitment_fee_rate,
                 funding_fee_rate,
                 max_tlc_value_in_flight,
-                max_num_of_accept_tlcs,
+                max_tlc_number_in_flight,
             }),
             network.clone().get_cell(),
         )
@@ -2810,6 +2869,7 @@ where
                             status: Status::Rejected,
                             block_number: None,
                             block_hash: None,
+                            tx_index: None,
                             reason: Some(format!("Sending transaction failed: {:?}", &err)),
                         },
                     })

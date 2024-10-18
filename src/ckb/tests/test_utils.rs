@@ -261,6 +261,7 @@ impl Actor for MockChainActor {
                     block_hash: Some(ckb_types::H256(
                         tx.tx_hash.clone().as_slice().try_into().unwrap(),
                     )),
+                    tx_index: None,
                     reason: None,
                 };
                 let response = TraceTxResponse {

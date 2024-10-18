@@ -50,7 +50,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U128Hex>")]
     max_tlc_value_in_flight: Option<u128>,
     #[serde_as(as = "Option<U64Hex>")]
-    max_num_of_accept_tlcs: Option<u64>,
+    max_tlc_number_in_flight: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -318,7 +318,7 @@ where
                     tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
-                    max_num_of_accept_tlcs: params.max_num_of_accept_tlcs,
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
                 },
                 rpc_reply,
             ))
