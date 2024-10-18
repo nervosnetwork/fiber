@@ -104,17 +104,3 @@ impl NodeHeap {
         self.inner.push(element);
     }
 }
-
-pub(crate) struct ProbabilityEvaluator {}
-
-impl ProbabilityEvaluator {
-    pub fn evaluate_probability(
-        _from: Pubkey,
-        _to: Pubkey,
-        _amount_sent: u128,
-        _capacity: u128,
-    ) -> f64 {
-        //FIXME(yukang): to because
-        return 0.5;
-    }
-}
