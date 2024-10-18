@@ -587,3 +587,31 @@ async fn test_connecting_to_bootnode() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn test_saving_and_connecting_to_node() {
+    init_tracing();
+
+    let node1 = NetworkNode::new().await;
+    let node1_address = node1.get_node_address().clone();
+    let node1_id = &node1.peer_id;
+
+    let mut node2 = NetworkNode::new().await;
+
+    node2
+        .network_actor
+        .send_message(NetworkActorMessage::new_command(
+            NetworkActorCommand::SavePeerAddress(node1_address),
+        ))
+        .expect("send message to network actor");
+
+    // Wait for the above message to be processed.
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    node2.restart().await;
+
+    node2.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == node1_id),
+    )
+    .await;
+}
