@@ -13,6 +13,7 @@ use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::HashMap;
+use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, warn};

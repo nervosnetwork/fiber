@@ -19,7 +19,7 @@ use crate::{
 };
 use ckb_jsonrpc_types::Status;
 use ckb_types::{
-    core::FeeRate,
+    core::{FeeRate, TransactionView},
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
@@ -223,7 +223,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     let node2_funding_amount = 6200000000;
 
     let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
-    let _channel_id = establish_channel_between_nodes(
+    let (_channel_id, funding_tx) = establish_channel_between_nodes(
         &mut node1,
         &mut node2,
         node1_funding_amount,
@@ -231,6 +231,8 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         true,
     )
     .await;
+    let status = node3.submit_tx(funding_tx).await;
+    assert_eq!(status, Status::Committed);
 
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
@@ -473,7 +475,7 @@ async fn establish_channel_between_nodes(
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
     public: bool,
-) -> Hash256 {
+) -> (Hash256, TransactionView) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -524,18 +526,18 @@ async fn establish_channel_between_nodes(
         .expect("accept channel success");
     let new_channel_id = accept_channel_result.new_channel_id;
 
-    node_a
-        .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+    let funding_tx_outpoint = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                true
+                Some(funding_tx_outpoint.clone())
             }
-            _ => false,
+            _ => None,
         })
         .await;
 
@@ -554,7 +556,11 @@ async fn establish_channel_between_nodes(
         })
         .await;
 
-    new_channel_id
+    let funding_tx = node_a
+        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
+        .await
+        .expect("tx found");
+    (new_channel_id, funding_tx)
 }
 
 async fn create_nodes_with_established_channel(
@@ -564,7 +570,7 @@ async fn create_nodes_with_established_channel(
 ) -> (NetworkNode, NetworkNode, Hash256) {
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let channel_id = establish_channel_between_nodes(
+    let (channel_id, _funding_tx) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         node_a_funding_amount,

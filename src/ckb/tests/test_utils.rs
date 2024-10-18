@@ -4,8 +4,8 @@ use ckb_testtool::context::Context;
 use ckb_types::{
     bytes::Bytes,
     core::{DepType, TransactionView},
-    packed::{CellDep, CellOutput, OutPoint, Script},
-    prelude::{Builder, Entity, Pack, PackVec, Unpack},
+    packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
+    prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
 };
 use once_cell::sync::Lazy;
 use std::{collections::HashMap, sync::RwLock};
@@ -410,4 +410,24 @@ pub async fn trace_tx_hash(
     .expect("chain actor alive")
     .status
     .status
+}
+
+pub async fn get_tx_from_hash(
+    mock_actor: ActorRef<CkbChainMessage>,
+    tx_hash: Byte32,
+) -> Result<TransactionView, anyhow::Error> {
+    pub const TIMEOUT: u64 = 1000;
+    let request = TraceTxRequest {
+        tx_hash,
+        confirmations: 1,
+    };
+    call_t!(
+        mock_actor,
+        CkbChainMessage::TraceTx,
+        TIMEOUT,
+        request.clone()
+    )?
+    .tx
+    .map(|tx| Transaction::from(tx.inner).into_view())
+    .ok_or(anyhow!("tx not found in trace tx response"))
 }

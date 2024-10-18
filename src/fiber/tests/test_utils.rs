@@ -24,17 +24,19 @@ use tokio::{
 
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
+    ckb::tests::test_utils::{
+        get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
+    },
     ckb::CkbChainMessage,
     fiber::channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     fiber::graph::NetworkGraphStateStore,
     fiber::graph::PaymentSession,
     fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo},
-    fiber::network::NetworkActorStartArguments,
-    fiber::network::{NetworkActor, NetworkActorCommand, NetworkActorMessage},
-    fiber::network::{NetworkActorStateStore, PersistentNetworkActorState},
-    fiber::types::Hash256,
-    fiber::types::Pubkey,
+    fiber::network::{
+        NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
+        NetworkActorStateStore, PersistentNetworkActorState,
+    },
+    fiber::types::{Hash256, Pubkey},
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
@@ -471,6 +473,13 @@ impl NetworkNode {
 
     pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
         trace_tx_hash(self.chain_actor.clone(), tx_hash).await
+    }
+
+    pub async fn get_tx_from_hash(
+        &mut self,
+        tx_hash: Byte32,
+    ) -> Result<TransactionView, anyhow::Error> {
+        get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
     }
 }
 
