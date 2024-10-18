@@ -3636,13 +3636,25 @@ where
         // Save bootnodes to the network actor state.
         state.persist_state();
 
+        Ok(state)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::MaintainConnections(NUM_PEER_CONNECTIONS),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
         myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
             NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections(
                 NUM_PEER_CONNECTIONS,
             ))
         });
-
-        Ok(state)
+        Ok(())
     }
 
     async fn handle(
