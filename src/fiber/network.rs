@@ -2085,6 +2085,11 @@ struct NetworkSyncState {
     // The timestamp we started syncing.
     starting_time: u64,
     // All the pinned peers that we are going to sync with.
+    // TODO: the intention of passing a few peer addresses to the sync status was to let the user
+    // select a few peers to sync network graph (these peers may have faster connection to the node).
+    // After some refactoring, the code below is a little bit clouded. We are currently only connecting
+    // to random peers. If this functionality is desired, we should make a config option for it.
+    // Otherwise, remove this completely.
     pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
     active_syncers: HashMap<PeerId, ActorRef<GraphSyncerMessage>>,
     // Number of peers with whom we succeeded to sync.
@@ -2185,13 +2190,13 @@ impl NetworkSyncStatus {
         starting_height: u64,
         ending_height: u64,
         starting_time: u64,
-        syncing_peers: Vec<(PeerId, Multiaddr)>,
+        pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
     ) -> Self {
         let state = NetworkSyncState {
             starting_height,
             ending_height,
             starting_time,
-            pinned_syncing_peers: syncing_peers,
+            pinned_syncing_peers,
             active_syncers: Default::default(),
             succeeded: 0,
             failed: 0,
@@ -2349,15 +2354,6 @@ impl PersistentNetworkActorState {
                 true
             }
         }
-    }
-
-    pub(crate) fn get_peers_to_sync_graph(&self) -> HashMap<PeerId, Vec<Multiaddr>> {
-        const NUM_PEERS_TO_SYNC_NETWORK_GRAPH: usize = 5;
-        self.peer_store
-            .iter()
-            .take(NUM_PEERS_TO_SYNC_NETWORK_GRAPH)
-            .map(|(id, addr)| (id.clone(), addr.clone()))
-            .collect()
     }
 
     pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
@@ -3572,16 +3568,8 @@ where
             state_to_be_persisted.add_peer_address(peer_id, addr);
         }
 
-        // Don't sync graph with bootnodes, as that may overload the bootnodes.
-        // Instead select a few peers from the persistent state to sync graph.
-        let peers_to_sync_graph = state_to_be_persisted.get_peers_to_sync_graph();
-
         let height = graph.get_best_height();
         let last_update = graph.get_last_update_timestamp();
-        debug!(
-            "Trying to sync network graph with peers {:?} with height {} and last update {:?}",
-            &peers_to_sync_graph, &height, &last_update
-        );
 
         let chain_actor = self.chain_actor.clone();
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
@@ -3592,10 +3580,7 @@ where
             height,
             current_block_number,
             last_update,
-            peers_to_sync_graph
-                .into_iter()
-                .map(|(peer_id, addrs)| (peer_id, addrs.into_iter().next().unwrap()))
-                .collect(),
+            vec![],
         );
 
         let mut state = NetworkActorState {
