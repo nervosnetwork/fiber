@@ -373,7 +373,8 @@ impl NetworkGraphStateStore for Store {
         });
 
         let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
-        let iter = self
+        let mut last_key = Vec::new();
+        let channels: Vec<_> = self
             .db
             .iterator(mode)
             .take_while(|(key, _)| key.starts_with(&channel_prefix))
@@ -383,13 +384,6 @@ impl NetworkGraphStateStore for Store {
                         return None;
                     }
                 }
-                Some((col_key, value))
-            })
-            .skip(skip)
-            .take(limit);
-        let mut last_key = Vec::new();
-        let channels = iter
-            .filter_map(|(col_key, value)| {
                 let channel: ChannelInfo = serde_json::from_slice(value.as_ref())
                     .expect("deserialize ChannelInfo should be OK");
                 if !channel.is_explicitly_disabled() {
@@ -399,6 +393,8 @@ impl NetworkGraphStateStore for Store {
                     None
                 }
             })
+            .skip(skip)
+            .take(limit)
             .collect();
         (channels, JsonBytes::from_bytes(last_key.into()))
     }
@@ -427,7 +423,8 @@ impl NetworkGraphStateStore for Store {
             key
         });
         let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
-        let iter = self
+        let mut last_key = Vec::new();
+        let nodes: Vec<_> = self
             .db
             .iterator(mode)
             .take_while(|(key, _)| key.starts_with(&node_prefix))
@@ -437,16 +434,14 @@ impl NetworkGraphStateStore for Store {
                         return None;
                     }
                 }
-                Some((col_key, value))
+                last_key = col_key.to_vec();
+                Some(
+                    serde_json::from_slice(value.as_ref())
+                        .expect("deserialize NodeInfo should be OK"),
+                )
             })
             .skip(skip)
-            .take(limit);
-        let mut last_key = Vec::new();
-        let nodes = iter
-            .map(|(col_key, value)| {
-                last_key = col_key.to_vec();
-                serde_json::from_slice(value.as_ref()).expect("deserialize NodeInfo should be OK")
-            })
+            .take(limit)
             .collect();
         (nodes, JsonBytes::from_bytes(last_key.into()))
     }
