@@ -272,6 +272,9 @@ impl NetworkNode {
             store,
             fiber_config,
         } = config;
+
+        let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
+
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 

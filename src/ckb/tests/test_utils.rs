@@ -175,6 +175,7 @@ impl Actor for MockChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("MockChainActor received message: {:?}", message);
         use CkbChainMessage::*;
         match message {
             GetCurrentBlockNumber(_, reply) => {
@@ -324,6 +325,10 @@ impl Actor for MockChainActor {
                     }
                 };
                 let (status, result) = f();
+                debug!(
+                    "Transaction verfication result: tx {:?}, status: {:?}",
+                    &tx, &status
+                );
                 state.tx_status.insert(tx.hash(), (tx.into(), status));
                 if let Err(e) = reply_port.send(result) {
                     error!(
