@@ -696,9 +696,10 @@ where
                 TlcErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::InvalidState(_) => match state.state {
-                ChannelState::Closed(_) => TlcErrorCode::PermanentChannelFailure,
-                // ShuttingDown is a temporary state
-                ChannelState::ShuttingDown(_) => TlcErrorCode::TemporaryChannelFailure,
+                // we can not revert back up `ChannelReady` after `ShuttingDown`
+                ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
+                    TlcErrorCode::PermanentChannelFailure
+                }
                 ChannelState::ChannelReady() => {
                     // we expect `ChannelReady` will be both OK for tlc forwarding,
                     // so here are the unreachable point in normal workflow,
