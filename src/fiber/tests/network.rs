@@ -568,3 +568,22 @@ async fn test_persisting_bootnode() {
     let peers = state.sample_n_peers_to_connect(1);
     assert_eq!(peers.get(&boot_peer_id), Some(&vec![address]));
 }
+
+#[tokio::test]
+async fn test_connecting_to_bootnode() {
+    let boot_node = NetworkNode::new().await;
+    let boot_node_address = format!("{}", boot_node.get_node_address());
+    let boot_node_id = &boot_node.peer_id;
+
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| config.bootnode_addrs = vec![boot_node_address])
+            .build(),
+    )
+    .await;
+
+    node.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == boot_node_id),
+    )
+    .await;
+}
