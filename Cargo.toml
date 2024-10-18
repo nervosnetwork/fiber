@@ -10,33 +10,11 @@ clap = { version = "4.5.2", features = ["derive", "env", "string"] }
 clap-serde-derive = "0.2.1"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_yaml = "0.9.32"
-lightning = { version = "0.0.121", features = ["max_level_trace"] }
-lightning-block-sync = { version = "0.0.121", features = [
-    "rpc-client",
-    "tokio",
-] }
 lightning-invoice = { version = "0.29.0" }
-lightning-net-tokio = { version = "0.0.121" }
-lightning-persister = { version = "0.0.121" }
-lightning-background-processor = { version = "0.0.121", features = ["futures"] }
-lightning-rapid-gossip-sync = { version = "0.0.121" }
-base64 = "0.13.0"
 bitcoin = { version = "0.30.2", features = ["serde", "rand"] }
-bitcoin-bech32 = "0.12"
 bech32 = "0.8"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rand = "0.8.5"
 serde_json = { version = "1.0" }
-tokio = { version = "1", features = [
-    "io-util",
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "sync",
-    "net",
-    "time",
-    "signal",
-] }
 home = "0.5.9"
 ckb-sdk = "3.4.0"
 thiserror = "1.0.58"
@@ -49,14 +27,11 @@ molecule = { version = "0.8.0", default-features = false }
 ckb-types = "0.118.0"
 ckb-gen-types = "0.118.0"
 ckb-jsonrpc-types = "0.118.0"
-ckb-crypto = "0.118.0"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "snappy",
 ], default-features = false }
 serde_with = { version = "3.7.0", features = ["macros", "base64"] }
 hex = "0.4.3"
-tower = "0.4.13"
-axum = { version = "0.7.5", features = ["json"] }
 jsonrpsee = { version = "0.22", features = ["server", "macros"] }
 bitflags = { version = "2.5.0", features = ["serde"] }
 ckb-hash = "0.115.0"
@@ -72,6 +47,16 @@ socket2 = "0.5.7"
 lnd-grpc-tonic-client = "0.3.0"
 git-version = "0.3.9"
 fiber-sphinx = "1.0.1"
+tokio = { version = "1", features = [
+    "io-util",
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "net",
+    "time",
+    "signal",
+] }
 
 [profile.release]
 panic = "abort"
