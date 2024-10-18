@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
+use std::hash::RandomState;
 use tentacle::utils::extract_peer_id;
 
 use std::collections::{HashMap, HashSet};
@@ -160,8 +161,12 @@ pub struct NodeInfoResponse {
 #[derive(Debug)]
 pub enum NetworkActorCommand {
     /// Network commands
+    // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr),
     DisconnectPeer(PeerId),
+    // Save the address of a peer to the peer store, the address here must be a valid
+    // multiaddr with the peer id.
+    SavePeerAddress(Multiaddr),
     // We need to maintain a certain number of peers connections to keep the network running.
     MaintainConnections(usize),
     // For internal use and debugging only. Most of the messages requires some
@@ -1199,7 +1204,6 @@ where
         state: &mut NetworkActorState<S>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
-        debug!("Handling command: {:?}", command);
         match command {
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_message_to_peer(&peer_id, message).await?;
@@ -1238,7 +1242,19 @@ where
                 }
             }
 
+            NetworkActorCommand::SavePeerAddress(addr) => match extract_peer_id(&addr) {
+                Some(peer) => {
+                    debug!("Saved peer id {:?} with address {:?}", &peer, &addr);
+                    state.save_peer_address(peer, addr);
+                }
+                None => {
+                    error!("Failed to save address to peer store: unable to extract peer id from address {:?}", &addr);
+                }
+            },
+
             NetworkActorCommand::MaintainConnections(num_peers) => {
+                debug!("Maintaining connections to {} peers", num_peers);
+
                 let num_connected_peers = state.peer_session_map.len();
                 if num_connected_peers >= num_peers {
                     debug!(
@@ -1250,6 +1266,10 @@ where
                 let peers_to_connect = state
                     .state_to_be_persisted
                     .sample_n_peers_to_connect(num_peers - num_connected_peers);
+                debug!(
+                    "Randomly selected peers to connect: {:?}",
+                    &peers_to_connect
+                );
                 for (peer_id, addresses) in peers_to_connect {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
@@ -1815,15 +1835,6 @@ where
                             &node_announcement
                         );
 
-                        // TODO: bookkeeping how many nodes we have connected to. Stop connecting once we surpass a threshold.
-                        for addr in &node_announcement.addresses {
-                            state
-                                .network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::ConnectPeer(addr.clone()),
-                                ))?;
-                        }
-
                         // Add the node to the network graph.
                         self.network_graph
                             .write()
@@ -1831,7 +1842,10 @@ where
                             .process_node_announcement(node_announcement.clone());
 
                         let peer_id = node_announcement.peer_id();
-                        state.on_node_announcement(peer_id, node_announcement.addresses.clone());
+                        state.save_announced_peer_addresses(
+                            peer_id,
+                            node_announcement.addresses.clone(),
+                        );
                         Ok(())
                     }
                     _ => {
@@ -2308,9 +2322,14 @@ pub struct NetworkActorState<S> {
 #[serde_as]
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct PersistentNetworkActorState {
-    // when we restarting a node, we will reconnect to these peers
+    // These addresses are announced by the peer itself to the network.
+    // When a new NodeAnnouncement message is received, we will overwrite the old addresses.
     #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
-    peer_store: HashMap<PeerId, Vec<Multiaddr>>,
+    announced_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
+    // These addresses are saved by the user (e.g. the user sends a ConnectPeer rpc to the node),
+    // we will then save these addresses to the peer store.
+    #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
+    saved_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
 }
 
 impl PersistentNetworkActorState {
@@ -2318,10 +2337,26 @@ impl PersistentNetworkActorState {
         Default::default()
     }
 
+    fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
+        let empty = vec![];
+        self.announced_peer_addresses
+            .get(peer_id)
+            .unwrap_or(&empty)
+            .iter()
+            .chain(
+                self.saved_peer_addresses
+                    .get(peer_id)
+                    .unwrap_or(&empty)
+                    .iter(),
+            )
+            .map(|addr| addr.clone())
+            .collect::<HashSet<_, RandomState>>()
+    }
+
     /// Save a single peer address to the peer store. If this address for the peer does not exist,
     /// then return false, otherwise return true.
-    pub(crate) fn add_peer_address(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
-        match self.peer_store.entry(peer_id) {
+    fn save_peer_address(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
+        match self.saved_peer_addresses.entry(peer_id) {
             Entry::Occupied(mut entry) => {
                 if entry.get().contains(&addr) {
                     false
@@ -2337,10 +2372,10 @@ impl PersistentNetworkActorState {
         }
     }
 
-    /// Save peer addresses to the peer store. If the peer addresses are updated,
-    /// return true, otherwise return false. This method will NOT keep the old addresses.
-    pub(crate) fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
-        match self.peer_store.entry(peer_id) {
+    /// Save announced peer addresses to the peer store. If the peer addresses are updated,
+    /// return true, otherwise return false. This method will NOT keep the old announced addresses.
+    fn save_announced_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
+        match self.announced_peer_addresses.entry(peer_id) {
             Entry::Occupied(mut entry) => {
                 if entry.get() == &addr {
                     false
@@ -2357,10 +2392,22 @@ impl PersistentNetworkActorState {
     }
 
     pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
-        self.peer_store
-            .iter()
+        let nodes = self
+            .saved_peer_addresses
+            .keys()
+            .into_iter()
+            .chain(self.saved_peer_addresses.keys().into_iter())
+            .collect::<HashSet<_, RandomState>>();
+
+        nodes
+            .into_iter()
             .take(n)
-            .map(|(id, addr)| (id.clone(), addr.clone()))
+            .map(|peer_id| {
+                (
+                    peer_id.clone(),
+                    self.get_peer_addresses(peer_id).into_iter().collect(),
+                )
+            })
             .collect()
     }
 }
@@ -3050,14 +3097,30 @@ where
         self.maybe_tell_syncer_peer_disconnected(id);
     }
 
-    fn on_node_announcement(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
-        self.save_peer_addresses(peer_id, addresses);
+    pub(crate) fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
+        self.state_to_be_persisted.get_peer_addresses(peer_id)
     }
 
-    fn save_peer_addresses(&mut self, peer_id: PeerId, addresses: Vec<Multiaddr>) {
+    pub(crate) fn save_peer_address(&mut self, peer_id: PeerId, address: Multiaddr) -> bool {
         if self
             .state_to_be_persisted
-            .save_peer_addresses(peer_id, addresses)
+            .save_peer_address(peer_id, address)
+        {
+            self.persist_state();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn save_announced_peer_addresses(
+        &mut self,
+        peer_id: PeerId,
+        addresses: Vec<Multiaddr>,
+    ) {
+        if self
+            .state_to_be_persisted
+            .save_announced_peer_addresses(peer_id, addresses)
         {
             self.persist_state();
         }
@@ -3565,7 +3628,7 @@ where
         for bootnode in &config.bootnode_addrs {
             let addr = Multiaddr::from_str(bootnode.as_str()).expect("valid bootnode");
             let peer_id = extract_peer_id(&addr).expect("valid peer id");
-            state_to_be_persisted.add_peer_address(peer_id, addr);
+            state_to_be_persisted.save_peer_address(peer_id, addr);
         }
 
         let height = graph.get_best_height();
@@ -3642,8 +3705,25 @@ where
     async fn post_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("Trying to connect to peers with mutual channels");
+        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+            let addresses = state.get_peer_addresses(&peer_id);
+
+            debug!(
+                "Reconnecting channel {:x} peers {:?} in state {:?}",
+                &channel_id, &peer_id, &channel_state
+            );
+            for addr in addresses {
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ConnectPeer(addr),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+        }
+
         myself
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::MaintainConnections(NUM_PEER_CONNECTIONS),
