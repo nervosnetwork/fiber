@@ -99,12 +99,12 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
 
-// This is the approximate number of peers that we need to keep connection to to make the
+// This is the default approximate number of peers that we need to keep connection to to make the
 // network operating normally.
-const NUM_PEERS_IN_CONNECTION: usize = 40;
+const NUM_PEER_CONNECTIONS: usize = 40;
 
 // The duration for which we will try to maintain the number of peers in connection.
-const MAINTAINING_CONNECTED_PEERS_INTERVAL: Duration = Duration::from_secs(3600);
+const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
 pub(crate) fn get_chain_hash() -> Hash256 {
     Default::default()
@@ -162,7 +162,8 @@ pub enum NetworkActorCommand {
     /// Network commands
     ConnectPeer(Multiaddr),
     DisconnectPeer(PeerId),
-    MaintainConnectedPeers(),
+    // We need to maintain a certain number of peers connections to keep the network running.
+    MaintainConnections(usize),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -1237,22 +1238,18 @@ where
                 }
             }
 
-            NetworkActorCommand::MaintainConnectedPeers() => {
+            NetworkActorCommand::MaintainConnections(num_peers) => {
                 let num_connected_peers = state.peer_session_map.len();
-                if num_connected_peers >= NUM_PEERS_IN_CONNECTION {
+                if num_connected_peers >= num_peers {
                     debug!(
                         "Already connected to {} peers, skipping connecting to more peers",
                         num_connected_peers,
                     );
                     return Ok(());
                 }
-                // Even though we have connected to some peers, we still try to select
-                // NUM_PEERS_IN_CONNECTION, because unless we're extremely lucky, we will connect
-                // to much less than 2 * NUM_PEERS_IN_CONNECTION peers. That should still be OK,
-                // because we will not be connecting to more peers in the next run.
                 let peers_to_connect = state
                     .state_to_be_persisted
-                    .sample_n_peers_to_connect(NUM_PEERS_IN_CONNECTION);
+                    .sample_n_peers_to_connect(num_peers - num_connected_peers);
                 for (peer_id, addresses) in peers_to_connect {
                     if let Some(session) = state.get_peer_session(&peer_id) {
                         debug!(
@@ -2316,8 +2313,27 @@ impl PersistentNetworkActorState {
         Default::default()
     }
 
+    /// Save a single peer address to the peer store. If this address for the peer does not exist,
+    /// then return false, otherwise return true.
+    pub(crate) fn add_peer_address(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
+        match self.peer_store.entry(peer_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().contains(&addr) {
+                    false
+                } else {
+                    entry.get_mut().push(addr);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(vec![addr]);
+                true
+            }
+        }
+    }
+
     /// Save peer addresses to the peer store. If the peer addresses are updated,
-    /// return true, otherwise return false.
+    /// return true, otherwise return false. This method will NOT keep the old addresses.
     pub(crate) fn save_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
         match self.peer_store.entry(peer_id) {
             Entry::Occupied(mut entry) => {
@@ -3549,28 +3565,11 @@ where
             .store
             .get_network_actor_state(&my_peer_id)
             .unwrap_or_default();
-        let mut peers_to_connect =
-            state_to_be_persisted.sample_n_peers_to_connect(NUM_PEERS_IN_CONNECTION);
-        let bootnodes = config.bootnode_addrs.clone();
-        for bootnode in &bootnodes {
-            let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
-            let peer_id = extract_peer_id(&addr).expect("valid peer id");
-            // If we have already selected the boot node as a peer to connect, then
-            // add this address to the list of addresses to connect to.
-            // Otherwise, create a new list out of this address.
-            peers_to_connect
-                .entry(peer_id)
-                .or_insert_with(Vec::new)
-                .push(addr);
-        }
 
-        for (peer_id, addrs) in peers_to_connect {
-            state_to_be_persisted.save_peer_addresses(peer_id, addrs.clone());
-            for addr in addrs {
-                myself.send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ConnectPeer(addr),
-                ))?;
-            }
+        for bootnode in &config.bootnode_addrs {
+            let addr = Multiaddr::from_str(bootnode.as_str()).expect("valid bootnode");
+            let peer_id = extract_peer_id(&addr).expect("valid peer id");
+            state_to_be_persisted.add_peer_address(peer_id, addr);
         }
 
         // Don't sync graph with bootnodes, as that may overload the bootnodes.
@@ -3649,12 +3648,15 @@ where
             });
         }
 
-        myself.send_interval(MAINTAINING_CONNECTED_PEERS_INTERVAL, || {
-            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnectedPeers())
-        });
-
         // Save bootnodes to the network actor state.
         state.persist_state();
+
+        myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections(
+                NUM_PEER_CONNECTIONS,
+            ))
+        });
+
         Ok(state)
     }
 
