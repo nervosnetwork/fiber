@@ -2,6 +2,8 @@ use ckb_types::packed::OutPoint;
 use std::collections::HashMap;
 use tracing::{debug, error};
 
+use super::types::Pubkey;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ChannelTimedResult {
     pub(crate) fail_time: u128,
@@ -16,17 +18,22 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
+
+const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
+
 #[derive(Debug, Clone)]
 pub(crate) struct PaymentHistory {
     pub inner: HashMap<OutPoint, ChannelTimedResult>,
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u128,
     pub bimodal_scale_msat: f64,
+    pub source: Pubkey,
 }
 
 impl PaymentHistory {
-    pub(crate) fn new(min_fail_relax_interval: Option<u128>) -> Self {
+    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u128>) -> Self {
         PaymentHistory {
+            source,
             inner: HashMap::new(),
             min_fail_relax_interval: min_fail_relax_interval
                 .unwrap_or(DEFAULT_MIN_FAIL_RELAX_INTERVAL),
@@ -86,6 +93,34 @@ impl PaymentHistory {
         self.inner.get(outpoint)
     }
 
+    pub(crate) fn eval_probability(
+        &self,
+        from: Pubkey,
+        channel: OutPoint,
+        amount: u128,
+        capacity: u128,
+    ) -> f64 {
+        if from == self.source {
+            self.get_direct_probability(channel)
+        } else {
+            self.get_channel_probability(channel, amount, capacity)
+        }
+    }
+
+    fn get_direct_probability(&self, channel: OutPoint) -> f64 {
+        let mut prob = 1.0;
+        if let Some(result) = self.inner.get(&channel) {
+            if result.fail_time != 0 {
+                let time_ago = (std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+                    - result.fail_time)
+                    .min(0);
+                let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
+                prob -= exponent.exp();
+            }
+        }
+        prob
+    }
+
     // Get the probability of a payment success through a channel
     // The probability is calculated based on the history of the channel
     // Suppose the range of amount:
@@ -95,7 +130,12 @@ impl PaymentHistory {
     // 1. If the amount is less than or equal to success_amount, return 1.0
     // 2. If the amount is greater than fail_amount, return 0.0
     // 3. Otherwise, calculate the probability based on the time and capacity of the channel
-    pub(crate) fn get_probability(&self, channel: OutPoint, amount: u128, capacity: u128) -> f64 {
+    pub(crate) fn get_channel_probability(
+        &self,
+        channel: OutPoint,
+        amount: u128,
+        capacity: u128,
+    ) -> f64 {
         if amount > capacity || amount == 0 {
             return 0.0;
         }

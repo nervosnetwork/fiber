@@ -179,7 +179,7 @@ where
             connected_peer_addresses: HashMap::new(),
             store,
             chain_hash: get_chain_hash(),
-            history: PaymentHistory::new(None),
+            history: PaymentHistory::new(source, None),
         };
         network_graph.load_from_store();
         network_graph
@@ -555,7 +555,7 @@ where
         self.channels.clear();
         self.nodes.clear();
         self.connected_peer_addresses.clear();
-        self.history = PaymentHistory::new(None);
+        self.history = PaymentHistory::new(self.source, None);
     }
 
     /// Returns a list of `PaymentHopData` for all nodes in the route,
@@ -772,7 +772,8 @@ where
                     };
 
                 let probability = cur_hop.probability
-                    * self.history.get_probability(
+                    * self.history.eval_probability(
+                        from,
                         channel_info.out_point(),
                         amount_to_send,
                         channel_info.capacity(),

@@ -1,11 +1,12 @@
 use crate::fiber::history::{ChannelTimedResult, PaymentHistory};
+use crate::fiber::tests::test_utils::generate_pubkey;
 use ckb_types::packed::{OutPoint, OutPointBuilder};
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;
 
 #[test]
 fn test_history() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
 
     let result1 = ChannelTimedResult {
@@ -31,8 +32,9 @@ fn test_history() {
 
 #[test]
 fn test_history_apply_channel_result() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
+
     history.apply_channel_result(&outpoint, 10, false, 11);
     assert_eq!(
         history.get_result(&outpoint),
@@ -59,8 +61,9 @@ fn test_history_apply_channel_result() {
 
 #[test]
 fn test_history_interal_success_fail() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
+
     let result = ChannelTimedResult {
         fail_time: 1,
         fail_amount: 2,
@@ -127,10 +130,10 @@ impl Round for f64 {
 
 #[test]
 fn test_history_probability() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
 
-    let prob = history.get_probability(outpoint.clone(), 10, 100);
+    let prob = history.get_channel_probability(outpoint.clone(), 10, 100);
     assert_eq!(prob, 1.0);
 
     let result = ChannelTimedResult {
@@ -140,78 +143,81 @@ fn test_history_probability() {
         fail_amount: 10,
     };
     history.add_result(&outpoint, result);
-    assert_eq!(history.get_probability(outpoint.clone(), 1, 10), 1.0);
-    assert_eq!(history.get_probability(outpoint.clone(), 1, 8), 1.0);
+    assert_eq!(
+        history.get_channel_probability(outpoint.clone(), 1, 10),
+        1.0
+    );
+    assert_eq!(history.get_channel_probability(outpoint.clone(), 1, 8), 1.0);
 
     // graph of amount is less than history's success_amount and fail_amount
-    assert_eq!(history.get_probability(outpoint.clone(), 1, 4), 1.0);
+    assert_eq!(history.get_channel_probability(outpoint.clone(), 1, 4), 1.0);
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 5, 9)
+            .get_channel_probability(outpoint.clone(), 5, 9)
             .to_2_decimal(),
         1.0
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 6, 9)
+            .get_channel_probability(outpoint.clone(), 6, 9)
             .to_2_decimal(),
         0.75
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 7, 9)
+            .get_channel_probability(outpoint.clone(), 7, 9)
             .to_2_decimal(),
         0.50
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 8, 9)
+            .get_channel_probability(outpoint.clone(), 8, 9)
             .to_2_decimal(),
         0.25
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 5, 10)
+            .get_channel_probability(outpoint.clone(), 5, 10)
             .to_2_decimal(),
         1.0
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 6, 10)
+            .get_channel_probability(outpoint.clone(), 6, 10)
             .to_2_decimal(),
         0.80
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 7, 10)
+            .get_channel_probability(outpoint.clone(), 7, 10)
             .to_2_decimal(),
         0.60
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 8, 10)
+            .get_channel_probability(outpoint.clone(), 8, 10)
             .to_2_decimal(),
         0.40
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 9, 10)
+            .get_channel_probability(outpoint.clone(), 9, 10)
             .to_2_decimal(),
         0.20
     );
 
     assert_eq!(
         history
-            .get_probability(outpoint.clone(), 10, 10)
+            .get_channel_probability(outpoint.clone(), 10, 10)
             .to_2_decimal(),
         0.0
     );
@@ -219,10 +225,10 @@ fn test_history_probability() {
 
 #[test]
 fn test_history_probability_small_fail_amount() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
 
-    let prob = history.get_probability(outpoint.clone(), 50000000, 100000000);
+    let prob = history.get_channel_probability(outpoint.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
     let result = ChannelTimedResult {
@@ -233,17 +239,17 @@ fn test_history_probability_small_fail_amount() {
     };
     history.add_result(&outpoint, result);
     assert_eq!(
-        history.get_probability(outpoint.clone(), 50000000, 100000000),
+        history.get_channel_probability(outpoint.clone(), 50000000, 100000000),
         0.0
     );
 }
 
 #[test]
 fn test_history_probability_range() {
-    let mut history = PaymentHistory::new(None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
     let outpoint = OutPoint::default();
 
-    let prob = history.get_probability(outpoint.clone(), 50000000, 100000000);
+    let prob = history.get_channel_probability(outpoint.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
     let result = ChannelTimedResult {
@@ -255,13 +261,13 @@ fn test_history_probability_range() {
     history.add_result(&outpoint, result);
 
     for amount in (1..10000000).step_by(100000) {
-        let prob = history.get_probability(outpoint.clone(), amount, 100000000);
+        let prob = history.get_channel_probability(outpoint.clone(), amount, 100000000);
         assert_eq!(prob, 1.0);
     }
 
-    let mut prev_prob = history.get_probability(outpoint.clone(), 10000000, 100000000);
+    let mut prev_prob = history.get_channel_probability(outpoint.clone(), 10000000, 100000000);
     for amount in (10000005..50000000).step_by(10000) {
-        let prob = history.get_probability(outpoint.clone(), amount, 100000000);
+        let prob = history.get_channel_probability(outpoint.clone(), amount, 100000000);
         eprintln!(
             "amount: {}, prob: {}, prev_prob: {}",
             amount, prob, prev_prob
@@ -271,7 +277,7 @@ fn test_history_probability_range() {
     }
 
     for amount in (50000001..100000000).step_by(100000) {
-        let prob = history.get_probability(outpoint.clone(), amount, 100000000);
+        let prob = history.get_channel_probability(outpoint.clone(), amount, 100000000);
         assert_eq!(prob, 0.0);
     }
 }
