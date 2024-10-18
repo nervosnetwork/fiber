@@ -4,7 +4,7 @@ use crate::{
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
         types::{Hash256, Pubkey},
     },
-    invoice::{CkbInvoice, InvoiceError, InvoiceStore},
+    invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
     watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
 use ckb_jsonrpc_types::JsonBytes;
@@ -86,6 +86,13 @@ impl Batch {
                 self.put(
                     key,
                     serde_json::to_vec(&preimage).expect("serialize Hash256 should be OK"),
+                );
+            }
+            KeyValue::CkbInvoiceStatus(id, status) => {
+                let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&status).expect("serialize CkbInvoiceStatus should be OK"),
                 );
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
@@ -192,7 +199,9 @@ impl Batch {
 /// | KeyPrefix::  | Key::              | Value::                  |
 /// +--------------+--------------------+--------------------------+
 /// | 0            | Hash256            | ChannelActorState        |
-/// | 32           | Hash256            | CkbInvoice               |
+/// | 32           | Payment_hash       | CkbInvoice               |
+/// | 33           | Payment_hash       | CkbInvoice Preimage      |
+/// | 34           | Payment_hash       | CkbInvoice Status        |
 /// | 64           | PeerId | Hash256   | ChannelState             |
 /// | 96           | ChannelId          | ChannelInfo              |
 /// | 97           | Block | Index      | ChannelId                |
@@ -208,6 +217,7 @@ impl Batch {
 const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
 const CKB_INVOICE_PREFIX: u8 = 32;
 const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
+const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
 const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
 pub(crate) const CHANNEL_INFO_PREFIX: u8 = 96;
 const CHANNEL_ANNOUNCEMENT_INDEX_PREFIX: u8 = 97;
@@ -222,6 +232,7 @@ enum KeyValue {
     ChannelActorState(Hash256, ChannelActorState),
     CkbInvoice(Hash256, CkbInvoice),
     CkbInvoicePreimage(Hash256, Hash256),
+    CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     PeerIdMultiAddr(PeerId, Multiaddr),
     NodeInfo(Pubkey, NodeInfo),
@@ -330,7 +341,12 @@ impl InvoiceStore for Store {
         if let Some(preimage) = preimage {
             batch.put_kv(KeyValue::CkbInvoicePreimage(*hash, preimage));
         }
-        batch.put_kv(KeyValue::CkbInvoice(*invoice.payment_hash(), invoice));
+        let payment_hash = *invoice.payment_hash();
+        batch.put_kv(KeyValue::CkbInvoice(payment_hash, invoice));
+        batch.put_kv(KeyValue::CkbInvoiceStatus(
+            payment_hash,
+            CkbInvoiceStatus::Open,
+        ));
         batch.commit();
         return Ok(());
     }
@@ -342,6 +358,31 @@ impl InvoiceStore for Store {
 
         self.get(key)
             .map(|v| serde_json::from_slice(v.as_ref()).expect("deserialize Hash256 should be OK"))
+    }
+
+    fn update_invoice_status(
+        &self,
+        id: &Hash256,
+        status: crate::invoice::CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        let _invoice = self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
+        let mut key = Vec::with_capacity(33);
+        key.extend_from_slice(&[CKB_INVOICE_STATUS_PREFIX]);
+        key.extend_from_slice(id.as_ref());
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CkbInvoiceStatus(*id, status));
+        batch.commit();
+        Ok(())
+    }
+
+    fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
+        let mut key = Vec::with_capacity(33);
+        key.extend_from_slice(&[CKB_INVOICE_STATUS_PREFIX]);
+        key.extend_from_slice(id.as_ref());
+
+        self.get(key).map(|v| {
+            serde_json::from_slice(v.as_ref()).expect("deserialize CkbInvoiceStatus should be OK")
+        })
     }
 }
 
