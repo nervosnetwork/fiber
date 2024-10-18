@@ -837,7 +837,8 @@ where
                 let fee_rate: u128 = state
                     .public_channel_info
                     .as_ref()
-                    .map(|info| info.tlc_fee_proportional_millionths.unwrap_or_default())
+                    .expect("public channel exits")
+                    .tlc_fee_proportional_millionths
                     .unwrap_or_default();
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
                 if forward_fee < expected_fee {
