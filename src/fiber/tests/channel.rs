@@ -147,10 +147,20 @@ async fn test_open_and_accept_channel() {
 }
 
 #[tokio::test]
-async fn test_create_public_channel() {
+async fn test_create_private_channel() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (_node_a, _node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+}
+
+#[tokio::test]
+async fn test_create_public_channel() {
+    init_tracing();
 
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
@@ -158,16 +168,11 @@ async fn test_create_public_channel() {
     let (_node_a, _node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
-    // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
-    // FIXME: add assertion
 }
 
 #[tokio::test]
 async fn test_public_channel_saved_to_the_owner_graph() {
     init_tracing();
-
-    let _span = tracing::info_span!("node", node = "test").entered();
 
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 6200000000;
@@ -217,8 +222,6 @@ async fn test_public_channel_saved_to_the_owner_graph() {
 async fn test_public_channel_saved_to_the_other_nodes_graph() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
-
     let node1_funding_amount = 100000000000;
     let node2_funding_amount = 6200000000;
 
@@ -253,6 +256,37 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         .collect::<HashSet<_>>();
     assert!(node_pubkeys.contains(&channel.node1()));
     assert!(node_pubkeys.contains(&channel.node2()));
+}
+
+#[tokio::test]
+async fn test_public_channel_with_unconfirmed_funding_tx() {
+    init_tracing();
+
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
+    let (_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node1,
+        &mut node2,
+        node1_funding_amount,
+        node2_funding_amount,
+        true,
+    )
+    .await;
+
+    // We should submit the transaction to node 3's chain actor here.
+    // If we don't do that node 3 will deem the funding transaction unconfirmed,
+    // thus refusing to save the channel to the graph.
+
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node3_store = node3.store.clone();
+    node3.stop().await;
+    let channels = node3_store.get_channels(None);
+    // No channels here as node 3 didn't think the funding transaction is confirmed.
+    assert_eq!(channels.len(), 0);
 }
 
 #[tokio::test]
