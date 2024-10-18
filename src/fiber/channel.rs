@@ -696,9 +696,10 @@ where
                 TlcErrorCode::TemporaryChannelFailure
             }
             ProcessingChannelError::InvalidState(_) => match state.state {
-                ChannelState::Closed(_) => TlcErrorCode::PermanentChannelFailure,
-                // ShuttingDown is a temporary state
-                ChannelState::ShuttingDown(_) => TlcErrorCode::TemporaryChannelFailure,
+                // we can not revert back up `ChannelReady` after `ShuttingDown`
+                ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
+                    TlcErrorCode::PermanentChannelFailure
+                }
                 ChannelState::ChannelReady() => {
                     // we expect `ChannelReady` will be both OK for tlc forwarding,
                     // so here are the unreachable point in normal workflow,
@@ -836,7 +837,8 @@ where
                 let fee_rate: u128 = state
                     .public_channel_info
                     .as_ref()
-                    .map(|info| info.tlc_fee_proportional_millionths.unwrap_or_default())
+                    .expect("public channel exits")
+                    .tlc_fee_proportional_millionths
                     .unwrap_or_default();
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
                 if forward_fee < expected_fee {
