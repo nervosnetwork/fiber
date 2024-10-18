@@ -1553,7 +1553,10 @@ where
                 // TODO: It is possible that the remote peer of the channel may repeatedly
                 // receive the same message.
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
-                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
+                debug!(
+                    "Broadcasting message to randomly selected peers {:?} (from {:?})",
+                    &peer_ids, &state.peer_id
+                );
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.

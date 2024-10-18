@@ -51,6 +51,10 @@ impl TempDir {
             OldTempDir::with_prefix(prefix).expect("create temp directory"),
         ))
     }
+
+    pub fn to_str(&self) -> &str {
+        self.0.path().to_str().expect("path to str")
+    }
 }
 
 impl AsRef<Path> for TempDir {
@@ -199,6 +203,10 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
+    pub fn base_dir_prefix(self, prefix: &str) -> Self {
+        self.base_dir(Arc::new(TempDir::new(prefix)))
+    }
+
     pub fn node_name(mut self, node_name: Option<String>) -> Self {
         self.node_name = node_name;
         self
@@ -278,7 +286,7 @@ impl NetworkNode {
             public_key.into(),
         )));
         let network_actor = Actor::spawn_linked(
-            Some(format!("network actor at {:?}", base_dir.as_ref())),
+            Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
@@ -361,7 +369,13 @@ impl NetworkNode {
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
         for i in 0..N {
-            let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
+            let new = Self::new_with_config(
+                NetworkNodeConfigBuilder::new()
+                    .node_name(Some(format!("node-{}", i)))
+                    .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+                    .build(),
+            )
+            .await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
