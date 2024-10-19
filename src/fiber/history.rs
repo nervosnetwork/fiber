@@ -5,7 +5,7 @@ use tracing::{debug, error};
 use super::types::Pubkey;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub(crate) struct ChannelTimedResult {
+pub(crate) struct TimedResult {
     pub(crate) fail_time: u128,
     pub(crate) fail_amount: u128,
     pub(crate) success_time: u128,
@@ -21,9 +21,11 @@ const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
 
 const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
 
+pub(crate) type ChannelTimedResult = HashMap<OutPoint, TimedResult>;
+
 #[derive(Debug, Clone)]
 pub(crate) struct PaymentHistory {
-    pub inner: HashMap<OutPoint, ChannelTimedResult>,
+    pub inner: HashMap<Pubkey, ChannelTimedResult>,
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u128,
     pub bimodal_scale_msat: f64,
@@ -41,18 +43,23 @@ impl PaymentHistory {
         }
     }
 
-    pub(crate) fn add_result(&mut self, outpoint: &OutPoint, result: ChannelTimedResult) {
-        self.inner.insert(outpoint.clone(), result);
+    pub(crate) fn add_result(&mut self, from: Pubkey, outpoint: &OutPoint, result: TimedResult) {
+        self.inner
+            .entry(from)
+            .or_insert_with(HashMap::new)
+            .insert(outpoint.clone(), result);
     }
 
     pub(crate) fn apply_channel_result(
         &mut self,
+        from: Pubkey,
         outpoint: &OutPoint,
         amount: u128,
         success: bool,
         time: u128,
     ) {
-        if let Some(current) = self.inner.get_mut(outpoint) {
+        let min_fail_relax_interval = self.min_fail_relax_interval;
+        if let Some(current) = self.get_mut_result(&from, outpoint) {
             if success {
                 current.success_time = time;
                 if amount > current.success_amount {
@@ -64,7 +71,7 @@ impl PaymentHistory {
             } else {
                 if amount > current.fail_amount
                     && current.fail_time != 0
-                    && time.saturating_sub(current.fail_time) < self.min_fail_relax_interval
+                    && time.saturating_sub(current.fail_time) < min_fail_relax_interval
                 {
                     return;
                 }
@@ -78,19 +85,26 @@ impl PaymentHistory {
             }
             assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
         } else {
-            let result = ChannelTimedResult {
+            let result = TimedResult {
                 fail_time: if success { 0 } else { time },
                 fail_amount: if success { 0 } else { amount },
                 success_time: if success { time } else { 0 },
                 success_amount: if success { amount } else { 0 },
             };
-            self.add_result(outpoint, result);
+            self.add_result(from, outpoint, result);
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_result(&self, outpoint: &OutPoint) -> Option<&ChannelTimedResult> {
-        self.inner.get(outpoint)
+    pub(crate) fn get_result(&self, from: &Pubkey, outpoint: &OutPoint) -> Option<&TimedResult> {
+        self.inner.get(from).and_then(|h| h.get(outpoint))
+    }
+
+    pub(crate) fn get_mut_result(
+        &mut self,
+        from: &Pubkey,
+        outpoint: &OutPoint,
+    ) -> Option<&mut TimedResult> {
+        self.inner.get_mut(from).and_then(|h| h.get_mut(outpoint))
     }
 
     pub(crate) fn eval_probability(
@@ -101,15 +115,15 @@ impl PaymentHistory {
         capacity: u128,
     ) -> f64 {
         if from == self.source {
-            self.get_direct_probability(channel)
+            self.get_direct_probability(from, channel)
         } else {
-            self.get_channel_probability(channel, amount, capacity)
+            self.get_channel_probability(from, channel, amount, capacity)
         }
     }
 
-    fn get_direct_probability(&self, channel: OutPoint) -> f64 {
+    fn get_direct_probability(&self, from: Pubkey, channel: OutPoint) -> f64 {
         let mut prob = 1.0;
-        if let Some(result) = self.inner.get(&channel) {
+        if let Some(result) = self.get_result(&from, &channel) {
             if result.fail_time != 0 {
                 let time_ago = (std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
                     - result.fail_time)
@@ -132,6 +146,7 @@ impl PaymentHistory {
     // 3. Otherwise, calculate the probability based on the time and capacity of the channel
     pub(crate) fn get_channel_probability(
         &self,
+        from: Pubkey,
         channel: OutPoint,
         amount: u128,
         capacity: u128,
@@ -139,7 +154,7 @@ impl PaymentHistory {
         if amount > capacity || amount == 0 {
             return 0.0;
         }
-        if let Some(result) = self.inner.get(&channel) {
+        if let Some(result) = self.get_result(&from, &channel) {
             // the payment history may have outdated information
             // we need to adjust the amount to the valid range
             let fail_amount = if result.fail_time == 0 {

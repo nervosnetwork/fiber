@@ -2217,14 +2217,15 @@ where
                     error = Some(format!("Failed to build route: {:?}", payment_hash));
                     break;
                 }
-                Ok(onion_path) => onion_path,
+                Ok(hops) => hops,
             };
             let first_channel_outpoint = hops_infos[0]
                 .channel_outpoint
                 .clone()
                 .expect("first hop channel outpoint");
 
-            let session_route = SessionRoute::new(&hops_infos);
+            let session_route =
+                SessionRoute::new(self.network_graph.read().await.source(), &hops_infos);
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
             let peeled_packet = match PeeledPaymentOnionPacket::create(

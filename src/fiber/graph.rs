@@ -189,6 +189,10 @@ where
         self.chain_hash
     }
 
+    pub(crate) fn source(&self) -> Pubkey {
+        self.source
+    }
+
     pub(crate) fn load_from_store(&mut self) {
         let channels = self.store.get_channels(None);
         for channel in channels.iter() {
@@ -507,6 +511,7 @@ where
         let session_route = &payment_session.route;
         for channel in session_route.channels.iter() {
             self.history.apply_channel_result(
+                channel.from,
                 &channel.channel_outpoint,
                 channel.amount,
                 true,
@@ -532,6 +537,7 @@ where
 
             for s in payment_session.route.channels[..index].iter() {
                 self.history.apply_channel_result(
+                    s.from,
                     &s.channel_outpoint,
                     s.amount,
                     true,
@@ -541,6 +547,7 @@ where
 
             if let Some(s) = payment_session.route.channels.get(index) {
                 self.history.apply_channel_result(
+                    s.from,
                     &s.channel_outpoint,
                     s.amount,
                     false,
@@ -890,6 +897,7 @@ pub enum PaymentSessionStatus {
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionRouteNode {
+    pub from: Pubkey,
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
     pub amount: u128,
@@ -903,18 +911,21 @@ pub struct SessionRoute {
 }
 
 impl SessionRoute {
-    pub fn new(payment_hops: &Vec<PaymentHopData>) -> Self {
+    pub fn new(source: Pubkey, payment_hops: &Vec<PaymentHopData>) -> Self {
         let mut router = Self::default();
+        let mut last_hop = source;
         for hop in payment_hops {
             if let Some(outpoint) = &hop.channel_outpoint {
-                router.add_node(outpoint.clone(), hop.amount);
+                router.add_node(last_hop, outpoint.clone(), hop.amount);
+                last_hop = hop.next_hop.expect("next_hop is none");
             }
         }
         router
     }
 
-    fn add_node(&mut self, channel_outpoint: OutPoint, amount: u128) {
+    fn add_node(&mut self, from: Pubkey, channel_outpoint: OutPoint, amount: u128) {
         self.channels.push(SessionRouteNode {
+            from,
             channel_outpoint,
             amount,
         });
