@@ -13,9 +13,11 @@ use std::sync::Arc;
 use tentacle::multiaddr::MultiAddr;
 use tokio::sync::RwLock;
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GraphNodesParams {
-    limit: Option<usize>,
+    #[serde_as(as = "Option<U64Hex>")]
+    limit: Option<u64>,
     after: Option<JsonBytes>,
 }
 
@@ -96,9 +98,11 @@ pub(crate) struct GraphNodesResult {
     last_cursor: JsonBytes,
 }
 
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GraphChannelsParams {
-    limit: Option<usize>,
+    #[serde_as(as = "Option<U64Hex>")]
+    limit: Option<u64>,
     after: Option<JsonBytes>,
 }
 
@@ -178,8 +182,10 @@ where
     ) -> Result<GraphNodesResult, ErrorObjectOwned> {
         let network_graph = self.network_graph.read().await;
         let default_max_limit = 500;
-        let (nodes, last_cursor) = network_graph
-            .get_nodes_with_params(params.limit.unwrap_or(default_max_limit), params.after);
+        let (nodes, last_cursor) = network_graph.get_nodes_with_params(
+            params.limit.unwrap_or(default_max_limit) as usize,
+            params.after,
+        );
 
         let nodes = nodes
             .iter()
@@ -205,8 +211,10 @@ where
         let default_max_limit = 500;
         let network_graph = self.network_graph.read().await;
         let chain_hash = network_graph.chain_hash();
-        let (channels, last_cursor) = network_graph
-            .get_channels_with_params(params.limit.unwrap_or(default_max_limit), params.after);
+        let (channels, last_cursor) = network_graph.get_channels_with_params(
+            params.limit.unwrap_or(default_max_limit) as usize,
+            params.after,
+        );
 
         let channels = channels
             .iter()
