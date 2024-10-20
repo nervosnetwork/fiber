@@ -2641,11 +2641,19 @@ where
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
         let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserved_ckb_amount
-            )));
+        if udt_type_script.is_none() {
+            if funding_amount < reserved_ckb_amount.into() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The value of the channel should be greater than the reserve amount: {}",
+                    reserved_ckb_amount
+                )));
+            }
+            if funding_amount >= u64::MAX as u128 {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The CKB amount of the channel should be less than {:?}",
+                    u64::MAX
+                )));
+            }
         }
         let funding_amount = if udt_type_script.is_some() {
             funding_amount
