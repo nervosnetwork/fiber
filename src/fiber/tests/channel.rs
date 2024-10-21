@@ -1124,10 +1124,6 @@ async fn test_reestablish_channel() {
         })
         .await;
 
-    // sleep for a while to wait before the reconnection, otherwise there maybe
-    // an error with `RepeatedConnection` in an odd chance.
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
     // This is due to tentacle connection is async. We may actually send
     // the `ChannelCreated` event before the `PeerConnected` event.
