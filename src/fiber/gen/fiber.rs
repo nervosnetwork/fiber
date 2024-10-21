@@ -8096,7 +8096,6 @@ impl ::core::fmt::Display for Shutdown {
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
-        write!(f, ", {}: {}", "force", self.force())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -8111,13 +8110,13 @@ impl ::core::default::Default for Shutdown {
     }
 }
 impl Shutdown {
-    const DEFAULT_VALUE: [u8; 114] = [
-        114, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 60, 0, 0, 0, 113, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 53, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 109] = [
+        109, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 56, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 53, 0, 0,
+        0, 16, 0, 0, 0, 48, 0, 0, 0, 49, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -8149,17 +8148,11 @@ impl Shutdown {
     pub fn close_script(&self) -> Script {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        Script::new_unchecked(self.0.slice(start..end))
-    }
-    pub fn force(&self) -> Byte {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
-            Byte::new_unchecked(self.0.slice(start..end))
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            Script::new_unchecked(self.0.slice(start..end))
         } else {
-            Byte::new_unchecked(self.0.slice(start..))
+            Script::new_unchecked(self.0.slice(start..))
         }
     }
     pub fn as_reader<'r>(&'r self) -> ShutdownReader<'r> {
@@ -8192,7 +8185,6 @@ impl molecule::prelude::Entity for Shutdown {
             .channel_id(self.channel_id())
             .fee_rate(self.fee_rate())
             .close_script(self.close_script())
-            .force(self.force())
     }
 }
 #[derive(Clone, Copy)]
@@ -8217,7 +8209,6 @@ impl<'r> ::core::fmt::Display for ShutdownReader<'r> {
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
         write!(f, ", {}: {}", "fee_rate", self.fee_rate())?;
         write!(f, ", {}: {}", "close_script", self.close_script())?;
-        write!(f, ", {}: {}", "force", self.force())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
             write!(f, ", .. ({} fields)", extra_count)?;
@@ -8226,7 +8217,7 @@ impl<'r> ::core::fmt::Display for ShutdownReader<'r> {
     }
 }
 impl<'r> ShutdownReader<'r> {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -8258,17 +8249,11 @@ impl<'r> ShutdownReader<'r> {
     pub fn close_script(&self) -> ScriptReader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[12..]) as usize;
-        let end = molecule::unpack_number(&slice[16..]) as usize;
-        ScriptReader::new_unchecked(&self.as_slice()[start..end])
-    }
-    pub fn force(&self) -> ByteReader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[16..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[20..]) as usize;
-            ByteReader::new_unchecked(&self.as_slice()[start..end])
+            let end = molecule::unpack_number(&slice[16..]) as usize;
+            ScriptReader::new_unchecked(&self.as_slice()[start..end])
         } else {
-            ByteReader::new_unchecked(&self.as_slice()[start..])
+            ScriptReader::new_unchecked(&self.as_slice()[start..])
         }
     }
 }
@@ -8321,7 +8306,6 @@ impl<'r> molecule::prelude::Reader<'r> for ShutdownReader<'r> {
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Uint64Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         ScriptReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
-        ByteReader::verify(&slice[offsets[3]..offsets[4]], compatible)?;
         Ok(())
     }
 }
@@ -8330,10 +8314,9 @@ pub struct ShutdownBuilder {
     pub(crate) channel_id: Byte32,
     pub(crate) fee_rate: Uint64,
     pub(crate) close_script: Script,
-    pub(crate) force: Byte,
 }
 impl ShutdownBuilder {
-    pub const FIELD_COUNT: usize = 4;
+    pub const FIELD_COUNT: usize = 3;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
         self
@@ -8346,10 +8329,6 @@ impl ShutdownBuilder {
         self.close_script = v;
         self
     }
-    pub fn force(mut self, v: Byte) -> Self {
-        self.force = v;
-        self
-    }
 }
 impl molecule::prelude::Builder for ShutdownBuilder {
     type Entity = Shutdown;
@@ -8359,7 +8338,6 @@ impl molecule::prelude::Builder for ShutdownBuilder {
             + self.channel_id.as_slice().len()
             + self.fee_rate.as_slice().len()
             + self.close_script.as_slice().len()
-            + self.force.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
@@ -8370,8 +8348,6 @@ impl molecule::prelude::Builder for ShutdownBuilder {
         total_size += self.fee_rate.as_slice().len();
         offsets.push(total_size);
         total_size += self.close_script.as_slice().len();
-        offsets.push(total_size);
-        total_size += self.force.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
@@ -8379,7 +8355,6 @@ impl molecule::prelude::Builder for ShutdownBuilder {
         writer.write_all(self.channel_id.as_slice())?;
         writer.write_all(self.fee_rate.as_slice())?;
         writer.write_all(self.close_script.as_slice())?;
-        writer.write_all(self.force.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

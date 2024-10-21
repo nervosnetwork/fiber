@@ -620,7 +620,6 @@ where
                                     channel_id: state.get_id(),
                                     close_script: close_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
-                                    force: shutdown.force,
                                 }),
                             )),
                         ))
@@ -898,6 +897,8 @@ where
         state: &mut ChannelActorState,
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
+        // The force shutdown command has been handled speically in the `NetworkActorState#send_command_to_channel` function.
+        // We only need to handle the normal shutdown command here.
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
             ChannelState::ChannelReady() => {
@@ -923,7 +924,6 @@ where
                         channel_id: state.get_id(),
                         close_script: command.close_script.clone(),
                         fee_rate: command.fee_rate,
-                        force: command.force,
                     }),
                 )),
             ))

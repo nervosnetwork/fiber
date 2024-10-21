@@ -1092,7 +1092,6 @@ impl TryFrom<molecule_fiber::TxAckRBF> for TxAckRBF {
 pub struct Shutdown {
     pub channel_id: Hash256,
     pub close_script: Script,
-    pub force: bool,
     pub fee_rate: FeeRate,
 }
 
@@ -1102,7 +1101,6 @@ impl From<Shutdown> for molecule_fiber::Shutdown {
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
             .fee_rate(shutdown.fee_rate.as_u64().pack())
-            .force(if shutdown.force { 1_u8 } else { 0_u8 }.into())
             .build()
     }
 }
@@ -1111,12 +1109,10 @@ impl TryFrom<molecule_fiber::Shutdown> for Shutdown {
     type Error = Error;
 
     fn try_from(shutdown: molecule_fiber::Shutdown) -> Result<Self, Self::Error> {
-        let force: u8 = shutdown.force().into();
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
             fee_rate: FeeRate::from_u64(shutdown.fee_rate().unpack()),
-            force: force != 0,
         })
     }
 }
