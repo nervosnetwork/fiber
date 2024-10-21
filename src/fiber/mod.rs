@@ -7,10 +7,10 @@ pub use network::{
     NetworkActor, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, NetworkServiceEvent,
 };
 pub mod graph;
+pub mod history;
 
 mod fee;
 mod graph_syncer;
-mod history;
 mod key;
 mod path;
 

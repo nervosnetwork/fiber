@@ -1,15 +1,15 @@
+use super::{graph::NetworkGraphStateStore, types::Pubkey};
 use ckb_types::packed::OutPoint;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error};
 
-use super::types::Pubkey;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub(crate) struct TimedResult {
-    pub(crate) fail_time: u128,
-    pub(crate) fail_amount: u128,
-    pub(crate) success_time: u128,
-    pub(crate) success_amount: u128,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedResult {
+    pub fail_time: u128,
+    pub fail_amount: u128,
+    pub success_time: u128,
+    pub success_amount: u128,
 }
 
 const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
@@ -24,7 +24,7 @@ const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
 pub(crate) type ChannelTimedResult = HashMap<OutPoint, TimedResult>;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PaymentHistory {
+pub(crate) struct PaymentHistory<S> {
     pub inner: HashMap<Pubkey, ChannelTimedResult>,
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u128,
@@ -33,17 +33,29 @@ pub(crate) struct PaymentHistory {
     // will be used after enabling the direct channel related logic
     #[allow(dead_code)]
     pub source: Pubkey,
+    store: S,
 }
 
-impl PaymentHistory {
-    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u128>) -> Self {
-        PaymentHistory {
+impl<S> PaymentHistory<S>
+where
+    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
+{
+    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u128>, store: S) -> Self {
+        let mut s = PaymentHistory {
             source,
             inner: HashMap::new(),
             min_fail_relax_interval: min_fail_relax_interval
                 .unwrap_or(DEFAULT_MIN_FAIL_RELAX_INTERVAL),
             bimodal_scale_msat: DEFAULT_BIMODAL_SCALE_SHANNONS,
-        }
+            store,
+        };
+        s.load_from_store();
+        s
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset(&mut self) {
+        self.inner.clear();
     }
 
     pub(crate) fn add_result(&mut self, from: Pubkey, outpoint: &OutPoint, result: TimedResult) {
@@ -51,6 +63,22 @@ impl PaymentHistory {
             .entry(from)
             .or_insert_with(HashMap::new)
             .insert(outpoint.clone(), result);
+        self.save_result(from, outpoint.clone(), result);
+    }
+
+    fn save_result(&mut self, from: Pubkey, outpoint: OutPoint, result: TimedResult) {
+        self.store
+            .insert_payment_history_result(from, outpoint, result);
+    }
+
+    pub(crate) fn load_from_store(&mut self) {
+        let results = self.store.get_payment_history_result();
+        for (from, outpoint, result) in results.iter() {
+            self.inner
+                .entry(from.clone())
+                .or_insert_with(HashMap::new)
+                .insert(outpoint.clone(), *result);
+        }
     }
 
     pub(crate) fn apply_channel_result(
@@ -62,7 +90,7 @@ impl PaymentHistory {
         time: u128,
     ) {
         let min_fail_relax_interval = self.min_fail_relax_interval;
-        if let Some(current) = self.get_mut_result(&from, outpoint) {
+        let result = if let Some(current) = self.get_mut_result(&from, outpoint) {
             if success {
                 current.success_time = time;
                 if amount > current.success_amount {
@@ -87,15 +115,16 @@ impl PaymentHistory {
                 }
             }
             assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
+            *current
         } else {
-            let result = TimedResult {
+            TimedResult {
                 fail_time: if success { 0 } else { time },
                 fail_amount: if success { 0 } else { amount },
                 success_time: if success { time } else { 0 },
                 success_amount: if success { amount } else { 0 },
-            };
-            self.add_result(from, outpoint, result);
-        }
+            }
+        };
+        self.add_result(from, outpoint, result);
     }
 
     pub(crate) fn get_result(&self, from: &Pubkey, outpoint: &OutPoint) -> Option<&TimedResult> {

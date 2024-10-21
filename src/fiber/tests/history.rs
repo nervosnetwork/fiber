@@ -1,9 +1,11 @@
 use crate::fiber::history::{PaymentHistory, TimedResult};
-use crate::fiber::tests::test_utils::generate_pubkey;
+use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
 use crate::fiber::types::Pubkey;
+use crate::store::Store;
 use ckb_types::packed::{OutPoint, OutPointBuilder};
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;
+use tempfile::tempdir;
 
 trait Round {
     fn round_to_2(self) -> f64;
@@ -17,7 +19,7 @@ impl Round for f64 {
 
 #[test]
 fn test_history() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -44,7 +46,7 @@ fn test_history() {
 
 #[test]
 fn test_history_apply_channel_result() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -74,7 +76,7 @@ fn test_history_apply_channel_result() {
 
 #[test]
 fn test_history_interal_success_fail() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -134,7 +136,7 @@ fn test_history_interal_success_fail() {
 
 #[test]
 fn test_history_probability() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -236,7 +238,7 @@ fn test_history_probability() {
 
 #[test]
 fn test_history_direct_probability() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -266,7 +268,7 @@ fn test_history_direct_probability() {
 
 #[test]
 fn test_history_probability_small_fail_amount() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -288,7 +290,7 @@ fn test_history_probability_small_fail_amount() {
 
 #[test]
 fn test_history_probability_range() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let outpoint = OutPoint::default();
     let from: Pubkey = generate_pubkey().into();
 
@@ -325,4 +327,41 @@ fn test_history_probability_range() {
         let prob = history.get_channel_probability(from, outpoint.clone(), amount, 100000000);
         assert_eq!(prob, 0.0);
     }
+}
+
+#[test]
+fn test_history_load_store() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("test_history_load_store");
+    let store = Store::new(path);
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, store.clone());
+    let from: Pubkey = generate_pubkey().into();
+    let outpoint = OutPoint::default();
+
+    let result = TimedResult {
+        success_time: 3,
+        success_amount: 10000000,
+        fail_time: 10,
+        fail_amount: 50000000,
+    };
+
+    history.add_result(from, &outpoint, result);
+    let result = history.get_result(&from, &outpoint).unwrap().clone();
+    history.reset();
+    assert_eq!(history.get_result(&from, &outpoint), None);
+    history.load_from_store();
+    assert_eq!(history.get_result(&from, &outpoint), Some(&result));
+
+    history.apply_channel_result(from, &outpoint, 1, false, 11);
+    history.reset();
+    history.load_from_store();
+    assert_eq!(
+        history.get_result(&from, &outpoint),
+        Some(&TimedResult {
+            fail_time: 11,
+            fail_amount: 1,
+            success_time: 3,
+            success_amount: 0,
+        })
+    );
 }

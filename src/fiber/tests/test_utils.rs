@@ -1,4 +1,5 @@
 use crate::fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo};
+use crate::fiber::history::TimedResult;
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use ckb_jsonrpc_types::JsonBytes;
@@ -472,6 +473,7 @@ pub struct MemoryStore {
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
     invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
+    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, OutPoint), TimedResult>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
@@ -579,6 +581,27 @@ impl NetworkGraphStateStore for MemoryStore {
             .write()
             .unwrap()
             .insert(session.payment_hash(), session);
+    }
+
+    fn insert_payment_history_result(
+        &mut self,
+        from: Pubkey,
+        outpoint: OutPoint,
+        result: TimedResult,
+    ) {
+        self.payment_hisotry
+            .write()
+            .unwrap()
+            .insert((from, outpoint), result);
+    }
+
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, OutPoint, TimedResult)> {
+        self.payment_hisotry
+            .read()
+            .unwrap()
+            .iter()
+            .map(|((from, outpoint), result)| (from.clone(), outpoint.clone(), result.clone()))
+            .collect()
     }
 }
 

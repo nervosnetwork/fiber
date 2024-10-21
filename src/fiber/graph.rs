@@ -1,4 +1,4 @@
-use super::history::PaymentHistory;
+use super::history::{PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
@@ -146,7 +146,7 @@ pub struct NetworkGraph<S> {
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
-    history: PaymentHistory,
+    history: PaymentHistory<S>,
 }
 
 #[derive(Error, Debug)]
@@ -177,9 +177,9 @@ where
             channels: HashMap::new(),
             nodes: HashMap::new(),
             connected_peer_addresses: HashMap::new(),
-            store,
+            store: store.clone(),
             chain_hash: get_chain_hash(),
-            history: PaymentHistory::new(source, None),
+            history: PaymentHistory::new(source, None, store),
         };
         network_graph.load_from_store();
         network_graph
@@ -562,7 +562,7 @@ where
         self.channels.clear();
         self.nodes.clear();
         self.connected_peer_addresses.clear();
-        self.history = PaymentHistory::new(self.source, None);
+        self.history.reset();
     }
 
     /// Returns a list of `PaymentHopData` for all nodes in the route,
@@ -880,6 +880,13 @@ pub trait NetworkGraphStateStore {
     fn remove_connected_peer(&self, peer_id: &PeerId);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    fn insert_payment_history_result(
+        &mut self,
+        from: Pubkey,
+        outpoint: OutPoint,
+        result: TimedResult,
+    );
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, OutPoint, TimedResult)>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

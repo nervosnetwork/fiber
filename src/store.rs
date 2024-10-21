@@ -2,6 +2,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
+        history::TimedResult,
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, InvoiceError, InvoiceStore},
@@ -11,6 +12,7 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
+use secp256k1::PublicKey;
 use serde_json;
 use std::{path::Path, sync::Arc};
 use tentacle::{multiaddr::Multiaddr, secio::PeerId};
@@ -171,6 +173,18 @@ impl Batch {
                     serde_json::to_vec(&channel_data).expect("serialize ChannelData should be OK"),
                 );
             }
+            KeyValue::PaymentHistoryTimedResult((from, outpoint), result) => {
+                let key = [
+                    &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
+                    from.serialize().as_slice(),
+                    outpoint.as_slice(),
+                ]
+                .concat();
+                self.put(
+                    key,
+                    serde_json::to_vec(&result).expect("serialize TimedResult should be OK"),
+                );
+            }
         }
     }
 
@@ -201,6 +215,7 @@ impl Batch {
 /// | 129          | Timestamp          | NodeId                   |
 /// | 160          | PeerId             | MultiAddr                |
 /// | 192          | Hash256            | PaymentSession           |
+/// | 193          | Hash256 | ChannelId| TimedResult              |
 /// | 224          | Hash256            | ChannelData              |
 /// +--------------+--------------------+--------------------------+
 ///
@@ -216,6 +231,7 @@ pub(crate) const NODE_INFO_PREFIX: u8 = 128;
 const NODE_ANNOUNCEMENT_INDEX_PREFIX: u8 = 129;
 const PEER_ID_MULTIADDR_PREFIX: u8 = 160;
 const PAYMENT_SESSION_PREFIX: u8 = 192;
+const PAYMENT_HISTORY_TIMED_RESULT_PREFIX: u8 = 193;
 const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
 
 enum KeyValue {
@@ -228,6 +244,7 @@ enum KeyValue {
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
+    PaymentHistoryTimedResult((Pubkey, OutPoint), TimedResult),
 }
 
 impl ChannelActorStateStore for Store {
@@ -515,6 +532,39 @@ impl NetworkGraphStateStore for Store {
         let mut batch = self.batch();
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
+    }
+
+    fn insert_payment_history_result(
+        &mut self,
+        from: Pubkey,
+        outpoint: OutPoint,
+        result: TimedResult,
+    ) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentHistoryTimedResult(
+            (from, outpoint),
+            result,
+        ));
+        batch.commit();
+    }
+
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, OutPoint, TimedResult)> {
+        let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
+        let iter = self
+            .db
+            .prefix_iterator(prefix.as_ref())
+            .take_while(|(col_key, _)| col_key.starts_with(&prefix));
+        iter.map(|(key, value)| {
+            let from: Pubkey = PublicKey::from_slice(&key[1..34])
+                .expect("deserialize Pubkey should be OK")
+                .into();
+            let outpoint =
+                OutPoint::from_slice(&key[34..]).expect("deserialize OutPoint should be OK");
+            let result = serde_json::from_slice(value.as_ref())
+                .expect("deserialize TimedResult should be OK");
+            (from, outpoint, result)
+        })
+        .collect()
     }
 }
 

@@ -2,6 +2,7 @@ use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
+use crate::fiber::history::TimedResult;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
 use crate::fiber::types::ChannelAnnouncement;
 use crate::fiber::types::Hash256;
@@ -201,4 +202,78 @@ fn test_store_wacthtower() {
 
     store.remove_watch_channel(channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_store_payment_hisotry() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payment_history_store");
+    let mut store = Store::new(path);
+
+    let pubkey = gen_rand_public_key();
+    let outpoint = OutPoint::default();
+    let result = TimedResult {
+        fail_amount: 1,
+        fail_time: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+    store.insert_payment_history_result(pubkey.into(), outpoint.clone(), result.clone());
+    assert_eq!(
+        store.get_payment_history_result(),
+        vec![(pubkey.into(), outpoint.clone(), result)]
+    );
+
+    let outpoint_2 = OutPoint::new_builder()
+        .tx_hash(gen_sha256_hash().into())
+        .index(1u32.pack())
+        .build();
+    let result_2 = TimedResult {
+        fail_amount: 2,
+        fail_time: 3,
+        success_time: 4,
+        success_amount: 5,
+    };
+    store.insert_payment_history_result(pubkey.into(), outpoint_2.clone(), result_2.clone());
+    assert_eq!(
+        store.get_payment_history_result(),
+        vec![
+            (pubkey.into(), outpoint.clone(), result),
+            (pubkey.into(), outpoint_2.clone(), result_2)
+        ]
+    );
+
+    let pubkey_3 = gen_rand_public_key();
+    let outpoint_3 = OutPoint::new_builder()
+        .tx_hash(gen_sha256_hash().into())
+        .index(2u32.pack())
+        .build();
+    let result_3 = TimedResult {
+        fail_amount: 3,
+        fail_time: 4,
+        success_time: 5,
+        success_amount: 6,
+    };
+    store.insert_payment_history_result(pubkey_3.into(), outpoint_3.clone(), result_3.clone());
+    let mut r1 = store.get_payment_history_result();
+    r1.sort_by(|a, b| {
+        if a.0 == b.0 {
+            a.1.cmp(&b.1)
+        } else {
+            a.0.cmp(&b.0)
+        }
+    });
+    let mut r2: Vec<(Pubkey, OutPoint, TimedResult)> = vec![
+        (pubkey.into(), outpoint, result),
+        (pubkey.into(), outpoint_2, result_2),
+        (pubkey_3.into(), outpoint_3, result_3),
+    ];
+    r2.sort_by(|a, b| {
+        if a.0 == b.0 {
+            a.1.cmp(&b.1)
+        } else {
+            a.0.cmp(&b.0)
+        }
+    });
+    assert_eq!(r1, r2);
 }
