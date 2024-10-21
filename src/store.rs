@@ -215,7 +215,7 @@ impl Batch {
 /// | 129          | Timestamp          | NodeId                   |
 /// | 160          | PeerId             | MultiAddr                |
 /// | 192          | Hash256            | PaymentSession           |
-/// | 193          | Hash256 | ChannelId| TimedResult              |
+/// | 193          | NodeId | NodeId    | TimedResult              |
 /// | 224          | Hash256            | ChannelData              |
 /// +--------------+--------------------+--------------------------+
 ///
