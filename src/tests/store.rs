@@ -19,20 +19,21 @@ use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
 use ckb_types::packed::Script;
 use ckb_types::prelude::*;
+use core::cmp::Ordering;
 use musig2::CompactSignature;
 use secp256k1::Keypair;
 use secp256k1::PublicKey;
 use secp256k1::Secp256k1;
 use tempfile::tempdir;
 
-fn gen_rand_public_key() -> PublicKey {
+fn gen_rand_public_key() -> Pubkey {
     let secp = Secp256k1::new();
     let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair)
+    PublicKey::from_keypair(&key_pair).into()
 }
 
 fn mock_node() -> (Pubkey, NodeInfo) {
-    let node_id: Pubkey = gen_rand_public_key().into();
+    let node_id: Pubkey = gen_rand_public_key();
     let node = NodeInfo {
         node_id,
         anouncement_msg: NodeAnnouncement::new_unsigned(
@@ -48,8 +49,8 @@ fn mock_node() -> (Pubkey, NodeInfo) {
 }
 
 fn mock_channel() -> ChannelInfo {
-    let node1: Pubkey = gen_rand_public_key().into();
-    let node2: Pubkey = gen_rand_public_key().into();
+    let node1: Pubkey = gen_rand_public_key();
+    let node2: Pubkey = gen_rand_public_key();
     let secp = Secp256k1::new();
     let keypair = Keypair::new(&secp, &mut rand::thread_rng());
     let (xonly, _parity) = keypair.x_only_public_key();
@@ -211,69 +212,60 @@ fn test_store_payment_hisotry() {
     let mut store = Store::new(path);
 
     let pubkey = gen_rand_public_key();
-    let outpoint = OutPoint::default();
+    let target = gen_rand_public_key();
     let result = TimedResult {
         fail_amount: 1,
         fail_time: 2,
         success_time: 3,
         success_amount: 4,
     };
-    store.insert_payment_history_result(pubkey.into(), outpoint.clone(), result.clone());
+    store.insert_payment_history_result(pubkey.into(), target.clone(), result.clone());
     assert_eq!(
         store.get_payment_history_result(),
-        vec![(pubkey.into(), outpoint.clone(), result)]
+        vec![(pubkey.into(), target.clone(), result)]
     );
 
-    let outpoint_2 = OutPoint::new_builder()
-        .tx_hash(gen_sha256_hash().into())
-        .index(1u32.pack())
-        .build();
+    fn sort_results(results: &mut Vec<(Pubkey, Pubkey, TimedResult)>) {
+        results.sort_by(|a, b| match a.0.cmp(&b.0) {
+            Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
+        });
+    }
+
+    let target_2 = gen_rand_public_key();
     let result_2 = TimedResult {
         fail_amount: 2,
         fail_time: 3,
         success_time: 4,
         success_amount: 5,
     };
-    store.insert_payment_history_result(pubkey.into(), outpoint_2.clone(), result_2.clone());
-    assert_eq!(
-        store.get_payment_history_result(),
-        vec![
-            (pubkey.into(), outpoint.clone(), result),
-            (pubkey.into(), outpoint_2.clone(), result_2)
-        ]
-    );
+    store.insert_payment_history_result(pubkey.into(), target_2.clone(), result_2.clone());
+    let mut r1 = store.get_payment_history_result();
+    sort_results(&mut r1);
+    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
+        (pubkey.into(), target, result),
+        (pubkey.into(), target_2, result_2),
+    ];
+    sort_results(&mut r2);
+    assert_eq!(r1, r2);
 
     let pubkey_3 = gen_rand_public_key();
-    let outpoint_3 = OutPoint::new_builder()
-        .tx_hash(gen_sha256_hash().into())
-        .index(2u32.pack())
-        .build();
+    let target_3 = gen_rand_public_key();
     let result_3 = TimedResult {
         fail_amount: 3,
         fail_time: 4,
         success_time: 5,
         success_amount: 6,
     };
-    store.insert_payment_history_result(pubkey_3.into(), outpoint_3.clone(), result_3.clone());
+    store.insert_payment_history_result(pubkey_3.into(), target_3.clone(), result_3.clone());
     let mut r1 = store.get_payment_history_result();
-    r1.sort_by(|a, b| {
-        if a.0 == b.0 {
-            a.1.cmp(&b.1)
-        } else {
-            a.0.cmp(&b.0)
-        }
-    });
-    let mut r2: Vec<(Pubkey, OutPoint, TimedResult)> = vec![
-        (pubkey.into(), outpoint, result),
-        (pubkey.into(), outpoint_2, result_2),
-        (pubkey_3.into(), outpoint_3, result_3),
+    sort_results(&mut r1);
+
+    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
+        (pubkey.into(), target, result),
+        (pubkey.into(), target_2, result_2),
+        (pubkey_3.into(), target_3, result_3),
     ];
-    r2.sort_by(|a, b| {
-        if a.0 == b.0 {
-            a.1.cmp(&b.1)
-        } else {
-            a.0.cmp(&b.0)
-        }
-    });
+    sort_results(&mut r2);
     assert_eq!(r1, r2);
 }

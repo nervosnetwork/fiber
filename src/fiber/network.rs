@@ -2030,7 +2030,8 @@ where
         } = command;
 
         let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
-            let error_detail = TlcErr::new(TlcErrorCode::InvalidOnionPayload);
+            let error_detail =
+                TlcErr::new_node_fail(TlcErrorCode::InvalidOnionPayload, state.get_public_key());
             reply
                 .send(Err(TlcErrPacket::new(error_detail)))
                 .expect("send error failed");
@@ -2126,12 +2127,12 @@ where
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let detail_error = reason.decode().expect("decoded error");
                         self.update_graph_with_tlc_fail(&detail_error).await;
-                        self.network_graph
+                        let need_to_retry = self
+                            .network_graph
                             .write()
                             .await
                             .record_payment_fail(&payment_session, detail_error.clone());
-                        if payment_session.can_retry() && !detail_error.error_code.payment_failed()
-                        {
+                        if payment_session.can_retry() && need_to_retry {
                             let res = self.try_payment_session(state, payment_session).await;
                             if res.is_err() {
                                 debug!("Failed to retry payment session: {:?}", res);
@@ -2224,8 +2225,7 @@ where
                 .clone()
                 .expect("first hop channel outpoint");
 
-            let session_route =
-                SessionRoute::new(self.network_graph.read().await.source(), &hops_infos);
+            let session_route = SessionRoute::new(payment_data.target_pubkey, &hops_infos);
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
             let peeled_packet = match PeeledPaymentOnionPacket::create(

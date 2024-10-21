@@ -120,11 +120,11 @@ pub fn generate_seckey() -> SecretKey {
     SecretKey::new(&mut rand::thread_rng())
 }
 
-pub fn generate_pubkey() -> PublicKey {
+pub fn generate_pubkey() -> Pubkey {
     let secp = Secp256k1::new();
     let secret_key = SecretKey::new(&mut rand::thread_rng());
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    public_key
+    public_key.into()
 }
 
 pub fn gen_sha256_hash() -> Hash256 {
@@ -473,7 +473,7 @@ pub struct MemoryStore {
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
     invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
-    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, OutPoint), TimedResult>>>,
+    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, Pubkey), TimedResult>>>,
 }
 
 impl NetworkGraphStateStore for MemoryStore {
@@ -583,24 +583,19 @@ impl NetworkGraphStateStore for MemoryStore {
             .insert(session.payment_hash(), session);
     }
 
-    fn insert_payment_history_result(
-        &mut self,
-        from: Pubkey,
-        outpoint: OutPoint,
-        result: TimedResult,
-    ) {
+    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
         self.payment_hisotry
             .write()
             .unwrap()
-            .insert((from, outpoint), result);
+            .insert((from, target), result);
     }
 
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, OutPoint, TimedResult)> {
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
         self.payment_hisotry
             .read()
             .unwrap()
             .iter()
-            .map(|((from, outpoint), result)| (from.clone(), outpoint.clone(), result.clone()))
+            .map(|((from, target), result)| (from.clone(), target.clone(), result.clone()))
             .collect()
     }
 }

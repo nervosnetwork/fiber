@@ -1,3 +1,4 @@
+use crate::fiber::types::Pubkey;
 use crate::{
     fiber::{
         graph::{ChannelInfo, GraphError, NetworkGraph, NodeInfo, PathEdge},
@@ -15,7 +16,7 @@ use tentacle::{multiaddr::Multiaddr, secio::PeerId};
 
 use super::test_utils::{generate_keypair, generate_pubkey};
 
-fn generate_keys(num: usize) -> Vec<PublicKey> {
+fn generate_keys(num: usize) -> Vec<Pubkey> {
     let mut keys = vec![];
     for _ in 0..num {
         keys.push(generate_pubkey());

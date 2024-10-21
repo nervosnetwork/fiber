@@ -173,11 +173,11 @@ impl Batch {
                     serde_json::to_vec(&channel_data).expect("serialize ChannelData should be OK"),
                 );
             }
-            KeyValue::PaymentHistoryTimedResult((from, outpoint), result) => {
+            KeyValue::PaymentHistoryTimedResult((from, target), result) => {
                 let key = [
                     &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
                     from.serialize().as_slice(),
-                    outpoint.as_slice(),
+                    target.serialize().as_slice(),
                 ]
                 .concat();
                 self.put(
@@ -244,7 +244,7 @@ enum KeyValue {
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
-    PaymentHistoryTimedResult((Pubkey, OutPoint), TimedResult),
+    PaymentHistoryTimedResult((Pubkey, Pubkey), TimedResult),
 }
 
 impl ChannelActorStateStore for Store {
@@ -534,21 +534,13 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn insert_payment_history_result(
-        &mut self,
-        from: Pubkey,
-        outpoint: OutPoint,
-        result: TimedResult,
-    ) {
+    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::PaymentHistoryTimedResult(
-            (from, outpoint),
-            result,
-        ));
+        batch.put_kv(KeyValue::PaymentHistoryTimedResult((from, target), result));
         batch.commit();
     }
 
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, OutPoint, TimedResult)> {
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self
             .db
@@ -558,11 +550,12 @@ impl NetworkGraphStateStore for Store {
             let from: Pubkey = PublicKey::from_slice(&key[1..34])
                 .expect("deserialize Pubkey should be OK")
                 .into();
-            let outpoint =
-                OutPoint::from_slice(&key[34..]).expect("deserialize OutPoint should be OK");
+            let target: Pubkey = PublicKey::from_slice(&key[34..])
+                .expect("deserialize Pubkey should be OK")
+                .into();
             let result = serde_json::from_slice(value.as_ref())
                 .expect("deserialize TimedResult should be OK");
-            (from, outpoint, result)
+            (from, target, result)
         })
         .collect()
     }
