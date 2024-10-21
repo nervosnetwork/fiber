@@ -5,6 +5,16 @@ use ckb_types::packed::{OutPoint, OutPointBuilder};
 use ckb_types::prelude::Builder;
 use ckb_types::prelude::Pack;
 
+trait Round {
+    fn round_to_2(self) -> f64;
+}
+
+impl Round for f64 {
+    fn round_to_2(self) -> f64 {
+        (self * 100.0).round() / 100.0
+    }
+}
+
 #[test]
 fn test_history() {
     let mut history = PaymentHistory::new(generate_pubkey().into(), None);
@@ -122,16 +132,6 @@ fn test_history_interal_success_fail() {
     );
 }
 
-trait Round {
-    fn to_2_decimal(self) -> f64;
-}
-
-impl Round for f64 {
-    fn to_2_decimal(self) -> f64 {
-        (self * 100.0).round() / 100.0
-    }
-}
-
 #[test]
 fn test_history_probability() {
     let mut history = PaymentHistory::new(generate_pubkey().into(), None);
@@ -166,72 +166,102 @@ fn test_history_probability() {
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 5, 9)
-            .to_2_decimal(),
+            .round_to_2(),
         1.0
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 6, 9)
-            .to_2_decimal(),
+            .round_to_2(),
         0.75
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 7, 9)
-            .to_2_decimal(),
+            .round_to_2(),
         0.50
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 8, 9)
-            .to_2_decimal(),
+            .round_to_2(),
         0.25
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 5, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         1.0
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 6, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         0.80
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 7, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         0.60
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 8, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         0.40
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 9, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         0.20
     );
 
     assert_eq!(
         history
             .get_channel_probability(from, outpoint.clone(), 10, 10)
-            .to_2_decimal(),
+            .round_to_2(),
         0.0
     );
+}
+
+#[test]
+fn test_history_direct_probability() {
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None);
+    let outpoint = OutPoint::default();
+    let from: Pubkey = generate_pubkey().into();
+
+    let prob = history.get_direct_probability(from, outpoint.clone());
+    assert_eq!(prob, 1.0);
+
+    let result = TimedResult {
+        success_time: 3,
+        success_amount: 5,
+        fail_time: 0,
+        fail_amount: 0,
+    };
+    history.add_result(from, &outpoint, result);
+    assert_eq!(history.get_direct_probability(from, outpoint.clone()), 1.0);
+
+    let result = TimedResult {
+        success_time: 3,
+        success_amount: 5,
+        fail_time: 10,
+        fail_amount: 10,
+    };
+    history.add_result(from, &outpoint, result);
+    let prob = history.get_direct_probability(from, outpoint.clone());
+    eprintln!("prob: {}", prob);
+    assert_eq!(prob, 0.0);
 }
 
 #[test]

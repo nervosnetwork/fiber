@@ -29,6 +29,9 @@ pub(crate) struct PaymentHistory {
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u128,
     pub bimodal_scale_msat: f64,
+    // this filed is used to check whether from is the source Node
+    // will be used after enabling the direct channel related logic
+    #[allow(dead_code)]
     pub source: Pubkey,
 }
 
@@ -114,14 +117,17 @@ impl PaymentHistory {
         amount: u128,
         capacity: u128,
     ) -> f64 {
-        if from == self.source {
-            self.get_direct_probability(from, channel)
-        } else {
-            self.get_channel_probability(from, channel, amount, capacity)
-        }
+        self.get_channel_probability(from, channel, amount, capacity)
     }
 
-    fn get_direct_probability(&self, from: Pubkey, channel: OutPoint) -> f64 {
+    // Get the probability of a payment success through a direct channel,
+    // suppose we know the accurate balance for direct channels, so we don't need to use `get_channel_probability`
+    // for the direct channel, this function is used disable the direct channel for a time preiod if it's failed
+    // currently we may mark the channel failed on graph level, so this function is not used now.
+    // FIXME: reconsider this after we already got the accurate balance of direct channels
+    //        related issue: https://github.com/nervosnetwork/fiber/issues/257
+    #[allow(dead_code)]
+    pub(crate) fn get_direct_probability(&self, from: Pubkey, channel: OutPoint) -> f64 {
         let mut prob = 1.0;
         if let Some(result) = self.get_result(&from, &channel) {
             if result.fail_time != 0 {
