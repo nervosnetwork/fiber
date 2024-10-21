@@ -900,20 +900,9 @@ where
     ) -> ProcessingChannelResult {
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
-            ChannelState::Closed(_) => {
-                debug!("Channel already closed, ignoring shutdown command");
-                return Ok(());
-            }
             ChannelState::ChannelReady() => {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
-            }
-            ChannelState::ShuttingDown(flags) => {
-                if !command.force {
-                    debug!("we already in shutting down state: {:?}", &flags);
-                    return Ok(());
-                }
-                flags
             }
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
@@ -926,57 +915,35 @@ where
 
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
 
-        if command.force {
-            if let Some(transaction) = &state.latest_commitment_transaction {
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::CommitmentTransactionPending(
-                            transaction.clone(),
-                            state.get_id(),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::shutdown(Shutdown {
+                        channel_id: state.get_id(),
+                        close_script: command.close_script.clone(),
+                        fee_rate: command.fee_rate,
+                        force: command.force,
+                    }),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                state.update_state(ChannelState::ShuttingDown(
-                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-                ));
-            } else {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Force shutdown without a valid commitment transaction".to_string(),
-                ));
-            }
-        } else {
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
-                        FiberMessage::shutdown(Shutdown {
-                            channel_id: state.get_id(),
-                            close_script: command.close_script.clone(),
-                            fee_rate: command.fee_rate,
-                            force: command.force,
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let shutdown_info = ShutdownInfo {
+            close_script: command.close_script,
+            fee_rate: command.fee_rate.as_u64(),
+            signature: None,
+        };
+        state.local_shutdown_info = Some(shutdown_info);
+        state.update_state(ChannelState::ShuttingDown(
+            flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+        ));
+        debug!(
+            "Channel state updated to {:?} after processing shutdown command",
+            &state.state
+        );
 
-            let shutdown_info = ShutdownInfo {
-                close_script: command.close_script,
-                fee_rate: command.fee_rate.as_u64(),
-                signature: None,
-            };
-            state.local_shutdown_info = Some(shutdown_info);
-            state.update_state(ChannelState::ShuttingDown(
-                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
-            ));
-            debug!(
-                "Channel state updated to {:?} after processing shutdown command",
-                &state.state
-            );
-
-            state.maybe_transition_to_shutdown(&self.network)?;
-        }
-        Ok(())
+        state.maybe_transition_to_shutdown(&self.network)
     }
 
     pub async fn handle_update_command(
@@ -2682,7 +2649,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn check_shutdown_fee_rate(
+    pub(crate) fn check_shutdown_fee_rate(
         &self,
         fee_rate: FeeRate,
         close_script: &Script,
@@ -2749,7 +2716,7 @@ impl ChannelActorState {
         self.state.is_closed()
     }
 
-    fn update_state(&mut self, new_state: ChannelState) {
+    pub(crate) fn update_state(&mut self, new_state: ChannelState) {
         debug!(
             "Updating channel state from {:?} to {:?}",
             &self.state, &new_state

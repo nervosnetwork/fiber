@@ -1155,3 +1155,34 @@ async fn test_reestablish_channel() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn test_force_close_channel_when_remote_is_offline() {
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(16200000000, 6200000000, true).await;
+
+    node_b.stop().await;
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::PeerDisConnected(_, _)))
+        .await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::default(),
+                        fee_rate: FeeRate::from_u64(1000),
+                        force: true,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("successfully shutdown channel");
+}
