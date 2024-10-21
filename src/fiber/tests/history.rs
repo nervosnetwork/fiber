@@ -239,7 +239,7 @@ fn test_history_direct_probability() {
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
-    let prob = history.get_direct_probability(from, target.clone());
+    let prob = history.get_direct_probability(&from, &target);
     assert_eq!(prob, 1.0);
 
     let result = TimedResult {
@@ -249,7 +249,7 @@ fn test_history_direct_probability() {
         fail_amount: 0,
     };
     history.add_result(from, target, result);
-    assert_eq!(history.get_direct_probability(from, target.clone()), 1.0);
+    assert_eq!(history.get_direct_probability(&from, &target), 1.0);
 
     let result = TimedResult {
         success_time: 3,
@@ -258,7 +258,7 @@ fn test_history_direct_probability() {
         fail_amount: 10,
     };
     history.add_result(from, target, result);
-    let prob = history.get_direct_probability(from, target.clone());
+    let prob = history.get_direct_probability(&from, &target);
     eprintln!("prob: {}", prob);
     assert_eq!(prob, 0.0);
 }

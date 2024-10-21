@@ -203,10 +203,8 @@ where
                 }
                 current.fail_amount = amount;
                 current.fail_time = time;
-                if amount == 0 {
-                    current.success_amount = 0;
-                } else if amount <= current.success_amount {
-                    current.success_amount = amount - 1;
+                if amount <= current.success_amount {
+                    current.success_amount = amount.saturating_sub(1);
                 }
             }
             assert!(current.fail_time == 0 || current.success_amount <= current.fail_amount);
@@ -285,7 +283,7 @@ where
     // FIXME: reconsider this after we already got the accurate balance of direct channels
     //        related issue: https://github.com/nervosnetwork/fiber/issues/257
     #[allow(dead_code)]
-    pub(crate) fn get_direct_probability(&self, from: Pubkey, target: Pubkey) -> f64 {
+    pub(crate) fn get_direct_probability(&self, from: &Pubkey, target: &Pubkey) -> f64 {
         let mut prob = 1.0;
         if let Some(result) = self.get_result(&from, &target) {
             if result.fail_time != 0 {
