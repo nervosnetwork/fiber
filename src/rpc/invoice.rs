@@ -1,16 +1,16 @@
-use std::time::Duration;
-
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
-use crate::fiber::types::Hash256;
+use crate::fiber::types::{Hash256, Privkey};
 use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
+use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
 use jsonrpsee::{core::async_trait, proc_macros::rpc, types::ErrorObjectOwned};
-use secp256k1::PublicKey as Publickey;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tentacle::secio::PublicKey;
+use std::time::Duration;
+use tentacle::secio::SecioKeyPair;
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
@@ -88,12 +88,26 @@ trait InvoiceRpc {
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
-    public_key: Option<PublicKey>,
+    keypair: Option<(PublicKey, SecretKey)>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
-    pub(crate) fn new(store: S, public_key: Option<PublicKey>) -> Self {
-        Self { store, public_key }
+    pub(crate) fn new(store: S, config: Option<FiberConfig>) -> Self {
+        let keypair = config.map(|config| {
+            let kp = config
+                .read_or_generate_secret_key()
+                .expect("read or generate secret key");
+            let private_key: Privkey = <[u8; 32]>::try_from(kp.as_ref())
+                .expect("valid length for key")
+                .into();
+            let secio_kp = SecioKeyPair::from(kp);
+            let keypair = (
+                PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
+                private_key.into(),
+            );
+            keypair
+        });
+        Self { store, keypair }
     }
 }
 
@@ -129,13 +143,15 @@ where
             invoice_builder = invoice_builder.hash_algorithm(hash_algorithm);
         };
 
-        if let Some(public_key) = &self.public_key {
-            invoice_builder = invoice_builder.payee_pub_key(
-                Publickey::from_slice(public_key.inner_ref()).expect("public key must be valid"),
-            );
-        }
+        let invoice = if let Some((public_key, secret_key)) = &self.keypair {
+            invoice_builder = invoice_builder.payee_pub_key(public_key.clone());
+            invoice_builder
+                .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &secret_key))
+        } else {
+            invoice_builder.build()
+        };
 
-        match invoice_builder.build() {
+        match invoice {
             Ok(invoice) => match self
                 .store
                 .insert_invoice(invoice.clone(), Some(params.payment_preimage))

@@ -2849,6 +2849,7 @@ where
                             status: Status::Rejected,
                             block_number: None,
                             block_hash: None,
+                            tx_index: None,
                             reason: Some(format!("Sending transaction failed: {:?}", &err)),
                         },
                     })
