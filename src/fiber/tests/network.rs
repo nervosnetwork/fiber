@@ -570,6 +570,33 @@ async fn test_persisting_bootnode() {
 }
 
 #[tokio::test]
+async fn test_persisting_announced_nodes() {
+    let mut node = new_synced_node("test").await;
+
+    let announcement = create_fake_node_announcement_mesage_version1();
+    let node_pk = announcement.node_id;
+    let peer_id = node_pk.tentacle_peer_id();
+
+    node.network_actor
+        .send_message(NetworkActorMessage::Event(NetworkActorEvent::PeerMessage(
+            peer_id.clone(),
+            FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
+                create_fake_node_announcement_mesage_version1(),
+            )),
+        )))
+        .expect("send message to network actor");
+
+    // Wait for the above message to be processed.
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    node.stop().await;
+    let state = node.store.clone();
+    let state = state.get_network_actor_state(&node.peer_id).unwrap();
+    let peers = state.sample_n_peers_to_connect(1);
+    assert!(peers.get(&peer_id).is_some());
+}
+
+#[tokio::test]
 async fn test_connecting_to_bootnode() {
     let boot_node = NetworkNode::new().await;
     let boot_node_address = format!("{}", boot_node.get_node_address());

@@ -2396,7 +2396,7 @@ impl PersistentNetworkActorState {
             .saved_peer_addresses
             .keys()
             .into_iter()
-            .chain(self.saved_peer_addresses.keys().into_iter())
+            .chain(self.announced_peer_addresses.keys().into_iter())
             .collect::<HashSet<_, RandomState>>();
 
         nodes
