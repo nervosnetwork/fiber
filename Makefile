@@ -41,6 +41,10 @@ coverage-collect-data:
 		--ignore "/*" \
 		--ignore "*/tests/*" \
 		--ignore "*/tests.rs" \
+		--excl-br-start "${GRCOV_EXCL_START}" --excl-br-stop "${GRCOV_EXCL_STOP}" \
+		--excl-start    "${GRCOV_EXCL_START}" --excl-stop    "${GRCOV_EXCL_STOP}" \
+		--excl-br-line  "${GRCOV_EXCL_LINE}" \
+		--excl-line     "${GRCOV_EXCL_LINE}" \
 		-o "${GRCOV_OUTPUT}"
 
 coverage-generate-report:
