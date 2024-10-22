@@ -47,8 +47,9 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    ChannelState, ChannelSubscribers, OpenChannelParameter, ProcessingChannelError,
+    ProcessingChannelResult, PublicChannelInfo, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE,
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
@@ -64,7 +65,7 @@ use super::types::{
     QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
     TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
 };
-use super::FiberConfig;
+use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
@@ -2926,11 +2927,19 @@ where
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
         let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserved_ckb_amount
-            )));
+        if udt_type_script.is_none() {
+            if funding_amount < reserved_ckb_amount.into() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The funding amount should be greater than the reserved amount: {}",
+                    reserved_ckb_amount
+                )));
+            }
+            if funding_amount >= u64::MAX as u128 {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The funding amount should be less than {:?}",
+                    u64::MAX
+                )));
+            }
         }
         let funding_amount = if udt_type_script.is_some() {
             funding_amount
@@ -3043,12 +3052,60 @@ where
         channel_id: Hash256,
         command: ChannelCommand,
     ) -> crate::Result<()> {
-        match self.channels.get(&channel_id) {
-            Some(actor) => {
-                actor.send_message(ChannelActorMessage::Command(command))?;
-                Ok(())
+        match command {
+            // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
+            ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
+                match self.store.get_channel_actor_state(&channel_id) {
+                    Some(mut state) => {
+                        match state.state {
+                            ChannelState::ChannelReady() => {
+                                debug!("Handling force shutdown command in ChannelReady state");
+                            }
+                            ChannelState::ShuttingDown(flags) => {
+                                debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
+                            }
+                            _ => {
+                                let error = Error::ChannelError(
+                                    ProcessingChannelError::InvalidState(format!(
+                                        "Handling force shutdown command invalid state {:?}",
+                                        &state.state
+                                    )),
+                                );
+
+                                let _ = rpc_reply.send(Err(error.to_string()));
+                                return Err(error);
+                            }
+                        };
+
+                        // when channel is in ChannelReady or ShuttingDown state, the latest_commitment_transaction should exist
+                        let transaction = state.latest_commitment_transaction.clone().unwrap();
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::CommitmentTransactionPending(
+                                    transaction,
+                                    channel_id,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                        state.update_state(ChannelState::ShuttingDown(
+                            ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                        ));
+                        self.store.insert_channel_actor_state(state);
+
+                        let _ = rpc_reply.send(Ok(()));
+                        Ok(())
+                    }
+                    None => Err(Error::ChannelNotFound(channel_id)),
+                }
             }
-            None => Err(Error::ChannelNotFound(channel_id)),
+            _ => match self.channels.get(&channel_id) {
+                Some(actor) => {
+                    actor.send_message(ChannelActorMessage::Command(command))?;
+                    Ok(())
+                }
+                None => Err(Error::ChannelNotFound(channel_id)),
+            },
         }
     }
 

@@ -98,7 +98,6 @@ table Shutdown {
     channel_id:   Byte32,
     fee_rate:     Uint64,
     close_script: Script,
-    force:        byte,
 }
 
 table ClosingSigned {
