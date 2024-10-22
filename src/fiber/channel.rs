@@ -2649,7 +2649,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub(crate) fn check_shutdown_fee_rate(
+    fn check_shutdown_fee_rate(
         &self,
         fee_rate: FeeRate,
         close_script: &Script,

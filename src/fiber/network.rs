@@ -2772,16 +2772,17 @@ where
                                 debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
                             }
                             _ => {
-                                return Err(Error::ChannelError(
+                                let error = Error::ChannelError(
                                     ProcessingChannelError::InvalidState(format!(
                                         "Handling force shutdown command invalid state {:?}",
                                         &state.state
                                     )),
-                                ));
+                                );
+
+                                let _ = rpc_reply.send(Err(error.to_string()));
+                                return Err(error);
                             }
                         };
-
-                        state.check_shutdown_fee_rate(shutdown.fee_rate, &shutdown.close_script)?;
 
                         // when channel is in ChannelReady or ShuttingDown state, the latest_commitment_transaction should exist
                         let transaction = state.latest_commitment_transaction.clone().unwrap();
