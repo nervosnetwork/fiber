@@ -5,13 +5,14 @@ use crate::fiber::{
     },
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U32Hex, U64Hex},
+    serde_utils::{EntityHex, U128Hex, U32Hex, U64Hex},
     types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
+
 use ckb_jsonrpc_types::Script;
-use ckb_types::core::FeeRate;
+use ckb_types::{core::FeeRate, packed::OutPoint};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -92,6 +93,9 @@ pub(crate) struct ListChannelsResult {
 #[derive(Clone, Serialize)]
 pub(crate) struct Channel {
     channel_id: Hash256,
+    is_public: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    channel_outpoint: Option<OutPoint>,
     #[serde_as(as = "DisplayFromStr")]
     peer_id: PeerId,
     funding_udt_type_script: Option<Script>,
@@ -344,6 +348,8 @@ where
                     .get_channel_actor_state(&channel_id)
                     .map(|state| Channel {
                         channel_id,
+                        is_public: state.is_public(),
+                        channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state
                             .funding_udt_type_script
