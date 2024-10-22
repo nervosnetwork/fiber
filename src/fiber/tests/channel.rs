@@ -745,10 +745,11 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
         ))
     };
     let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("{:?}", open_channel_result.as_ref().err().unwrap());
     assert!(open_channel_result
         .err()
         .unwrap()
-        .contains("The CKB amount of the channel should be less than 18446744073709551615"));
+        .contains("The funding amount should be less than 18446744073709551615"));
 }
 
 #[tokio::test]

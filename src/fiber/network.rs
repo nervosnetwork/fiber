@@ -2650,7 +2650,7 @@ where
             }
             if funding_amount >= u64::MAX as u128 {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The CKB amount of the channel should be less than {:?}",
+                    "The funding amount should be less than {:?}",
                     u64::MAX
                 )));
             }
