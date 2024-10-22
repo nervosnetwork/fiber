@@ -60,11 +60,16 @@ impl Actor for RootActor {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisionEvent::ActorTerminated(who, _, _) => {
-                debug!("Actor {:?} terminated", who);
-            }
-            SupervisionEvent::ActorPanicked(who, _) => {
-                error!("Actor {:?} panicked", who);
+            SupervisionEvent::ActorTerminated(who, _state, reason) => match reason {
+                Some(reason) => {
+                    debug!("Actor terminated for {:?} (id: {:?})", reason, who,);
+                }
+                None => {
+                    debug!("Actor terminated for unknown reason (id: {:?})", who);
+                }
+            },
+            SupervisionEvent::ActorPanicked(who, err) => {
+                error!("Actor unexpectedly panicked (id: {:?}): {:?}", who, err);
             }
             _ => {}
         }

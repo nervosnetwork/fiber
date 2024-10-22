@@ -1469,7 +1469,10 @@ where
                 // TODO: It is possible that the remote peer of the channel may repeatedly
                 // receive the same message.
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
-                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
+                debug!(
+                    "Broadcasting message to randomly selected peers {:?} (from {:?})",
+                    &peer_ids, &state.peer_id
+                );
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1638,10 +1641,10 @@ where
                 channel_announcement,
             ) => {
                 debug!(
-                    "Received channel announcement message for channel (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
-                    &peer_id,
+                    "Processing our channel announcement message (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
                     &block_number,
                     &tx_index,
+                    &peer_id,
                     &channel_announcement
                 );
                 // Adding this owned channel to the network graph.
@@ -1680,6 +1683,10 @@ where
             }
 
             NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                debug!(
+                    "Processing our channel update message to peer {:?}: {:?}",
+                    &peer_id, &channel_update
+                );
                 let mut graph = self.network_graph.write().await;
                 graph
                     .process_channel_update(channel_update.clone())
@@ -1866,6 +1873,11 @@ where
                         &channel_announcement.node2_id
                     )));
                 }
+
+                debug!(
+                    "Node signatures in channel announcement message verified: {:?}",
+                    &channel_announcement
+                );
 
                 let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
                     self.chain_actor,

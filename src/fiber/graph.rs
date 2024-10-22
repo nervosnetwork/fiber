@@ -56,6 +56,14 @@ impl ChannelInfo {
         self.announcement_msg.node2_id
     }
 
+    pub fn node1_peerid(&self) -> PeerId {
+        self.announcement_msg.node1_id.tentacle_peer_id()
+    }
+
+    pub fn node2_peerid(&self) -> PeerId {
+        self.announcement_msg.node2_id.tentacle_peer_id()
+    }
+
     pub fn channel_annoucement_timestamp(&self) -> u64 {
         self.timestamp
     }
