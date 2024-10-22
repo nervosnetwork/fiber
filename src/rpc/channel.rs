@@ -10,8 +10,8 @@ use crate::fiber::{
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
-use ckb_jsonrpc_types::Script;
-use ckb_types::core::FeeRate;
+use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_types::core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -33,6 +33,7 @@ pub(crate) struct OpenChannelParams {
     public: Option<bool>,
     funding_udt_type_script: Option<Script>,
     shutdown_script: Option<Script>,
+    commitment_delay_epoch: Option<EpochNumberWithFraction>,
     #[serde_as(as = "Option<U64Hex>")]
     commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
@@ -290,6 +291,10 @@ where
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(false),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    commitment_delay_epoch: params
+                        .commitment_delay_epoch
+                        .clone()
+                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()
