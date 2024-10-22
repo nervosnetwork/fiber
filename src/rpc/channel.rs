@@ -98,6 +98,7 @@ pub(crate) struct ListChannelsResult {
 #[derive(Clone, Serialize)]
 pub(crate) struct Channel {
     channel_id: Hash256,
+    is_public: bool,
     #[serde_as(as = "Option<EntityHex>")]
     channel_outpoint: Option<OutPoint>,
     #[serde_as(as = "DisplayFromStr")]
@@ -374,6 +375,7 @@ where
                     .get_channel_actor_state(&channel_id)
                     .map(|state| Channel {
                         channel_id,
+                        is_public: state.is_public(),
                         channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state
