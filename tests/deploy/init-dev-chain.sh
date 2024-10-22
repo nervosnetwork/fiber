@@ -77,7 +77,8 @@ if ! [[ -d "$data_dir" ]]; then
     echo "begin to generate blocks for wallet updating..."
     "$script_dir/generate-blocks.sh" 6
 
-    # Aslo deploy the contracts.
+    # Also deploy the contracts.
+    echo "deploy.sh..."
     "$script_dir/deploy.sh"
 
     pkill -P $$

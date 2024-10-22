@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
 use tentacle::multiaddr::{MultiAddr, Protocol};
+use tentacle::utils::extract_peer_id;
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -1249,7 +1250,21 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-                // TODO: If we are already connected to the peer, skip connecting.
+
+                if let Some(peer_id) = extract_peer_id(&addr) {
+                    if state.is_connected(&peer_id) {
+                        debug!("Peer {:?} already connected, ignoring...", peer_id);
+                        return Ok(());
+                    }
+                    if state.peer_id == peer_id {
+                        debug!("Trying to connect to self {:?}, ignoring...", addr);
+                        return Ok(());
+                    }
+                } else {
+                    error!("Failed to extract peer id from address: {:?}", addr);
+                    return Ok(());
+                }
+
                 state
                     .control
                     .dial(addr.clone(), TargetProtocol::All)
@@ -2882,6 +2897,10 @@ where
 
     fn get_peer_session(&self, peer_id: &PeerId) -> Option<SessionId> {
         self.peer_session_map.get(peer_id).cloned()
+    }
+
+    fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.peer_session_map.contains_key(peer_id)
     }
 
     pub fn get_n_peer_peer_ids(&self, n: usize, excluding: HashSet<PeerId>) -> Vec<PeerId> {
