@@ -1,6 +1,8 @@
+use crate::fiber::types::TlcErrorCode;
+
 use super::{
     graph::{NetworkGraphStateStore, SessionRouteNode},
-    types::Pubkey,
+    types::{Pubkey, TlcErr},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -115,6 +117,115 @@ impl InternalResult {
         for index in start.max(1)..=end {
             self.fail_pair(route, index);
         }
+    }
+
+    pub fn record_payment_fail(&mut self, route: &Vec<SessionRouteNode>, tlc_err: TlcErr) -> bool {
+        let mut need_to_retry = true;
+
+        let error_index = route.iter().position(|s| {
+            Some(s.channel_outpoint.clone()) == tlc_err.error_channel_outpoint()
+                || Some(s.pubkey) == tlc_err.error_node_id()
+        });
+
+        let Some(index) = error_index else {
+            error!("Error index not found in the route: {:?}", tlc_err);
+            return need_to_retry;
+        };
+
+        let len = route.len();
+        assert!(len >= 2);
+        let error_code = tlc_err.error_code;
+        if index == 0 {
+            match error_code {
+                // we received an error from the first node, we trust our own node
+                // so we need to penalize the first node
+                TlcErrorCode::InvalidOnionVersion
+                | TlcErrorCode::InvalidOnionHmac
+                | TlcErrorCode::InvalidOnionKey
+                | TlcErrorCode::InvalidOnionPayload => {
+                    self.fail_node(route, 1);
+                }
+                _ => {
+                    // we can not penalize our own node, the whole payment session need to retry
+                    debug!("first hop failed with error: {:?}", tlc_err);
+                }
+            }
+        } else if index == len - 1 {
+            match error_code {
+                TlcErrorCode::FinalIncorrectCltvExpiry | TlcErrorCode::FinalIncorrectHtlcAmount => {
+                    if len == 2 {
+                        need_to_retry = false;
+                        self.fail_node(route, len - 1);
+                    } else {
+                        self.fail_pair(route, index - 1);
+                        self.succeed_range_pairs(route, 0, index - 2);
+                    }
+                }
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                    need_to_retry = false;
+                    self.succeed_range_pairs(route, 0, len - 1);
+                }
+                TlcErrorCode::ExpiryTooSoon => {
+                    need_to_retry = false;
+                }
+                TlcErrorCode::MppTimeout | TlcErrorCode::InvalidOnionBlinding => {
+                    unimplemented!("not implemented");
+                }
+                _ => {
+                    self.fail_node(route, len - 1);
+                    if len > 1 {
+                        self.succeed_range_pairs(route, 0, len - 2);
+                    }
+                }
+            }
+        } else {
+            assert!(index > 0 && index < len - 1);
+            match error_code {
+                TlcErrorCode::InvalidOnionVersion
+                | TlcErrorCode::InvalidOnionHmac
+                | TlcErrorCode::InvalidOnionKey => {
+                    self.fail_pair(route, index);
+                }
+                TlcErrorCode::InvalidOnionPayload => {
+                    self.fail_node(route, index);
+                    if index > 1 {
+                        self.succeed_range_pairs(route, 0, index - 1);
+                    }
+                }
+                TlcErrorCode::UnknownNextPeer => {
+                    self.fail_pair(route, index);
+                }
+                TlcErrorCode::PermanentChannelFailure => {
+                    self.fail_pair(route, index);
+                }
+                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectCltvExpiry => {
+                    need_to_retry = false;
+                    if index == 1 {
+                        self.fail_node(route, 1);
+                    } else {
+                        self.fail_pair(route, index - 1);
+                        if index > 1 {
+                            self.succeed_range_pairs(route, 0, index - 2);
+                        }
+                    }
+                }
+                TlcErrorCode::TemporaryChannelFailure => {
+                    self.fail_pair_balanced(route, index);
+                    self.succeed_range_pairs(route, 0, index - 1);
+                }
+                TlcErrorCode::ExpiryTooSoon => {
+                    if index == 1 {
+                        self.fail_node(route, 1);
+                    } else {
+                        self.fail_range_pairs(route, 0, index - 1);
+                    }
+                }
+                _ => {
+                    self.fail_node(route, index);
+                }
+            }
+        }
+        need_to_retry
     }
 }
 
@@ -273,7 +384,9 @@ where
         amount: u128,
         capacity: u128,
     ) -> f64 {
-        self.get_channel_probability(from, target, amount, capacity)
+        let ret = self.get_channel_probability(from, target, amount, capacity);
+        assert!(ret >= 0.0 && ret <= 1.0);
+        ret
     }
 
     // Get the probability of a payment success through a direct channel,

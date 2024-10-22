@@ -1,7 +1,7 @@
 use super::history::{InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
-use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement, TlcErrorCode};
+use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use super::types::{Pubkey, TlcErr};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::fee::calculate_tlc_forward_fee;
@@ -516,113 +516,9 @@ where
         tlc_err: TlcErr,
     ) -> bool {
         let route = &payment_session.route.channels;
-        let mut need_to_retry = true;
-
-        let error_index = route.iter().position(|s| {
-            Some(s.channel_outpoint.clone()) == tlc_err.error_channel_outpoint()
-                || Some(s.pubkey) == tlc_err.error_node_id()
-        });
-
-        let Some(index) = error_index else {
-            error!("Error index not found in the route: {:?}", tlc_err);
-            return need_to_retry;
-        };
-
-        let mut result = InternalResult::default();
-        let len = route.len();
-        assert!(len >= 2);
-        let error_code = tlc_err.error_code;
-        if index == 0 {
-            match error_code {
-                // we received an error from the first node, we trust our own node
-                // so we need to penalize the first node
-                TlcErrorCode::InvalidOnionVersion
-                | TlcErrorCode::InvalidOnionHmac
-                | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionPayload => {
-                    result.fail_node(route, 1);
-                }
-                _ => {
-                    // we can not penalize our own node, the whole payment session need to retry
-                    debug!("first hop failed with error: {:?}", tlc_err);
-                }
-            }
-        } else if index == len - 1 {
-            match error_code {
-                TlcErrorCode::FinalIncorrectCltvExpiry | TlcErrorCode::FinalIncorrectHtlcAmount => {
-                    if len == 2 {
-                        need_to_retry = false;
-                        result.fail_node(route, len - 1);
-                    } else {
-                        result.fail_pair(route, index - 1);
-                        result.succeed_range_pairs(route, 0, index - 2);
-                    }
-                }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
-                    need_to_retry = false;
-                    result.succeed_range_pairs(route, 0, len - 1);
-                }
-                TlcErrorCode::ExpiryTooSoon => {
-                    need_to_retry = false;
-                }
-                TlcErrorCode::MppTimeout | TlcErrorCode::InvalidOnionBlinding => {
-                    unimplemented!("not implemented");
-                }
-                _ => {
-                    result.fail_node(route, len - 1);
-                    if len > 1 {
-                        result.succeed_range_pairs(route, 0, len - 2);
-                    }
-                }
-            }
-        } else {
-            assert!(index > 0 && index < len - 1);
-            match error_code {
-                TlcErrorCode::InvalidOnionVersion
-                | TlcErrorCode::InvalidOnionHmac
-                | TlcErrorCode::InvalidOnionKey => {
-                    result.fail_pair(route, index);
-                }
-                TlcErrorCode::InvalidOnionPayload => {
-                    result.fail_node(route, index);
-                    if index > 1 {
-                        result.succeed_range_pairs(route, 0, index - 1);
-                    }
-                }
-                TlcErrorCode::UnknownNextPeer => {
-                    result.fail_pair(route, index);
-                }
-                TlcErrorCode::PermanentChannelFailure => {
-                    result.fail_pair(route, index);
-                }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectCltvExpiry => {
-                    need_to_retry = false;
-                    if index == 1 {
-                        result.fail_node(route, 1);
-                    } else {
-                        result.fail_pair(route, index - 1);
-                        if index > 1 {
-                            result.succeed_range_pairs(route, 0, index - 2);
-                        }
-                    }
-                }
-                TlcErrorCode::TemporaryChannelFailure => {
-                    result.fail_pair_balanced(route, index);
-                    result.succeed_range_pairs(route, 0, index - 1);
-                }
-                TlcErrorCode::ExpiryTooSoon => {
-                    if index == 1 {
-                        result.fail_node(route, 1);
-                    } else {
-                        result.fail_range_pairs(route, 0, index - 1);
-                    }
-                }
-                _ => {
-                    result.fail_node(route, index);
-                }
-            }
-        }
-        self.history.apply_internal_result(result);
+        let mut internal_result = InternalResult::default();
+        let need_to_retry = internal_result.record_payment_fail(route, tlc_err);
+        self.history.apply_internal_result(internal_result);
         return need_to_retry;
     }
 
