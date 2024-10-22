@@ -1,7 +1,10 @@
+use crate::fiber::graph::SessionRouteNode;
+use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
 use crate::fiber::types::Pubkey;
 use crate::store::Store;
+use ckb_types::packed::OutPoint;
 use tempfile::tempdir;
 
 trait Round {
@@ -69,6 +72,286 @@ fn test_history_apply_channel_result() {
             success_amount: 10,
         })
     );
+}
+
+#[test]
+fn test_history_internal_result() {
+    //let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+
+    let mut internal_result = InternalResult::default();
+    let from = generate_pubkey();
+    let target = generate_pubkey();
+    internal_result.add(from, target, 10, 11, true);
+    assert_eq!(internal_result.pairs.len(), 1);
+    assert_eq!(
+        internal_result.pairs.get(&(from, target)).unwrap(),
+        &InternalPairResult {
+            amount: 11,
+            success: true,
+            time: 10
+        }
+    );
+
+    internal_result.add_fail_pair(from, target);
+    assert_eq!(internal_result.pairs.len(), 2);
+
+    let res = internal_result.pairs.get(&(from, target)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+    assert_ne!(res.time, 0);
+
+    let res = internal_result.pairs.get(&(target, from)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+    assert_ne!(res.time, 0);
+
+    internal_result.add_fail_pair_balanced(from, target, 100);
+    assert_eq!(internal_result.pairs.len(), 2);
+    let res = internal_result.pairs.get(&(from, target)).unwrap();
+    assert_eq!(res.amount, 100);
+    assert_eq!(res.success, false);
+}
+
+#[test]
+fn test_history_internal_result_fail_pair() {
+    let mut internal_result = InternalResult::default();
+    let from = generate_pubkey();
+    let target = generate_pubkey();
+
+    let route = vec![
+        SessionRouteNode {
+            pubkey: from,
+            amount: 10,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: target,
+            amount: 5,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    internal_result.fail_pair(&route, 0);
+    assert_eq!(internal_result.pairs.len(), 0);
+
+    internal_result.fail_pair(&route, 1);
+    assert_eq!(internal_result.pairs.len(), 2);
+    let res = internal_result.pairs.get(&(from, target)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+
+    let res = internal_result.pairs.get(&(target, from)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+}
+
+#[test]
+fn test_history_internal_result_success_range_pair() {
+    let mut internal_result = InternalResult::default();
+    let node1 = generate_pubkey();
+    let node2 = generate_pubkey();
+    let node3 = generate_pubkey();
+
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node1,
+            amount: 10,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node2,
+            amount: 5,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node3,
+            amount: 3,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    internal_result.succeed_range_pairs(&route, 0, 2);
+    assert_eq!(internal_result.pairs.len(), 2);
+    let res = internal_result.pairs.get(&(node1, node2)).unwrap();
+    assert_eq!(res.amount, 10);
+    assert_eq!(res.success, true);
+    let res = internal_result.pairs.get(&(node2, node3)).unwrap();
+    assert_eq!(res.amount, 5);
+    assert_eq!(res.success, true);
+}
+
+#[test]
+fn test_history_internal_result_fail_range_pair() {
+    let mut internal_result = InternalResult::default();
+    let node1 = generate_pubkey();
+    let node2 = generate_pubkey();
+    let node3 = generate_pubkey();
+
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node1,
+            amount: 10,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node2,
+            amount: 5,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node3,
+            amount: 3,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    internal_result.fail_range_pairs(&route, 0, 2);
+    assert_eq!(internal_result.pairs.len(), 4);
+    let res = internal_result.pairs.get(&(node1, node2)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+    let res = internal_result.pairs.get(&(node2, node1)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+    let res = internal_result.pairs.get(&(node2, node3)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+    let res = internal_result.pairs.get(&(node3, node2)).unwrap();
+    assert_eq!(res.amount, 0);
+    assert_eq!(res.success, false);
+
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    history.apply_internal_result(internal_result);
+
+    assert!(matches!(
+        history.get_result(&node1, &node2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&node2, &node1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&node2, &node3),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&node3, &node2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn test_history_apply_internal_result_fail_node() {
+    let mut internal_result = InternalResult::default();
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let node1 = generate_pubkey();
+    let node2 = generate_pubkey();
+    let node3 = generate_pubkey();
+    let route = vec![
+        SessionRouteNode {
+            pubkey: node1,
+            amount: 10,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node2,
+            amount: 5,
+            channel_outpoint: OutPoint::default(),
+        },
+        SessionRouteNode {
+            pubkey: node3,
+            amount: 3,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    internal_result.fail_node(&route, 1);
+    assert_eq!(internal_result.pairs.len(), 4);
+
+    history.apply_pair_result(node1, node2, 10, true, 1);
+    history.apply_pair_result(node2, node3, 11, true, 2);
+    assert!(matches!(
+        history.get_result(&node1, &node2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 10,
+            success_time: 1,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&node2, &node3),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 11,
+            success_time: 2,
+            ..
+        })
+    ));
+
+    history.apply_internal_result(internal_result);
+    assert!(matches!(
+        history.get_result(&node1, &node2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 1,
+            ..
+        })
+    ));
+    assert!(matches!(
+        history.get_result(&node2, &node1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&node2, &node3),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 2,
+            ..
+        })
+    ));
+    assert!(matches!(
+        history.get_result(&node3, &node2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            success_time: 0,
+            ..
+        })
+    ));
 }
 
 #[test]
