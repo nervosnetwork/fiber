@@ -2644,7 +2644,7 @@ where
         if udt_type_script.is_none() {
             if funding_amount < reserved_ckb_amount.into() {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The value of the channel should be greater than the reserve amount: {}",
+                    "The funding amount should be greater than the reserved amount: {}",
                     reserved_ckb_amount
                 )));
             }
