@@ -420,97 +420,89 @@ fn test_history_probability() {
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
-    let prob = history.get_channel_probability(from, target.clone(), 10, 100);
+    let prob = history.eval_probability(from, target.clone(), 10, 100);
     assert_eq!(prob, 1.0);
 
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
     let result = TimedResult {
-        success_time: 3,
+        success_time: now,
         success_amount: 5,
-        fail_time: 10,
+        fail_time: now,
         fail_amount: 10,
     };
     history.add_result(from, target, result);
-    assert_eq!(
-        history.get_channel_probability(from, target.clone(), 1, 10),
-        1.0
-    );
-    assert_eq!(
-        history.get_channel_probability(from, target.clone(), 1, 8),
-        1.0
-    );
+    assert_eq!(history.eval_probability(from, target.clone(), 1, 10), 1.0);
+    assert_eq!(history.eval_probability(from, target.clone(), 1, 8), 1.0);
 
     // graph of amount is less than history's success_amount and fail_amount
-    assert_eq!(
-        history.get_channel_probability(from, target.clone(), 1, 4),
-        1.0
-    );
+    assert_eq!(history.eval_probability(from, target.clone(), 1, 4), 1.0);
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 5, 9)
+            .eval_probability(from, target.clone(), 5, 9)
             .round_to_2(),
         1.0
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 6, 9)
+            .eval_probability(from, target.clone(), 6, 9)
             .round_to_2(),
         0.75
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 7, 9)
+            .eval_probability(from, target.clone(), 7, 9)
             .round_to_2(),
         0.50
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 8, 9)
+            .eval_probability(from, target.clone(), 8, 9)
             .round_to_2(),
         0.25
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 5, 10)
+            .eval_probability(from, target.clone(), 5, 10)
             .round_to_2(),
         1.0
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 6, 10)
+            .eval_probability(from, target.clone(), 6, 10)
             .round_to_2(),
         0.80
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 7, 10)
+            .eval_probability(from, target.clone(), 7, 10)
             .round_to_2(),
         0.60
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 8, 10)
+            .eval_probability(from, target.clone(), 8, 10)
             .round_to_2(),
         0.40
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 9, 10)
+            .eval_probability(from, target.clone(), 9, 10)
             .round_to_2(),
         0.20
     );
 
     assert_eq!(
         history
-            .get_channel_probability(from, target.clone(), 10, 10)
+            .eval_probability(from, target.clone(), 10, 10)
             .round_to_2(),
         0.0
     );
@@ -552,18 +544,18 @@ fn test_history_probability_small_fail_amount() {
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
-    let prob = history.get_channel_probability(from, target.clone(), 50000000, 100000000);
+    let prob = history.eval_probability(from, target.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
     let result = TimedResult {
         success_time: 3,
         success_amount: 50000000,
-        fail_time: 10,
+        fail_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
         fail_amount: 10,
     };
     history.add_result(from, target, result);
     assert_eq!(
-        history.get_channel_probability(from, target.clone(), 50000000, 100000000),
+        history.eval_probability(from, target.clone(), 50000000, 100000000),
         0.0
     );
 }
@@ -574,26 +566,27 @@ fn test_history_probability_range() {
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
-    let prob = history.get_channel_probability(from, target.clone(), 50000000, 100000000);
+    let prob = history.eval_probability(from, target.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
     let result = TimedResult {
-        success_time: 3,
+        success_time: now,
         success_amount: 10000000,
-        fail_time: 10,
+        fail_time: now,
         fail_amount: 50000000,
     };
 
     history.add_result(from, target, result);
 
     for amount in (1..10000000).step_by(100000) {
-        let prob = history.get_channel_probability(from, target.clone(), amount, 100000000);
+        let prob = history.eval_probability(from, target.clone(), amount, 100000000);
         assert_eq!(prob, 1.0);
     }
 
-    let mut prev_prob = history.get_channel_probability(from, target.clone(), 10000000, 100000000);
+    let mut prev_prob = history.eval_probability(from, target.clone(), 10000000, 100000000);
     for amount in (10000005..50000000).step_by(10000) {
-        let prob = history.get_channel_probability(from, target.clone(), amount, 100000000);
+        let prob = history.eval_probability(from, target.clone(), amount, 100000000);
         eprintln!(
             "amount: {}, prob: {}, prev_prob: {}",
             amount, prob, prev_prob
@@ -603,8 +596,8 @@ fn test_history_probability_range() {
     }
 
     for amount in (50000001..100000000).step_by(100000) {
-        let prob = history.get_channel_probability(from, target.clone(), amount, 100000000);
-        assert_eq!(prob, 0.0);
+        let prob = history.eval_probability(from, target.clone(), amount, 100000000);
+        assert!(prob < 0.0001);
     }
 }
 
@@ -643,4 +636,48 @@ fn test_history_load_store() {
             success_amount: 0,
         })
     );
+}
+
+#[test]
+fn test_history_can_send_with_time() {
+    use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
+
+    let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let res = history.can_send(100, now);
+    assert_eq!(res, 100);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 / 3;
+    let res = history.can_send(100, before);
+    assert_eq!(res, 71);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128;
+    let res = history.can_send(100, before);
+    assert_eq!(res, 36);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 * 3;
+    let res = history.can_send(100, before);
+    assert_eq!(res, 4);
+}
+
+#[test]
+fn test_history_can_not_send_with_time() {
+    use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
+
+    let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let res = history.cannot_send(90, now, 100);
+    assert_eq!(res, 90);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 / 3;
+    let res = history.cannot_send(90, before, 100);
+    assert_eq!(res, 93);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128;
+    let res = history.cannot_send(90, before, 100);
+    assert_eq!(res, 97);
+
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 * 3;
+    let res = history.cannot_send(90, before, 100);
+    assert_eq!(res, 100);
 }

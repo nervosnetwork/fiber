@@ -22,7 +22,7 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
-const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
+pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
 pub(crate) type PairTimedResult = HashMap<Pubkey, TimedResult>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -384,9 +384,61 @@ where
         amount: u128,
         capacity: u128,
     ) -> f64 {
-        let ret = self.get_channel_probability(from, target, amount, capacity);
+        let mut success_amount = 0;
+        let mut fail_amount = capacity;
+        if let Some(result) = self.get_result(&from, &target) {
+            if result.fail_time != 0 {
+                fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);
+            }
+            if result.success_time != 0 {
+                success_amount = self.can_send(result.success_amount, result.success_time);
+            }
+        } else {
+            // if we don't have the history, we assume the probability is 1.0
+            return 1.0;
+        }
+        eprintln!(
+            "eval_probability: amount: {}, capacity: {}, success_amount: {}, fail_amount: {}",
+            amount, capacity, success_amount, fail_amount
+        );
+        let ret = self.get_channel_probability(capacity, success_amount, fail_amount, amount);
         assert!(ret >= 0.0 && ret <= 1.0);
         ret
+    }
+
+    // The factor approaches 0 for success_time a long time in the past,
+    // is 1 when the success_time is now.
+    fn time_factor(&self, time: u128) -> f64 {
+        let time_ago = (std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() - time).max(0);
+        let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
+        let factor = exponent.exp();
+        factor
+    }
+
+    pub(crate) fn cannot_send(&self, fail_amount: u128, time: u128, capacity: u128) -> u128 {
+        let mut fail_amount = fail_amount;
+
+        if fail_amount > capacity {
+            fail_amount = capacity;
+        }
+
+        let factor = self.time_factor(time);
+        let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
+        eprintln!(
+            "cannot_send: amount: {}, time: {}, factor: {}, cannot_send: {}",
+            fail_amount, time, factor, cannot_send
+        );
+        cannot_send
+    }
+
+    pub(crate) fn can_send(&self, amount: u128, time: u128) -> u128 {
+        let factor = self.time_factor(time);
+        let can_send = (amount as f64 * factor) as u128;
+        eprintln!(
+            "can_send: amount: {}, time: {}, factor: {}, can_send: {}",
+            amount, time, factor, can_send
+        );
+        can_send
     }
 
     // Get the probability of a payment success through a direct channel,
@@ -421,79 +473,63 @@ where
     // 3. Otherwise, calculate the probability based on the time and capacity of the channel
     pub(crate) fn get_channel_probability(
         &self,
-        from: Pubkey,
-        target: Pubkey,
-        amount: u128,
         capacity: u128,
+        success_amount: u128,
+        fail_amount: u128,
+        amount: u128,
     ) -> f64 {
         if amount > capacity || amount == 0 {
             return 0.0;
         }
-        if let Some(result) = self.get_result(&from, &target) {
-            // the payment history may have outdated information
-            // we need to adjust the amount to the valid range
-            let fail_amount = if result.fail_time == 0 {
-                capacity
-            } else {
-                result.fail_amount.min(capacity)
-            };
-            let success_amount = if result.success_time == 0 {
-                0
-            } else {
-                result.success_amount.min(capacity)
-            };
 
-            if fail_amount == success_amount {
-                // if the graph has latest information
-                // we don't continue to calculate the probability
-                if amount <= capacity {
-                    return 1.0;
-                }
-                return 0.0;
-            } else if fail_amount < success_amount {
-                // suppose a malioucious node report wrong information
-                // here we return 0.0 to avoid to choose this channel
-                error!(
-                    "fail_amount: {} < success_amount: {}",
-                    fail_amount, success_amount
-                );
-                return 0.0;
+        let fail_amount = fail_amount.min(capacity);
+        let success_amount = success_amount.min(capacity);
+
+        if fail_amount == success_amount {
+            // if the graph has latest information
+            // we don't continue to calculate the probability
+            if amount <= capacity {
+                return 1.0;
             }
-
-            if amount > fail_amount {
-                return 0.0;
-            }
-
-            // safely convert amount, success_amount, fail_amount to f64
-            let amount = amount as f64;
-            let success_amount = success_amount as f64;
-            let fail_amount = fail_amount as f64;
-
-            // f128 is only on nightly, so we use f64 here, we may lose some precision
-            // but it's acceptable since all the values are cast to f64
-            let mut prob =
-                self.integral_probability(capacity as f64, amount as f64, fail_amount as f64);
-            if prob.is_nan() {
-                error!(
-                    "probability is NaN: capacity: {} amount: {} fail_amount: {}",
-                    capacity, amount, fail_amount
-                );
-                return 0.0;
-            }
-            let re_norm = self.integral_probability(
-                capacity as f64,
-                success_amount as f64,
-                fail_amount as f64,
+            return 0.0;
+        } else if fail_amount < success_amount {
+            // suppose a malioucious node report wrong information
+            // here we return 0.0 to avoid to choose this channel
+            error!(
+                "fail_amount: {} < success_amount: {}",
+                fail_amount, success_amount
             );
-            if re_norm == 0.0 {
-                return 0.0;
-            }
-            prob /= re_norm;
-            prob = prob.max(0.0).min(1.0);
-            return prob;
+            return 0.0;
         }
-        // if we don't have the history, we assume the probability is 1.0
-        1.0
+
+        if amount > fail_amount {
+            return 0.0;
+        }
+
+        // safely convert amount, success_amount, fail_amount to f64
+        let amount = amount as f64;
+        let success_amount = success_amount as f64;
+        let fail_amount = fail_amount as f64;
+
+        // f128 is only on nightly, so we use f64 here, we may lose some precision
+        // but it's acceptable since all the values are cast to f64
+        let mut prob =
+            self.integral_probability(capacity as f64, amount as f64, fail_amount as f64);
+        if prob.is_nan() {
+            error!(
+                "probability is NaN: capacity: {} amount: {} fail_amount: {}",
+                capacity, amount, fail_amount
+            );
+            return 0.0;
+        }
+        let re_norm =
+            self.integral_probability(capacity as f64, success_amount as f64, fail_amount as f64);
+        if re_norm == 0.0 {
+            return 0.0;
+        }
+        prob /= re_norm;
+        prob = prob.max(0.0).min(1.0);
+        return prob;
     }
 
     fn primitive(&self, c: f64, x: f64) -> f64 {
