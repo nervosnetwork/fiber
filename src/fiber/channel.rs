@@ -5435,15 +5435,6 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
-pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    let result = derive_public_key(commitment_point, base_key);
-    debug!(
-        "Derived revocation pub key from commitment point {:?}, base_key {:?}, result {:?}",
-        &commitment_point, &base_key, &result
-    );
-    result
-}
-
 pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
 }

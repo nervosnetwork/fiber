@@ -2,9 +2,9 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
-            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
+            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
@@ -41,18 +41,6 @@ fn test_derive_private_and_public_tlc_keys() {
     let per_commitment_point = Privkey::from(&[2; 32]).pubkey();
     let derived_privkey = derive_private_key(&privkey, &per_commitment_point);
     let derived_pubkey = derive_tlc_pubkey(&privkey.pubkey(), &per_commitment_point);
-    assert_eq!(derived_privkey.pubkey(), derived_pubkey);
-}
-
-#[test]
-fn test_derive_private_and_public_revocation_keys() {
-    let base_revocation_key = Privkey::from(&[1; 32]);
-    let per_commitment_secret = Privkey::from(&[2; 32]);
-    let derived_privkey = derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
-    let derived_pubkey = derive_revocation_pubkey(
-        &base_revocation_key.pubkey(),
-        &per_commitment_secret.pubkey(),
-    );
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
