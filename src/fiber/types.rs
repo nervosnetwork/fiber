@@ -7,7 +7,7 @@ use super::gen::fiber::{
     self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66, UdtCellDeps, Uint128Opt,
 };
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
-use super::network::get_chain_hash;
+use super::network::{get_chain_hash, PaymentCustomRecord};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
@@ -3079,7 +3079,7 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
     pub payment_hash: Hash256,
     // this is only specified in the last hop in the keysend mode
@@ -3090,6 +3090,7 @@ pub struct PaymentHopData {
     pub next_hop: Option<Pubkey>,
     #[serde_as(as = "Option<EntityHex>")]
     pub channel_outpoint: Option<OutPoint>,
+    pub custom_records: Option<PaymentCustomRecord>,
 }
 
 /// Trait for hop data

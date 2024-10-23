@@ -118,6 +118,7 @@ pub struct SendPaymentResponse {
     pub created_at: u128,
     pub last_updated_at: u128,
     pub failed_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecord>,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -274,6 +275,13 @@ pub struct SendPaymentCommand {
     // udt type script
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
+    // custom records
+    pub custom_records: Option<PaymentCustomRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaymentCustomRecord {
+    pub data: HashMap<u32, Vec<u8>>,
 }
 
 #[serde_as]
@@ -291,6 +299,7 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub custom_records: Option<PaymentCustomRecord>,
 }
 
 impl SendPaymentData {
@@ -386,6 +395,7 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
+            custom_records: command.custom_records,
         })
     }
 }

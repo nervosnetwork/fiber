@@ -605,6 +605,11 @@ where
                 expiry: current_expiry,
                 channel_outpoint: next_channel_outpoint,
                 preimage: if is_last { preimage } else { None },
+                custom_records: if is_last {
+                    payment_request.custom_records.clone()
+                } else {
+                    None
+                },
             });
             current_amount += fee;
             current_expiry += expiry;
@@ -618,6 +623,7 @@ where
             expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
             preimage: None,
+            custom_records: None,
         });
         hops_data.reverse();
         assert_eq!(hops_data.len(), route.len() + 1);
@@ -985,6 +991,7 @@ impl From<PaymentSession> for SendPaymentResponse {
             failed_error: session.last_error,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
+            custom_records: session.request.custom_records,
         }
     }
 }

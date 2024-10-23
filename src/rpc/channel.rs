@@ -5,7 +5,7 @@ use crate::fiber::{
     },
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
-    network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
+    network::{AcceptChannelCommand, OpenChannelCommand, PaymentCustomRecord, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
@@ -21,8 +21,8 @@ use jsonrpsee::{
 use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
-use std::cmp::Reverse;
 use std::str::FromStr;
+use std::{cmp::Reverse, collections::HashMap};
 use tentacle::secio::PeerId;
 
 #[serde_as]
@@ -186,6 +186,7 @@ pub struct GetPaymentCommandResult {
     #[serde_as(as = "U128Hex")]
     pub last_updated_at: u128,
     pub failed_error: Option<String>,
+    pub custom_records: Option<PaymentCustomRecord>,
 }
 
 #[serde_as]
@@ -226,6 +227,9 @@ pub(crate) struct SendPaymentCommandParams {
 
     // udt type script for the payment
     udt_type_script: Option<Script>,
+
+    // custom record for the payment
+    custom_records: Option<HashMap<u32, Vec<u8>>>,
 }
 
 #[rpc(server)]
@@ -522,6 +526,10 @@ where
                     max_parts: params.max_parts,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
+                    custom_records: params
+                        .custom_records
+                        .clone()
+                        .map(|data| PaymentCustomRecord { data }),
                 },
                 rpc_reply,
             ))
@@ -532,6 +540,7 @@ where
             created_at: response.created_at,
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
+            custom_records: response.custom_records,
         })
     }
 
@@ -548,9 +557,10 @@ where
         handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
             status: response.status,
-            last_updated_at: response.last_updated_at,
             created_at: response.created_at,
+            last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
+            custom_records: response.custom_records,
         })
     }
 }
