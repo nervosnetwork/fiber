@@ -38,6 +38,10 @@ pub(crate) struct InternalResult {
     pub fail_node: Option<Pubkey>,
 }
 
+fn current_time() -> u128 {
+    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+}
+
 impl InternalResult {
     pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u128, amount: u128, success: bool) {
         let pair = InternalPairResult {
@@ -49,30 +53,12 @@ impl InternalResult {
     }
 
     pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey) {
-        self.add(
-            from,
-            target,
-            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-            0,
-            false,
-        );
-        self.add(
-            target,
-            from,
-            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-            0,
-            false,
-        )
+        self.add(from, target, current_time(), 0, false);
+        self.add(target, from, current_time(), 0, false)
     }
 
     pub fn add_fail_pair_balanced(&mut self, from: Pubkey, target: Pubkey, amount: u128) {
-        self.add(
-            from,
-            target,
-            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-            amount,
-            false,
-        );
+        self.add(from, target, current_time(), amount, false);
     }
 
     pub fn fail_node(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
@@ -107,7 +93,7 @@ impl InternalResult {
             self.add(
                 route[i].pubkey,
                 route[i + 1].pubkey,
-                std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+                current_time(),
                 route[i].amount,
                 true,
             );
@@ -354,13 +340,7 @@ where
                 }
             }
             for (from, target) in pairs {
-                self.apply_pair_result(
-                    from,
-                    target,
-                    0,
-                    false,
-                    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
-                );
+                self.apply_pair_result(from, target, 0, false, current_time());
             }
         }
     }
@@ -405,7 +385,7 @@ where
     // The factor approaches 0 for success_time a long time in the past,
     // is 1 when the success_time is now.
     fn time_factor(&self, time: u128) -> f64 {
-        let time_ago = (std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() - time).max(0);
+        let time_ago = (current_time() - time).max(0);
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         let factor = exponent.exp();
         factor
@@ -440,9 +420,7 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(&from, &target) {
             if result.fail_time != 0 {
-                let time_ago = (std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
-                    - result.fail_time)
-                    .min(0);
+                let time_ago = (current_time() - result.fail_time).min(0);
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
