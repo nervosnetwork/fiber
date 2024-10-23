@@ -26,6 +26,7 @@ table OpenChannel {
     revocation_basepoint:        Pubkey,
     // deprecated
     payment_basepoint:           Pubkey,
+    // deprecated
     delayed_payment_basepoint:   Pubkey,
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,
@@ -48,6 +49,7 @@ table AcceptChannel {
     revocation_basepoint:        Pubkey,
     // deprecated
     payment_basepoint:           Pubkey,
+    // deprecated
     delayed_payment_basepoint:   Pubkey,
     tlc_basepoint:               Pubkey,
     first_per_commitment_point:  Pubkey,

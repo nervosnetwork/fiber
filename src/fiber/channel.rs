@@ -1375,7 +1375,6 @@ where
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     revocation_basepoint: state.signer.revocation_base_key.pubkey(),
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    delayed_payment_basepoint: state.signer.delayed_payment_base_key.pubkey(),
                     tlc_basepoint: state.signer.tlc_base_key.pubkey(),
                     first_per_commitment_point: state
                         .signer
@@ -1494,9 +1493,6 @@ where
                     revocation_basepoint: channel
                         .get_local_channel_public_keys()
                         .revocation_base_key,
-                    delayed_payment_basepoint: channel
-                        .get_local_channel_public_keys()
-                        .delayed_payment_base_key,
                     tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
                     next_local_nonce: channel.get_local_musig2_pubnonce(),
                     channel_announcement_nonce,
@@ -5294,10 +5290,6 @@ impl ChannelParametersOneParty {
         &self.pubkeys.funding_pubkey
     }
 
-    pub fn delayed_payment_base_key(&self) -> &Pubkey {
-        &self.pubkeys.delayed_payment_base_key
-    }
-
     pub fn revocation_base_key(&self) -> &Pubkey {
         &self.pubkeys.revocation_base_key
     }
@@ -5318,10 +5310,6 @@ pub struct ChannelBasePublicKeys {
     /// counterparty to create a secret which the counterparty can reveal to revoke previous
     /// states.
     pub revocation_base_key: Pubkey,
-    /// The base point which is used (with derive_public_key) to derive a per-commitment payment
-    /// public key which receives non-HTLC-encumbered funds which are only available for spending
-    /// after some delay (or can be claimed via the revocation path).
-    pub delayed_payment_base_key: Pubkey,
     /// The base point which is used (with derive_public_key) to derive a per-commitment public key
     /// which is used to encumber HTLC-in-flight outputs.
     pub tlc_base_key: Pubkey,
@@ -5332,7 +5320,6 @@ impl From<&OpenChannel> for ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             revocation_base_key: value.revocation_basepoint,
-            delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
     }
@@ -5343,7 +5330,6 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             revocation_base_key: value.revocation_basepoint,
-            delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
     }
@@ -5505,10 +5491,6 @@ pub struct InMemorySigner {
     pub funding_key: Privkey,
     /// Holder secret key for blinded revocation pubkey.
     pub revocation_base_key: Privkey,
-    /// Holder secret key used for our balance in counterparty-broadcasted commitment transactions.
-    pub payment_key: Privkey,
-    /// Holder secret key used in an HTLC transaction.
-    pub delayed_payment_base_key: Privkey,
     /// Holder HTLC secret key used in commitment transaction HTLC outputs.
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
@@ -5538,17 +5520,12 @@ impl InMemorySigner {
 
         let funding_key = key_derive(&seed, b"funding key");
         let revocation_base_key = key_derive(funding_key.as_ref(), b"revocation base key");
-        let payment_key = key_derive(revocation_base_key.as_ref(), b"payment key");
-        let delayed_payment_base_key =
-            key_derive(payment_key.as_ref(), b"delayed payment base key");
-        let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
+        let tlc_base_key = key_derive(revocation_base_key.as_ref(), b"HTLC base key");
         let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
         Self {
             funding_key,
             revocation_base_key,
-            payment_key,
-            delayed_payment_base_key,
             tlc_base_key,
             musig2_base_nonce,
             commitment_seed,
@@ -5559,7 +5536,6 @@ impl InMemorySigner {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
             revocation_base_key: self.revocation_base_key.pubkey(),
-            delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
             tlc_base_key: self.tlc_base_key.pubkey(),
         }
     }
