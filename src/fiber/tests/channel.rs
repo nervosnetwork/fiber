@@ -1234,3 +1234,20 @@ async fn test_commitment_tx_capacity() {
         output_capacity as u128
     );
 }
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
+}
