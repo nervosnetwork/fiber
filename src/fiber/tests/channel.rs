@@ -3,8 +3,8 @@ use crate::{
     fiber::{
         channel::{
             derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
-            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
+            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
@@ -18,7 +18,7 @@ use ckb_jsonrpc_types::Status;
 use ckb_types::{
     core::FeeRate,
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, Pack},
+    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use ractor::call;
 
@@ -1215,4 +1215,22 @@ async fn test_force_close_channel_when_remote_is_offline() {
     call!(node_a.network_actor, message)
         .expect("node_a alive")
         .expect("successfully shutdown channel");
+}
+
+#[tokio::test]
+async fn test_commitment_tx_capacity() {
+    let (amount_a, amount_b) = (16200000000, 6200000000);
+    let (node_a, _node_b, channel_id) =
+        create_nodes_with_established_channel(amount_a, amount_b, true).await;
+
+    let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
+    let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
+    let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
+
+    // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one
+    // ref to fn commitment_tx_size
+    assert_eq!(
+        amount_a + amount_b - (commitment_tx.data().serialized_size_in_block() + 20) as u128,
+        output_capacity as u128
+    );
 }
