@@ -22,7 +22,7 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
-pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
+pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u128 = 6 * 60 * 60 * 1000; // 6 hours
 pub(crate) type PairTimedResult = HashMap<Pubkey, TimedResult>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -397,10 +397,6 @@ where
             // if we don't have the history, we assume the probability is 1.0
             return 1.0;
         }
-        eprintln!(
-            "eval_probability: amount: {}, capacity: {}, success_amount: {}, fail_amount: {}",
-            amount, capacity, success_amount, fail_amount
-        );
         let ret = self.get_channel_probability(capacity, success_amount, fail_amount, amount);
         assert!(ret >= 0.0 && ret <= 1.0);
         ret
@@ -424,20 +420,12 @@ where
 
         let factor = self.time_factor(time);
         let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
-        eprintln!(
-            "cannot_send: amount: {}, time: {}, factor: {}, cannot_send: {}",
-            fail_amount, time, factor, cannot_send
-        );
         cannot_send
     }
 
     pub(crate) fn can_send(&self, amount: u128, time: u128) -> u128 {
         let factor = self.time_factor(time);
         let can_send = (amount as f64 * factor) as u128;
-        eprintln!(
-            "can_send: amount: {}, time: {}, factor: {}, can_send: {}",
-            amount, time, factor, can_send
-        );
         can_send
     }
 

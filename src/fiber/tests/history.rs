@@ -1,4 +1,5 @@
 use crate::fiber::graph::SessionRouteNode;
+use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
@@ -561,7 +562,7 @@ fn test_history_probability_small_fail_amount() {
 }
 
 #[test]
-fn test_history_probability_range() {
+fn test_history_channel_probability_range() {
     let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
@@ -599,6 +600,75 @@ fn test_history_probability_range() {
         let prob = history.eval_probability(from, target.clone(), amount, 100000000);
         assert!(prob < 0.0001);
     }
+}
+
+#[test]
+fn test_history_eval_probability_range() {
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let target = generate_pubkey();
+    let from: Pubkey = generate_pubkey().into();
+
+    let prob = history.eval_probability(from, target.clone(), 50000000, 100000000);
+    assert_eq!(prob, 1.0);
+
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let result = TimedResult {
+        success_time: now,
+        success_amount: 10000000,
+        fail_time: now,
+        fail_amount: 50000000,
+    };
+
+    history.add_result(from, target, result);
+    let prob1 = history.eval_probability(from, target.clone(), 50000000, 100000000);
+    assert!(0.0 <= prob1 && prob1 < 0.001);
+    let prob2 = history.eval_probability(from, target.clone(), 50000000 - 10, 100000000);
+    assert!(0.0 < prob2 && prob2 < 0.001);
+    assert!(prob2 > prob1);
+
+    let mut prev_prob = prob2;
+    for _i in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let prob = history.eval_probability(from, target.clone(), 50000000 - 10, 100000000);
+        eprintln!("prob: {}", prob);
+        eprintln!("prev_prob: {}", prev_prob);
+        assert!(prob > prev_prob);
+        prev_prob = prob;
+    }
+
+    history.reset();
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let result = TimedResult {
+        success_time: now,
+        success_amount: 10000000,
+        fail_time: now,
+        fail_amount: 50000000,
+    };
+    history.add_result(from, target, result);
+    prev_prob = 0.0;
+    for gap in (10..10000000).step_by(100000) {
+        let prob = history.eval_probability(from, target, 50000000 - gap, 100000000);
+        assert!(prob > prev_prob);
+        prev_prob = prob;
+    }
+
+    prev_prob = 0.0;
+    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    for time in (60 * 1000..DEFAULT_BIMODAL_DECAY_TIME * 2).step_by(1 * 60 * 60 * 1000) {
+        history.reset();
+        let result = TimedResult {
+            success_time: now,
+            success_amount: 10000000,
+            fail_time: now - time,
+            fail_amount: 50000000,
+        };
+        history.add_result(from, target, result);
+        let prob = history.eval_probability(from, target, 50000000 - 10, 100000000);
+        eprintln!("prob --> : {}", prob);
+        assert!(prob > prev_prob);
+        prev_prob = prob;
+    }
+    assert!(prev_prob > 0.0 && prev_prob < 0.55);
 }
 
 #[test]
