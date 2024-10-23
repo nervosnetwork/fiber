@@ -204,23 +204,23 @@ impl Batch {
 }
 
 ///
-/// +--------------+--------------------+--------------------------+
-/// | KeyPrefix::  | Key::              | Value::                  |
-/// +--------------+--------------------+--------------------------+
-/// | 0            | Hash256            | ChannelActorState        |
+/// +--------------+--------------------+-----------------------------+
+/// | KeyPrefix::  | Key::              | Value::                     |
+/// +--------------+--------------------+-----------------------------+
+/// | 0            | Hash256            | ChannelActorState           |
 /// | 16           | PeerId             | PersistentNetworkActorState |
-/// | 32           | Hash256            | CkbInvoice               |
-/// | 64           | PeerId | Hash256   | ChannelState             |
-/// | 96           | ChannelId          | ChannelInfo              |
-/// | 97           | Block | Index      | ChannelId                |
-/// | 98           | Timestamp          | ChannelId                |
-/// | 128          | NodeId             | NodeInfo                 |
-/// | 129          | Timestamp          | NodeId                   |
-/// | 160          | PeerId             | MultiAddr                |
-/// | 192          | Hash256            | PaymentSession           |
-/// | 193          | NodeId | NodeId    | TimedResult              |
-/// | 224          | Hash256            | ChannelData              |
-/// +--------------+--------------------+--------------------------+
+/// | 32           | Hash256            | CkbInvoice                  |
+/// | 64           | PeerId | Hash256   | ChannelState                |
+/// | 96           | ChannelId          | ChannelInfo                 |
+/// | 97           | Block | Index      | ChannelId                   |
+/// | 98           | Timestamp          | ChannelId                   |
+/// | 128          | NodeId             | NodeInfo                    |
+/// | 129          | Timestamp          | NodeId                      |
+/// | 160          | PeerId             | MultiAddr                   |
+/// | 192          | Hash256            | PaymentSession              |
+/// | 193          | NodeId | NodeId    | TimedResult                 |
+/// | 224          | Hash256            | ChannelData                 |
+/// +--------------+--------------------+-----------------------------+
 ///
 
 const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
