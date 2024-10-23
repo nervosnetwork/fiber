@@ -173,7 +173,12 @@ pub struct ChannelCommandWithId {
 
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
-pub const DEFAULT_COMMITMENT_DELAY_EPOCH: u64 = 4;
+// The default commitment delay is 6 epochs = 24 hours.
+pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 6;
+// The min commitment delay is 1 epoch = 4 hours.
+pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
+// The max commitment delay is 84 epochs = 14 days.
+pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
@@ -1354,6 +1359,7 @@ where
                     "local_reserved_ckb_amount",
                     "remote_reserved_ckb_amount",
                     "commitment_fee_rate",
+                    "commitment_delay_epoch",
                     "funding_fee_rate",
                     "max_tlc_number_in_flight",
                 ])?;
@@ -1438,7 +1444,7 @@ where
                     commitment_fee_rate,
                     commitment_delay_epoch
                         .unwrap_or(EpochNumberWithFraction::new(
-                            DEFAULT_COMMITMENT_DELAY_EPOCH,
+                            DEFAULT_COMMITMENT_DELAY_EPOCHS,
                             0,
                             1,
                         ))
@@ -1452,6 +1458,7 @@ where
 
                 channel.check_ckb_params(vec![
                     "commitment_fee_rate",
+                    "commitment_delay_epoch",
                     "funding_fee_rate",
                     "local_reserved_ckb_amount",
                     "max_tlc_number_in_flight",
@@ -2594,6 +2601,33 @@ impl ChannelActorState {
                         or you can set a lower commitment fee rate",
                         self.commitment_fee_rate, expected_minimal_reserved_ckb_amount
                     )));
+                    }
+                }
+                "commitment_delay_epoch" => {
+                    let epoch = EpochNumberWithFraction::from_full_value_unchecked(
+                        self.commitment_delay_epoch,
+                    );
+                    if !epoch.is_well_formed() {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is not a valid value",
+                            self.commitment_delay_epoch,
+                        )));
+                    }
+
+                    let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+                    if epoch < min {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is less than the minimal value {}",
+                            epoch, min
+                        )));
+                    }
+
+                    let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+                    if epoch > max {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is greater than the maximal value {}",
+                            epoch, max
+                        )));
                     }
                 }
                 "max_tlc_number_in_flight" => {
