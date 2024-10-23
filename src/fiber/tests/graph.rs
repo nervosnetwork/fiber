@@ -1,7 +1,8 @@
+use crate::fiber::types::Pubkey;
 use crate::{
     fiber::{
         graph::{ChannelInfo, GraphError, NetworkGraph, NodeInfo, PathEdge},
-        network::{get_chain_hash, SendPaymentData},
+        network::{get_chain_hash, SendPaymentCommand, SendPaymentData},
         types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
     store::Store,
@@ -189,7 +190,7 @@ impl MockNetworkGraph {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph
-            .find_route(source, target, amount, Some(max_fee), None)
+            .find_route(source, target, amount, Some(max_fee), None, false)
     }
 
     pub fn find_route_udt(
@@ -202,8 +203,26 @@ impl MockNetworkGraph {
     ) -> Result<Vec<PathEdge>, GraphError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
-        self.graph
-            .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
+        self.graph.find_route(
+            source,
+            target,
+            amount,
+            Some(max_fee),
+            Some(udt_type_script),
+            false,
+        )
+    }
+
+    pub fn build_route_with_expect(&self, payment_data: &SendPaymentData, expect: Vec<usize>) {
+        let route = self.graph.build_route(payment_data);
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
+        let expecptected_nodes: Vec<Pubkey> = expect
+            .iter()
+            .map(|x| self.keys[*x].into())
+            .collect::<Vec<_>>();
+        assert_eq!(nodes, expecptected_nodes);
     }
 }
 
@@ -509,6 +528,7 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        false,
     );
     assert!(route.is_err());
 
@@ -518,6 +538,7 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        false,
     );
     assert!(route.is_err());
 }
@@ -531,7 +552,7 @@ fn test_graph_build_route_three_nodes() {
     let node2 = network.keys[2];
     let node3 = network.keys[3];
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -543,6 +564,7 @@ fn test_graph_build_route_three_nodes() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
@@ -569,7 +591,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount exceeding max_htlc_value
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100, // Exceeds max_htlc_value of 50
         payment_hash: Hash256::default(),
@@ -581,6 +603,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     assert!(route.is_err());
 }
@@ -594,7 +617,7 @@ fn test_graph_build_route_below_min_htlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_htlc_value
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 10, // Below min_htlc_value of 50
         payment_hash: Hash256::default(),
@@ -606,6 +629,7 @@ fn test_graph_build_route_below_min_htlc_value() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     assert!(route.is_err());
 }
@@ -638,7 +662,7 @@ fn test_graph_mark_failed_channel() {
 
     network.mark_channel_failed(2, 3);
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -650,6 +674,7 @@ fn test_graph_mark_failed_channel() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_err());
@@ -658,7 +683,7 @@ fn test_graph_mark_failed_channel() {
     network.add_edge(5, 3, Some(500), Some(2));
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -670,6 +695,7 @@ fn test_graph_mark_failed_channel() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
@@ -686,7 +712,7 @@ fn test_graph_mark_failed_node() {
     let node4 = network.keys[4];
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -698,12 +724,13 @@ fn test_graph_mark_failed_node() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node4.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -715,6 +742,7 @@ fn test_graph_mark_failed_node() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
@@ -722,7 +750,7 @@ fn test_graph_mark_failed_node() {
     network.mark_node_failed(2);
 
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node3.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -734,12 +762,13 @@ fn test_graph_mark_failed_node() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_err());
 
     // Test build route from node1 to node4
-    let route = network.graph.build_route(SendPaymentData {
+    let route = network.graph.build_route(&SendPaymentData {
         target_pubkey: node4.into(),
         amount: 100,
         payment_hash: Hash256::default(),
@@ -751,7 +780,130 @@ fn test_graph_mark_failed_node() {
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_payment_self_default_is_false() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(2, 4, Some(500), Some(2));
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(node0.into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_cltv_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into());
+    let error = payment_data.unwrap_err().to_string();
+    assert!(error.contains("can not pay self"));
+
+    let route = network.graph.build_route(&SendPaymentData {
+        target_pubkey: node0.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+    });
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_payment_pay_single_path() {
+    let mut network = MockNetworkGraph::new(9);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(2, 4, Some(500), Some(2));
+    network.add_edge(4, 5, Some(500), Some(2));
+    network.add_edge(5, 6, Some(500), Some(2));
+
+    let node0 = network.keys[0];
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[6].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_cltv_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into());
+    assert!(payment_data.is_ok());
+    let payment_data = payment_data.unwrap();
+
+    network.add_edge(4, 0, Some(1000), Some(2));
+    network.build_route_with_expect(&payment_data, vec![2, 4, 5, 6]);
+}
+
+#[test]
+fn test_graph_payment_pay_self_will_ok() {
+    let mut network = MockNetworkGraph::new(9);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(2, 4, Some(500), Some(2));
+    network.add_edge(4, 5, Some(500), Some(2));
+    network.add_edge(5, 6, Some(500), Some(2));
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[0].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_cltv_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into());
+    assert!(payment_data.is_ok());
+    let payment_data = payment_data.unwrap();
+
+    let route = network.graph.build_route(&payment_data);
+    // since we don't have a route to node0, it will fail
+    assert!(route.is_err());
+
+    // add a long path
+    network.add_edge(6, 0, Some(500), Some(2));
+    network.build_route_with_expect(&payment_data, vec![2, 4, 5, 6, 0]);
+
+    // now add another shorter path
+    network.add_edge(4, 0, Some(1000), Some(2));
+    network.build_route_with_expect(&payment_data, vec![2, 4, 0]);
+
+    // now add another shorter path
+    network.add_edge(2, 0, Some(1000), Some(2));
+    network.build_route_with_expect(&payment_data, vec![2, 0]);
 }

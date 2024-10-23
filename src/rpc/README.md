@@ -182,6 +182,7 @@ Sends a payment to a peer.
 - `timeout` (type: `Option<u64>`): The payment timeout in seconds. If the payment is not completed within this time, it will be cancelled.
 - `max_fee_amount` (type: `Option<u128>`): The maximum fee amounts in shannons that the sender is willing to pay.
 - `max_parts` (type: `Option<u64>`): Max parts for the payment, only used for multi-part payments.
+- `allow_self_payment` (type: `Option<bool>`): Allow self payment, if it's true path finding may construct a payment router that target to the same node, default is false.
 
 Note `target_pubkey`, `amount`, `payment_hash` should be consistent with the invoice. If `invoice` is provided, the `target_pubkey`, `amount`, `payment_hash` can be omitted.
 

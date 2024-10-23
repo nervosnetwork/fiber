@@ -276,6 +276,8 @@ pub struct SendPaymentCommand {
     // udt type script
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
+    // allow self payment, default is false
+    pub allow_self_payment: bool,
 }
 
 #[serde_as]
@@ -293,10 +295,11 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub allow_self_payment: bool,
 }
 
 impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+    pub fn new(command: SendPaymentCommand, source: Pubkey) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -335,6 +338,10 @@ impl SendPaymentData {
                 .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
             "target_pubkey",
         )?;
+
+        if !command.allow_self_payment && target == source {
+            return Err("allow_self_payment is not enable, can not pay self".to_string());
+        }
 
         let amount = validate_field(
             command.amount,
@@ -388,6 +395,7 @@ impl SendPaymentData {
             keysend,
             udt_type_script,
             preimage,
+            allow_self_payment: command.allow_self_payment,
         })
     }
 }
@@ -2211,12 +2219,7 @@ where
         let mut error = None;
         while payment_session.can_retry() {
             payment_session.retried_times += 1;
-            let hops_infos = match self
-                .network_graph
-                .read()
-                .await
-                .build_route(payment_data.clone())
-            {
+            let hops_infos = match self.network_graph.read().await.build_route(&payment_data) {
                 Err(e) => {
                     error!("Failed to build route: {:?}", e);
                     error = Some(format!("Failed to build route: {:?}", payment_hash));
@@ -2280,10 +2283,11 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
-        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
-            error!("Failed to validate payment request: {:?}", e);
-            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-        })?;
+        let payment_data = SendPaymentData::new(payment_request.clone(), state.get_public_key())
+            .map_err(|e| {
+                error!("Failed to validate payment request: {:?}", e);
+                Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+            })?;
 
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
