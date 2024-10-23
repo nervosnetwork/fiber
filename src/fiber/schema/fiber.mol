@@ -23,6 +23,7 @@ table OpenChannel {
     min_tlc_value:               Uint128,
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
+    // deprecated
     revocation_basepoint:        Pubkey,
     // deprecated
     payment_basepoint:           Pubkey,
@@ -46,6 +47,7 @@ table AcceptChannel {
     min_tlc_value:               Uint128,
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
+    // deprecated
     revocation_basepoint:        Pubkey,
     // deprecated
     payment_basepoint:           Pubkey,
