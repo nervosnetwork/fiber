@@ -3349,18 +3349,9 @@ where
     }
 
     fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
-        self.channels.remove(channel_id).map(|channel| {
-            if let Some(outpoint) = self.outpoint_channel_map.iter().find_map(|(k, v)| {
-                if v == channel_id {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            }) {
-                self.outpoint_channel_map.remove(&outpoint);
-            }
-            channel
-        })
+        self.channels
+            .remove(channel_id)
+            .inspect(|_| self.outpoint_channel_map.retain(|_, v| v != channel_id))
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
