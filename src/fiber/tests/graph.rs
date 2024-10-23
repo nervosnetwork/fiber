@@ -1,3 +1,4 @@
+use super::test_utils::{generate_keypair, generate_pubkey};
 use crate::fiber::types::Pubkey;
 use crate::{
     fiber::{
@@ -12,17 +13,6 @@ use ckb_types::{
     prelude::Entity,
 };
 use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
-use tentacle::{multiaddr::Multiaddr, secio::PeerId};
-
-use super::test_utils::{generate_keypair, generate_pubkey};
-
-fn generate_keys(num: usize) -> Vec<Pubkey> {
-    let mut keys = vec![];
-    for _ in 0..num {
-        keys.push(generate_pubkey());
-    }
-    keys
-}
 
 fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     let mut keys = vec![];
@@ -206,41 +196,6 @@ impl MockNetworkGraph {
         self.graph
             .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
     }
-}
-
-#[test]
-fn test_graph_connected_peers() {
-    let temp_path = tempfile::tempdir().unwrap();
-    let store = Store::new(temp_path.path());
-    let keys = generate_keys(1);
-    let public_key1 = keys[0];
-    let mut network_graph = NetworkGraph::new(store, public_key1.into());
-
-    let peer_id = PeerId::random();
-    let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-    network_graph.add_connected_peer(&peer_id, address.clone());
-
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 1);
-    assert_eq!(connected_peers[0], (&peer_id, &address));
-
-    network_graph.reset();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
-
-    // load from db
-    network_graph.load_from_store();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 1);
-    assert_eq!(connected_peers[0], (&peer_id, &address));
-
-    network_graph.remove_connected_peer(&peer_id);
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
-
-    network_graph.load_from_store();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
 }
 
 #[test]

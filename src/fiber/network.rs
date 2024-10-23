@@ -1,5 +1,3 @@
-use crate::ckb::config::UdtCfgInfos;
-use crate::fiber::serde_utils::EntityHex;
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
 use ckb_types::core::TransactionView;
@@ -14,15 +12,18 @@ use ractor::{
 use rand::Rng;
 use secp256k1::{Message, Secp256k1};
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::hash::RandomState;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
 use tentacle::multiaddr::{MultiAddr, Protocol};
+use tentacle::utils::extract_peer_id;
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -46,8 +47,9 @@ use tracing::{debug, error, info, trace, warn};
 use super::channel::{
     AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
     ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelSubscribers, OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult,
-    PublicChannelInfo, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    ChannelState, ChannelSubscribers, OpenChannelParameter, ProcessingChannelError,
+    ProcessingChannelResult, PublicChannelInfo, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE,
 };
 use super::config::AnnouncedNodeName;
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
@@ -63,14 +65,16 @@ use super::types::{
     QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
     TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
 };
-use super::FiberConfig;
+use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
+use crate::ckb::config::UdtCfgInfos;
 use crate::ckb::contracts::{check_udt_script, get_udt_whitelist, is_udt_type_auto_accept};
 use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, TraceTxResponse};
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
     TxSignatures,
@@ -95,6 +99,13 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
     "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
+
+// This is the default approximate number of peers that we need to keep connection to to make the
+// network operating normally.
+const NUM_PEER_CONNECTIONS: usize = 40;
+
+// The duration for which we will try to maintain the number of peers in connection.
+const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
 pub(crate) fn get_chain_hash() -> Hash256 {
     Default::default()
@@ -154,8 +165,14 @@ pub struct NodeInfoResponse {
 #[derive(Debug)]
 pub enum NetworkActorCommand {
     /// Network commands
+    // Connect to a peer, and optionally also save the peer to the peer store.
     ConnectPeer(Multiaddr),
     DisconnectPeer(PeerId),
+    // Save the address of a peer to the peer store, the address here must be a valid
+    // multiaddr with the peer id.
+    SavePeerAddress(Multiaddr),
+    // We need to maintain a certain number of peers connections to keep the network running.
+    MaintainConnections(usize),
     // For internal use and debugging only. Most of the messages requires some
     // changes to local state. Even if we can send a message to a peer, some
     // part of the local state is not changed.
@@ -578,7 +595,8 @@ pub struct NetworkActor<S> {
 
 impl<S> NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -708,10 +726,7 @@ where
                         }
                     };
                     for message in messages {
-                        if let Err(e) = self
-                            .process_broadcasted_message(&state.network, message)
-                            .await
-                        {
+                        if let Err(e) = self.process_broadcasted_message(state, message).await {
                             let fail_message =
                                 format!("Failed to process broadcasted message: {:?}", &e);
                             error!("{}", &fail_message);
@@ -1046,10 +1061,6 @@ where
                 self.on_service_event(e).await;
             }
             NetworkActorEvent::PeerConnected(id, pubkey, session) => {
-                self.network_graph
-                    .write()
-                    .await
-                    .add_connected_peer(&id, session.address.clone());
                 state.on_peer_connected(&id, pubkey, &session).await;
                 // Notify outside observers.
                 myself
@@ -1062,7 +1073,6 @@ where
                     .expect(ASSUME_NETWORK_MYSELF_ALIVE);
             }
             NetworkActorEvent::PeerDisconnected(id, session) => {
-                self.network_graph.write().await.remove_connected_peer(&id);
                 state.on_peer_disconnected(&id);
                 // Notify outside observers.
                 myself
@@ -1240,7 +1250,6 @@ where
         state: &mut NetworkActorState<S>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
-        debug!("Handling command: {:?}", command);
         match command {
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_message_to_peer(&peer_id, message).await?;
@@ -1249,7 +1258,21 @@ where
             NetworkActorCommand::ConnectPeer(addr) => {
                 // TODO: It is more than just dialing a peer. We need to exchange capabilities of the peer,
                 // e.g. whether the peer support some specific feature.
-                // TODO: If we are already connected to the peer, skip connecting.
+
+                if let Some(peer_id) = extract_peer_id(&addr) {
+                    if state.is_connected(&peer_id) {
+                        debug!("Peer {:?} already connected, ignoring...", peer_id);
+                        return Ok(());
+                    }
+                    if state.peer_id == peer_id {
+                        debug!("Trying to connect to self {:?}, ignoring...", addr);
+                        return Ok(());
+                    }
+                } else {
+                    error!("Failed to extract peer id from address: {:?}", addr);
+                    return Ok(());
+                }
+
                 state
                     .control
                     .dial(addr.clone(), TargetProtocol::All)
@@ -1262,6 +1285,53 @@ where
             NetworkActorCommand::DisconnectPeer(peer_id) => {
                 if let Some(session) = state.get_peer_session(&peer_id) {
                     state.control.disconnect(session).await?;
+                }
+            }
+
+            NetworkActorCommand::SavePeerAddress(addr) => match extract_peer_id(&addr) {
+                Some(peer) => {
+                    debug!("Saved peer id {:?} with address {:?}", &peer, &addr);
+                    state.save_peer_address(peer, addr);
+                }
+                None => {
+                    error!("Failed to save address to peer store: unable to extract peer id from address {:?}", &addr);
+                }
+            },
+
+            NetworkActorCommand::MaintainConnections(num_peers) => {
+                debug!("Maintaining connections to {} peers", num_peers);
+
+                let num_connected_peers = state.peer_session_map.len();
+                if num_connected_peers >= num_peers {
+                    debug!(
+                        "Already connected to {} peers, skipping connecting to more peers",
+                        num_connected_peers,
+                    );
+                    return Ok(());
+                }
+                let peers_to_connect = state
+                    .state_to_be_persisted
+                    .sample_n_peers_to_connect(num_peers - num_connected_peers);
+                debug!(
+                    "Randomly selected peers to connect: {:?}",
+                    &peers_to_connect
+                );
+                for (peer_id, addresses) in peers_to_connect {
+                    if let Some(session) = state.get_peer_session(&peer_id) {
+                        debug!(
+                            "Randomly selected peer {:?} already connected with session id {:?}, skipping connection",
+                            peer_id, session
+                        );
+                        continue;
+                    }
+                    for addr in addresses {
+                        state
+                            .network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ConnectPeer(addr.clone()),
+                            ))
+                            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+                    }
                 }
             }
 
@@ -1541,10 +1611,7 @@ where
                 );
                 for message in broadcasted_message_queue {
                     let (_peer_id, message) = message;
-                    if let Err(e) = self
-                        .process_broadcasted_message(&state.network, message)
-                        .await
-                    {
+                    if let Err(e) = self.process_broadcasted_message(state, message).await {
                         error!("Failed to process broadcasted message: {:?}", e);
                     }
                 }
@@ -1759,13 +1826,12 @@ where
                 NetworkActorCommand::BroadcastMessage(message.clone()),
             ))
             .expect(ASSUME_NETWORK_MYSELF_ALIVE);
-        self.process_broadcasted_message(&state.network, message)
-            .await
+        self.process_broadcasted_message(state, message).await
     }
 
     async fn process_broadcasted_message(
         &self,
-        network: &ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         message: FiberBroadcastMessage,
     ) -> Result<(), Error> {
         match message {
@@ -1791,18 +1857,17 @@ where
                             &node_announcement
                         );
 
-                        // TODO: bookkeeping how many nodes we have connected to. Stop connecting once we surpass a threshold.
-                        for addr in &node_announcement.addresses {
-                            network.send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ConnectPeer(addr.clone()),
-                            ))?;
-                        }
-
                         // Add the node to the network graph.
                         self.network_graph
                             .write()
                             .await
-                            .process_node_announcement(node_announcement);
+                            .process_node_announcement(node_announcement.clone());
+
+                        let peer_id = node_announcement.peer_id();
+                        state.save_announced_peer_addresses(
+                            peer_id,
+                            node_announcement.addresses.clone(),
+                        );
                         Ok(())
                     }
                     _ => {
@@ -2320,6 +2385,11 @@ struct NetworkSyncState {
     // The timestamp we started syncing.
     starting_time: u64,
     // All the pinned peers that we are going to sync with.
+    // TODO: the intention of passing a few peer addresses to the sync status was to let the user
+    // select a few peers to sync network graph (these peers may have faster connection to the node).
+    // After some refactoring, the code below is a little bit clouded. We are currently only connecting
+    // to random peers. If this functionality is desired, we should make a config option for it.
+    // Otherwise, remove this completely.
     pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
     active_syncers: HashMap<PeerId, ActorRef<GraphSyncerMessage>>,
     // Number of peers with whom we succeeded to sync.
@@ -2420,13 +2490,13 @@ impl NetworkSyncStatus {
         starting_height: u64,
         ending_height: u64,
         starting_time: u64,
-        syncing_peers: Vec<(PeerId, Multiaddr)>,
+        pinned_syncing_peers: Vec<(PeerId, Multiaddr)>,
     ) -> Self {
         let state = NetworkSyncState {
             starting_height,
             ending_height,
             starting_time,
-            pinned_syncing_peers: syncing_peers,
+            pinned_syncing_peers,
             active_syncers: Default::default(),
             succeeded: 0,
             failed: 0,
@@ -2463,6 +2533,7 @@ enum RequestState {
 
 pub struct NetworkActorState<S> {
     store: S,
+    state_to_be_persisted: PersistentNetworkActorState,
     // The name of the node to be announced to the network, may be empty.
     node_name: Option<AnnouncedNodeName>,
     peer_id: PeerId,
@@ -2535,6 +2606,104 @@ pub struct NetworkActorState<S> {
     broadcasted_message_queue: Vec<(PeerId, FiberBroadcastMessage)>,
 }
 
+#[serde_as]
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct PersistentNetworkActorState {
+    // These addresses are announced by the peer itself to the network.
+    // When a new NodeAnnouncement message is received, we will overwrite the old addresses.
+    #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
+    announced_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
+    // These addresses are saved by the user (e.g. the user sends a ConnectPeer rpc to the node),
+    // we will then save these addresses to the peer store.
+    #[serde_as(as = "Vec<(DisplayFromStr, _)>")]
+    saved_peer_addresses: HashMap<PeerId, Vec<Multiaddr>>,
+}
+
+impl PersistentNetworkActorState {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
+        let empty = vec![];
+        self.announced_peer_addresses
+            .get(peer_id)
+            .unwrap_or(&empty)
+            .iter()
+            .chain(
+                self.saved_peer_addresses
+                    .get(peer_id)
+                    .unwrap_or(&empty)
+                    .iter(),
+            )
+            .map(|addr| addr.clone())
+            .collect::<HashSet<_, RandomState>>()
+    }
+
+    /// Save a single peer address to the peer store. If this address for the peer does not exist,
+    /// then return false, otherwise return true.
+    fn save_peer_address(&mut self, peer_id: PeerId, addr: Multiaddr) -> bool {
+        match self.saved_peer_addresses.entry(peer_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().contains(&addr) {
+                    false
+                } else {
+                    entry.get_mut().push(addr);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(vec![addr]);
+                true
+            }
+        }
+    }
+
+    /// Save announced peer addresses to the peer store. If the peer addresses are updated,
+    /// return true, otherwise return false. This method will NOT keep the old announced addresses.
+    fn save_announced_peer_addresses(&mut self, peer_id: PeerId, addr: Vec<Multiaddr>) -> bool {
+        match self.announced_peer_addresses.entry(peer_id) {
+            Entry::Occupied(mut entry) => {
+                if entry.get() == &addr {
+                    false
+                } else {
+                    entry.insert(addr);
+                    true
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(addr);
+                true
+            }
+        }
+    }
+
+    pub(crate) fn sample_n_peers_to_connect(&self, n: usize) -> HashMap<PeerId, Vec<Multiaddr>> {
+        let nodes = self
+            .saved_peer_addresses
+            .keys()
+            .into_iter()
+            .chain(self.announced_peer_addresses.keys().into_iter())
+            .collect::<HashSet<_, RandomState>>();
+
+        nodes
+            .into_iter()
+            .take(n)
+            .map(|peer_id| {
+                (
+                    peer_id.clone(),
+                    self.get_peer_addresses(peer_id).into_iter().collect(),
+                )
+            })
+            .collect()
+    }
+}
+
+pub trait NetworkActorStateStore {
+    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState>;
+    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState);
+}
+
 static CHANNEL_ACTOR_NAME_PREFIX: AtomicU64 = AtomicU64::new(0u64);
 
 // ractor requires that the actor name is unique, so we add a prefix to the actor name.
@@ -2549,7 +2718,8 @@ fn generate_channel_actor_name(local_peer_id: &PeerId, remote_peer_id: &PeerId) 
 
 impl<S> NetworkActorState<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -2905,6 +3075,10 @@ where
         self.peer_session_map.get(peer_id).cloned()
     }
 
+    fn is_connected(&self, peer_id: &PeerId) -> bool {
+        self.peer_session_map.contains_key(peer_id)
+    }
+
     pub fn get_n_peer_peer_ids(&self, n: usize, excluding: HashSet<PeerId>) -> Vec<PeerId> {
         self.peer_session_map
             .keys()
@@ -2928,11 +3102,19 @@ where
         udt_type_script: &Option<Script>,
     ) -> Result<(u128, u64), ProcessingChannelError> {
         let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if udt_type_script.is_none() && funding_amount < reserved_ckb_amount.into() {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The value of the channel should be greater than the reserve amount: {}",
-                reserved_ckb_amount
-            )));
+        if udt_type_script.is_none() {
+            if funding_amount < reserved_ckb_amount.into() {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The funding amount should be greater than the reserved amount: {}",
+                    reserved_ckb_amount
+                )));
+            }
+            if funding_amount >= u64::MAX as u128 {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "The funding amount should be less than {:?}",
+                    u64::MAX
+                )));
+            }
         }
         let funding_amount = if udt_type_script.is_some() {
             funding_amount
@@ -3045,12 +3227,60 @@ where
         channel_id: Hash256,
         command: ChannelCommand,
     ) -> crate::Result<()> {
-        match self.channels.get(&channel_id) {
-            Some(actor) => {
-                actor.send_message(ChannelActorMessage::Command(command))?;
-                Ok(())
+        match command {
+            // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
+            ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
+                match self.store.get_channel_actor_state(&channel_id) {
+                    Some(mut state) => {
+                        match state.state {
+                            ChannelState::ChannelReady() => {
+                                debug!("Handling force shutdown command in ChannelReady state");
+                            }
+                            ChannelState::ShuttingDown(flags) => {
+                                debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
+                            }
+                            _ => {
+                                let error = Error::ChannelError(
+                                    ProcessingChannelError::InvalidState(format!(
+                                        "Handling force shutdown command invalid state {:?}",
+                                        &state.state
+                                    )),
+                                );
+
+                                let _ = rpc_reply.send(Err(error.to_string()));
+                                return Err(error);
+                            }
+                        };
+
+                        // when channel is in ChannelReady or ShuttingDown state, the latest_commitment_transaction should exist
+                        let transaction = state.latest_commitment_transaction.clone().unwrap();
+                        self.network
+                            .send_message(NetworkActorMessage::new_event(
+                                NetworkActorEvent::CommitmentTransactionPending(
+                                    transaction,
+                                    channel_id,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+                        state.update_state(ChannelState::ShuttingDown(
+                            ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                        ));
+                        self.store.insert_channel_actor_state(state);
+
+                        let _ = rpc_reply.send(Ok(()));
+                        Ok(())
+                    }
+                    None => Err(Error::ChannelNotFound(channel_id)),
+                }
             }
-            None => Err(Error::ChannelNotFound(channel_id)),
+            _ => match self.channels.get(&channel_id) {
+                Some(actor) => {
+                    actor.send_message(ChannelActorMessage::Command(command))?;
+                    Ok(())
+                }
+                None => Err(Error::ChannelNotFound(channel_id)),
+            },
         }
     }
 
@@ -3140,18 +3370,9 @@ where
     }
 
     fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
-        self.channels.remove(channel_id).map(|channel| {
-            if let Some(outpoint) = self.outpoint_channel_map.iter().find_map(|(k, v)| {
-                if v == channel_id {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            }) {
-                self.outpoint_channel_map.remove(&outpoint);
-            }
-            channel
-        })
+        self.channels
+            .remove(channel_id)
+            .inspect(|_| self.outpoint_channel_map.retain(|_, v| v != channel_id))
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
@@ -3168,6 +3389,40 @@ where
             }
         }
         self.maybe_tell_syncer_peer_disconnected(id);
+    }
+
+    pub(crate) fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
+        self.state_to_be_persisted.get_peer_addresses(peer_id)
+    }
+
+    pub(crate) fn save_peer_address(&mut self, peer_id: PeerId, address: Multiaddr) -> bool {
+        if self
+            .state_to_be_persisted
+            .save_peer_address(peer_id, address)
+        {
+            self.persist_state();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn save_announced_peer_addresses(
+        &mut self,
+        peer_id: PeerId,
+        addresses: Vec<Multiaddr>,
+    ) {
+        if self
+            .state_to_be_persisted
+            .save_announced_peer_addresses(peer_id, addresses)
+        {
+            self.persist_state();
+        }
+    }
+
+    fn persist_state(&self) {
+        self.store
+            .insert_network_actor_state(&self.peer_id, self.state_to_be_persisted.clone());
     }
 
     async fn maybe_sync_network_graph(&mut self, peer_id: &PeerId) {
@@ -3568,7 +3823,8 @@ pub struct NetworkActorStartArguments {
 #[rasync_trait]
 impl<S> Actor for NetworkActor<S>
 where
-    S: ChannelActorStateStore
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
         + NetworkGraphStateStore
         + InvoiceStore
         + Clone
@@ -3658,17 +3914,19 @@ where
 
         let mut graph = self.network_graph.write().await;
 
-        let peers_to_sync_network_graph = graph
-            .get_peers_to_sync_network_graph()
-            .into_iter()
-            .map(|(a, b)| (a.clone(), b.clone()))
-            .collect();
+        let mut state_to_be_persisted = self
+            .store
+            .get_network_actor_state(&my_peer_id)
+            .unwrap_or_default();
+
+        for bootnode in &config.bootnode_addrs {
+            let addr = Multiaddr::from_str(bootnode.as_str()).expect("valid bootnode");
+            let peer_id = extract_peer_id(&addr).expect("valid peer id");
+            state_to_be_persisted.save_peer_address(peer_id, addr);
+        }
+
         let height = graph.get_best_height();
         let last_update = graph.get_last_update_timestamp();
-        debug!(
-            "Trying to sync network graph with peers {:?} with height {} and last update {:?}",
-            &peers_to_sync_network_graph, &height, &last_update
-        );
 
         let chain_actor = self.chain_actor.clone();
         let current_block_number = call!(chain_actor, CkbChainMessage::GetCurrentBlockNumber, ())
@@ -3679,10 +3937,12 @@ where
             height,
             current_block_number,
             last_update,
-            peers_to_sync_network_graph,
+            vec![],
         );
+
         let mut state = NetworkActorState {
             store: self.store.clone(),
+            state_to_be_persisted,
             node_name: config.announced_node_name,
             peer_id: my_peer_id,
             announced_addrs,
@@ -3721,18 +3981,6 @@ where
         let node_announcement = state.get_or_create_new_node_announcement_message();
         graph.process_node_announcement(node_announcement);
 
-        // load the connected peers from the network graph
-        let peers = graph.get_connected_peers();
-        // TODO: we need to bootstrap the network if no peers are connected.
-        if peers.is_empty() {
-            warn!("No connected peers found in the network graph");
-        }
-        for (_peer_id, addr) in peers {
-            myself.send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ConnectPeer(addr.clone()),
-            ))?;
-        }
-
         let announce_node_interval_seconds = config.announce_node_interval_seconds();
         if announce_node_interval_seconds > 0 {
             myself.send_interval(Duration::from_secs(announce_node_interval_seconds), || {
@@ -3742,7 +3990,45 @@ where
             });
         }
 
+        // Save bootnodes to the network actor state.
+        state.persist_state();
+
         Ok(state)
+    }
+
+    async fn post_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        debug!("Trying to connect to peers with mutual channels");
+        for (peer_id, channel_id, channel_state) in self.store.get_channel_states(None) {
+            let addresses = state.get_peer_addresses(&peer_id);
+
+            debug!(
+                "Reconnecting channel {:x} peers {:?} in state {:?}",
+                &channel_id, &peer_id, &channel_state
+            );
+            for addr in addresses {
+                myself
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ConnectPeer(addr),
+                    ))
+                    .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+            }
+        }
+
+        myself
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::MaintainConnections(NUM_PEER_CONNECTIONS),
+            ))
+            .expect(ASSUME_NETWORK_MYSELF_ALIVE);
+        myself.send_interval(MAINTAINING_CONNECTIONS_INTERVAL, || {
+            NetworkActorMessage::new_command(NetworkActorCommand::MaintainConnections(
+                NUM_PEER_CONNECTIONS,
+            ))
+        });
+        Ok(())
     }
 
     async fn handle(
@@ -3774,6 +4060,8 @@ where
         if let Err(err) = state.control.close().await {
             error!("Failed to close tentacle service: {}", err);
         }
+        debug!("Saving network actor state for {:?}", state.peer_id);
+        state.persist_state();
         debug!("Network service for {:?} shutdown", state.peer_id);
         // The event receiver may have been closed already.
         // We ignore the error here.
@@ -3922,7 +4210,14 @@ pub(crate) fn emit_service_event(
 }
 
 pub async fn start_network<
-    S: ChannelActorStateStore + NetworkGraphStateStore + InvoiceStore + Clone + Send + Sync + 'static,
+    S: NetworkActorStateStore
+        + ChannelActorStateStore
+        + NetworkGraphStateStore
+        + InvoiceStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 >(
     config: FiberConfig,
     chain_actor: ActorRef<CkbChainMessage>,
