@@ -646,7 +646,6 @@ pub struct OpenChannel {
     pub min_tlc_value: u128,
     pub funding_pubkey: Pubkey,
     pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
     pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
@@ -687,7 +686,6 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .shutdown_script(open_channel.shutdown_script)
             .funding_pubkey(open_channel.funding_pubkey.into())
             .revocation_basepoint(open_channel.revocation_basepoint.into())
-            .payment_basepoint(open_channel.payment_basepoint.into())
             .delayed_payment_basepoint(open_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
@@ -722,7 +720,6 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             min_tlc_value: open_channel.min_tlc_value().unpack(),
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
             revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: open_channel.payment_basepoint().try_into()?,
             delayed_payment_basepoint: open_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
@@ -755,7 +752,6 @@ pub struct AcceptChannel {
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
     pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
     pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
@@ -776,7 +772,6 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .min_tlc_value(accept_channel.min_tlc_value.pack())
             .funding_pubkey(accept_channel.funding_pubkey.into())
             .revocation_basepoint(accept_channel.revocation_basepoint.into())
-            .payment_basepoint(accept_channel.payment_basepoint.into())
             .delayed_payment_basepoint(accept_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
@@ -809,7 +804,6 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
             revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: accept_channel.payment_basepoint().try_into()?,
             delayed_payment_basepoint: accept_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,

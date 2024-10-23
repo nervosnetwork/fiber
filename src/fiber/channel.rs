@@ -1374,7 +1374,6 @@ where
                     max_tlc_number_in_flight: DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     revocation_basepoint: state.signer.revocation_base_key.pubkey(),
-                    payment_basepoint: state.signer.payment_key.pubkey(),
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
                     delayed_payment_basepoint: state.signer.delayed_payment_base_key.pubkey(),
                     tlc_basepoint: state.signer.tlc_base_key.pubkey(),
@@ -1495,7 +1494,6 @@ where
                     revocation_basepoint: channel
                         .get_local_channel_public_keys()
                         .revocation_base_key,
-                    payment_basepoint: channel.get_local_channel_public_keys().payment_base_key,
                     delayed_payment_basepoint: channel
                         .get_local_channel_public_keys()
                         .delayed_payment_base_key,
@@ -5296,10 +5294,6 @@ impl ChannelParametersOneParty {
         &self.pubkeys.funding_pubkey
     }
 
-    pub fn payment_base_key(&self) -> &Pubkey {
-        &self.pubkeys.payment_base_key
-    }
-
     pub fn delayed_payment_base_key(&self) -> &Pubkey {
         &self.pubkeys.delayed_payment_base_key
     }
@@ -5324,10 +5318,6 @@ pub struct ChannelBasePublicKeys {
     /// counterparty to create a secret which the counterparty can reveal to revoke previous
     /// states.
     pub revocation_base_key: Pubkey,
-    /// The public key on which the non-broadcaster (ie the countersignatory) receives an immediately
-    /// spendable primary channel balance on the broadcaster's commitment transaction. This key is
-    /// static across every commitment transaction.
-    pub payment_base_key: Pubkey,
     /// The base point which is used (with derive_public_key) to derive a per-commitment payment
     /// public key which receives non-HTLC-encumbered funds which are only available for spending
     /// after some delay (or can be claimed via the revocation path).
@@ -5342,7 +5332,6 @@ impl From<&OpenChannel> for ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             revocation_base_key: value.revocation_basepoint,
-            payment_base_key: value.payment_basepoint,
             delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
@@ -5354,7 +5343,6 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
             revocation_base_key: value.revocation_basepoint,
-            payment_base_key: value.payment_basepoint,
             delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
@@ -5571,7 +5559,6 @@ impl InMemorySigner {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
             revocation_base_key: self.revocation_base_key.pubkey(),
-            payment_base_key: self.payment_key.pubkey(),
             delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
             tlc_base_key: self.tlc_base_key.pubkey(),
         }
@@ -5595,16 +5582,6 @@ impl InMemorySigner {
             &per_commitment_secret.into(),
             &self.revocation_base_key.pubkey(),
         )
-    }
-
-    pub fn derive_payment_key(&self, new_commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(new_commitment_number);
-        derive_private_key(&self.payment_key, &per_commitment_point)
-    }
-
-    pub fn derive_delayed_payment_key(&self, new_commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(new_commitment_number);
-        derive_private_key(&self.delayed_payment_base_key, &per_commitment_point)
     }
 
     pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {

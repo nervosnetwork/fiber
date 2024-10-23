@@ -24,6 +24,7 @@ table OpenChannel {
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
     revocation_basepoint:        Pubkey,
+    // deprecated
     payment_basepoint:           Pubkey,
     delayed_payment_basepoint:   Pubkey,
     tlc_basepoint:               Pubkey,
@@ -45,6 +46,7 @@ table AcceptChannel {
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
     revocation_basepoint:        Pubkey,
+    // deprecated
     payment_basepoint:           Pubkey,
     delayed_payment_basepoint:   Pubkey,
     tlc_basepoint:               Pubkey,
