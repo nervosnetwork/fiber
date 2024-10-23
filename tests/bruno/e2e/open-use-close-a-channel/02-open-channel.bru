@@ -15,9 +15,6 @@ headers {
   Accept: application/json
 }
 
-// open a channel with delay epoch 3.5 epochs = 14 hours
-// 3.5 epochs is presented as 3(E) and 1(I)/2(L): (L << 40) | (I << 24) | E = 0x20001000003
-// ref: https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png
 body:json {
   {
     "id": "42",
