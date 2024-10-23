@@ -1,9 +1,12 @@
-use crate::fiber::types::TlcErrorCode;
+// The probability calculation is based on lnd's implementation,
+// https://github.com/lightningnetwork/lnd/blob/b7c59b36a74975c4e710a02ea42959053735402e/routing/probability_bimodal.go
+// we only use direct channel probability now.
 
 use super::{
     graph::{NetworkGraphStateStore, SessionRouteNode},
     types::{Pubkey, TlcErr},
 };
+use crate::fiber::types::TlcErrorCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error};

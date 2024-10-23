@@ -815,6 +815,7 @@ where
     }
 
     fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
+        assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
         let time_pref = 0.5_f64;
