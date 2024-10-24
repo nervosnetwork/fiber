@@ -619,7 +619,6 @@ where
                                     channel_id: state.get_id(),
                                     close_script: close_script.clone(),
                                     fee_rate: FeeRate::from_u64(0),
-                                    force: shutdown.force,
                                 }),
                             )),
                         ))
@@ -1154,22 +1153,13 @@ where
         state: &mut ChannelActorState,
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
+        // The force shutdown command has been handled speically in the `NetworkActorState#send_command_to_channel` function.
+        // We only need to handle the normal shutdown command here.
         debug!("Handling shutdown command: {:?}", &command);
         let flags = match state.state {
-            ChannelState::Closed(_) => {
-                debug!("Channel already closed, ignoring shutdown command");
-                return Ok(());
-            }
             ChannelState::ChannelReady() => {
                 debug!("Handling shutdown command in ChannelReady state");
                 ShuttingDownFlags::empty()
-            }
-            ChannelState::ShuttingDown(flags) => {
-                if !command.force {
-                    debug!("we already in shutting down state: {:?}", &flags);
-                    return Ok(());
-                }
-                flags
             }
             _ => {
                 debug!("Handling shutdown command in state {:?}", &state.state);
@@ -1181,57 +1171,34 @@ where
         };
 
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-        if command.force {
-            if let Some(transaction) = &state.latest_commitment_transaction {
-                self.network
-                    .send_message(NetworkActorMessage::new_event(
-                        NetworkActorEvent::CommitmentTransactionPending(
-                            transaction.clone(),
-                            state.get_id(),
-                        ),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                    self.get_remote_peer_id(),
+                    FiberMessage::shutdown(Shutdown {
+                        channel_id: state.get_id(),
+                        close_script: command.close_script.clone(),
+                        fee_rate: command.fee_rate,
+                    }),
+                )),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                state.update_state(ChannelState::ShuttingDown(
-                    ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-                ));
-            } else {
-                return Err(ProcessingChannelError::InvalidState(
-                    "Force shutdown without a valid commitment transaction".to_string(),
-                ));
-            }
-        } else {
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
-                        FiberMessage::shutdown(Shutdown {
-                            channel_id: state.get_id(),
-                            close_script: command.close_script.clone(),
-                            fee_rate: command.fee_rate,
-                            force: command.force,
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let shutdown_info = ShutdownInfo {
+            close_script: command.close_script,
+            fee_rate: command.fee_rate.as_u64(),
+            signature: None,
+        };
+        state.local_shutdown_info = Some(shutdown_info);
+        state.update_state(ChannelState::ShuttingDown(
+            flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
+        ));
+        debug!(
+            "Channel state updated to {:?} after processing shutdown command",
+            &state.state
+        );
 
-            let shutdown_info = ShutdownInfo {
-                close_script: command.close_script,
-                fee_rate: command.fee_rate.as_u64(),
-                signature: None,
-            };
-            state.local_shutdown_info = Some(shutdown_info);
-            state.update_state(ChannelState::ShuttingDown(
-                flags | ShuttingDownFlags::OUR_SHUTDOWN_SENT,
-            ));
-            debug!(
-                "Channel state updated to {:?} after processing shutdown command",
-                &state.state
-            );
-
-            state.maybe_transition_to_shutdown(&self.network)?;
-        }
-        Ok(())
+        state.maybe_transition_to_shutdown(&self.network)
     }
 
     pub async fn handle_update_command(
@@ -2541,12 +2508,9 @@ impl ChannelActorState {
             None => {
                 let channel_outpoint = self.get_funding_transaction_outpoint();
                 let capacity = if self.funding_udt_type_script.is_some() {
-                    self.to_local_amount + self.to_remote_amount
+                    self.get_total_udt_amount()
                 } else {
-                    self.to_local_amount
-                        + self.to_remote_amount
-                        + self.local_reserved_ckb_amount as u128
-                        + self.remote_reserved_ckb_amount as u128
+                    self.get_total_ckb_amount() as u128
                 };
 
                 let (node1_id, node2_id) = if self.local_is_node1() {
@@ -3032,7 +2996,7 @@ impl ChannelActorState {
         self.state.is_closed()
     }
 
-    fn update_state(&mut self, new_state: ChannelState) {
+    pub(crate) fn update_state(&mut self, new_state: ChannelState) {
         debug!(
             "Updating channel state from {:?} to {:?}",
             &self.state, &new_state
@@ -3217,6 +3181,20 @@ impl ChannelActorState {
         }
     }
 
+    fn get_total_reserved_ckb_amount(&self) -> u64 {
+        self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
+    }
+
+    fn get_total_ckb_amount(&self) -> u64 {
+        self.to_local_amount as u64
+            + self.to_remote_amount as u64
+            + self.get_total_reserved_ckb_amount()
+    }
+
+    fn get_total_udt_amount(&self) -> u128 {
+        self.to_local_amount + self.to_remote_amount
+    }
+
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
     fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
@@ -3224,21 +3202,17 @@ impl ChannelActorState {
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
         let lock_script = self.get_remote_shutdown_script();
         let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
-                - commitment_tx_fee;
+            let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = (self.to_local_amount + self.to_remote_amount)
-                .to_le_bytes()
-                .pack();
+            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
             (output, output_data)
         } else {
-            let capacity =
-                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
+            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .capacity(capacity.pack())
@@ -4711,21 +4685,17 @@ impl ChannelActorState {
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
         let lock_script = self.get_local_shutdown_script();
         let (output, output_data) = if let Some(udt_type_script) = &self.funding_udt_type_script {
-            let capacity = self.local_reserved_ckb_amount + self.remote_reserved_ckb_amount
-                - commitment_tx_fee;
+            let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .type_(Some(udt_type_script.clone()).pack())
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = (self.to_local_amount + self.to_remote_amount)
-                .to_le_bytes()
-                .pack();
+            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
             (output, output_data)
         } else {
-            let capacity =
-                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
+            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(lock_script)
                 .capacity(capacity.pack())
@@ -4975,14 +4945,10 @@ impl ChannelActorState {
             );
             debug!("current_capacity: {}, remote_reserved_ckb_amount: {}, local_reserved_ckb_amount: {}",
                 current_capacity, self.remote_reserved_ckb_amount, self.local_reserved_ckb_amount);
-            let is_udt_amount_ok = udt_amount == self.to_remote_amount + self.to_local_amount;
+            let is_udt_amount_ok = udt_amount == self.get_total_udt_amount();
             return Ok(is_udt_amount_ok);
         } else {
-            let is_complete = current_capacity
-                == (self.to_local_amount
-                    + self.to_remote_amount
-                    + self.local_reserved_ckb_amount as u128
-                    + self.remote_reserved_ckb_amount as u128) as u64;
+            let is_complete = current_capacity == self.get_total_ckb_amount();
             Ok(is_complete)
         }
     }
@@ -5312,13 +5278,10 @@ impl ChannelActorState {
                 .capacity(capacity.pack())
                 .build();
 
-            let output_data = (self.to_local_amount + self.to_remote_amount)
-                .to_le_bytes()
-                .pack();
+            let output_data = self.get_total_udt_amount().to_le_bytes().pack();
             (output, output_data)
         } else {
-            let capacity =
-                (self.to_local_amount + self.to_remote_amount) as u64 - commitment_tx_fee;
+            let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
             let output = CellOutput::new_builder()
                 .lock(commitment_lock_script)
                 .capacity(capacity.pack())

@@ -265,6 +265,7 @@ Attempts to connect to a peer.
 ###### Params
 
 * `address` - The address of the peer to connect to
+* `save` - Whether to save the peer address, an optional parameter (default value true)
 
 ###### Returns
 

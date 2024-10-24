@@ -21,6 +21,8 @@ pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
 }
 
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
+    // when there is pending htlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.
+    // to simplify the calculation, we use hardcoded 56 bytes here.
     let commitment_lock_script = get_script_by_contract(Contract::CommitmentLock, &[0u8; 56]);
     let cell_deps = get_cell_deps(vec![Contract::FundingLock], udt_type_script);
 

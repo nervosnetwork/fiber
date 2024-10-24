@@ -3,8 +3,8 @@ use crate::{
     fiber::{
         channel::{
             derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
-            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
+            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
@@ -18,7 +18,7 @@ use ckb_jsonrpc_types::Status;
 use ckb_types::{
     core::FeeRate,
     packed::{CellInput, Script, Transaction},
-    prelude::{AsTransactionBuilder, Builder, Entity, Pack},
+    prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use ractor::call;
 
@@ -721,6 +721,39 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
 }
 
 #[tokio::test]
+async fn test_open_channel_with_invalid_ckb_amount_range() {
+    init_tracing();
+
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: true,
+                shutdown_script: None,
+                funding_amount: 0xfffffffffffffffffffffffffffffff,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                funding_fee_rate: None,
+                tlc_locktime_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_max_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("{:?}", open_channel_result.as_ref().err().unwrap());
+    assert!(open_channel_result
+        .err()
+        .unwrap()
+        .contains("The funding amount should be less than 18446744073709551615"));
+}
+
+#[tokio::test]
 async fn test_revoke_old_commitment_transaction() {
     init_tracing();
 
@@ -1125,10 +1158,6 @@ async fn test_reestablish_channel() {
         })
         .await;
 
-    // sleep for a while to wait before the reconnection, otherwise there maybe
-    // an error with `RepeatedConnection` in an odd chance.
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
     // Don't use `connect_to` here as that may consume the `ChannelCreated` event.
     // This is due to tentacle connection is async. We may actually send
     // the `ChannelCreated` event before the `PeerConnected` event.
@@ -1155,4 +1184,70 @@ async fn test_reestablish_channel() {
             _ => false,
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_force_close_channel_when_remote_is_offline() {
+    let (mut node_a, mut node_b, channel_id) =
+        create_nodes_with_established_channel(16200000000, 6200000000, true).await;
+
+    node_b.stop().await;
+    node_a
+        .expect_event(|event| matches!(event, NetworkServiceEvent::PeerDisConnected(_, _)))
+        .await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::default(),
+                        fee_rate: FeeRate::from_u64(1000),
+                        force: true,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("successfully shutdown channel");
+}
+
+#[tokio::test]
+async fn test_commitment_tx_capacity() {
+    let (amount_a, amount_b) = (16200000000, 6200000000);
+    let (node_a, _node_b, channel_id) =
+        create_nodes_with_established_channel(amount_a, amount_b, true).await;
+
+    let state = node_a.store.get_channel_actor_state(&channel_id).unwrap();
+    let commitment_tx = state.latest_commitment_transaction.unwrap().into_view();
+    let output_capacity: u64 = commitment_tx.output(0).unwrap().capacity().unpack();
+
+    // default fee rate is 1000 shannons per kb, and there is a gap of 20 bytes between the mock commitment tx and the real one
+    // ref to fn commitment_tx_size
+    assert_eq!(
+        amount_a + amount_b - (commitment_tx.data().serialized_size_in_block() + 20) as u128,
+        output_capacity as u128
+    );
+}
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
 }
