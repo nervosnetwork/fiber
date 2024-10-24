@@ -4387,7 +4387,12 @@ impl ::core::fmt::Display for OpenChannel {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -4543,7 +4548,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn to_self_delay(&self) -> Uint64 {
+    pub fn commitment_delay_epoch(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
@@ -4651,7 +4656,7 @@ impl molecule::prelude::Entity for OpenChannel {
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
-            .to_self_delay(self.to_self_delay())
+            .commitment_delay_epoch(self.commitment_delay_epoch())
             .funding_pubkey(self.funding_pubkey())
             .revocation_basepoint(self.revocation_basepoint())
             .payment_basepoint(self.payment_basepoint())
@@ -4719,7 +4724,12 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -4846,7 +4856,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn to_self_delay(&self) -> Uint64Reader<'r> {
+    pub fn commitment_delay_epoch(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
@@ -5001,7 +5011,7 @@ pub struct OpenChannelBuilder {
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
-    pub(crate) to_self_delay: Uint64,
+    pub(crate) commitment_delay_epoch: Uint64,
     pub(crate) funding_pubkey: Pubkey,
     pub(crate) revocation_basepoint: Pubkey,
     pub(crate) payment_basepoint: Pubkey,
@@ -5059,8 +5069,8 @@ impl OpenChannelBuilder {
         self.min_tlc_value = v;
         self
     }
-    pub fn to_self_delay(mut self, v: Uint64) -> Self {
-        self.to_self_delay = v;
+    pub fn commitment_delay_epoch(mut self, v: Uint64) -> Self {
+        self.commitment_delay_epoch = v;
         self
     }
     pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
@@ -5120,7 +5130,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
-            + self.to_self_delay.as_slice().len()
+            + self.commitment_delay_epoch.as_slice().len()
             + self.funding_pubkey.as_slice().len()
             + self.revocation_basepoint.as_slice().len()
             + self.payment_basepoint.as_slice().len()
@@ -5158,7 +5168,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.to_self_delay.as_slice().len();
+        total_size += self.commitment_delay_epoch.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_pubkey.as_slice().len();
         offsets.push(total_size);
@@ -5194,7 +5204,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
-        writer.write_all(self.to_self_delay.as_slice())?;
+        writer.write_all(self.commitment_delay_epoch.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;
         writer.write_all(self.revocation_basepoint.as_slice())?;
         writer.write_all(self.payment_basepoint.as_slice())?;
@@ -5255,7 +5265,12 @@ impl ::core::fmt::Display for AcceptChannel {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -5383,7 +5398,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn to_self_delay(&self) -> Uint64 {
+    pub fn commitment_delay_epoch(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
@@ -5481,7 +5496,7 @@ impl molecule::prelude::Entity for AcceptChannel {
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
-            .to_self_delay(self.to_self_delay())
+            .commitment_delay_epoch(self.commitment_delay_epoch())
             .funding_pubkey(self.funding_pubkey())
             .revocation_basepoint(self.revocation_basepoint())
             .payment_basepoint(self.payment_basepoint())
@@ -5534,7 +5549,12 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -5636,7 +5656,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn to_self_delay(&self) -> Uint64Reader<'r> {
+    pub fn commitment_delay_epoch(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
@@ -5776,7 +5796,7 @@ pub struct AcceptChannelBuilder {
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
-    pub(crate) to_self_delay: Uint64,
+    pub(crate) commitment_delay_epoch: Uint64,
     pub(crate) funding_pubkey: Pubkey,
     pub(crate) revocation_basepoint: Pubkey,
     pub(crate) payment_basepoint: Pubkey,
@@ -5817,8 +5837,8 @@ impl AcceptChannelBuilder {
         self.min_tlc_value = v;
         self
     }
-    pub fn to_self_delay(mut self, v: Uint64) -> Self {
-        self.to_self_delay = v;
+    pub fn commitment_delay_epoch(mut self, v: Uint64) -> Self {
+        self.commitment_delay_epoch = v;
         self
     }
     pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
@@ -5870,7 +5890,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
-            + self.to_self_delay.as_slice().len()
+            + self.commitment_delay_epoch.as_slice().len()
             + self.funding_pubkey.as_slice().len()
             + self.revocation_basepoint.as_slice().len()
             + self.payment_basepoint.as_slice().len()
@@ -5899,7 +5919,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.to_self_delay.as_slice().len();
+        total_size += self.commitment_delay_epoch.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_pubkey.as_slice().len();
         offsets.push(total_size);
@@ -5929,7 +5949,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
-        writer.write_all(self.to_self_delay.as_slice())?;
+        writer.write_all(self.commitment_delay_epoch.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;
         writer.write_all(self.revocation_basepoint.as_slice())?;
         writer.write_all(self.payment_basepoint.as_slice())?;

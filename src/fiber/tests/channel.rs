@@ -2,9 +2,9 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
-            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
+            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
@@ -44,18 +44,6 @@ fn test_derive_private_and_public_tlc_keys() {
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
-#[test]
-fn test_derive_private_and_public_revocation_keys() {
-    let base_revocation_key = Privkey::from(&[1; 32]);
-    let per_commitment_secret = Privkey::from(&[2; 32]);
-    let derived_privkey = derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
-    let derived_pubkey = derive_revocation_pubkey(
-        &base_revocation_key.pubkey(),
-        &per_commitment_secret.pubkey(),
-    );
-    assert_eq!(derived_privkey.pubkey(), derived_pubkey);
-}
-
 #[tokio::test]
 async fn test_open_channel_to_peer() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
@@ -69,6 +57,7 @@ async fn test_open_channel_to_peer() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -109,6 +98,7 @@ async fn test_open_and_accept_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -207,6 +197,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -397,6 +388,7 @@ async fn create_nodes_with_established_channel(
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -734,6 +726,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
                 funding_amount: 0xfffffffffffffffffffffffffffffff,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -768,6 +761,7 @@ async fn test_revoke_old_commitment_transaction() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -945,6 +939,7 @@ async fn test_create_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -1069,6 +1064,7 @@ async fn test_reestablish_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,

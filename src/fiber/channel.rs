@@ -12,9 +12,9 @@ use crate::{
     invoice::InvoiceStore,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_sdk::Since;
+use ckb_sdk::{Since, SinceType};
 use ckb_types::{
-    core::{FeeRate, TransactionBuilder, TransactionView},
+    core::{EpochNumberWithFraction, FeeRate, TransactionBuilder, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
@@ -180,11 +180,16 @@ pub struct ChannelCommandWithId {
 
 pub const DEFAULT_FEE_RATE: u64 = 1_000;
 pub const DEFAULT_COMMITMENT_FEE_RATE: u64 = 1_000;
+// The default commitment delay is 6 epochs = 24 hours.
+pub const DEFAULT_COMMITMENT_DELAY_EPOCHS: u64 = 6;
+// The min commitment delay is 1 epoch = 4 hours.
+pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
+// The max commitment delay is 84 epochs = 14 days.
+pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
-pub const DEFAULT_TO_LOCAL_DELAY_BLOCKS: u64 = 10;
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -199,6 +204,7 @@ pub struct OpenChannelParameter {
     pub shutdown_script: Script,
     pub channel_id_sender: oneshot::Sender<Hash256>,
     pub commitment_fee_rate: Option<u64>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
@@ -1508,12 +1514,12 @@ where
                     channel_id,
                     chain_hash,
                     commitment_fee_rate,
+                    commitment_delay_epoch,
                     funding_fee_rate,
                     funding_udt_type_script,
                     funding_amount,
                     shutdown_script,
                     reserved_ckb_amount,
-                    to_local_delay,
                     first_per_commitment_point,
                     second_per_commitment_point,
                     next_local_nonce,
@@ -1546,6 +1552,7 @@ where
                     local_funding_amount,
                     local_reserved_ckb_amount,
                     *commitment_fee_rate,
+                    *commitment_delay_epoch,
                     *funding_fee_rate,
                     funding_udt_type_script.clone(),
                     &seed,
@@ -1555,7 +1562,6 @@ where
                     shutdown_script.clone(),
                     *funding_amount,
                     *reserved_ckb_amount,
-                    *to_local_delay,
                     counterpart_pubkeys,
                     next_local_nonce.clone(),
                     channel_announcement_nonce.clone(),
@@ -1569,6 +1575,7 @@ where
                     "local_reserved_ckb_amount",
                     "remote_reserved_ckb_amount",
                     "commitment_fee_rate",
+                    "commitment_delay_epoch",
                     "funding_fee_rate",
                     "max_tlc_number_in_flight",
                 ])?;
@@ -1587,12 +1594,8 @@ where
                     reserved_ckb_amount: local_reserved_ckb_amount,
                     max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
                     max_tlc_number_in_flight: DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
-                    to_local_delay: *to_local_delay,
                     funding_pubkey: state.signer.funding_key.pubkey(),
-                    revocation_basepoint: state.signer.revocation_base_key.pubkey(),
-                    payment_basepoint: state.signer.payment_key.pubkey(),
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    delayed_payment_basepoint: state.signer.delayed_payment_base_key.pubkey(),
                     tlc_basepoint: state.signer.tlc_base_key.pubkey(),
                     first_per_commitment_point: state
                         .signer
@@ -1631,6 +1634,7 @@ where
                 shutdown_script,
                 channel_id_sender,
                 commitment_fee_rate,
+                commitment_delay_epoch,
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
@@ -1654,16 +1658,23 @@ where
                     funding_amount,
                     reserved_ckb_amount,
                     commitment_fee_rate,
+                    commitment_delay_epoch
+                        .unwrap_or(EpochNumberWithFraction::new(
+                            DEFAULT_COMMITMENT_DELAY_EPOCHS,
+                            0,
+                            1,
+                        ))
+                        .full_value(),
                     funding_fee_rate,
                     funding_udt_type_script.clone(),
                     shutdown_script.clone(),
                     max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                     max_tlc_number_in_flight.unwrap_or(DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT),
-                    LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                 );
 
                 channel.check_ckb_params(vec![
                     "commitment_fee_rate",
+                    "commitment_delay_epoch",
                     "funding_fee_rate",
                     "local_reserved_ckb_amount",
                     "max_tlc_number_in_flight",
@@ -1689,10 +1700,10 @@ where
                     reserved_ckb_amount: channel.local_reserved_ckb_amount,
                     funding_fee_rate,
                     commitment_fee_rate,
+                    commitment_delay_epoch: channel.commitment_delay_epoch,
                     max_tlc_value_in_flight: channel.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: channel.max_tlc_number_in_flight,
                     min_tlc_value: DEFAULT_MIN_TLC_VALUE,
-                    to_local_delay: LockTime::new(DEFAULT_TO_LOCAL_DELAY_BLOCKS),
                     channel_flags,
                     first_per_commitment_point: channel
                         .signer
@@ -1700,23 +1711,8 @@ where
                     second_per_commitment_point: channel
                         .signer
                         .get_commitment_point(commitment_number + 1),
-                    funding_pubkey: channel
-                        .get_local_channel_parameters()
-                        .pubkeys
-                        .funding_pubkey,
-                    revocation_basepoint: channel
-                        .get_local_channel_parameters()
-                        .pubkeys
-                        .revocation_base_key,
-                    payment_basepoint: channel
-                        .get_local_channel_parameters()
-                        .pubkeys
-                        .payment_base_key,
-                    delayed_payment_basepoint: channel
-                        .get_local_channel_parameters()
-                        .pubkeys
-                        .delayed_payment_base_key,
-                    tlc_basepoint: channel.get_local_channel_parameters().pubkeys.tlc_base_key,
+                    funding_pubkey: channel.get_local_channel_public_keys().funding_pubkey,
+                    tlc_basepoint: channel.get_local_channel_public_keys().tlc_base_key,
                     next_local_nonce: channel.get_local_musig2_pubnonce(),
                     channel_announcement_nonce,
                 });
@@ -1997,6 +1993,10 @@ pub struct ChannelActorState {
     // The side who want to submit the commitment transaction will pay fee
     pub commitment_fee_rate: u64,
 
+    // The delay time for the commitment transaction, this value is set by the initiator of the channel.
+    // It must be a relative EpochNumberWithFraction in u64 format.
+    pub commitment_delay_epoch: u64,
+
     // The fee rate used for funding transaction, the initiator may set it as `funding_fee_rate` option,
     // if it's not set, DEFAULT_FEE_RATE will be used as default value, two sides will use the same fee rate
     pub funding_fee_rate: u64,
@@ -2004,8 +2004,8 @@ pub struct ChannelActorState {
     // Signer is used to sign the commitment transactions.
     pub signer: InMemorySigner,
 
-    // Cached channel parameter for easier of access.
-    pub local_channel_parameters: ChannelParametersOneParty,
+    // Cached channel public keys for easier of access.
+    pub local_channel_public_keys: ChannelBasePublicKeys,
 
     // Commitment numbers that are used to derive keys.
     // This value is guaranteed to be 0 when channel is just created.
@@ -2045,7 +2045,7 @@ pub struct ChannelActorState {
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
     pub remote_commitment_points: Vec<Pubkey>,
-    pub remote_channel_parameters: Option<ChannelParametersOneParty>,
+    pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
 
     // The shutdown info for both local and remote, they are setup by the shutdown command or message.
     pub local_shutdown_info: Option<ShutdownInfo>,
@@ -2280,25 +2280,18 @@ impl ChannelState {
     }
 }
 
-pub fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
+fn new_channel_id_from_seed(seed: &[u8]) -> Hash256 {
     blake2b_256(seed).into()
 }
 
-fn derive_channel_id_from_revocation_keys(
-    revocation_basepoint1: &Pubkey,
-    revocation_basepoint2: &Pubkey,
-) -> Hash256 {
-    let local_revocation = revocation_basepoint1.0.serialize();
-    let remote_revocation = revocation_basepoint2.0.serialize();
-    let mut preimage = [local_revocation, remote_revocation];
+fn derive_channel_id_from_tlc_keys(tlc_basepoint1: &Pubkey, tlc_basepoint2: &Pubkey) -> Hash256 {
+    let mut preimage = [tlc_basepoint1.0.serialize(), tlc_basepoint2.0.serialize()];
     preimage.sort();
     new_channel_id_from_seed(&preimage.concat())
 }
 
-fn derive_temp_channel_id_from_revocation_key(revocation_basepoint: &Pubkey) -> Hash256 {
-    let revocation = revocation_basepoint.0.serialize();
-    let zero_point = [0; 33];
-    let preimage = [zero_point, revocation].concat();
+fn derive_temp_channel_id_from_tlc_key(tlc_basepoint: &Pubkey) -> Hash256 {
+    let preimage = [tlc_basepoint.0.serialize(), [0; 33]].concat();
     new_channel_id_from_seed(&preimage)
 }
 
@@ -2345,14 +2338,8 @@ impl From<&ChannelActorState> for Musig2VerifyContext {
 impl From<(&ChannelActorState, bool)> for Musig2SignContext {
     fn from(value: (&ChannelActorState, bool)) -> Self {
         let (channel, local) = value;
-        let local_pubkey = channel
-            .get_local_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
-        let remote_pubkey = channel
-            .get_remote_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
+        let local_pubkey = channel.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = channel.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if local {
             [local_pubkey, remote_pubkey]
         } else {
@@ -2381,14 +2368,8 @@ impl From<(&ChannelActorState, bool)> for Musig2SignContext {
 impl From<(&ChannelActorState, bool)> for Musig2VerifyContext {
     fn from(value: (&ChannelActorState, bool)) -> Self {
         let (channel, local) = value;
-        let local_pubkey = channel
-            .get_local_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
-        let remote_pubkey = channel
-            .get_remote_channel_parameters()
-            .pubkeys
-            .funding_pubkey;
+        let local_pubkey = channel.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = channel.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if local {
             [local_pubkey, remote_pubkey]
         } else {
@@ -2661,6 +2642,7 @@ impl ChannelActorState {
         local_value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
+        commitment_delay_epoch: u64,
         funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         seed: &[u8],
@@ -2670,7 +2652,6 @@ impl ChannelActorState {
         remote_shutdown_script: Script,
         remote_value: u128,
         remote_reserved_ckb_amount: u64,
-        remote_delay: LockTime,
         remote_pubkeys: ChannelBasePublicKeys,
         remote_nonce: PubNonce,
         remote_channel_announcement_nonce: Option<PubNonce>,
@@ -2682,9 +2663,9 @@ impl ChannelActorState {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
 
-        let channel_id = derive_channel_id_from_revocation_keys(
-            &local_base_pubkeys.revocation_base_key,
-            &remote_pubkeys.revocation_base_key,
+        let channel_id = derive_channel_id_from_tlc_keys(
+            &local_base_pubkeys.tlc_base_key,
+            &remote_pubkeys.tlc_base_key,
         );
 
         debug!(
@@ -2704,20 +2685,15 @@ impl ChannelActorState {
             to_local_amount: local_value,
             to_remote_amount: remote_value,
             commitment_fee_rate,
+            commitment_delay_epoch,
             funding_fee_rate,
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
             local_shutdown_script: Some(local_shutdown_script),
-            local_channel_parameters: ChannelParametersOneParty {
-                pubkeys: local_base_pubkeys,
-                selected_contest_delay: remote_delay,
-            },
+            local_channel_public_keys: local_base_pubkeys,
             signer,
-            remote_channel_parameters: Some(ChannelParametersOneParty {
-                pubkeys: remote_pubkeys,
-                selected_contest_delay: remote_delay,
-            }),
+            remote_channel_public_keys: Some(remote_pubkeys),
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
             previous_remote_nonce: None,
@@ -2749,17 +2725,16 @@ impl ChannelActorState {
         value: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
+        commitment_delay_epoch: u64,
         funding_fee_rate: u64,
         funding_udt_type_script: Option<Script>,
         shutdown_script: Script,
         max_tlc_value_in_flight: u128,
         max_tlc_number_in_flight: u64,
-        to_local_delay: LockTime,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
-        let temp_channel_id =
-            derive_temp_channel_id_from_revocation_key(&local_pubkeys.revocation_base_key);
+        let temp_channel_id = derive_temp_channel_id_from_tlc_key(&local_pubkeys.tlc_base_key);
         Self {
             state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::empty()),
             public_channel_info,
@@ -2772,18 +2747,16 @@ impl ChannelActorState {
             to_local_amount: value,
             to_remote_amount: 0,
             commitment_fee_rate,
+            commitment_delay_epoch,
             funding_fee_rate,
             id: temp_channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
             signer,
-            local_channel_parameters: ChannelParametersOneParty {
-                pubkeys: local_pubkeys,
-                selected_contest_delay: to_local_delay,
-            },
+            local_channel_public_keys: local_pubkeys,
             max_tlc_number_in_flight,
             max_tlc_value_in_flight,
-            remote_channel_parameters: None,
+            remote_channel_public_keys: None,
             previous_remote_nonce: None,
             remote_nonce: None,
             commitment_numbers: Default::default(),
@@ -2858,6 +2831,33 @@ impl ChannelActorState {
                         or you can set a lower commitment fee rate",
                         self.commitment_fee_rate, expected_minimal_reserved_ckb_amount
                     )));
+                    }
+                }
+                "commitment_delay_epoch" => {
+                    let epoch = EpochNumberWithFraction::from_full_value_unchecked(
+                        self.commitment_delay_epoch,
+                    );
+                    if !epoch.is_well_formed() {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is not a valid value",
+                            self.commitment_delay_epoch,
+                        )));
+                    }
+
+                    let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+                    if epoch < min {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is less than the minimal value {}",
+                            epoch, min
+                        )));
+                    }
+
+                    let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+                    if epoch > max {
+                        return Err(ProcessingChannelError::InvalidParameter(format!(
+                            "Commitment delay epoch {} is greater than the maximal value {}",
+                            epoch, max
+                        )));
                     }
                 }
                 "max_tlc_number_in_flight" => {
@@ -3168,16 +3168,18 @@ impl ChannelActorState {
             (output, output_data)
         };
 
-        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let key_agg_ctx = KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys");
 
         let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let delay_epoch = self.get_remote_channel_parameters().selected_contest_delay;
+        let delay_epoch = self.commitment_delay_epoch;
         let commitment_number = self.get_remote_commitment_number();
         let commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
-            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
+                .to_le_bytes()
+                .as_slice(),
             commitment_number.to_be_bytes().as_slice(),
         ]
         .concat();
@@ -3561,12 +3563,12 @@ impl ChannelActorState {
         Ok(tlc.clone())
     }
 
-    pub fn get_local_channel_parameters(&self) -> &ChannelParametersOneParty {
-        &self.local_channel_parameters
+    pub fn get_local_channel_public_keys(&self) -> &ChannelBasePublicKeys {
+        &self.local_channel_public_keys
     }
 
-    pub fn get_remote_channel_parameters(&self) -> &ChannelParametersOneParty {
-        self.remote_channel_parameters.as_ref().unwrap()
+    pub fn get_remote_channel_public_keys(&self) -> &ChannelBasePublicKeys {
+        self.remote_channel_public_keys.as_ref().unwrap()
     }
 
     pub fn get_funding_transaction(&self) -> &Transaction {
@@ -3668,8 +3670,8 @@ impl ChannelActorState {
     }
 
     pub fn get_musig2_agg_context(&self) -> KeyAggContext {
-        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let keys = self.order_things_for_musig2(local_pubkey, remote_pubkey);
         KeyAggContext::new(keys).expect("Valid pubkeys")
     }
@@ -3802,11 +3804,11 @@ impl ChannelActorState {
             local_commitment_number, remote_commitment_number
         );
         let local_pubkey = derive_tlc_pubkey(
-            &self.get_local_channel_parameters().pubkeys.tlc_base_key,
+            &self.get_local_channel_public_keys().tlc_base_key,
             &self.get_local_commitment_point(remote_commitment_number),
         );
         let remote_pubkey = derive_tlc_pubkey(
-            &self.get_remote_channel_parameters().pubkeys.tlc_base_key,
+            &self.get_remote_channel_public_keys().tlc_base_key,
             &self.get_remote_commitment_point(local_commitment_number),
         );
 
@@ -3890,11 +3892,11 @@ impl ChannelActorState {
     }
 
     pub fn get_local_funding_pubkey(&self) -> &Pubkey {
-        &self.get_local_channel_parameters().pubkeys.funding_pubkey
+        &self.get_local_channel_public_keys().funding_pubkey
     }
 
     pub fn get_remote_funding_pubkey(&self) -> &Pubkey {
-        &self.get_remote_channel_parameters().pubkeys.funding_pubkey
+        &self.get_remote_channel_public_keys().funding_pubkey
     }
 
     fn check_valid_to_auto_accept_shutdown(&self) -> bool {
@@ -4185,10 +4187,7 @@ impl ChannelActorState {
 
         self.remote_nonce = Some(accept_channel.next_local_nonce.clone());
         let remote_pubkeys = (&accept_channel).into();
-        self.remote_channel_parameters = Some(ChannelParametersOneParty {
-            pubkeys: remote_pubkeys,
-            selected_contest_delay: accept_channel.to_local_delay,
-        });
+        self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
             accept_channel.first_per_commitment_point,
             accept_channel.second_per_commitment_point,
@@ -4651,17 +4650,19 @@ impl ChannelActorState {
             (output, output_data)
         };
 
-        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let key_agg_ctx = KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys");
 
         let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
-        let delay_epoch = self.get_local_channel_parameters().selected_contest_delay;
+        let delay_epoch = self.commitment_delay_epoch;
         let commitment_number = self.get_local_commitment_number();
 
         let commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
-            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
+                .to_le_bytes()
+                .as_slice(),
             commitment_number.to_be_bytes().as_slice(),
         ]
         .concat();
@@ -4967,24 +4968,11 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn fill_in_channel_id(&mut self) {
-        assert!(
-            self.remote_channel_parameters.is_some(),
-            "Counterparty pubkeys is required to derive actual channel id"
-        );
-        let remote_revocation = &self
-            .get_remote_channel_parameters()
-            .pubkeys
-            .revocation_base_key;
-        let local_revocation = &self
-            .get_local_channel_parameters()
-            .pubkeys
-            .revocation_base_key;
-        let channel_id =
-            derive_channel_id_from_revocation_keys(local_revocation, remote_revocation);
-
+    pub fn fill_in_channel_id(&mut self) {
+        let local = &self.get_local_channel_public_keys().tlc_base_key;
+        let remote = &self.get_remote_channel_public_keys().tlc_base_key;
+        let channel_id = derive_channel_id_from_tlc_keys(local, remote);
         debug!("Channel Id changed from {:?} to {:?}", self.id, channel_id,);
-
         self.id = channel_id;
     }
 
@@ -4992,8 +4980,8 @@ impl ChannelActorState {
     // We define a definitive order for the pubkeys in musig2 to makes it easier
     // to aggregate musig2 signatures.
     fn should_local_go_first_in_musig2(&self) -> bool {
-        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         local_pubkey <= remote_pubkey
     }
 
@@ -5178,8 +5166,8 @@ impl ChannelActorState {
     }
 
     fn build_commitment_transaction_output(&self, local: bool) -> (CellOutput, Bytes) {
-        let local_pubkey = self.get_local_channel_parameters().pubkeys.funding_pubkey;
-        let remote_pubkey = self.get_remote_channel_parameters().pubkeys.funding_pubkey;
+        let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+        let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
         let pubkeys = if local {
             [local_pubkey, remote_pubkey]
         } else {
@@ -5190,19 +5178,15 @@ impl ChannelActorState {
             .aggregated_pubkey::<Point>()
             .serialize_xonly();
 
-        let delay_epoch = if local {
-            self.get_remote_channel_parameters().selected_contest_delay
-        } else {
-            self.get_local_channel_parameters().selected_contest_delay
-        };
-
+        let delay_epoch = self.commitment_delay_epoch;
         let version = self.get_current_commitment_number(local);
-
         let htlcs = self.get_active_htlcs(local);
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
-            (Since::from(delay_epoch).value()).to_le_bytes().as_slice(),
+            (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
+                .to_le_bytes()
+                .as_slice(),
             version.to_be_bytes().as_slice(),
         ]
         .concat();
@@ -5565,18 +5549,6 @@ impl ChannelParametersOneParty {
         &self.pubkeys.funding_pubkey
     }
 
-    pub fn payment_base_key(&self) -> &Pubkey {
-        &self.pubkeys.payment_base_key
-    }
-
-    pub fn delayed_payment_base_key(&self) -> &Pubkey {
-        &self.pubkeys.delayed_payment_base_key
-    }
-
-    pub fn revocation_base_key(&self) -> &Pubkey {
-        &self.pubkeys.revocation_base_key
-    }
-
     pub fn tlc_base_key(&self) -> &Pubkey {
         &self.pubkeys.tlc_base_key
     }
@@ -5588,19 +5560,6 @@ pub struct ChannelBasePublicKeys {
     /// The public key which is used to sign all commitment transactions, as it appears in the
     /// on-chain channel lock-in 2-of-2 multisig output.
     pub funding_pubkey: Pubkey,
-    /// The base point which is used (with derive_public_revocation_key) to derive per-commitment
-    /// revocation keys. This is combined with the per-commitment-secret generated by the
-    /// counterparty to create a secret which the counterparty can reveal to revoke previous
-    /// states.
-    pub revocation_base_key: Pubkey,
-    /// The public key on which the non-broadcaster (ie the countersignatory) receives an immediately
-    /// spendable primary channel balance on the broadcaster's commitment transaction. This key is
-    /// static across every commitment transaction.
-    pub payment_base_key: Pubkey,
-    /// The base point which is used (with derive_public_key) to derive a per-commitment payment
-    /// public key which receives non-HTLC-encumbered funds which are only available for spending
-    /// after some delay (or can be claimed via the revocation path).
-    pub delayed_payment_base_key: Pubkey,
     /// The base point which is used (with derive_public_key) to derive a per-commitment public key
     /// which is used to encumber HTLC-in-flight outputs.
     pub tlc_base_key: Pubkey,
@@ -5610,9 +5569,6 @@ impl From<&OpenChannel> for ChannelBasePublicKeys {
     fn from(value: &OpenChannel) -> Self {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
-            revocation_base_key: value.revocation_basepoint,
-            payment_base_key: value.payment_basepoint,
-            delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
     }
@@ -5622,9 +5578,6 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
     fn from(value: &AcceptChannel) -> Self {
         ChannelBasePublicKeys {
             funding_pubkey: value.funding_pubkey,
-            revocation_base_key: value.revocation_basepoint,
-            payment_base_key: value.payment_basepoint,
-            delayed_payment_base_key: value.delayed_payment_basepoint,
             tlc_base_key: value.tlc_basepoint,
         }
     }
@@ -5762,15 +5715,6 @@ fn derive_public_key(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     base_key.tweak(get_tweak_by_commitment_point(commitment_point))
 }
 
-pub fn derive_revocation_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
-    let result = derive_public_key(commitment_point, base_key);
-    debug!(
-        "Derived revocation pub key from commitment point {:?}, base_key {:?}, result {:?}",
-        &commitment_point, &base_key, &result
-    );
-    result
-}
-
 pub fn derive_payment_pubkey(base_key: &Pubkey, commitment_point: &Pubkey) -> Pubkey {
     derive_public_key(base_key, commitment_point)
 }
@@ -5792,12 +5736,6 @@ pub struct InMemorySigner {
     /// Holder secret key in the 2-of-2 multisig script of a channel. This key also backs the
     /// holder's anchor output in a commitment transaction, if one is present.
     pub funding_key: Privkey,
-    /// Holder secret key for blinded revocation pubkey.
-    pub revocation_base_key: Privkey,
-    /// Holder secret key used for our balance in counterparty-broadcasted commitment transactions.
-    pub payment_key: Privkey,
-    /// Holder secret key used in an HTLC transaction.
-    pub delayed_payment_base_key: Privkey,
     /// Holder HTLC secret key used in commitment transaction HTLC outputs.
     pub tlc_base_key: Privkey,
     /// SecNonce used to generate valid signature in musig.
@@ -5826,18 +5764,11 @@ impl InMemorySigner {
         };
 
         let funding_key = key_derive(&seed, b"funding key");
-        let revocation_base_key = key_derive(funding_key.as_ref(), b"revocation base key");
-        let payment_key = key_derive(revocation_base_key.as_ref(), b"payment key");
-        let delayed_payment_base_key =
-            key_derive(payment_key.as_ref(), b"delayed payment base key");
-        let tlc_base_key = key_derive(delayed_payment_base_key.as_ref(), b"HTLC base key");
+        let tlc_base_key = key_derive(funding_key.as_ref(), b"HTLC base key");
         let musig2_base_nonce = key_derive(tlc_base_key.as_ref(), b"musig nocne");
 
         Self {
             funding_key,
-            revocation_base_key,
-            payment_key,
-            delayed_payment_base_key,
             tlc_base_key,
             musig2_base_nonce,
             commitment_seed,
@@ -5847,9 +5778,6 @@ impl InMemorySigner {
     fn get_base_public_keys(&self) -> ChannelBasePublicKeys {
         ChannelBasePublicKeys {
             funding_pubkey: self.funding_key.pubkey(),
-            revocation_base_key: self.revocation_base_key.pubkey(),
-            payment_base_key: self.payment_key.pubkey(),
-            delayed_payment_base_key: self.delayed_payment_base_key.pubkey(),
             tlc_base_key: self.tlc_base_key.pubkey(),
         }
     }
@@ -5860,28 +5788,6 @@ impl InMemorySigner {
 
     pub fn get_commitment_secret(&self, commitment_number: u64) -> [u8; 32] {
         get_commitment_secret(&self.commitment_seed, commitment_number)
-    }
-
-    pub fn derive_revocation_key(&self, commitment_number: u64) -> Privkey {
-        let per_commitment_secret = self.get_commitment_secret(commitment_number);
-        // Note that here we don't derive private key in the same way as we ususally do.
-        // Instead we use per commitment secret as "master key" and public revocation key
-        // as derivation material. In this way when we reveal the per round "master key",
-        // the counterparty can obtain the secret key for that round.
-        derive_private_key(
-            &per_commitment_secret.into(),
-            &self.revocation_base_key.pubkey(),
-        )
-    }
-
-    pub fn derive_payment_key(&self, new_commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(new_commitment_number);
-        derive_private_key(&self.payment_key, &per_commitment_point)
-    }
-
-    pub fn derive_delayed_payment_key(&self, new_commitment_number: u64) -> Privkey {
-        let per_commitment_point = self.get_commitment_point(new_commitment_number);
-        derive_private_key(&self.delayed_payment_base_key, &per_commitment_point)
     }
 
     pub fn derive_tlc_key(&self, new_commitment_number: u64) -> Privkey {

@@ -72,6 +72,7 @@ Attempts to open a channel with a peer.
 * `funding_udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
 * `shutdown_script` - The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
 * `commitment_fee_rate` - The fee rate for the commitment transaction, an optional parameter
+* `commitment_delay_epoch` - The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours
 * `funding_fee_rate` - The fee rate for the funding transaction, an optional parameter
 * `tlc_locktime_expiry_delta` - The expiry delta for the TLC locktime, an optional parameter
 * `tlc_min_value` - The minimum value for a TLC, an optional parameter

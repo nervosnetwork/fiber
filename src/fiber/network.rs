@@ -1,6 +1,6 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
-use ckb_types::core::TransactionView;
+use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use musig2::CompactSignature;
@@ -257,6 +257,7 @@ pub struct OpenChannelCommand {
     pub shutdown_script: Option<Script>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
     pub tlc_locktime_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
@@ -2854,6 +2855,7 @@ where
             shutdown_script,
             funding_udt_type_script,
             commitment_fee_rate,
+            commitment_delay_epoch,
             funding_fee_rate,
             tlc_locktime_expiry_delta,
             tlc_min_value,
@@ -2904,6 +2906,7 @@ where
                     .unwrap_or_else(|| self.default_shutdown_script.clone()),
                 channel_id_sender: tx,
                 commitment_fee_rate,
+                commitment_delay_epoch,
                 funding_fee_rate,
                 max_tlc_value_in_flight,
                 max_tlc_number_in_flight,
