@@ -4387,7 +4387,12 @@ impl ::core::fmt::Display for OpenChannel {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -4543,7 +4548,7 @@ impl OpenChannel {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn to_self_delay(&self) -> Uint64 {
+    pub fn commitment_delay_epoch(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
@@ -4651,7 +4656,7 @@ impl molecule::prelude::Entity for OpenChannel {
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
-            .to_self_delay(self.to_self_delay())
+            .commitment_delay_epoch(self.commitment_delay_epoch())
             .funding_pubkey(self.funding_pubkey())
             .revocation_basepoint(self.revocation_basepoint())
             .payment_basepoint(self.payment_basepoint())
@@ -4719,7 +4724,12 @@ impl<'r> ::core::fmt::Display for OpenChannelReader<'r> {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -4846,7 +4856,7 @@ impl<'r> OpenChannelReader<'r> {
         let end = molecule::unpack_number(&slice[48..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn to_self_delay(&self) -> Uint64Reader<'r> {
+    pub fn commitment_delay_epoch(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[48..]) as usize;
         let end = molecule::unpack_number(&slice[52..]) as usize;
@@ -5001,7 +5011,7 @@ pub struct OpenChannelBuilder {
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
-    pub(crate) to_self_delay: Uint64,
+    pub(crate) commitment_delay_epoch: Uint64,
     pub(crate) funding_pubkey: Pubkey,
     pub(crate) revocation_basepoint: Pubkey,
     pub(crate) payment_basepoint: Pubkey,
@@ -5059,8 +5069,8 @@ impl OpenChannelBuilder {
         self.min_tlc_value = v;
         self
     }
-    pub fn to_self_delay(mut self, v: Uint64) -> Self {
-        self.to_self_delay = v;
+    pub fn commitment_delay_epoch(mut self, v: Uint64) -> Self {
+        self.commitment_delay_epoch = v;
         self
     }
     pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
@@ -5120,7 +5130,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
-            + self.to_self_delay.as_slice().len()
+            + self.commitment_delay_epoch.as_slice().len()
             + self.funding_pubkey.as_slice().len()
             + self.revocation_basepoint.as_slice().len()
             + self.payment_basepoint.as_slice().len()
@@ -5158,7 +5168,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.to_self_delay.as_slice().len();
+        total_size += self.commitment_delay_epoch.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_pubkey.as_slice().len();
         offsets.push(total_size);
@@ -5194,7 +5204,7 @@ impl molecule::prelude::Builder for OpenChannelBuilder {
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
-        writer.write_all(self.to_self_delay.as_slice())?;
+        writer.write_all(self.commitment_delay_epoch.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;
         writer.write_all(self.revocation_basepoint.as_slice())?;
         writer.write_all(self.payment_basepoint.as_slice())?;
@@ -5255,7 +5265,12 @@ impl ::core::fmt::Display for AcceptChannel {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -5383,7 +5398,7 @@ impl AcceptChannel {
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint128::new_unchecked(self.0.slice(start..end))
     }
-    pub fn to_self_delay(&self) -> Uint64 {
+    pub fn commitment_delay_epoch(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
@@ -5481,7 +5496,7 @@ impl molecule::prelude::Entity for AcceptChannel {
             .max_tlc_value_in_flight(self.max_tlc_value_in_flight())
             .max_tlc_number_in_flight(self.max_tlc_number_in_flight())
             .min_tlc_value(self.min_tlc_value())
-            .to_self_delay(self.to_self_delay())
+            .commitment_delay_epoch(self.commitment_delay_epoch())
             .funding_pubkey(self.funding_pubkey())
             .revocation_basepoint(self.revocation_basepoint())
             .payment_basepoint(self.payment_basepoint())
@@ -5534,7 +5549,12 @@ impl<'r> ::core::fmt::Display for AcceptChannelReader<'r> {
             self.max_tlc_number_in_flight()
         )?;
         write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
-        write!(f, ", {}: {}", "to_self_delay", self.to_self_delay())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_delay_epoch",
+            self.commitment_delay_epoch()
+        )?;
         write!(f, ", {}: {}", "funding_pubkey", self.funding_pubkey())?;
         write!(
             f,
@@ -5636,7 +5656,7 @@ impl<'r> AcceptChannelReader<'r> {
         let end = molecule::unpack_number(&slice[32..]) as usize;
         Uint128Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn to_self_delay(&self) -> Uint64Reader<'r> {
+    pub fn commitment_delay_epoch(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[32..]) as usize;
         let end = molecule::unpack_number(&slice[36..]) as usize;
@@ -5776,7 +5796,7 @@ pub struct AcceptChannelBuilder {
     pub(crate) max_tlc_value_in_flight: Uint128,
     pub(crate) max_tlc_number_in_flight: Uint64,
     pub(crate) min_tlc_value: Uint128,
-    pub(crate) to_self_delay: Uint64,
+    pub(crate) commitment_delay_epoch: Uint64,
     pub(crate) funding_pubkey: Pubkey,
     pub(crate) revocation_basepoint: Pubkey,
     pub(crate) payment_basepoint: Pubkey,
@@ -5817,8 +5837,8 @@ impl AcceptChannelBuilder {
         self.min_tlc_value = v;
         self
     }
-    pub fn to_self_delay(mut self, v: Uint64) -> Self {
-        self.to_self_delay = v;
+    pub fn commitment_delay_epoch(mut self, v: Uint64) -> Self {
+        self.commitment_delay_epoch = v;
         self
     }
     pub fn funding_pubkey(mut self, v: Pubkey) -> Self {
@@ -5870,7 +5890,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
             + self.max_tlc_value_in_flight.as_slice().len()
             + self.max_tlc_number_in_flight.as_slice().len()
             + self.min_tlc_value.as_slice().len()
-            + self.to_self_delay.as_slice().len()
+            + self.commitment_delay_epoch.as_slice().len()
             + self.funding_pubkey.as_slice().len()
             + self.revocation_basepoint.as_slice().len()
             + self.payment_basepoint.as_slice().len()
@@ -5899,7 +5919,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         offsets.push(total_size);
         total_size += self.min_tlc_value.as_slice().len();
         offsets.push(total_size);
-        total_size += self.to_self_delay.as_slice().len();
+        total_size += self.commitment_delay_epoch.as_slice().len();
         offsets.push(total_size);
         total_size += self.funding_pubkey.as_slice().len();
         offsets.push(total_size);
@@ -5929,7 +5949,7 @@ impl molecule::prelude::Builder for AcceptChannelBuilder {
         writer.write_all(self.max_tlc_value_in_flight.as_slice())?;
         writer.write_all(self.max_tlc_number_in_flight.as_slice())?;
         writer.write_all(self.min_tlc_value.as_slice())?;
-        writer.write_all(self.to_self_delay.as_slice())?;
+        writer.write_all(self.commitment_delay_epoch.as_slice())?;
         writer.write_all(self.funding_pubkey.as_slice())?;
         writer.write_all(self.revocation_basepoint.as_slice())?;
         writer.write_all(self.payment_basepoint.as_slice())?;
@@ -9471,8 +9491,8 @@ impl molecule::prelude::Builder for RemoveTlcFulfillBuilder {
     }
 }
 #[derive(Clone)]
-pub struct RemoveTlcFail(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for RemoveTlcFail {
+pub struct TlcErrPacket(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for TlcErrPacket {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -9481,41 +9501,66 @@ impl ::core::fmt::LowerHex for RemoveTlcFail {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for RemoveTlcFail {
+impl ::core::fmt::Debug for TlcErrPacket {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for RemoveTlcFail {
+impl ::core::fmt::Display for TlcErrPacket {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "error_code", self.error_code())?;
+        write!(f, "{}: {}", "onion_packet", self.onion_packet())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
         write!(f, " }}")
     }
 }
-impl ::core::default::Default for RemoveTlcFail {
+impl ::core::default::Default for TlcErrPacket {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        RemoveTlcFail::new_unchecked(v)
+        TlcErrPacket::new_unchecked(v)
     }
 }
-impl RemoveTlcFail {
-    const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
-    pub const TOTAL_SIZE: usize = 4;
-    pub const FIELD_SIZES: [usize; 1] = [4];
+impl TlcErrPacket {
+    const DEFAULT_VALUE: [u8; 12] = [12, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0];
     pub const FIELD_COUNT: usize = 1;
-    pub fn error_code(&self) -> Uint32 {
-        Uint32::new_unchecked(self.0.slice(0..4))
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
     }
-    pub fn as_reader<'r>(&'r self) -> RemoveTlcFailReader<'r> {
-        RemoveTlcFailReader::new_unchecked(self.as_slice())
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn onion_packet(&self) -> Bytes {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            Bytes::new_unchecked(self.0.slice(start..end))
+        } else {
+            Bytes::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> TlcErrPacketReader<'r> {
+        TlcErrPacketReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for RemoveTlcFail {
-    type Builder = RemoveTlcFailBuilder;
-    const NAME: &'static str = "RemoveTlcFail";
+impl molecule::prelude::Entity for TlcErrPacket {
+    type Builder = TlcErrPacketBuilder;
+    const NAME: &'static str = "TlcErrPacket";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        RemoveTlcFail(data)
+        TlcErrPacket(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -9524,21 +9569,21 @@ impl molecule::prelude::Entity for RemoveTlcFail {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        RemoveTlcFailReader::from_slice(slice).map(|reader| reader.to_entity())
+        TlcErrPacketReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        RemoveTlcFailReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
+        TlcErrPacketReader::from_compatible_slice(slice).map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder().error_code(self.error_code())
+        Self::new_builder().onion_packet(self.onion_packet())
     }
 }
 #[derive(Clone, Copy)]
-pub struct RemoveTlcFailReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for RemoveTlcFailReader<'r> {
+pub struct TlcErrPacketReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for TlcErrPacketReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -9547,75 +9592,135 @@ impl<'r> ::core::fmt::LowerHex for RemoveTlcFailReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for RemoveTlcFailReader<'r> {
+impl<'r> ::core::fmt::Debug for TlcErrPacketReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for RemoveTlcFailReader<'r> {
+impl<'r> ::core::fmt::Display for TlcErrPacketReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
-        write!(f, "{}: {}", "error_code", self.error_code())?;
+        write!(f, "{}: {}", "onion_packet", self.onion_packet())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
         write!(f, " }}")
     }
 }
-impl<'r> RemoveTlcFailReader<'r> {
-    pub const TOTAL_SIZE: usize = 4;
-    pub const FIELD_SIZES: [usize; 1] = [4];
+impl<'r> TlcErrPacketReader<'r> {
     pub const FIELD_COUNT: usize = 1;
-    pub fn error_code(&self) -> Uint32Reader<'r> {
-        Uint32Reader::new_unchecked(&self.as_slice()[0..4])
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn onion_packet(&self) -> BytesReader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[8..]) as usize;
+            BytesReader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            BytesReader::new_unchecked(&self.as_slice()[start..])
+        }
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for RemoveTlcFailReader<'r> {
-    type Entity = RemoveTlcFail;
-    const NAME: &'static str = "RemoveTlcFailReader";
+impl<'r> molecule::prelude::Reader<'r> for TlcErrPacketReader<'r> {
+    type Entity = TlcErrPacket;
+    const NAME: &'static str = "TlcErrPacketReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        RemoveTlcFailReader(slice)
+        TlcErrPacketReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
     }
-    fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
         use molecule::verification_error as ve;
         let slice_len = slice.len();
-        if slice_len != Self::TOTAL_SIZE {
-            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
         }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        BytesReader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct RemoveTlcFailBuilder {
-    pub(crate) error_code: Uint32,
+pub struct TlcErrPacketBuilder {
+    pub(crate) onion_packet: Bytes,
 }
-impl RemoveTlcFailBuilder {
-    pub const TOTAL_SIZE: usize = 4;
-    pub const FIELD_SIZES: [usize; 1] = [4];
+impl TlcErrPacketBuilder {
     pub const FIELD_COUNT: usize = 1;
-    pub fn error_code(mut self, v: Uint32) -> Self {
-        self.error_code = v;
+    pub fn onion_packet(mut self, v: Bytes) -> Self {
+        self.onion_packet = v;
         self
     }
 }
-impl molecule::prelude::Builder for RemoveTlcFailBuilder {
-    type Entity = RemoveTlcFail;
-    const NAME: &'static str = "RemoveTlcFailBuilder";
+impl molecule::prelude::Builder for TlcErrPacketBuilder {
+    type Entity = TlcErrPacket;
+    const NAME: &'static str = "TlcErrPacketBuilder";
     fn expected_length(&self) -> usize {
-        Self::TOTAL_SIZE
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1) + self.onion_packet.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(self.error_code.as_slice())?;
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.onion_packet.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.onion_packet.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        RemoveTlcFail::new_unchecked(inner.into())
+        TlcErrPacket::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -9660,7 +9765,7 @@ impl RemoveTlcReason {
         let inner = self.0.slice(molecule::NUMBER_SIZE..);
         match self.item_id() {
             0 => RemoveTlcFulfill::new_unchecked(inner).into(),
-            1 => RemoveTlcFail::new_unchecked(inner).into(),
+            1 => TlcErrPacket::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9725,7 +9830,7 @@ impl<'r> RemoveTlcReasonReader<'r> {
         let inner = &self.as_slice()[molecule::NUMBER_SIZE..];
         match self.item_id() {
             0 => RemoveTlcFulfillReader::new_unchecked(inner).into(),
-            1 => RemoveTlcFailReader::new_unchecked(inner).into(),
+            1 => TlcErrPacketReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -9752,7 +9857,7 @@ impl<'r> molecule::prelude::Reader<'r> for RemoveTlcReasonReader<'r> {
         let inner_slice = &slice[molecule::NUMBER_SIZE..];
         match item_id {
             0 => RemoveTlcFulfillReader::verify(inner_slice, compatible),
-            1 => RemoveTlcFailReader::verify(inner_slice, compatible),
+            1 => TlcErrPacketReader::verify(inner_slice, compatible),
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
         }?;
         Ok(())
@@ -9790,12 +9895,12 @@ impl molecule::prelude::Builder for RemoveTlcReasonBuilder {
 #[derive(Debug, Clone)]
 pub enum RemoveTlcReasonUnion {
     RemoveTlcFulfill(RemoveTlcFulfill),
-    RemoveTlcFail(RemoveTlcFail),
+    TlcErrPacket(TlcErrPacket),
 }
 #[derive(Debug, Clone, Copy)]
 pub enum RemoveTlcReasonUnionReader<'r> {
     RemoveTlcFulfill(RemoveTlcFulfillReader<'r>),
-    RemoveTlcFail(RemoveTlcFailReader<'r>),
+    TlcErrPacket(TlcErrPacketReader<'r>),
 }
 impl ::core::default::Default for RemoveTlcReasonUnion {
     fn default() -> Self {
@@ -9808,8 +9913,8 @@ impl ::core::fmt::Display for RemoveTlcReasonUnion {
             RemoveTlcReasonUnion::RemoveTlcFulfill(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RemoveTlcFulfill::NAME, item)
             }
-            RemoveTlcReasonUnion::RemoveTlcFail(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RemoveTlcFail::NAME, item)
+            RemoveTlcReasonUnion::TlcErrPacket(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TlcErrPacket::NAME, item)
             }
         }
     }
@@ -9820,8 +9925,8 @@ impl<'r> ::core::fmt::Display for RemoveTlcReasonUnionReader<'r> {
             RemoveTlcReasonUnionReader::RemoveTlcFulfill(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RemoveTlcFulfill::NAME, item)
             }
-            RemoveTlcReasonUnionReader::RemoveTlcFail(ref item) => {
-                write!(f, "{}::{}({})", Self::NAME, RemoveTlcFail::NAME, item)
+            RemoveTlcReasonUnionReader::TlcErrPacket(ref item) => {
+                write!(f, "{}::{}({})", Self::NAME, TlcErrPacket::NAME, item)
             }
         }
     }
@@ -9830,7 +9935,7 @@ impl RemoveTlcReasonUnion {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(ref item) => write!(f, "{}", item),
-            RemoveTlcReasonUnion::RemoveTlcFail(ref item) => write!(f, "{}", item),
+            RemoveTlcReasonUnion::TlcErrPacket(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -9838,7 +9943,7 @@ impl<'r> RemoveTlcReasonUnionReader<'r> {
     pub(crate) fn display_inner(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         match self {
             RemoveTlcReasonUnionReader::RemoveTlcFulfill(ref item) => write!(f, "{}", item),
-            RemoveTlcReasonUnionReader::RemoveTlcFail(ref item) => write!(f, "{}", item),
+            RemoveTlcReasonUnionReader::TlcErrPacket(ref item) => write!(f, "{}", item),
         }
     }
 }
@@ -9847,9 +9952,9 @@ impl ::core::convert::From<RemoveTlcFulfill> for RemoveTlcReasonUnion {
         RemoveTlcReasonUnion::RemoveTlcFulfill(item)
     }
 }
-impl ::core::convert::From<RemoveTlcFail> for RemoveTlcReasonUnion {
-    fn from(item: RemoveTlcFail) -> Self {
-        RemoveTlcReasonUnion::RemoveTlcFail(item)
+impl ::core::convert::From<TlcErrPacket> for RemoveTlcReasonUnion {
+    fn from(item: TlcErrPacket) -> Self {
+        RemoveTlcReasonUnion::TlcErrPacket(item)
     }
 }
 impl<'r> ::core::convert::From<RemoveTlcFulfillReader<'r>> for RemoveTlcReasonUnionReader<'r> {
@@ -9857,9 +9962,9 @@ impl<'r> ::core::convert::From<RemoveTlcFulfillReader<'r>> for RemoveTlcReasonUn
         RemoveTlcReasonUnionReader::RemoveTlcFulfill(item)
     }
 }
-impl<'r> ::core::convert::From<RemoveTlcFailReader<'r>> for RemoveTlcReasonUnionReader<'r> {
-    fn from(item: RemoveTlcFailReader<'r>) -> Self {
-        RemoveTlcReasonUnionReader::RemoveTlcFail(item)
+impl<'r> ::core::convert::From<TlcErrPacketReader<'r>> for RemoveTlcReasonUnionReader<'r> {
+    fn from(item: TlcErrPacketReader<'r>) -> Self {
+        RemoveTlcReasonUnionReader::TlcErrPacket(item)
     }
 }
 impl RemoveTlcReasonUnion {
@@ -9867,31 +9972,31 @@ impl RemoveTlcReasonUnion {
     pub fn as_bytes(&self) -> molecule::bytes::Bytes {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(item) => item.as_bytes(),
-            RemoveTlcReasonUnion::RemoveTlcFail(item) => item.as_bytes(),
+            RemoveTlcReasonUnion::TlcErrPacket(item) => item.as_bytes(),
         }
     }
     pub fn as_slice(&self) -> &[u8] {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(item) => item.as_slice(),
-            RemoveTlcReasonUnion::RemoveTlcFail(item) => item.as_slice(),
+            RemoveTlcReasonUnion::TlcErrPacket(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(_) => 0,
-            RemoveTlcReasonUnion::RemoveTlcFail(_) => 1,
+            RemoveTlcReasonUnion::TlcErrPacket(_) => 1,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(_) => "RemoveTlcFulfill",
-            RemoveTlcReasonUnion::RemoveTlcFail(_) => "RemoveTlcFail",
+            RemoveTlcReasonUnion::TlcErrPacket(_) => "TlcErrPacket",
         }
     }
     pub fn as_reader<'r>(&'r self) -> RemoveTlcReasonUnionReader<'r> {
         match self {
             RemoveTlcReasonUnion::RemoveTlcFulfill(item) => item.as_reader().into(),
-            RemoveTlcReasonUnion::RemoveTlcFail(item) => item.as_reader().into(),
+            RemoveTlcReasonUnion::TlcErrPacket(item) => item.as_reader().into(),
         }
     }
 }
@@ -9900,19 +10005,19 @@ impl<'r> RemoveTlcReasonUnionReader<'r> {
     pub fn as_slice(&self) -> &'r [u8] {
         match self {
             RemoveTlcReasonUnionReader::RemoveTlcFulfill(item) => item.as_slice(),
-            RemoveTlcReasonUnionReader::RemoveTlcFail(item) => item.as_slice(),
+            RemoveTlcReasonUnionReader::TlcErrPacket(item) => item.as_slice(),
         }
     }
     pub fn item_id(&self) -> molecule::Number {
         match self {
             RemoveTlcReasonUnionReader::RemoveTlcFulfill(_) => 0,
-            RemoveTlcReasonUnionReader::RemoveTlcFail(_) => 1,
+            RemoveTlcReasonUnionReader::TlcErrPacket(_) => 1,
         }
     }
     pub fn item_name(&self) -> &str {
         match self {
             RemoveTlcReasonUnionReader::RemoveTlcFulfill(_) => "RemoveTlcFulfill",
-            RemoveTlcReasonUnionReader::RemoveTlcFail(_) => "RemoveTlcFail",
+            RemoveTlcReasonUnionReader::TlcErrPacket(_) => "TlcErrPacket",
         }
     }
 }
@@ -9921,8 +10026,8 @@ impl From<RemoveTlcFulfill> for RemoveTlcReason {
         Self::new_builder().set(value).build()
     }
 }
-impl From<RemoveTlcFail> for RemoveTlcReason {
-    fn from(value: RemoveTlcFail) -> Self {
+impl From<TlcErrPacket> for RemoveTlcReason {
+    fn from(value: TlcErrPacket) -> Self {
         Self::new_builder().set(value).build()
     }
 }

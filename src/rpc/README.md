@@ -21,6 +21,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_tlc`](#remove_tlc)
         * [Method `shutdown_channel`](#shutdown_channel)
         * [Method `send_payment`](#send_payment)
+        * [Method `get_payment`](#get_payment)
 
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#new_invoice)
@@ -71,6 +72,7 @@ Attempts to open a channel with a peer.
 * `funding_udt_type_script` - The type script of the UDT to fund the channel with, an optional parameter
 * `shutdown_script` - The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
 * `commitment_fee_rate` - The fee rate for the commitment transaction, an optional parameter
+* `commitment_delay_epoch` - The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours
 * `funding_fee_rate` - The fee rate for the funding transaction, an optional parameter
 * `tlc_locktime_expiry_delta` - The expiry delta for the TLC locktime, an optional parameter
 * `tlc_min_value` - The minimum value for a TLC, an optional parameter
@@ -181,6 +183,7 @@ Sends a payment to a peer.
 - `timeout` (type: `Option<u64>`): The payment timeout in seconds. If the payment is not completed within this time, it will be cancelled.
 - `max_fee_amount` (type: `Option<u128>`): The maximum fee amounts in shannons that the sender is willing to pay.
 - `max_parts` (type: `Option<u64>`): Max parts for the payment, only used for multi-part payments.
+- `allow_self_payment` (type: `Option<bool>`): Allow self payment, if it's true path finding may construct a payment router that target to the same node, default is false.
 
 Note `target_pubkey`, `amount`, `payment_hash` should be consistent with the invoice. If `invoice` is provided, the `target_pubkey`, `amount`, `payment_hash` can be omitted.
 
@@ -188,7 +191,30 @@ If `invoice` is not provided, the `target_pubkey`, `amount` must be provided, if
 
 ###### Returns
 
-Returns the `payment_hash` when the request is successful. Otherwise, returns an error message.
+Return a `SendPaymentResult` object with the following fields:
+- `payment_hash` (type: `Hash256`): The identifier of the payment, should be the same as the `payment_hash` in the request.
+- `status` (type: `String`): The status of the payment, possible values are `created`, `inflight`, `success`, `failed`.
+- `last_update_time` (type: `u128`): The last update time of the payment.
+- `failed_error` (type: `Option<String>`): The error message if the payment failed.
+
+<a id="get_payment"></a>
+#### Method `get_payment`
+
+Get the payment by the payment hash.
+
+###### Params
+
+- `payment_hash` (type: `Hash256`): The hash to use within the payment's HTLC.
+
+###### Returns
+
+If success, return a `SendPaymentResult` object with the following fields:
+- `payment_hash` (type: `Hash256`): The identifier of the payment, should be the same as the `payment_hash` in the request.
+- `status` (type: `String`): The status of the payment, possible values are `created`, `inflight`, `success`, `failed`.
+- `last_update_time` (type: `u128`): The last update time of the payment.
+- `failed_error` (type: `Option<String>`): The error message if the payment failed.
+
+If the payment is not found, return error message.
 
 ### Module `Invoice`
 
@@ -241,6 +267,7 @@ Attempts to connect to a peer.
 ###### Params
 
 * `address` - The address of the peer to connect to
+* `save` - Whether to save the peer address, an optional parameter (default value true)
 
 ###### Returns
 

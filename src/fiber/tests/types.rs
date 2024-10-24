@@ -1,13 +1,17 @@
+use super::test_utils::generate_seckey;
 use crate::fiber::{
     gen::fiber as molecule_fiber,
     hash_algorithm::HashAlgorithm,
-    types::{secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey},
+    tests::test_utils::generate_pubkey,
+    types::{
+        secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
+        TlcErrPacket, TlcErrorCode,
+    },
 };
 use ckb_types::packed::OutPointBuilder;
 use ckb_types::prelude::Builder;
 use secp256k1::{Secp256k1, SecretKey};
-
-use super::test_utils::generate_seckey;
+use std::str::FromStr;
 
 #[test]
 fn test_serde_public_key() {
@@ -92,4 +96,27 @@ fn test_peeled_onion_packet() {
     let packet = packet.peel(&keys[2], &secp).expect("peel");
     assert_eq!(packet.current, hops_infos[2]);
     assert!(packet.is_last());
+}
+
+#[test]
+fn test_tlc_fail_error() {
+    let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
+    assert!(!tlc_fail_detail.error_code.is_node());
+    assert!(tlc_fail_detail.error_code.is_bad_onion());
+    assert!(tlc_fail_detail.error_code.is_perm());
+    let tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone());
+
+    let convert_back: TlcErr = tlc_fail.decode().expect("decoded fail");
+    assert_eq!(tlc_fail_detail, convert_back);
+
+    let node_fail =
+        TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, generate_pubkey().into());
+    assert!(node_fail.error_code.is_node());
+    let tlc_fail = TlcErrPacket::new(node_fail.clone());
+    let convert_back = tlc_fail.decode().expect("decoded fail");
+    assert_eq!(node_fail, convert_back);
+
+    let error_code = TlcErrorCode::PermanentNodeFailure;
+    let convert = TlcErrorCode::from_str("PermanentNodeFailure").expect("convert error");
+    assert_eq!(error_code, convert);
 }

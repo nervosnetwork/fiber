@@ -3,15 +3,16 @@ use crate::fiber::{
         AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
         RemoveTlcCommand, ShutdownCommand, UpdateCommand,
     },
+    graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U32Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFail, RemoveTlcFulfill},
+    serde_utils::{U128Hex, U64Hex},
+    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
-use ckb_jsonrpc_types::Script;
-use ckb_types::core::FeeRate;
+use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_types::core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -21,6 +22,7 @@ use ractor::{call, ActorRef};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::cmp::Reverse;
+use std::str::FromStr;
 use tentacle::secio::PeerId;
 
 #[serde_as]
@@ -33,6 +35,7 @@ pub(crate) struct OpenChannelParams {
     public: Option<bool>,
     funding_udt_type_script: Option<Script>,
     shutdown_script: Option<Script>,
+    commitment_delay_epoch: Option<EpochNumberWithFraction>,
     #[serde_as(as = "Option<U64Hex>")]
     commitment_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
@@ -127,7 +130,7 @@ pub(crate) struct AddTlcResult {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct RemoveTlcParams {
     channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
@@ -136,16 +139,11 @@ pub(crate) struct RemoveTlcParams {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 enum RemoveTlcReason {
-    RemoveTlcFulfill {
-        payment_preimage: Hash256,
-    },
-    RemoveTlcFail {
-        #[serde_as(as = "U32Hex")]
-        error_code: u32,
-    },
+    RemoveTlcFulfill { payment_preimage: Hash256 },
+    RemoveTlcFail { error_code: String },
 }
 
 #[serde_as]
@@ -171,6 +169,24 @@ pub struct UpdateChannelParams {
     tlc_maximum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GetPaymentCommandParams {
+    pub payment_hash: Hash256,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct GetPaymentCommandResult {
+    pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    #[serde_as(as = "U128Hex")]
+    created_at: u128,
+    #[serde_as(as = "U128Hex")]
+    pub last_updated_at: u128,
+    pub failed_error: Option<String>,
 }
 
 #[serde_as]
@@ -211,12 +227,11 @@ pub(crate) struct SendPaymentCommandParams {
 
     // udt type script for the payment
     udt_type_script: Option<Script>,
+
+    // allow self payment, default is false
+    allow_self_payment: Option<bool>,
 }
 
-#[derive(Clone, Serialize)]
-pub(crate) struct SendPaymentResult {
-    payment_hash: Hash256,
-}
 #[rpc(server)]
 trait ChannelRpc {
     #[method(name = "open_channel")]
@@ -260,7 +275,13 @@ trait ChannelRpc {
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
-    ) -> Result<SendPaymentResult, ErrorObjectOwned>;
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
+
+    #[method(name = "get_payment")]
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct ChannelRpcServerImpl<S> {
@@ -290,6 +311,10 @@ where
                     funding_amount: params.funding_amount,
                     public: params.public.unwrap_or(false),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    commitment_delay_epoch: params
+                        .commitment_delay_epoch
+                        .clone()
+                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()
@@ -402,6 +427,15 @@ where
     }
 
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned> {
+        let err_code = match &params.reason {
+            RemoveTlcReason::RemoveTlcFail { error_code } => {
+                let Ok(err) = TlcErrorCode::from_str(&error_code) else {
+                    return log_and_error!(params, format!("invalid error code: {}", error_code));
+                };
+                Some(err)
+            }
+            _ => None,
+        };
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
@@ -409,15 +443,20 @@ where
                     command: ChannelCommand::RemoveTlc(
                         RemoveTlcCommand {
                             id: params.tlc_id,
-                            reason: match params.reason {
+                            reason: match &params.reason {
                                 RemoveTlcReason::RemoveTlcFulfill { payment_preimage } => {
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFulfill(
-                                        RemoveTlcFulfill { payment_preimage },
+                                        RemoveTlcFulfill {
+                                            payment_preimage: *payment_preimage,
+                                        },
                                     )
                                 }
-                                RemoveTlcReason::RemoveTlcFail { error_code } => {
+                                RemoveTlcReason::RemoveTlcFail { .. } => {
+                                    // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        RemoveTlcFail { error_code },
+                                        TlcErrPacket::new(TlcErr::new(
+                                            err_code.expect("expect error code"),
+                                        )),
                                     )
                                 }
                             },
@@ -477,7 +516,7 @@ where
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
-    ) -> Result<SendPaymentResult, ErrorObjectOwned> {
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
                 SendPaymentCommand {
@@ -491,12 +530,36 @@ where
                     max_parts: params.max_parts,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
+                    allow_self_payment: params.allow_self_payment.unwrap_or(false),
                 },
                 rpc_reply,
             ))
         };
-        handle_actor_call!(self.actor, message, params).map(|response| SendPaymentResult {
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
             payment_hash: response.payment_hash,
+            status: response.status,
+            created_at: response.created_at,
+            last_updated_at: response.last_updated_at,
+            failed_error: response.failed_error,
+        })
+    }
+
+    async fn get_payment(
+        &self,
+        params: GetPaymentCommandParams,
+    ) -> Result<GetPaymentCommandResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(
+                params.payment_hash,
+                rpc_reply,
+            ))
+        };
+        handle_actor_call!(self.actor, message, params).map(|response| GetPaymentCommandResult {
+            payment_hash: response.payment_hash,
+            status: response.status,
+            last_updated_at: response.last_updated_at,
+            created_at: response.created_at,
+            failed_error: response.failed_error,
         })
     }
 }

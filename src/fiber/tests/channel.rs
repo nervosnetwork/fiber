@@ -2,9 +2,9 @@ use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
-            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
+            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
@@ -44,18 +44,6 @@ fn test_derive_private_and_public_tlc_keys() {
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
-#[test]
-fn test_derive_private_and_public_revocation_keys() {
-    let base_revocation_key = Privkey::from(&[1; 32]);
-    let per_commitment_secret = Privkey::from(&[2; 32]);
-    let derived_privkey = derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
-    let derived_pubkey = derive_revocation_pubkey(
-        &base_revocation_key.pubkey(),
-        &per_commitment_secret.pubkey(),
-    );
-    assert_eq!(derived_privkey.pubkey(), derived_pubkey);
-}
-
 #[tokio::test]
 async fn test_open_channel_to_peer() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
@@ -69,6 +57,7 @@ async fn test_open_channel_to_peer() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -109,6 +98,7 @@ async fn test_open_and_accept_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -207,6 +197,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -323,7 +314,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
 
-    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+    call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
@@ -341,8 +332,6 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
-
-    dbg!(&remove_tlc_result);
 
     // Since we currently automatically send a `CommitmentSigned` message
     // after sending a `RemoveTlc` message, we can expect the `RemoteCommitmentSigned`
@@ -399,6 +388,7 @@ async fn create_nodes_with_established_channel(
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -531,6 +521,9 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
+
+    dbg!("Sleeping for some time to wait for the RemoveTlc processed by both party");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -733,6 +726,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
                 funding_amount: 0xfffffffffffffffffffffffffffffff,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -767,6 +761,7 @@ async fn test_revoke_old_commitment_transaction() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -852,7 +847,7 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
 
-    let _ = node_a
+    node_a
         .network_actor
         .send_message(NetworkActorMessage::Command(
             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -944,6 +939,7 @@ async fn test_create_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -1068,6 +1064,7 @@ async fn test_reestablish_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
                 tlc_locktime_expiry_delta: None,
                 tlc_min_value: None,
@@ -1232,4 +1229,21 @@ async fn test_commitment_tx_capacity() {
         amount_a + amount_b - (commitment_tx.data().serialized_size_in_block() + 20) as u128,
         output_capacity as u128
     );
+}
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
 }

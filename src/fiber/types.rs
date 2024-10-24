@@ -18,6 +18,7 @@ use ckb_types::{
     packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
     prelude::{Pack, Unpack},
 };
+use core::fmt::{self, Formatter};
 use fiber_sphinx::SphinxError;
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
@@ -640,14 +642,11 @@ pub struct OpenChannel {
     pub reserved_ckb_amount: u64,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -680,15 +679,12 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .reserved_ckb_amount(open_channel.reserved_ckb_amount.pack())
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
+            .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
             .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
-            .to_self_delay(open_channel.to_local_delay.into())
             .funding_pubkey(open_channel.funding_pubkey.into())
-            .revocation_basepoint(open_channel.revocation_basepoint.into())
-            .payment_basepoint(open_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(open_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
@@ -716,14 +712,11 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             shutdown_script: open_channel.shutdown_script(),
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
+            commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: open_channel.min_tlc_value().unpack(),
-            to_local_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: open_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: open_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
@@ -752,12 +745,8 @@ pub struct AcceptChannel {
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -775,11 +764,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
             .min_tlc_value(accept_channel.min_tlc_value.pack())
-            .to_self_delay(accept_channel.to_local_delay.into())
             .funding_pubkey(accept_channel.funding_pubkey.into())
-            .revocation_basepoint(accept_channel.revocation_basepoint.into())
-            .payment_basepoint(accept_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(accept_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
@@ -809,11 +794,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
-            to_local_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: accept_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: accept_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
@@ -1249,33 +1230,214 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RemoveTlcFail {
-    pub error_code: u32,
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TlcErrData {
+    ChannelFailed {
+        #[serde_as(as = "EntityHex")]
+        channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
+    },
+    NodeFailed {
+        node_id: Pubkey,
+    },
 }
 
-impl From<RemoveTlcFail> for molecule_fiber::RemoveTlcFail {
-    fn from(remove_tlc_fail: RemoveTlcFail) -> Self {
-        molecule_fiber::RemoveTlcFail::new_builder()
-            .error_code(remove_tlc_fail.error_code.pack())
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TlcErr {
+    pub error_code: TlcErrorCode,
+    pub extra_data: Option<TlcErrData>,
+}
+
+impl TlcErr {
+    pub fn new(error_code: TlcErrorCode) -> Self {
+        TlcErr {
+            error_code: error_code,
+            extra_data: None,
+        }
+    }
+
+    pub fn new_node_fail(error_code: TlcErrorCode, node_id: Pubkey) -> Self {
+        TlcErr {
+            error_code: error_code.into(),
+            extra_data: Some(TlcErrData::NodeFailed { node_id }),
+        }
+    }
+
+    pub fn new_channel_fail(
+        error_code: TlcErrorCode,
+        channel_outpoint: OutPoint,
+        channel_update: Option<ChannelUpdate>,
+    ) -> Self {
+        TlcErr {
+            error_code: error_code.into(),
+            extra_data: Some(TlcErrData::ChannelFailed {
+                channel_outpoint,
+                channel_update,
+            }),
+        }
+    }
+
+    pub fn error_node_id(&self) -> Option<Pubkey> {
+        match &self.extra_data {
+            Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
+            _ => None,
+        }
+    }
+
+    pub fn error_channel_outpoint(&self) -> Option<OutPoint> {
+        match &self.extra_data {
+            Some(TlcErrData::ChannelFailed {
+                channel_outpoint, ..
+            }) => Some(channel_outpoint.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn error_code(&self) -> TlcErrorCode {
+        self.error_code
+    }
+
+    pub fn error_code_as_str(&self) -> String {
+        let error_code: TlcErrorCode = self.error_code.into();
+        error_code.as_ref().to_string()
+    }
+
+    pub fn set_extra_data(&mut self, extra_data: TlcErrData) {
+        self.extra_data = Some(extra_data);
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        deterministically_serialize(self)
+    }
+
+    fn deserialize(data: &[u8]) -> Option<Self> {
+        serde_json::from_slice(data).ok()
+    }
+}
+
+// This is the onion packet we need to encode and send back to the sender,
+// currently it's the raw TlcErr serialized data from the TlcErr struct,
+// sender should decode it and then decide what to do with the error.
+// Note: this supposed to be only accessible by the sender, and it's not reliable since it
+//       is not placed on-chain due to the possibility of hop failure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TlcErrPacket {
+    // TODO: replace this with the real onion packet
+    pub onion_packet: Vec<u8>,
+}
+
+impl TlcErrPacket {
+    pub fn new(tlc_fail: TlcErr) -> Self {
+        TlcErrPacket {
+            onion_packet: tlc_fail.serialize(),
+        }
+    }
+
+    pub fn decode(&self) -> Option<TlcErr> {
+        TlcErr::deserialize(&self.onion_packet)
+    }
+}
+
+impl From<TlcErrPacket> for molecule_fiber::TlcErrPacket {
+    fn from(remove_tlc_fail: TlcErrPacket) -> Self {
+        molecule_fiber::TlcErrPacket::new_builder()
+            .onion_packet(remove_tlc_fail.onion_packet.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_fiber::RemoveTlcFail> for RemoveTlcFail {
+impl TryFrom<molecule_fiber::TlcErrPacket> for TlcErrPacket {
     type Error = Error;
 
-    fn try_from(remove_tlc_fail: molecule_fiber::RemoveTlcFail) -> Result<Self, Self::Error> {
-        Ok(RemoveTlcFail {
-            error_code: remove_tlc_fail.error_code().unpack(),
+    fn try_from(remove_tlc_fail: molecule_fiber::TlcErrPacket) -> Result<Self, Self::Error> {
+        Ok(TlcErrPacket {
+            onion_packet: remove_tlc_fail.onion_packet().unpack(),
         })
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl std::fmt::Display for TlcErrPacket {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "TlcErrPacket")
+    }
+}
+
+// The onion packet is invalid
+const BADONION: u16 = 0x8000;
+// Permanent errors (otherwise transient)
+const PERM: u16 = 0x4000;
+// Node releated errors (otherwise channels)
+const NODE: u16 = 0x2000;
+// Channel forwarding parameter was violated
+const UPDATE: u16 = 0x1000;
+
+#[repr(u16)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, AsRefStr, EnumString)]
+pub enum TlcErrorCode {
+    TemporaryNodeFailure = NODE | 2,
+    PermanentNodeFailure = PERM | NODE | 2,
+    // unused right now
+    RequiredNodeFeatureMissing = PERM | NODE | 3,
+    // unused right now, maybe need to add onion version in future?
+    InvalidOnionVersion = BADONION | PERM | 4,
+    InvalidOnionHmac = BADONION | PERM | 5,
+    InvalidOnionKey = BADONION | PERM | 6,
+    TemporaryChannelFailure = UPDATE | 7,
+    // used for shutting down the channel
+    PermanentChannelFailure = PERM | 8,
+    RequiredChannelFeatureMissing = PERM | 9,
+    UnknownNextPeer = PERM | 10,
+    AmountBelowMinimum = UPDATE | 11,
+    FeeInsufficient = UPDATE | 12,
+    // TODO: cltv expiry check
+    IncorrectCltvExpiry = UPDATE | 13,
+    ExpiryTooSoon = UPDATE | 14,
+    IncorrectOrUnknownPaymentDetails = PERM | 15,
+    InvoiceExpired = PERM | 16,
+    FinalIncorrectCltvExpiry = 18,
+    FinalIncorrectHtlcAmount = 19,
+    ChannelDisabled = UPDATE | 20,
+    ExpiryTooFar = 21,
+    InvalidOnionPayload = PERM | 22,
+    MppTimeout = 23,
+    InvalidOnionBlinding = BADONION | PERM | 24,
+}
+
+impl TlcErrorCode {
+    pub fn is_node(&self) -> bool {
+        *self as u16 & NODE != 0
+    }
+
+    pub fn is_bad_onion(&self) -> bool {
+        *self as u16 & BADONION != 0
+    }
+
+    pub fn is_perm(&self) -> bool {
+        *self as u16 & PERM != 0
+    }
+
+    pub fn is_update(&self) -> bool {
+        *self as u16 & UPDATE != 0
+    }
+
+    pub fn payment_failed(&self) -> bool {
+        match self {
+            TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            | TlcErrorCode::FinalIncorrectCltvExpiry
+            | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::InvoiceExpired
+            | TlcErrorCode::MppTimeout => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
-    RemoveTlcFail(RemoveTlcFail),
+    RemoveTlcFail(TlcErrPacket),
 }
 
 impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
@@ -1285,7 +1447,7 @@ impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
                 molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill.into())
             }
             RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
-                molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail.into())
+                molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail.into())
             }
         }
     }
@@ -1307,7 +1469,7 @@ impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
             molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFulfill(remove_tlc_fulfill) => Ok(
                 RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill.try_into()?),
             ),
-            molecule_fiber::RemoveTlcReasonUnion::RemoveTlcFail(remove_tlc_fail) => {
+            molecule_fiber::RemoveTlcReasonUnion::TlcErrPacket(remove_tlc_fail) => {
                 Ok(RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.try_into()?))
             }
         }
@@ -1493,6 +1655,10 @@ impl NodeAnnouncement {
             udt_cfg_infos: get_udt_whitelist(),
         };
         deterministically_hash(&unsigned_announcement)
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        PeerId::from_public_key(&self.node_id.into())
     }
 }
 
@@ -2994,7 +3160,8 @@ impl<T: HopData> OnionPacket<T> {
 }
 
 impl<T: HopData> PeeledOnionPacket<T> {
-    /// - `hops_info`: the first is the instruction for the origin node itself. Remaining elements are for each node to receive the packet.
+    /// - `hops_info`: the first is the instruction for the origin node itself.
+    ///                Remaining elements are for each node to receive the packet.
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<T>,

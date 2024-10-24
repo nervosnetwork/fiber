@@ -54,13 +54,11 @@ table OpenChannel {
     funding_fee_rate:            Uint64,
     commitment_fee_rate:         Uint64,
     max_tlc_value_in_flight:     Uint128,
-    max_tlc_number_in_flight:      Uint64,
+    max_tlc_number_in_flight:    Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Byte33,
-    revocation_basepoint:        Byte33,
-    payment_basepoint:           Byte33,
-    delayed_payment_basepoint:   Byte33,
+    tlc_basepoint:               Byte33,
     first_per_commitment_point:  Byte33,
     second_per_commitment_point: Byte33,
     next_local_nonce:            Byte66,
@@ -69,7 +67,7 @@ table OpenChannel {
 ```
 
 - chain_hash: Chain genesis block hash
-- channel_id: The ID of the channel, which is a temporary ID derived from the revocation_basepoint before the channel is officially established. After the channel is established, it will be replaced with the actual channel ID, derived from a blake2b hash of the sorted revocation_basepoints of both parties.
+- channel_id: The ID of the channel, which is a temporary ID derived from the tlc_basepoint before the channel is officially established. After the channel is established, it will be replaced with the actual channel ID, derived from a blake2b hash of the sorted tlc_basepoints of both parties.
 - funding_type_script: Specifies the asset type of the channel. If empty, it indicates using CKB native token as the asset.
 - funding_amount: The amount of assets the channel initiator wants to contribute.
 - funding_fee_rate: Funding transaction fee rate, in shannons per kilo-bytes.
@@ -79,15 +77,11 @@ table OpenChannel {
 - min_tlc_value: The minimum value of TLCs that the channel initiator can accept.
 - to_self_delay: The delay time for the channel initiator to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel initiator, used for generating 2-2 multisig contracts.
-- revocation_basepoint: See further description below.
-- payment_basepoint:
-- delayed_payment_basepoint:
+- tlc_basepoint: The master key used to derive child keys required for tlcs, we will use the same method as lightning network to derive these keys, see [Secret Derivations] for more details.
 - first_per_commitment_point:
 - second_per_commitment_point:
 - next_local_nonce: Used for generating partial signatures for unlocking 2-2 Schnorr multisig.
 - channel_flags: Channel flags, currently only using one bit to indicate whether to broadcast this channel information on the P2P network.
-
-The xxx_basepoints here are master keys used to derive child keys required for different types of transactions. For example, they can be used with per_commitment_point to derive commitment transactions keys. We will use the same method as lightning network to derive these keys, see [Secret Derivations] for more details.
 
 ### AcceptChannel
 
@@ -98,11 +92,11 @@ table AcceptChannel {
     channel_id:                  Byte32,
     funding_amount:              Uint128,
     max_tlc_value_in_flight:     Uint128,
-    max_tlc_number_in_flight:      Uint64,
+    max_tlc_number_in_flight:    Uint64,
     min_tlc_value:               Uint128,
     to_self_delay:               Uint64,
     funding_pubkey:              Byte33,
-    revocation_basepoint:        Byte33,
+    tlc_basepoint:               Byte33,
     payment_basepoint:           Byte33,
     delayed_payment_basepoint:   Byte33,
     first_per_commitment_point:  Byte33,
@@ -118,10 +112,7 @@ table AcceptChannel {
 - min_tlc_value: The minimum value of TLCs that the channel receiver can accept.
 - to_self_delay: The delay time for the channel receiver to unlock the outputs from the commitment transaction, in EpochNumberWithFraction.
 - funding_pubkey: The pubkey of the channel receiver, used for generating 2-2 multisig contracts.
-- revocation_basepoint: See the description in `OpenChannel` message.
-- payment_basepoint:
-- delayed_payment_basepoint:
-- tlc_basepoint:
+- tlc_basepoint: See the description in `OpenChannel` message.
 - first_per_commitment_point:
 - second_per_commitment_point:
 - next_local_nonce: Used for generating partial signatures for unlocking 2-2 Schnorr multisig.

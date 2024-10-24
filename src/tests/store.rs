@@ -114,7 +114,7 @@ fn test_store_channels() {
     }
 
     // sort by out_point
-    channels.sort_by(|a, b| a.out_point().cmp(&b.out_point()));
+    channels.sort_by_key(|a| a.out_point());
 
     let outpoint_0 = channels[0].out_point();
     assert_eq!(

@@ -1,11 +1,11 @@
 meta {
-  name: add tlc from NODE3
+  name: Node1 send get_payment for query status
   type: http
-  seq: 9
+  seq: 17
 }
 
 post {
-  url: {{NODE3_RPC_URL}}
+  url: {{NODE1_RPC_URL}}
   body: json
   auth: none
 }
@@ -19,13 +19,10 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "add_tlc",
+    "method": "get_payment",
     "params": [
       {
-        "channel_id": "{{CHANNEL_ID}}",
-        "amount": "0x11e1a300",
-        "payment_hash": "0x29449e2cc6f56a691253fe88e3a378171c81573b09247010b4f1cb8c806e1e09",
-        "expiry": 40
+        "payment_hash": "{{payment_hash}}"
       }
     ]
   }
@@ -33,12 +30,19 @@ body:json {
 
 assert {
   res.body.error: isUndefined
-  res.body.result.tlc_id: isDefined
+}
+
+script:pre-request {
+  // sleep for a while
+  await new Promise(r => setTimeout(r, 1000));
 }
 
 script:post-response {
-  console.log("step 9 response: ", res.body);
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  bru.setVar("TLC_ID3", res.body.result.tlc_id);
+  console.log("get result: ", res.body.result);
+  if (res.body.result.status != "Success") {
+    throw new Error("Assertion failed: payment session status expected to be Success");
+  }
+
 }

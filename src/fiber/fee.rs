@@ -120,3 +120,14 @@ pub(crate) fn calculate_shutdown_tx_fee(
     let tx_size = shutdown_tx_size(udt_type_script, shutdown_scripts) as u64;
     fee_rate.fee(tx_size).as_u64()
 }
+
+pub(crate) fn calculate_tlc_forward_fee(amount: u128, fee_proportational_millionths: u128) -> u128 {
+    let fee = fee_proportational_millionths * amount;
+    let base_fee = fee / 1_000_000;
+    let remainder = fee % 1_000_000;
+    if remainder > 0 {
+        base_fee + 1
+    } else {
+        base_fee
+    }
+}
