@@ -1,23 +1,24 @@
-use ckb_hash::blake2b_256;
-use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
-use fnn::ckb::contracts::{get_script_by_contract, init_contracts_context, Contract};
-use fnn::ckb::CkbChainActor;
-use fnn::fiber::graph::NetworkGraph;
-use fnn::fiber::{channel::ChannelSubscribers, NetworkActorCommand, NetworkActorMessage};
+use fnn::ckb::{
+    contracts::{get_script_by_contract, init_contracts_context, Contract},
+    CkbChainActor,
+};
+use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph};
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
-use ractor::Actor;
-use secp256k1::Secp256k1;
-use std::str::FromStr;
+
+use core::default::Default;
 use std::sync::Arc;
 use std::time::Duration;
-use tentacle::multiaddr::Multiaddr;
+
+use ckb_hash::blake2b_256;
+use ractor::Actor;
+use secp256k1::Secp256k1;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
 use tracing::{debug, error, info, info_span, trace};
@@ -85,8 +86,6 @@ pub async fn main() {
             const CHANNEL_SIZE: usize = 4000;
             let (event_sender, mut event_receiver) = mpsc::channel(CHANNEL_SIZE);
 
-            let bootnodes = fiber_config.bootnode_addrs.clone();
-
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
                 node_public_key.clone().into(),
@@ -111,14 +110,6 @@ pub async fn main() {
                 default_shutdown_script,
             )
             .await;
-
-            for bootnode in bootnodes {
-                let addr = Multiaddr::from_str(&bootnode).expect("valid bootnode");
-                let command = NetworkActorCommand::ConnectPeer(addr);
-                network_actor
-                    .send_message(NetworkActorMessage::new_command(command))
-                    .expect("ckb actor alive")
-            }
 
             let watchtower_actor = Actor::spawn_linked(
                 Some("watchtower".to_string()),

@@ -1,7 +1,7 @@
 use crate::{
     fiber::{
         graph::{ChannelInfo, GraphError, NetworkGraph, NodeInfo, PathEdge},
-        network::{get_chain_hash, SendPaymentCommand},
+        network::{get_chain_hash, SendPaymentData},
         types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
     store::Store,
@@ -11,17 +11,8 @@ use ckb_types::{
     prelude::Entity,
 };
 use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
-use tentacle::{multiaddr::Multiaddr, secio::PeerId};
 
-use super::test_utils::{generate_keypair, generate_pubkey};
-
-fn generate_keys(num: usize) -> Vec<PublicKey> {
-    let mut keys = vec![];
-    for _ in 0..num {
-        keys.push(generate_pubkey());
-    }
-    keys
-}
+use super::test_utils::generate_keypair;
 
 fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     let mut keys = vec![];
@@ -74,6 +65,20 @@ impl MockNetworkGraph {
             keys: keypairs.into_iter().map(|x| x.1).collect(),
             edges: vec![],
             graph,
+        }
+    }
+
+    pub fn mark_node_failed(&mut self, node: usize) {
+        self.graph.mark_node_failed(self.keys[node].into());
+    }
+
+    pub fn mark_channel_failed(&mut self, node_a: usize, node_b: usize) {
+        let outpoint = self
+            .edges
+            .iter()
+            .find(|(a, b, _)| (*a == node_a && *b == node_b) || (*a == node_b && *b == node_a));
+        if let Some((_, _, outpoint)) = outpoint {
+            self.graph.mark_channel_failed(&outpoint);
         }
     }
 
@@ -191,41 +196,6 @@ impl MockNetworkGraph {
         self.graph
             .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
     }
-}
-
-#[test]
-fn test_graph_connected_peers() {
-    let temp_path = tempfile::tempdir().unwrap();
-    let store = Store::new(temp_path.path());
-    let keys = generate_keys(1);
-    let public_key1 = keys[0];
-    let mut network_graph = NetworkGraph::new(store, public_key1.into());
-
-    let peer_id = PeerId::random();
-    let address: Multiaddr = "/ip4/127.0.0.1/tcp/10000".parse().unwrap();
-    network_graph.add_connected_peer(&peer_id, address.clone());
-
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 1);
-    assert_eq!(connected_peers[0], (&peer_id, &address));
-
-    network_graph.reset();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
-
-    // load from db
-    network_graph.load_from_store();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 1);
-    assert_eq!(connected_peers[0], (&peer_id, &address));
-
-    network_graph.remove_connected_peer(&peer_id);
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
-
-    network_graph.load_from_store();
-    let connected_peers = network_graph.get_connected_peers();
-    assert_eq!(connected_peers.len(), 0);
 }
 
 #[test]
@@ -517,17 +487,18 @@ fn test_graph_build_route_three_nodes() {
     let node2 = network.keys[2];
     let node3 = network.keys[3];
     // Test build route from node1 to node3
-    let route = network.graph.build_route(SendPaymentCommand {
-        target_pubkey: Some(node3.into()),
-        amount: Some(100),
-        payment_hash: Some(Hash256::default()),
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
         invoice: None,
         final_cltv_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
-        keysend: None,
+        keysend: false,
         udt_type_script: None,
+        preimage: None,
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
@@ -554,17 +525,18 @@ fn test_graph_build_route_exceed_max_htlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount exceeding max_htlc_value
-    let route = network.graph.build_route(SendPaymentCommand {
-        target_pubkey: Some(node3.into()),
-        amount: Some(100), // Exceeds max_htlc_value of 50
-        payment_hash: Some(Hash256::default()),
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100, // Exceeds max_htlc_value of 50
+        payment_hash: Hash256::default(),
         invoice: None,
         final_cltv_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
-        keysend: None,
+        keysend: false,
         udt_type_script: None,
+        preimage: None,
     });
     assert!(route.is_err());
 }
@@ -578,17 +550,18 @@ fn test_graph_build_route_below_min_htlc_value() {
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_htlc_value
-    let route = network.graph.build_route(SendPaymentCommand {
-        target_pubkey: Some(node3.into()),
-        amount: Some(10), // Below min_htlc_value of 50
-        payment_hash: Some(Hash256::default()),
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 10, // Below min_htlc_value of 50
+        payment_hash: Hash256::default(),
         invoice: None,
         final_cltv_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
-        keysend: None,
+        keysend: false,
         udt_type_script: None,
+        preimage: None,
     });
     assert!(route.is_err());
 }
@@ -609,5 +582,132 @@ fn test_graph_find_path_udt() {
     assert_eq!(route[0].channel_outpoint, network.edges[0].2);
 
     let route = network.find_route(1, 3, 10, 100);
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_mark_failed_channel() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    let node3 = network.keys[3];
+
+    network.mark_channel_failed(2, 3);
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_err());
+
+    network.add_edge(0, 5, Some(500), Some(2));
+    network.add_edge(5, 3, Some(500), Some(2));
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+}
+
+#[test]
+fn test_graph_mark_failed_node() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(2, 4, Some(500), Some(2));
+
+    let node3 = network.keys[3];
+    let node4 = network.keys[4];
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+
+    // Test build route from node1 to node4 should be Ok
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node4.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_ok());
+
+    network.mark_node_failed(2);
+
+    // Test build route from node1 to node3
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node3.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
+    assert!(route.is_err());
+
+    // Test build route from node1 to node4
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node4.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    eprintln!("return {:?}", route);
     assert!(route.is_err());
 }

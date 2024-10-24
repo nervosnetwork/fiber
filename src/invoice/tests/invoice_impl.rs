@@ -437,3 +437,18 @@ fn test_invoice_udt_script() {
     let decoded = serde_json::from_str::<CkbInvoice>(&res.unwrap()).unwrap();
     assert_eq!(decoded, invoice);
 }
+
+#[test]
+fn test_invoice_check_expired() {
+    let private_key = gen_rand_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(rand_sha256_hash())
+        .expiry_time(Duration::from_secs(1))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    assert_eq!(invoice.is_expired(), false);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(invoice.is_expired(), true);
+}

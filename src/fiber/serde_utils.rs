@@ -109,3 +109,4 @@ macro_rules! uint_as_hex {
 uint_as_hex!(U128Hex, u128);
 uint_as_hex!(U64Hex, u64);
 uint_as_hex!(U32Hex, u32);
+uint_as_hex!(U16Hex, u16);

@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct ConnectPeerParams {
     address: MultiAddr,
+    save: Option<bool>,
 }
 
 #[serde_as]
@@ -45,6 +46,15 @@ impl PeerRpcServer for PeerRpcServerImpl {
     async fn connect_peer(&self, params: ConnectPeerParams) -> Result<(), ErrorObjectOwned> {
         let message =
             NetworkActorMessage::Command(NetworkActorCommand::ConnectPeer(params.address.clone()));
+        if params.save.unwrap_or(true) {
+            crate::handle_actor_cast!(
+                self.actor,
+                NetworkActorMessage::Command(NetworkActorCommand::SavePeerAddress(
+                    params.address.clone()
+                )),
+                params.clone()
+            )?;
+        }
         crate::handle_actor_cast!(self.actor, message, params)
     }
 

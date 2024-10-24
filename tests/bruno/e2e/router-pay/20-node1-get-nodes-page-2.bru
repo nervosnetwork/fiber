@@ -23,7 +23,7 @@ body:json {
     "method": "graph_nodes",
     "params": [{
         "limit": "0x2",
-        "after": "{{last_cursor_2}}"
+        "after": "{{last_cursor}}"
     }]
   }
 }
@@ -41,7 +41,8 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("get result: ", res.body.result);
-  if (res.body.result.nodes.length != 0) {
+  if (res.body.result.nodes.length != 2) {
     throw new Error("Assertion failed: nodes number is not right");
   }
+  bru.setVar("last_cursor_2", res.body.result.last_cursor);
 }

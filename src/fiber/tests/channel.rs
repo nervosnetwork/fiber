@@ -314,7 +314,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
 
-    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+    call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
@@ -332,8 +332,6 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
-
-    dbg!(&remove_tlc_result);
 
     // Since we currently automatically send a `CommitmentSigned` message
     // after sending a `RemoveTlc` message, we can expect the `RemoteCommitmentSigned`
@@ -523,6 +521,9 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
+
+    dbg!("Sleeping for some time to wait for the RemoveTlc processed by both party");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -846,7 +847,7 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
 
-    let _ = node_a
+    node_a
         .network_actor
         .send_message(NetworkActorMessage::Command(
             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
@@ -1228,4 +1229,21 @@ async fn test_commitment_tx_capacity() {
         amount_a + amount_b - (commitment_tx.data().serialized_size_in_block() + 20) as u128,
         output_capacity as u128
     );
+}
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
 }
