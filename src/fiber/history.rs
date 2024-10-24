@@ -64,13 +64,13 @@ impl InternalResult {
         self.add(from, target, current_time(), amount, false);
     }
 
-    pub fn fail_node(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
-        self.fail_node = Some(route[index].pubkey);
+    pub fn fail_node(&mut self, nodes: &Vec<SessionRouteNode>, index: usize) {
+        self.fail_node = Some(nodes[index].pubkey);
         if index > 0 {
-            self.fail_pair(route, index);
+            self.fail_pair(nodes, index);
         }
-        if index + 1 < route.len() {
-            self.fail_pair(route, index + 1);
+        if index + 1 < nodes.len() {
+            self.fail_pair(nodes, index + 1);
         }
     }
 
@@ -82,36 +82,36 @@ impl InternalResult {
         }
     }
 
-    pub fn fail_pair_balanced(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_pair_balanced(&mut self, nodes: &Vec<SessionRouteNode>, index: usize) {
         if index > 0 {
-            let a = route[index - 1].pubkey;
-            let b = route[index].pubkey;
-            let amount = route[index].amount;
+            let a = nodes[index - 1].pubkey;
+            let b = nodes[index].pubkey;
+            let amount = nodes[index].amount;
             self.add_fail_pair_balanced(a, b, amount);
         }
     }
 
-    pub fn succeed_range_pairs(&mut self, route: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn succeed_range_pairs(&mut self, nodes: &Vec<SessionRouteNode>, start: usize, end: usize) {
         for i in start..end {
             self.add(
-                route[i].pubkey,
-                route[i + 1].pubkey,
+                nodes[i].pubkey,
+                nodes[i + 1].pubkey,
                 current_time(),
-                route[i].amount,
+                nodes[i].amount,
                 true,
             );
         }
     }
-    pub fn fail_range_pairs(&mut self, route: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn fail_range_pairs(&mut self, nodes: &Vec<SessionRouteNode>, start: usize, end: usize) {
         for index in start.max(1)..=end {
-            self.fail_pair(route, index);
+            self.fail_pair(nodes, index);
         }
     }
 
-    pub fn record_payment_fail(&mut self, route: &Vec<SessionRouteNode>, tlc_err: TlcErr) -> bool {
+    pub fn record_payment_fail(&mut self, nodes: &Vec<SessionRouteNode>, tlc_err: TlcErr) -> bool {
         let mut need_to_retry = true;
 
-        let error_index = route.iter().position(|s| {
+        let error_index = nodes.iter().position(|s| {
             Some(s.channel_outpoint.clone()) == tlc_err.error_channel_outpoint()
                 || Some(s.pubkey) == tlc_err.error_node_id()
         });
@@ -121,10 +121,10 @@ impl InternalResult {
             return need_to_retry;
         };
 
-        let len = route.len();
+        let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
-        if index == 0 {
+        if index == 1 {
             match error_code {
                 // we received an error from the first node, we trust our own node
                 // so we need to penalize the first node
@@ -132,7 +132,7 @@ impl InternalResult {
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey
                 | TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(route, 1);
+                    self.fail_node(nodes, 1);
                 }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
@@ -144,15 +144,15 @@ impl InternalResult {
                 TlcErrorCode::FinalIncorrectCltvExpiry | TlcErrorCode::FinalIncorrectHtlcAmount => {
                     if len == 2 {
                         need_to_retry = false;
-                        self.fail_node(route, len - 1);
+                        self.fail_node(nodes, len - 1);
                     } else {
-                        self.fail_pair(route, index - 1);
-                        self.succeed_range_pairs(route, 0, index - 2);
+                        self.fail_pair(nodes, index - 1);
+                        self.succeed_range_pairs(nodes, 0, index - 2);
                     }
                 }
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
                     need_to_retry = false;
-                    self.succeed_range_pairs(route, 0, len - 1);
+                    self.succeed_range_pairs(nodes, 0, len - 1);
                 }
                 TlcErrorCode::ExpiryTooSoon => {
                     need_to_retry = false;
@@ -161,9 +161,9 @@ impl InternalResult {
                     unimplemented!("not implemented");
                 }
                 _ => {
-                    self.fail_node(route, len - 1);
+                    self.fail_node(nodes, len - 1);
                     if len > 1 {
-                        self.succeed_range_pairs(route, 0, len - 2);
+                        self.succeed_range_pairs(nodes, 0, len - 2);
                     }
                 }
             }
@@ -173,44 +173,44 @@ impl InternalResult {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(route, index);
+                    self.fail_node(nodes, index);
                     if index > 1 {
-                        self.succeed_range_pairs(route, 0, index - 1);
+                        self.succeed_range_pairs(nodes, 0, index - 1);
                     }
                 }
                 TlcErrorCode::UnknownNextPeer => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::PermanentChannelFailure => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectCltvExpiry => {
                     need_to_retry = false;
                     if index == 1 {
-                        self.fail_node(route, 1);
+                        self.fail_node(nodes, 1);
                     } else {
-                        self.fail_pair(route, index - 1);
+                        self.fail_pair(nodes, index - 1);
                         if index > 1 {
-                            self.succeed_range_pairs(route, 0, index - 2);
+                            self.succeed_range_pairs(nodes, 0, index - 2);
                         }
                     }
                 }
                 TlcErrorCode::TemporaryChannelFailure => {
-                    self.fail_pair_balanced(route, index);
-                    self.succeed_range_pairs(route, 0, index - 1);
+                    self.fail_pair_balanced(nodes, index);
+                    self.succeed_range_pairs(nodes, 0, index - 1);
                 }
                 TlcErrorCode::ExpiryTooSoon => {
                     if index == 1 {
-                        self.fail_node(route, 1);
+                        self.fail_node(nodes, 1);
                     } else {
-                        self.fail_range_pairs(route, 0, index - 1);
+                        self.fail_range_pairs(nodes, 0, index - 1);
                     }
                 }
                 _ => {
-                    self.fail_node(route, index);
+                    self.fail_node(nodes, index);
                 }
             }
         }

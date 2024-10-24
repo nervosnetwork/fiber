@@ -477,7 +477,7 @@ where
     }
 
     pub(crate) fn record_payment_success(&mut self, payment_session: &PaymentSession) {
-        let session_route = &payment_session.route.channels;
+        let session_route = &payment_session.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
         self.history.apply_internal_result(result);
@@ -488,9 +488,9 @@ where
         payment_session: &PaymentSession,
         tlc_err: TlcErr,
     ) -> bool {
-        let route = &payment_session.route.channels;
         let mut internal_result = InternalResult::default();
-        let need_to_retry = internal_result.record_payment_fail(route, tlc_err);
+        let nodes = &payment_session.route.nodes;
+        let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
         self.history.apply_internal_result(internal_result);
         return need_to_retry;
     }
@@ -527,7 +527,7 @@ where
             source, target, amount, payment_hash
         );
 
-        let route = self.find_route(
+        let route = self.find_path(
             source,
             target,
             amount,
@@ -608,7 +608,7 @@ where
     }
 
     // the algorithm works from target-to-source to find the shortest path
-    pub fn find_route(
+    pub fn find_path(
         &self,
         source: Pubkey,
         target: Pubkey,
@@ -843,32 +843,42 @@ pub struct SessionRouteNode {
 
 // The router is a list of nodes that the payment will go through.
 // We store in the payment session and then will use it to track the payment history.
+// The router is a list of nodes that the payment will go through.
+// For example:
+//    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SessionRoute {
-    pub channels: Vec<SessionRouteNode>,
+    pub nodes: Vec<SessionRouteNode>,
 }
 
 impl SessionRoute {
-    pub fn new(target: Pubkey, payment_hops: &Vec<PaymentHopData>) -> Self {
+    // Create a new route from the source to the target with the given payment hops.
+    // The payment hops are the hops that the payment will go through.
+    // for a payment route A -> B -> C -> D
+    // the `payment_hops` is [B, C, D], which is a convinent way for onion routing.
+    // here we need to create a session route with source, which is A -> B -> C -> D
+    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &Vec<PaymentHopData>) -> Self {
         let mut router = Self::default();
+        let mut current = source;
         for hop in payment_hops {
             if let Some(key) = hop.next_hop {
                 router.add_node(
-                    key,
+                    current,
                     hop.channel_outpoint
                         .clone()
                         .expect("expect channel outpoint"),
                     hop.amount,
                 );
-            } else {
-                router.add_node(target, OutPoint::default(), hop.amount);
+                current = key;
             }
         }
+        assert_eq!(current, target);
+        router.add_node(target, OutPoint::default(), 0);
         router
     }
 
     fn add_node(&mut self, pubkey: Pubkey, channel_outpoint: OutPoint, amount: u128) {
-        self.channels.push(SessionRouteNode {
+        self.nodes.push(SessionRouteNode {
             pubkey,
             channel_outpoint,
             amount,

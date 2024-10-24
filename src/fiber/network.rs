@@ -2290,7 +2290,11 @@ where
                 .clone()
                 .expect("first hop channel outpoint");
 
-            let session_route = SessionRoute::new(payment_data.target_pubkey, &hops_infos);
+            let session_route = SessionRoute::new(
+                state.get_public_key(),
+                payment_data.target_pubkey,
+                &hops_infos,
+            );
             // generate session key
             let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
             let peeled_packet = match PeeledPaymentOnionPacket::create(

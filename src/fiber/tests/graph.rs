@@ -1,5 +1,5 @@
-use super::test_utils::{generate_keypair, generate_pubkey};
-use crate::fiber::types::Pubkey;
+use super::test_utils::generate_keypair;
+use crate::fiber::graph::SessionRoute;
 use crate::{
     fiber::{
         graph::{ChannelInfo, GraphError, NetworkGraph, NodeInfo, PathEdge},
@@ -180,7 +180,7 @@ impl MockNetworkGraph {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph
-            .find_route(source, target, amount, Some(max_fee), None)
+            .find_path(source, target, amount, Some(max_fee), None)
     }
 
     pub fn find_route_udt(
@@ -194,7 +194,7 @@ impl MockNetworkGraph {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph
-            .find_route(source, target, amount, Some(max_fee), Some(udt_type_script))
+            .find_path(source, target, amount, Some(max_fee), Some(udt_type_script))
     }
 }
 
@@ -459,7 +459,7 @@ fn test_graph_find_path_err() {
     assert!(route.is_err());
 
     let no_exits_public_key = network.keys[0];
-    let route = network.graph.find_route(
+    let route = network.graph.find_path(
         node1.into(),
         no_exits_public_key.into(),
         100,
@@ -468,7 +468,7 @@ fn test_graph_find_path_err() {
     );
     assert!(route.is_err());
 
-    let route = network.graph.find_route(
+    let route = network.graph.find_path(
         no_exits_public_key.into(),
         node1.into(),
         100,
@@ -629,6 +629,43 @@ fn test_graph_mark_failed_channel() {
     });
     eprintln!("return {:?}", route);
     assert!(route.is_ok());
+}
+
+#[test]
+fn test_graph_session_router() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(3, 4, Some(500), Some(2));
+
+    let node0 = network.keys[0];
+    let node2 = network.keys[2];
+    let node3 = network.keys[3];
+    let node4 = network.keys[4];
+
+    // Test build route from node1 to node4 should be Ok
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node4.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    });
+    assert!(route.is_ok());
+
+    let route = route.unwrap();
+    let session_route = SessionRoute::new(node0.into(), node4.into(), &route);
+    let session_route_keys: Vec<_> = session_route.nodes.iter().map(|x| x.pubkey).collect();
+    assert_eq!(
+        session_route_keys,
+        vec![node0.into(), node2.into(), node3.into(), node4.into()]
+    );
 }
 
 #[test]
