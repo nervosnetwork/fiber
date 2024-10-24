@@ -3,6 +3,7 @@ use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::history::TimedResult;
+use crate::fiber::tests::test_utils::gen_rand_public_key;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
 use crate::fiber::types::ChannelAnnouncement;
 use crate::fiber::types::Hash256;
@@ -22,15 +23,8 @@ use ckb_types::prelude::*;
 use core::cmp::Ordering;
 use musig2::CompactSignature;
 use secp256k1::Keypair;
-use secp256k1::PublicKey;
 use secp256k1::Secp256k1;
 use tempfile::tempdir;
-
-fn gen_rand_public_key() -> Pubkey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair).into()
-}
 
 fn mock_node() -> (Pubkey, NodeInfo) {
     let node_id: Pubkey = gen_rand_public_key();

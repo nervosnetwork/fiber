@@ -146,7 +146,7 @@ pub struct NetworkGraph<S> {
 }
 
 #[derive(Error, Debug)]
-pub enum GraphError {
+pub enum PathFindError {
     #[error("Graph error: {0}")]
     Amount(String),
     #[error("PathFind error: {0}")]
@@ -370,11 +370,11 @@ where
         )
     }
 
-    pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
+    pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), PathFindError> {
         debug!("Processing channel update: {:?}", &update);
         let channel_outpoint = &update.channel_outpoint;
         let Some(channel) = self.channels.get_mut(channel_outpoint) else {
-            return Err(GraphError::Other("channel not found".to_string()));
+            return Err(PathFindError::Other("channel not found".to_string()));
         };
         debug!(
             "Found channel {:?} for channel update {:?}",
@@ -507,7 +507,7 @@ where
     pub fn build_route(
         &self,
         payment_request: SendPaymentData,
-    ) -> Result<Vec<PaymentHopData>, GraphError> {
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_request.target_pubkey;
         let amount = payment_request.amount;
@@ -615,7 +615,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
-    ) -> Result<Vec<PathEdge>, GraphError> {
+    ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let mut result = vec![];
@@ -625,24 +625,24 @@ where
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
 
         if amount == 0 {
-            return Err(GraphError::Amount(
+            return Err(PathFindError::Amount(
                 "Amount must be greater than 0".to_string(),
             ));
         }
 
         if source == target {
-            return Err(GraphError::PathFind(
+            return Err(PathFindError::PathFind(
                 "source and target are the same".to_string(),
             ));
         }
         let Some(source_node) = self.nodes.get(&source) else {
-            return Err(GraphError::PathFind(format!(
+            return Err(PathFindError::PathFind(format!(
                 "source node not found: {:?}",
                 &source
             )));
         };
         let Some(_target_node) = self.nodes.get(&target) else {
-            return Err(GraphError::PathFind(format!(
+            return Err(PathFindError::PathFind(format!(
                 "target node not found: {:?}",
                 &target
             )));
@@ -775,7 +775,7 @@ where
             started_time.elapsed()
         );
         if result.is_empty() || current != target {
-            return Err(GraphError::PathFind("no path found".to_string()));
+            return Err(PathFindError::PathFind("no path found".to_string()));
         }
         Ok(result)
     }

@@ -4042,7 +4042,6 @@ impl ChannelActorState {
         );
 
         let verify_ctx = Musig2VerifyContext::from(self);
-
         let signature = aggregate_partial_signatures_for_msg(
             tx.hash().as_slice(),
             verify_ctx,

@@ -21,6 +21,7 @@ use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
 use rand::Rng;
+use secp256k1::Keypair;
 use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
@@ -32,6 +33,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir as OldTempDir;
+use tentacle::secio::SecioKeyPair;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
@@ -154,6 +156,7 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+    pub pubkey: Pubkey,
 }
 
 impl NetworkNode {
@@ -270,12 +273,15 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let kp = fiber_config
+            .read_or_generate_secret_key()
+            .expect("read or generate secret key");
+        let secio_kp = SecioKeyPair::from(kp);
+        let public_key: Pubkey = secio_kp.public_key().into();
+
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key.into(),
+            public_key.clone(),
         )));
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
@@ -325,6 +331,7 @@ impl NetworkNode {
             chain_actor,
             peer_id,
             event_emitter: event_receiver,
+            pubkey: public_key.into(),
         }
     }
 
@@ -666,6 +673,34 @@ impl InvoiceStore for MemoryStore {
             .get(hash)
             .cloned()
     }
+}
+
+pub(crate) fn rand_sha256_hash() -> Hash256 {
+    let mut rng = rand::thread_rng();
+    let mut result = [0u8; 32];
+    rng.fill(&mut result[..]);
+    result.into()
+}
+
+pub(crate) fn gen_rand_public_key() -> Pubkey {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    PublicKey::from_keypair(&key_pair).into()
+}
+
+pub(crate) fn gen_rand_private_key() -> SecretKey {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    SecretKey::from_keypair(&key_pair)
+}
+
+pub(crate) fn gen_rand_keypair() -> (PublicKey, SecretKey) {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    (
+        PublicKey::from_keypair(&key_pair),
+        SecretKey::from_keypair(&key_pair),
+    )
 }
 
 #[tokio::test]

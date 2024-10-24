@@ -1,3 +1,6 @@
+use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::tests::test_utils::gen_rand_public_key;
+use crate::fiber::tests::test_utils::gen_sha256_hash;
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -166,6 +169,82 @@ async fn test_create_public_channel() {
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
     // FIXME: add assertion
+}
+
+#[tokio::test]
+async fn test_network_send_payment() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node_b_pubkey = node_b.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(gen_sha256_hash()),
+                final_cltv_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("send_payment {:?}", res);
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_network_send_payment_target_not_found() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, _node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    let node_b_pubkey = gen_rand_public_key().into();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(gen_sha256_hash()),
+                final_cltv_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("send_payment {:?}", res);
+    assert!(res.is_err());
+    assert!(res.err().unwrap().contains("target node not found"));
 }
 
 #[tokio::test]

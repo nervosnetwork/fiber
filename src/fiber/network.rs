@@ -2267,7 +2267,6 @@ where
         payment_session: &mut PaymentSession,
         payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, Error> {
-        let payment_hash = payment_data.payment_hash;
         match self
             .network_graph
             .read()
@@ -2275,8 +2274,7 @@ where
             .build_route(payment_data.clone())
         {
             Err(e) => {
-                error!("Failed to build route: {:?}", e);
-                let error = format!("Failed to build route: {:?}", payment_hash);
+                let error = format!("Failed to build route, {}", e);
                 payment_session.set_failed_status(&error);
                 self.store.insert_payment_session(payment_session.clone());
                 return Err(Error::SendPaymentError(error));

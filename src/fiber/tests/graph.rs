@@ -2,7 +2,7 @@ use super::test_utils::generate_keypair;
 use crate::fiber::graph::SessionRoute;
 use crate::{
     fiber::{
-        graph::{ChannelInfo, GraphError, NetworkGraph, NodeInfo, PathEdge},
+        graph::{ChannelInfo, NetworkGraph, NodeInfo, PathEdge, PathFindError},
         network::{get_chain_hash, SendPaymentData},
         types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement},
     },
@@ -176,7 +176,7 @@ impl MockNetworkGraph {
         target: usize,
         amount: u128,
         max_fee: u128,
-    ) -> Result<Vec<PathEdge>, GraphError> {
+    ) -> Result<Vec<PathEdge>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph
@@ -190,7 +190,7 @@ impl MockNetworkGraph {
         amount: u128,
         max_fee: u128,
         udt_type_script: Script,
-    ) -> Result<Vec<PathEdge>, GraphError> {
+    ) -> Result<Vec<PathEdge>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
         self.graph

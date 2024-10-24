@@ -209,14 +209,12 @@ pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
     res.copy_from_slice(array);
     res
 }
-
 pub(crate) fn rand_sha256_hash() -> Hash256 {
     let mut rng = rand::thread_rng();
     let mut result = [0u8; 32];
     rng.fill(&mut result[..]);
     result.into()
 }
-
 #[test]
 fn test_parse_hrp() {
     let res = parse_hrp("fibb1280");
