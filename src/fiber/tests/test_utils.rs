@@ -1,27 +1,6 @@
-use ckb_jsonrpc_types::JsonBytes;
-use ckb_types::packed::OutPoint;
-use ckb_types::{core::TransactionView, packed::Byte32};
-use ractor::{Actor, ActorRef};
-use rand::Rng;
-use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
-use std::{
-    collections::HashMap,
-    env,
-    ffi::OsStr,
-    mem::ManuallyDrop,
-    path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-    time::Duration,
-};
-use tempfile::TempDir as OldTempDir;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
-use tokio::sync::RwLock as TokioRwLock;
-use tokio::{
-    select,
-    sync::{mpsc, OnceCell},
-    time::sleep,
-};
-
+use crate::fiber::history::TimedResult;
+use crate::fiber::types::Pubkey;
+use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use crate::{
     actors::{RootActor, RootActorMessage},
     ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
@@ -34,10 +13,33 @@ use crate::{
     fiber::network::{NetworkActor, NetworkActorCommand, NetworkActorMessage},
     fiber::network::{NetworkActorStateStore, PersistentNetworkActorState},
     fiber::types::Hash256,
-    fiber::types::Pubkey,
-    invoice::{CkbInvoice, InvoiceError, InvoiceStore},
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
+};
+use ckb_jsonrpc_types::JsonBytes;
+use ckb_types::packed::OutPoint;
+use ckb_types::{core::TransactionView, packed::Byte32};
+use ractor::{Actor, ActorRef};
+use rand::Rng;
+use secp256k1::Keypair;
+use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
+use std::{
+    collections::HashMap,
+    env,
+    ffi::OsStr,
+    mem::ManuallyDrop,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+use tempfile::TempDir as OldTempDir;
+use tentacle::secio::SecioKeyPair;
+use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tokio::sync::RwLock as TokioRwLock;
+use tokio::{
+    select,
+    sync::{mpsc, OnceCell},
+    time::sleep,
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
@@ -116,11 +118,11 @@ pub fn generate_seckey() -> SecretKey {
     SecretKey::new(&mut rand::thread_rng())
 }
 
-pub fn generate_pubkey() -> PublicKey {
+pub fn generate_pubkey() -> Pubkey {
     let secp = Secp256k1::new();
     let secret_key = SecretKey::new(&mut rand::thread_rng());
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    public_key
+    public_key.into()
 }
 
 pub fn gen_sha256_hash() -> Hash256 {
@@ -154,6 +156,7 @@ pub struct NetworkNode {
     pub chain_actor: ActorRef<CkbChainMessage>,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
+    pub pubkey: Pubkey,
 }
 
 impl NetworkNode {
@@ -270,12 +273,15 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let kp = fiber_config
+            .read_or_generate_secret_key()
+            .expect("read or generate secret key");
+        let secio_kp = SecioKeyPair::from(kp);
+        let public_key: Pubkey = secio_kp.public_key().into();
+
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key.into(),
+            public_key.clone(),
         )));
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {:?}", base_dir.as_ref())),
@@ -325,6 +331,7 @@ impl NetworkNode {
             chain_actor,
             peer_id,
             event_emitter: event_receiver,
+            pubkey: public_key.into(),
         }
     }
 
@@ -469,6 +476,7 @@ pub struct MemoryStore {
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
     invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
+    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, Pubkey), TimedResult>>>,
 }
 
 impl NetworkActorStateStore for MemoryStore {
@@ -557,6 +565,22 @@ impl NetworkGraphStateStore for MemoryStore {
             .write()
             .unwrap()
             .insert(session.payment_hash(), session);
+    }
+
+    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+        self.payment_hisotry
+            .write()
+            .unwrap()
+            .insert((from, target), result);
+    }
+
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
+        self.payment_hisotry
+            .read()
+            .unwrap()
+            .iter()
+            .map(|((from, target), result)| (from.clone(), target.clone(), result.clone()))
+            .collect()
     }
 }
 
@@ -649,6 +673,34 @@ impl InvoiceStore for MemoryStore {
             .get(hash)
             .cloned()
     }
+}
+
+pub(crate) fn rand_sha256_hash() -> Hash256 {
+    let mut rng = rand::thread_rng();
+    let mut result = [0u8; 32];
+    rng.fill(&mut result[..]);
+    result.into()
+}
+
+pub(crate) fn gen_rand_public_key() -> Pubkey {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    PublicKey::from_keypair(&key_pair).into()
+}
+
+pub(crate) fn gen_rand_private_key() -> SecretKey {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    SecretKey::from_keypair(&key_pair)
+}
+
+pub(crate) fn gen_rand_keypair() -> (PublicKey, SecretKey) {
+    let secp = Secp256k1::new();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    (
+        PublicKey::from_keypair(&key_pair),
+        SecretKey::from_keypair(&key_pair),
+    )
 }
 
 #[tokio::test]
