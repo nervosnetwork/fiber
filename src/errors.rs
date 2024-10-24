@@ -38,6 +38,8 @@ pub enum Error {
     FundingError(#[from] FundingError),
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
+    #[error("Send payment first hop error: {0}")]
+    SendPaymentFirstHopError(String),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
     #[error("Network Graph error: {0}")]
