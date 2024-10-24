@@ -227,6 +227,9 @@ pub(crate) struct SendPaymentCommandParams {
 
     // udt type script for the payment
     udt_type_script: Option<Script>,
+
+    // allow self payment, default is false
+    allow_self_payment: Option<bool>,
 }
 
 #[rpc(server)]
@@ -527,6 +530,7 @@ where
                     max_parts: params.max_parts,
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
+                    allow_self_payment: params.allow_self_payment.unwrap_or(false),
                 },
                 rpc_reply,
             ))

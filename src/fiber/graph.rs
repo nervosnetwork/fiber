@@ -482,15 +482,16 @@ where
     /// Returns a list of `PaymentHopData` for all nodes in the route, including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_request: SendPaymentData,
+        payment_data: &SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, GraphError> {
+        let payment_data = payment_data.clone();
         let source = self.get_source_pubkey();
-        let target = payment_request.target_pubkey;
-        let amount = payment_request.amount;
-        let preimage = payment_request.preimage;
-        let payment_hash = payment_request.payment_hash;
-        let udt_type_script = payment_request.udt_type_script;
-        let invoice = payment_request
+        let target = payment_data.target_pubkey;
+        let amount = payment_data.amount;
+        let preimage = payment_data.preimage;
+        let payment_hash = payment_data.payment_hash;
+        let udt_type_script = payment_data.udt_type_script;
+        let invoice = payment_data
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
         let hash_algorithm = invoice
@@ -503,12 +504,20 @@ where
             source, target, amount, payment_hash
         );
 
+        let allow_self_payment = payment_data.allow_self_payment;
+        if source == target && !allow_self_payment {
+            return Err(GraphError::PathFind(
+                "source and target are the same and allow_self_payment is not enable".to_string(),
+            ));
+        }
+
         let route = self.find_route(
             source,
             target,
             amount,
-            payment_request.max_fee_amount,
+            payment_data.max_fee_amount,
             udt_type_script,
+            allow_self_payment,
         )?;
         assert!(!route.is_empty());
 
@@ -581,6 +590,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
+        allow_self: bool,
     ) -> Result<Vec<PathEdge>, GraphError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -596,11 +606,12 @@ where
             ));
         }
 
-        if source == target {
+        if source == target && !allow_self {
             return Err(GraphError::PathFind(
                 "source and target are the same".to_string(),
             ));
         }
+
         let Some(source_node) = self.nodes.get(&source) else {
             return Err(GraphError::PathFind(format!(
                 "source node not found: {:?}",
@@ -613,6 +624,7 @@ where
                 &target
             )));
         };
+
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -624,18 +636,20 @@ where
             next_hop: None,
             incoming_cltv_height: 0,
         });
+        let route_to_self = source == target;
         while let Some(cur_hop) = nodes_heap.pop() {
-            if cur_hop.node_id == source {
-                break;
-            }
             nodes_visited += 1;
 
             for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
-                edges_expanded += 1;
+                if from == target && !route_to_self {
+                    continue;
+                }
                 // if charge inbound fees for exit hop
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
                     continue;
                 }
+
+                edges_expanded += 1;
 
                 let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
@@ -720,7 +734,7 @@ where
         }
 
         let mut current = source_node.node_id;
-        while current != target {
+        loop {
             if let Some(elem) = distances.get(&current) {
                 let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
                 result.push(PathEdge {
@@ -729,6 +743,9 @@ where
                 });
                 current = next_hop.0;
             } else {
+                break;
+            }
+            if current == target {
                 break;
             }
         }
