@@ -929,16 +929,10 @@ impl PaymentSession {
         self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
     }
 
-    pub fn set_inflight_status(
-        &mut self,
-        channel_outpoint: OutPoint,
-        tlc_id: u64,
-        session_route: SessionRoute,
-    ) {
+    pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
         self.set_status(PaymentSessionStatus::Inflight);
         self.first_hop_channel_outpoint = Some(channel_outpoint);
         self.first_hop_tlc_id = Some(tlc_id);
-        self.route = session_route;
     }
 
     pub fn set_success_status(&mut self) {

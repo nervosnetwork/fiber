@@ -168,7 +168,6 @@ impl InternalResult {
                 }
             }
         } else {
-            assert!(index > 0 && index < len - 1);
             match error_code {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac

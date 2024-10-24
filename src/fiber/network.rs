@@ -381,6 +381,9 @@ impl SendPaymentData {
             if invoice.is_some() {
                 return Err("keysend payment should not have invoice".to_string());
             }
+            if command.payment_hash.is_some() {
+                return Err("keysend payment should not have payment_hash".to_string());
+            }
             // generate a random preimage for keysend payment
             let mut rng = rand::thread_rng();
             let mut result = [0u8; 32];
@@ -2182,11 +2185,11 @@ where
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
-                        payment_session.set_success_status();
                         self.network_graph
                             .write()
                             .await
                             .record_payment_success(&payment_session);
+                        payment_session.set_success_status();
                         self.store.insert_payment_session(payment_session);
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
@@ -2203,8 +2206,10 @@ where
                                 debug!("Failed to retry payment session: {:?}", res);
                             }
                         } else {
-                            payment_session.set_failed_status(error_detail.error_code.as_ref());
-                            self.store.insert_payment_session(payment_session);
+                            self.set_payment_fail_with_error(
+                                &mut payment_session,
+                                error_detail.error_code.as_ref(),
+                            );
                         }
                     }
                 }
@@ -2275,8 +2280,7 @@ where
         {
             Err(e) => {
                 let error = format!("Failed to build route, {}", e);
-                payment_session.set_failed_status(&error);
-                self.store.insert_payment_session(payment_session.clone());
+                self.set_payment_fail_with_error(payment_session, &error);
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
@@ -2310,12 +2314,21 @@ where
             }
         };
 
+        let first_channel_outpoint = hops[0]
+            .channel_outpoint
+            .clone()
+            .expect("first hop channel must exist");
+
+        let session_route =
+            SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
+
         let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
         let command = SendOnionPacketCommand {
             packet: peeled_packet.serialize(),
             previous_tlc: None,
         };
+        payment_session.route = session_route.clone();
         self.handle_send_onion_packet_command(state, command, rpc_reply)
             .await;
         match recv.await.expect("msg recv error") {
@@ -2343,15 +2356,7 @@ where
                 }
             }
             Ok(tlc_id) => {
-                let first_channel_outpoint = hops[0]
-                    .channel_outpoint
-                    .clone()
-                    .expect("first hop channel must exist");
-
-                let session_route =
-                    SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
-
-                payment_session.set_inflight_status(first_channel_outpoint, tlc_id, session_route);
+                payment_session.set_inflight_status(first_channel_outpoint, tlc_id);
                 self.store.insert_payment_session(payment_session.clone());
                 return Ok(payment_session.clone());
             }
@@ -2372,12 +2377,12 @@ where
         while payment_session.can_retry() {
             payment_session.retried_times += 1;
 
-            let hops_infos = self
+            let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
 
             match self
-                .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_infos)
+                .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
@@ -2391,10 +2396,13 @@ where
             }
         }
 
-        return Err(Error::SendPaymentError(format!(
-            "Failed to send payment: {:?} with retried times: {:?}",
-            payment_data.payment_hash, payment_session.retried_times
-        )));
+        let error = payment_session.last_error.clone().unwrap_or_else(|| {
+            format!(
+                "Failed to send payment session: {:?}, retried times: {}",
+                payment_data.payment_hash, payment_session.retried_times
+            )
+        });
+        return Err(Error::SendPaymentError(error));
     }
 
     async fn on_send_payment(
@@ -2421,6 +2429,7 @@ where
 
         let payment_session = PaymentSession::new(payment_data.clone(), 5);
         self.store.insert_payment_session(payment_session.clone());
+        eprintln!("debug here payment session created: {:?}", payment_session);
         let session = self.try_payment_session(state, payment_session).await?;
         return Ok(session.into());
     }

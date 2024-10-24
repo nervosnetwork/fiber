@@ -2,7 +2,10 @@ use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::history::TimedResult;
+use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::gen_rand_public_key;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
 use crate::fiber::types::ChannelAnnouncement;
@@ -197,6 +200,34 @@ fn test_store_wacthtower() {
 
     store.remove_watch_channel(channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_store_payment_session() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payment_history_store");
+    let store = Store::new(path);
+    let payment_hash = gen_sha256_hash();
+    let payment_data = SendPaymentData {
+        target_pubkey: gen_rand_public_key(),
+        amount: 100,
+        payment_hash,
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    };
+    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    store.insert_payment_session(payment_session.clone());
+    let res = store.get_payment_session(payment_hash).unwrap();
+    eprintln!("{:?}", res);
+    assert_eq!(res.payment_hash(), payment_hash);
+    assert_eq!(res.request.max_fee_amount, Some(1000));
+    assert_eq!(res.status, PaymentSessionStatus::Created);
 }
 
 #[test]
