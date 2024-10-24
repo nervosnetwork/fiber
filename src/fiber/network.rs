@@ -15,16 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use std::borrow::Cow;
 use std::collections::hash_map::Entry;
-use std::hash::RandomState;
-use tentacle::utils::extract_peer_id;
-
 use std::collections::{HashMap, HashSet};
+use std::hash::RandomState;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
 use tentacle::multiaddr::{MultiAddr, Protocol};
+use tentacle::utils::extract_peer_id;
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -63,7 +62,8 @@ use super::types::{
     FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
     NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, Privkey, Pubkey,
     QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
-    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
+    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -73,7 +73,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::graph::{ChannelInfo, PaymentSession};
+use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
     secp256k1_instance, FiberChannelMessage, PaymentOnionPacket, PeeledPaymentOnionPacket,
@@ -125,6 +125,10 @@ pub struct AcceptChannelResponse {
 #[derive(Debug)]
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
+    pub status: PaymentSessionStatus,
+    pub created_at: u128,
+    pub last_updated_at: u128,
+    pub failed_error: Option<String>,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -185,10 +189,12 @@ pub enum NetworkActorCommand {
     ),
     // Send a command to a channel.
     ControlFiberChannel(ChannelCommandWithId),
-    // SendPaymentOnionPacket(peeled_packet_buf, previous_tlc),
     // The first parameter is the peeled onion in binary via `PeeledOnionPacket::serialize`. `PeeledOnionPacket::current`
     // is for the current node.
-    SendPaymentOnionPacket(Vec<u8>, Option<(Hash256, u64)>),
+    SendPaymentOnionPacket(
+        SendOnionPacketCommand,
+        RpcReplyPort<Result<u64, TlcErrPacket>>,
+    ),
     PeelPaymentOnionPacket(
         Vec<u8>, // onion_packet
         Hash256, // payment_hash
@@ -216,6 +222,8 @@ pub enum NetworkActorCommand {
         SendPaymentCommand,
         RpcReplyPort<Result<SendPaymentResponse, String>>,
     ),
+    // Get Payment Session for query payment status and errors
+    GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
     GetAndProcessChannelsWithinBlockRangeFromPeer(
         (PeerId, u64, u64),
         RpcReplyPort<Result<(u64, bool), Error>>,
@@ -285,17 +293,37 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
 }
 
-impl SendPaymentCommand {
-    // return (target_pubkey, amount, payment_hash, preimage, udt_type_script)
-    pub fn check_valid(
-        &self,
-    ) -> Result<(Pubkey, u128, Hash256, Option<Hash256>, Option<Script>), String> {
-        let invoice = self
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SendPaymentData {
+    pub target_pubkey: Pubkey,
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub invoice: Option<String>,
+    pub final_cltv_delta: Option<u64>,
+    pub timeout: Option<u64>,
+    pub max_fee_amount: Option<u128>,
+    pub max_parts: Option<u64>,
+    pub keysend: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    pub udt_type_script: Option<Script>,
+    pub preimage: Option<Hash256>,
+}
+
+impl SendPaymentData {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+        let invoice = command
             .invoice
             .as_ref()
             .map(|invoice| invoice.parse::<CkbInvoice>())
             .transpose()
             .map_err(|_| "invoice is invalid".to_string())?;
+
+        if let Some(invoice) = invoice.clone() {
+            if invoice.is_expired() {
+                return Err("invoice is expired".to_string());
+            }
+        }
 
         fn validate_field<T: PartialEq + Clone>(
             field: Option<T>,
@@ -316,7 +344,7 @@ impl SendPaymentCommand {
         }
 
         let target = validate_field(
-            self.target_pubkey,
+            command.target_pubkey,
             invoice
                 .as_ref()
                 .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
@@ -324,13 +352,13 @@ impl SendPaymentCommand {
         )?;
 
         let amount = validate_field(
-            self.amount,
+            command.amount,
             invoice.as_ref().and_then(|i| i.amount()),
             "amount",
         )?;
 
         let udt_type_script = match validate_field(
-            self.udt_type_script.clone(),
+            command.udt_type_script.clone(),
             invoice.as_ref().and_then(|i| i.udt_type_script().cloned()),
             "udt_type_script",
         ) {
@@ -339,10 +367,11 @@ impl SendPaymentCommand {
             Err(e) => return Err(e),
         };
 
-        let (payment_hash, preimage) = if !self.is_keysend() {
+        let keysend = command.keysend.unwrap_or(false);
+        let (payment_hash, preimage) = if !keysend {
             (
                 validate_field(
-                    self.payment_hash,
+                    command.payment_hash,
                     invoice.as_ref().map(|i| *i.payment_hash()),
                     "payment_hash",
                 )?,
@@ -362,16 +391,19 @@ impl SendPaymentCommand {
             (payment_hash, Some(preimage))
         };
 
-        Ok((target, amount, payment_hash, preimage, udt_type_script))
-    }
-
-    pub fn payment_hash(&self) -> Hash256 {
-        let (_, _, payment_hash, ..) = self.check_valid().expect("valid SendPaymentCommand");
-        payment_hash
-    }
-
-    pub fn is_keysend(&self) -> bool {
-        self.keysend.unwrap_or(false)
+        Ok(SendPaymentData {
+            target_pubkey: target,
+            amount,
+            payment_hash,
+            invoice: command.invoice,
+            final_cltv_delta: command.final_cltv_delta,
+            timeout: command.timeout,
+            max_fee_amount: command.max_fee_amount,
+            max_parts: command.max_parts,
+            keysend,
+            udt_type_script,
+            preimage,
+        })
     }
 }
 
@@ -380,6 +412,12 @@ pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
     pub shutdown_script: Option<Script>,
+}
+
+#[derive(Debug)]
+pub struct SendOnionPacketCommand {
+    pub packet: Vec<u8>,
+    pub previous_tlc: Option<(Hash256, u64)>,
 }
 
 impl NetworkActorMessage {
@@ -499,6 +537,9 @@ pub enum NetworkActorEvent {
     // The graph syncer to the peer has exited with some reason.
     GraphSyncerExited(PeerId, GraphSyncerExitStatus),
 
+    // A tlc remove message is received. (payment_hash, remove_tlc)
+    TlcRemoveReceived(Hash256, RemoveTlc),
+
     /// Network service events to be sent to outside observers.
     /// These events may be both present at `NetworkActorEvent` and
     /// this branch of `NetworkActorEvent`. This is because some events
@@ -600,7 +641,7 @@ where
                         let auto_accept = if let Some(udt_type_script) =
                             open_channel.funding_udt_type_script.as_ref()
                         {
-                            is_udt_type_auto_accept(&udt_type_script, open_channel.funding_amount)
+                            is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
                         } else {
                             state.auto_accept_channel_ckb_funding_amount > 0
                                 && open_channel.all_ckb_amount()
@@ -1194,6 +1235,11 @@ where
                 }
                 state.maybe_finish_sync();
             }
+            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
+                // When a node is restarted, RemoveTLC will also be resent if necessary
+                self.on_tlc_remove_received(state, payment_hash, remove_tlc.reason)
+                    .await;
+            }
         }
         Ok(())
     }
@@ -1323,43 +1369,9 @@ where
             }
 
             // TODO: we should check the OnionPacket is valid or not, only the current node can decrypt it.
-            NetworkActorCommand::SendPaymentOnionPacket(peeled_packet_buf, previous_tlc) => {
-                if let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&peeled_packet_buf)
-                {
-                    let current_hop_info = peeled_packet.current;
-                    debug!("Processing onion packet info: {:?}", current_hop_info);
-                    let channel_outpoint = &current_hop_info
-                        .channel_outpoint
-                        .expect("valid onion packet contains channel outpoint");
-                    let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
-                        Some(channel_id) => channel_id,
-                        None => {
-                            // TODO: Return error to the sender. This is a payment failure.
-                            error!("Failed to process onion packet: channel id not found for channel outpoint {:?}. Are we connected to the peer?", channel_outpoint);
-                            return Ok(());
-                        }
-                    };
-                    let (send, recv) = oneshot::channel::<Result<AddTlcResponse, String>>();
-                    let rpc_reply = RpcReplyPort::from(send);
-                    let command = ChannelCommand::AddTlc(
-                        AddTlcCommand {
-                            amount: current_hop_info.amount,
-                            preimage: None,
-                            payment_hash: Some(current_hop_info.payment_hash),
-                            expiry: current_hop_info.expiry.into(),
-                            hash_algorithm: current_hop_info.tlc_hash_algorithm,
-                            onion_packet: peeled_packet
-                                .next
-                                .map(|next| next.data)
-                                .unwrap_or_default(),
-                            previous_tlc,
-                        },
-                        rpc_reply,
-                    );
-                    state.send_command_to_channel(*channel_id, command).await?;
-                    let res = recv.await.expect("recv add tlc response");
-                    info!("send onion packet: {:?}", res);
-                }
+            NetworkActorCommand::SendPaymentOnionPacket(command, reply) => {
+                self.handle_send_onion_packet_command(state, command, reply)
+                    .await;
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
                 let response = PaymentOnionPacket::new(onion_packet)
@@ -1553,12 +1565,22 @@ where
                 let _ = reply.send(signature);
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
-                match self.on_send_payment(myself, payment_request).await {
-                    Ok(payment_hash) => {
-                        let _ = reply.send(Ok(SendPaymentResponse { payment_hash }));
+                match self.on_send_payment(state, payment_request).await {
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
                     }
                     Err(e) => {
                         error!("Failed to send payment: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
+            NetworkActorCommand::GetPayment(payment_hash, reply) => {
+                match self.on_get_payment(&payment_hash) {
+                    Ok(payment) => {
+                        let _ = reply.send(Ok(payment));
+                    }
+                    Err(e) => {
                         let _ = reply.send(Err(e.to_string()));
                     }
                 }
@@ -1977,7 +1999,7 @@ where
                 };
 
                 if let Err(err) = secp256k1_instance().verify_schnorr(
-                    &ckb_signature,
+                    ckb_signature,
                     &Message::from_digest(message),
                     &channel_announcement.ckb_key,
                 ) {
@@ -2061,30 +2083,273 @@ where
         }
     }
 
+    async fn handle_send_onion_packet_command(
+        &self,
+        state: &mut NetworkActorState<S>,
+        command: SendOnionPacketCommand,
+        reply: RpcReplyPort<Result<u64, TlcErrPacket>>,
+    ) {
+        let SendOnionPacketCommand {
+            packet,
+            previous_tlc,
+        } = command;
+
+        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
+            let error_detail = TlcErr::new(TlcErrorCode::InvalidOnionPayload);
+            reply
+                .send(Err(TlcErrPacket::new(error_detail)))
+                .expect("send error failed");
+        };
+
+        let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&packet) else {
+            info!("onion packet is empty, ignore it");
+            return invalid_onion_error(reply);
+        };
+
+        let info = peeled_packet.current;
+        debug!("Processing onion packet info: {:?}", info);
+
+        let Some(channel_outpoint) = &info.channel_outpoint else {
+            return invalid_onion_error(reply);
+        };
+
+        let unknown_next_peer = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
+            let error_detail = TlcErr::new_channel_fail(
+                TlcErrorCode::UnknownNextPeer,
+                channel_outpoint.clone(),
+                None,
+            );
+            reply
+                .send(Err(TlcErrPacket::new(error_detail)))
+                .expect("send add tlc response");
+        };
+
+        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+            Some(channel_id) => channel_id,
+            None => {
+                error!(
+                        "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
+                        channel_outpoint
+                    );
+                return unknown_next_peer(reply);
+            }
+        };
+        let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErrPacket>>();
+        let rpc_reply = RpcReplyPort::from(send);
+        let command = ChannelCommand::AddTlc(
+            AddTlcCommand {
+                amount: info.amount,
+                preimage: None,
+                payment_hash: Some(info.payment_hash),
+                expiry: info.expiry.into(),
+                hash_algorithm: info.tlc_hash_algorithm,
+                onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
+                previous_tlc,
+            },
+            rpc_reply,
+        );
+
+        // we have already checked the channel_id is valid,
+        match state.send_command_to_channel(*channel_id, command).await {
+            Ok(()) => {}
+            Err(Error::ChannelNotFound(_)) => {
+                return unknown_next_peer(reply);
+            }
+            Err(err) => {
+                // must be some error fron tentacle, set it as temporary node failure
+                error!(
+                    "Failed to send onion packet to channel: {:?} with err: {:?}",
+                    channel_id, err
+                );
+                let error_detail = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
+                return reply
+                    .send(Err(TlcErrPacket::new(error_detail)))
+                    .expect("send add tlc response");
+            }
+        }
+        let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
+        reply.send(add_tlc_res).expect("send error");
+    }
+
+    async fn on_tlc_remove_received(
+        &self,
+        state: &mut NetworkActorState<S>,
+        payment_hash: Hash256,
+        reason: RemoveTlcReason,
+    ) {
+        if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
+            if payment_session.status == PaymentSessionStatus::Inflight {
+                match reason {
+                    RemoveTlcReason::RemoveTlcFulfill(_) => {
+                        payment_session.set_success_status();
+                        self.store.insert_payment_session(payment_session);
+                    }
+                    RemoveTlcReason::RemoveTlcFail(reason) => {
+                        let detail_error = reason.decode().expect("decoded error");
+                        self.update_with_tcl_fail(&detail_error).await;
+                        if payment_session.can_retry() && !detail_error.error_code.payment_failed()
+                        {
+                            let res = self.try_payment_session(state, payment_session).await;
+                            if res.is_err() {
+                                debug!("Failed to retry payment session: {:?}", res);
+                            }
+                        } else {
+                            payment_session.set_failed_status(detail_error.error_code.as_ref());
+                            self.store.insert_payment_session(payment_session);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn update_with_tcl_fail(&self, tcl_error_detail: &TlcErr) {
+        let error_code = tcl_error_detail.error_code();
+        // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
+        // we now still update the graph, maybe we need to remove it later?
+        if error_code.is_update() {
+            if let Some(extra_data) = &tcl_error_detail.extra_data {
+                match extra_data {
+                    TlcErrData::ChannelFailed { channel_update, .. } => {
+                        if let Some(channel_update) = channel_update {
+                            let mut graph = self.network_graph.write().await;
+                            let _ = graph.process_channel_update(channel_update.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match tcl_error_detail.error_code() {
+            TlcErrorCode::PermanentChannelFailure
+            | TlcErrorCode::ChannelDisabled
+            | TlcErrorCode::UnknownNextPeer => {
+                let channel_outpoint = tcl_error_detail
+                    .error_channel_outpoint()
+                    .expect("expect channel outpoint");
+                debug!("mark channel failed: {:?}", channel_outpoint);
+                let mut graph = self.network_graph.write().await;
+                graph.mark_channel_failed(&channel_outpoint);
+            }
+            TlcErrorCode::PermanentNodeFailure => {
+                let node_id = tcl_error_detail.error_node_id().expect("expect node id");
+                let mut graph = self.network_graph.write().await;
+                graph.mark_node_failed(node_id);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
+        match self.store.get_payment_session(*payment_hash) {
+            Some(payment_session) => Ok(payment_session.into()),
+            None => Err(Error::InvalidParameter(format!(
+                "Payment session not found: {:?}",
+                payment_hash
+            ))),
+        }
+    }
+
+    async fn try_payment_session(
+        &self,
+        state: &mut NetworkActorState<S>,
+        mut payment_session: PaymentSession,
+    ) -> Result<PaymentSession, Error> {
+        let payment_data = payment_session.request.clone();
+        let payment_hash = payment_data.payment_hash;
+        let mut error = None;
+        while payment_session.can_retry() {
+            payment_session.retried_times += 1;
+            let hops_infos = match self
+                .network_graph
+                .read()
+                .await
+                .build_route(payment_data.clone())
+            {
+                Err(e) => {
+                    error!("Failed to build route: {:?}", e);
+                    error = Some(format!("Failed to build route: {:?}", payment_hash));
+                    break;
+                }
+                Ok(onion_path) => onion_path,
+            };
+            let first_channel_outpoint = hops_infos[0]
+                .channel_outpoint
+                .clone()
+                .expect("first hop channel outpoint");
+
+            // generate session key
+            let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
+            let peeled_packet = PeeledPaymentOnionPacket::create(
+                session_key,
+                hops_infos,
+                &Secp256k1::signing_only(),
+            )
+            .map_err(|err| Error::InvalidOnionPacket(err))?;
+
+            let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
+            let rpc_reply = RpcReplyPort::from(send);
+            let command = SendOnionPacketCommand {
+                packet: peeled_packet.serialize(),
+                previous_tlc: None,
+            };
+            self.handle_send_onion_packet_command(state, command, rpc_reply)
+                .await;
+            match recv.await.expect("msg recv error") {
+                Err(e) => {
+                    if let Some(error_detail) = e.decode() {
+                        error!("Failed to send onion packet with error: {:?}", e);
+                        // This is the error implies we send payment request to the first hop failed
+                        let err = format!(
+                            "Failed to send onion packet with error {:?}",
+                            error_detail.error_code_as_str()
+                        );
+                        error = Some(err);
+                        self.update_with_tcl_fail(&error_detail).await;
+                    }
+                    continue;
+                }
+                Ok(tlc_id) => {
+                    payment_session.set_status(PaymentSessionStatus::Inflight);
+                    payment_session.set_first_hop_info(first_channel_outpoint, tlc_id);
+                    self.store.insert_payment_session(payment_session.clone());
+                    return Ok(payment_session);
+                }
+            }
+        }
+        payment_session.set_status(PaymentSessionStatus::Failed);
+        let final_error = error.expect("expect error details");
+        payment_session.set_failed_status(&final_error);
+        self.store.insert_payment_session(payment_session);
+        return Err(Error::SendPaymentError(final_error));
+    }
+
     async fn on_send_payment(
         &self,
-        my_self: ActorRef<NetworkActorMessage>,
+        state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
-    ) -> Result<Hash256, Error> {
-        let graph = self.network_graph.read().await;
-        // initialize the payment session in db and begin the payment process in a statemachine to
-        // handle the payment process
-        let payment_session = PaymentSession::new(payment_request.clone(), 3);
+    ) -> Result<SendPaymentResponse, Error> {
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
 
-        let hops_infos = graph.build_route(payment_request.clone())?;
-        assert!(!hops_infos.is_empty());
+        // initialize the payment session in db and begin the payment process lifecycle
+        if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
+            // we only allow retrying payment session with status failed
+            debug!("Payment session already exists: {:?}", payment_session);
+            if payment_session.status != PaymentSessionStatus::Failed {
+                return Err(Error::InvalidParameter(format!(
+                    "Payment session already exists: {} with payment session status: {:?}",
+                    payment_data.payment_hash, payment_session.status
+                )));
+            }
+        }
 
-        // generate session key
-        let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        let peeled_packet =
-            PeeledPaymentOnionPacket::create(session_key, hops_infos, &Secp256k1::signing_only())
-                .map_err(|err| Error::InvalidOnionPacket(err))?;
-
-        let res = my_self.send_message(NetworkActorMessage::Command(
-            NetworkActorCommand::SendPaymentOnionPacket(peeled_packet.serialize(), None),
-        ));
-        info!("send_payment: {:?} => result: {:?}", payment_request, res);
-        Ok(payment_session.payment_hash())
+        let payment_session = PaymentSession::new(payment_data.clone(), 5);
+        self.store.insert_payment_session(payment_session.clone());
+        let session = self.try_payment_session(state, payment_session).await?;
+        return Ok(session.into());
     }
 }
 
@@ -2149,7 +2414,7 @@ impl NetworkSyncState {
                     false
                 } else {
                     debug!("Adding peer to dynamic syncing peers list: peer {:?}, succeeded syncing {}, failed syncing {}, pinned syncing peers {}",
-                        peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
+                            peer_id, self.succeeded, self.failed, self.pinned_syncing_peers.len());
                     true
                 }
             } else {
@@ -2271,7 +2536,8 @@ pub struct NetworkActorState<S> {
     peer_pubkey_map: HashMap<PeerId, Pubkey>,
     session_channels_map: HashMap<SessionId, HashSet<Hash256>>,
     channels: HashMap<Hash256, ActorRef<ChannelActorMessage>>,
-    // Outpoint to channel id mapping.
+    // Outpoint to channel id mapping, only contains channels with state of Ready.
+    // We need to remove the channel from this map when the channel is closed or peer disconnected.
     outpoint_channel_map: HashMap<OutPoint, Hash256>,
     // Channels in this hashmap are pending for acceptance. The user needs to
     // issue an AcceptChannelCommand with the amount of funding to accept the channel.
@@ -3082,11 +3348,18 @@ where
         self.maybe_sync_network_graph(remote_peer_id).await;
     }
 
+    fn remove_channel(&mut self, channel_id: &Hash256) -> Option<ActorRef<ChannelActorMessage>> {
+        self.channels
+            .remove(channel_id)
+            .inspect(|_| self.outpoint_channel_map.retain(|_, v| v != channel_id))
+    }
+
     fn on_peer_disconnected(&mut self, id: &PeerId) {
+        info!("Peer {:?} disconnected", id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
-                    if let Some(channel) = self.channels.remove(&channel_id) {
+                    if let Some(channel) = self.remove_channel(&channel_id) {
                         let _ = channel.send_message(ChannelActorMessage::Event(
                             ChannelEvent::PeerDisconnected,
                         ));
@@ -3257,7 +3530,7 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
     ) {
-        self.channels.remove(channel_id);
+        self.remove_channel(channel_id);
         if let Some(session) = self.get_peer_session(peer_id) {
             if let Some(set) = self.session_channels_map.get_mut(&session) {
                 set.remove(channel_id);

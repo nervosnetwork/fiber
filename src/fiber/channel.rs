@@ -4,7 +4,11 @@ use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    fiber::{network::get_chain_hash, types::ChannelUpdate},
+    fiber::{
+        fee::calculate_tlc_forward_fee,
+        network::{get_chain_hash, SendOnionPacketCommand},
+        types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
+    },
     invoice::InvoiceStore,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
@@ -114,7 +118,10 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, String>>),
+    AddTlc(
+        AddTlcCommand,
+        RpcReplyPort<Result<AddTlcResponse, TlcErrPacket>>,
+    ),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
@@ -458,88 +465,69 @@ where
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
-                state.check_for_tlc_update(Some(add_tlc.amount))?;
-
-                // check the onion_packet is valid or not, if not, we should return an error.
-                // If there is a next hop, we should send the AddTlc message to the next hop.
-                // If this is the last hop, we should check the payment hash and amount and then
-                // try to fulfill the payment, find the corresponding payment preimage from payment hash.
-                let mut preimage = None;
-                let mut peeled_packet_bytes: Option<Vec<u8>> = None;
-
-                if !add_tlc.onion_packet.is_empty() {
-                    // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
-                    // the network actor when it handles `FiberMessage::ChannelNormalOperation`. A better alternative is
-                    // peeling the onion packet there before forwarding the message to the channel actor.
-                    let peeled_packet = call!(self.network, |tx| NetworkActorMessage::Command(
-                        NetworkActorCommand::PeelPaymentOnionPacket(
-                            add_tlc.onion_packet.clone(),
-                            add_tlc.payment_hash.clone(),
-                            tx
-                        )
-                    ))
-                    .expect("call network")
-                    .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
-
-                    // TODO: check the expiry time, if expired, we should return an error.
-                    if peeled_packet.is_last() {
-                        // check the payment hash and amount
-                        if peeled_packet.current.payment_hash != add_tlc.payment_hash
-                            || peeled_packet.current.amount != add_tlc.amount
-                        {
-                            return Err(ProcessingChannelError::InvalidParameter(
-                                "Payment hash or amount mismatch".to_string(),
-                            ));
+                let tlc_id = add_tlc.tlc_id;
+                let tlc_count = state.tlcs.len();
+                match self
+                    .handle_add_tlc_peer_message(state, add_tlc.clone())
+                    .await
+                {
+                    Ok((added_tlc_id, peeled_packet_bytes)) => {
+                        if let Some(forward_packet_bytes) = peeled_packet_bytes {
+                            self.handle_forward_onion_packet(
+                                state,
+                                forward_packet_bytes,
+                                added_tlc_id.into(),
+                            )
+                            .await?;
                         }
-                        // if this is the last hop, store the preimage.
-                        preimage = peeled_packet.current.preimage;
-                    } else {
-                        peeled_packet_bytes = Some(peeled_packet.serialize());
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // we assume that TLC was not inserted into our state,
+                        // so we can safely send RemoveTlc message to the peer
+                        // note this new add_tlc may be trying to add a duplicate tlc,
+                        // so we use tlc count to make sure no new tlc was added
+                        // and only send RemoveTlc message to peer if the TLC is not in our state
+                        error!("Error handling AddTlc message: {:?}", e);
+                        assert!(tlc_count == state.tlcs.len());
+                        let error_detail = self.get_tlc_detail_error(state, &e).await;
+                        if state.get_received_tlc(tlc_id).is_none() {
+                            self.network
+                                .send_message(NetworkActorMessage::new_command(
+                                    NetworkActorCommand::SendFiberMessage(
+                                        FiberMessageWithPeerId::new(
+                                            state.get_remote_peer_id(),
+                                            FiberMessage::remove_tlc(RemoveTlc {
+                                                channel_id: state.get_id(),
+                                                tlc_id,
+                                                reason: RemoveTlcReason::RemoveTlcFail(
+                                                    TlcErrPacket::new(error_detail),
+                                                ),
+                                            }),
+                                        ),
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                        }
+                        Err(e)
                     }
                 }
-
-                let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
-                state.insert_tlc(tlc.clone())?;
-                if let Some(ref udt_type_script) = state.funding_udt_type_script {
-                    self.subscribers
-                        .pending_received_tlcs_subscribers
-                        .send(TlcNotification {
-                            tlc: tlc.clone(),
-                            channel_id: state.get_id(),
-                            script: udt_type_script.clone(),
-                        });
-                }
-                warn!("created tlc: {:?}", &tlc);
-                // TODO: here we didn't send any ack message to the peer.
-                // The peer may falsely believe that we have already processed this message,
-                // while we have crashed. We need a way to make sure that the peer will resend
-                // this message, and our processing of this message is idempotent.
-
-                if let Some(peeled_packet_bytes) = peeled_packet_bytes {
-                    self.network
-                        .send_message(NetworkActorMessage::Command(
-                            NetworkActorCommand::SendPaymentOnionPacket(
-                                peeled_packet_bytes,
-                                Some((state.get_id(), tlc.get_id())),
-                            ),
-                        ))
-                        .expect("network actor is alive");
-                }
-                Ok(())
             }
             FiberChannelMessage::RemoveTlc(remove_tlc) => {
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
-                let tlc_details = state
-                    .remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), remove_tlc.reason)?;
+                let tlc_details = state.remove_tlc_with_reason(
+                    TLCId::Offered(remove_tlc.tlc_id),
+                    &remove_tlc.reason,
+                )?;
                 if let (
                     Some(ref udt_type_script),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-                ) = (state.funding_udt_type_script.clone(), remove_tlc.reason)
+                ) = (state.funding_udt_type_script.clone(), &remove_tlc.reason)
                 {
                     let mut tlc = tlc_details.tlc.clone();
-                    tlc.payment_preimage = Some(payment_preimage);
+                    tlc.payment_preimage = Some(*payment_preimage);
                     self.subscribers
                         .settled_tlcs_subscribers
                         .send(TlcNotification {
@@ -563,15 +551,26 @@ where
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
                                         id: previous_tlc.into(),
-                                        reason: remove_tlc.reason,
+                                        reason: remove_tlc.reason.clone(),
                                     },
                                     port,
                                 ),
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let res = recv.await.expect("network actor is alive");
+                    let res = recv.await.expect("remove tlc replied");
                     info!("remove tlc from previous channel: {:?}", &res);
+                } else {
+                    // only the original sender of the TLC should send `TlcRemoveReceived` event
+                    // because only the original sender cares about the TLC event to settle the payment
+                    self.network
+                        .send_message(NetworkActorMessage::new_event(
+                            NetworkActorEvent::TlcRemoveReceived(
+                                tlc_details.tlc.payment_hash,
+                                remove_tlc,
+                            ),
+                        ))
+                        .expect("myself alive");
                 }
                 Ok(())
             }
@@ -635,7 +634,6 @@ where
                 }
                 state.update_state(ChannelState::ShuttingDown(flags));
                 state.maybe_transition_to_shutdown(&self.network)?;
-
                 Ok(())
             }
             FiberChannelMessage::ClosingSigned(closing) => {
@@ -676,16 +674,83 @@ where
         }
     }
 
+    async fn get_tlc_detail_error(
+        &self,
+        state: &mut ChannelActorState,
+        error: &ProcessingChannelError,
+    ) -> TlcErr {
+        let error_code = match error {
+            ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
+            ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
+            ProcessingChannelError::FinalIncorrectPreimage
+            | ProcessingChannelError::FinalIncorrectPaymentHash => {
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            }
+            ProcessingChannelError::FinalIncorrectHTLCAmount => {
+                TlcErrorCode::FinalIncorrectHtlcAmount
+            }
+            ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
+            ProcessingChannelError::TlcNumberExceedLimit
+            | ProcessingChannelError::TlcValueInflightExceedLimit => {
+                TlcErrorCode::TemporaryChannelFailure
+            }
+            ProcessingChannelError::InvalidState(_) => match state.state {
+                // we can not revert back up `ChannelReady` after `ShuttingDown`
+                ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
+                    TlcErrorCode::PermanentChannelFailure
+                }
+                ChannelState::ChannelReady() => {
+                    // we expect `ChannelReady` will be both OK for tlc forwarding,
+                    // so here are the unreachable point in normal workflow,
+                    // set `TemporaryNodeFailure` for general temporary failure of the processing node here
+                    assert!(false, "unreachable point in normal workflow");
+                    TlcErrorCode::TemporaryNodeFailure
+                }
+                // otherwise, channel maybe not ready
+                _ => TlcErrorCode::TemporaryChannelFailure,
+            },
+            // TODO: there maybe more error types here
+            _ => TlcErrorCode::IncorrectOrUnknownPaymentDetails,
+        };
+
+        let channel_update = if error_code.is_update() {
+            state.try_create_channel_update_message(&self.network).await
+        } else {
+            None
+        };
+        TlcErr::new_channel_fail(
+            error_code,
+            state.get_funding_transaction_outpoint(),
+            channel_update,
+        )
+    }
+
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
         let tlcs = state.get_tlcs_for_settle_down();
-        info!("try_to_settle_down_tlc get tlcs: {:?}", &tlcs);
         for tlc_info in tlcs {
             let tlc = tlc_info.tlc.clone();
+            if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
+                if invoice.is_expired() {
+                    let command = RemoveTlcCommand {
+                        id: tlc.get_id(),
+                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(
+                            TlcErrorCode::InvoiceExpired,
+                        ))),
+                    };
+                    let result = self.handle_remove_tlc_command(state, command);
+                    info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
+                }
+            }
+
             let preimage = if let Some(preimage) = tlc.payment_preimage {
                 preimage
             } else if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
                 preimage
             } else {
+                error!(
+                    "No preimage found for payment hash: {:?}",
+                    &tlc.payment_hash
+                );
                 continue;
             };
             let command = RemoveTlcCommand {
@@ -699,6 +764,157 @@ where
             // we only handle one tlc at a time.
             break;
         }
+    }
+
+    async fn handle_add_tlc_peer_message(
+        &self,
+        state: &mut ChannelActorState,
+        add_tlc: AddTlc,
+    ) -> Result<(TLCId, Option<Vec<u8>>), ProcessingChannelError> {
+        state.check_for_tlc_update(Some(add_tlc.amount))?;
+
+        // check the onion_packet is valid or not, if not, we should return an error.
+        // If there is a next hop, we should send the AddTlc message to the next hop.
+        // If this is the last hop, we should check the payment hash and amount and then
+        // try to fulfill the payment, find the corresponding payment preimage from payment hash.
+        let mut preimage = None;
+        let mut peeled_packet_bytes: Option<Vec<u8>> = None;
+
+        if !add_tlc.onion_packet.is_empty() {
+            // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
+            // the network actor when it handles `FiberMessage::ChannelNormalOperation`. A better alternative is
+            // peeling the onion packet there before forwarding the message to the channel actor.
+            let peeled_packet = call!(self.network, |tx| NetworkActorMessage::Command(
+                NetworkActorCommand::PeelPaymentOnionPacket(
+                    add_tlc.onion_packet.clone(),
+                    add_tlc.payment_hash.clone(),
+                    tx
+                )
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+            .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
+
+            // check the payment hash and amount
+            if peeled_packet.current.payment_hash != add_tlc.payment_hash {
+                return Err(ProcessingChannelError::InvalidParameter(
+                    "Payment hash mismatch".to_string(),
+                ));
+            }
+
+            let received_amount = add_tlc.amount;
+            let forward_amount = peeled_packet.current.amount;
+            debug!(
+                "received_amount: {} forward_amount: {}",
+                add_tlc.amount, forward_amount
+            );
+
+            // TODO: check the expiry time, if it's expired, we should return an error.
+            if peeled_packet.is_last() {
+                if forward_amount != add_tlc.amount {
+                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                }
+
+                // if this is the last hop, store the preimage.
+                // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
+                // here we can do error check early here for better error handling.
+                preimage = peeled_packet
+                    .current
+                    .preimage
+                    .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+                if let Some(preimage) = preimage {
+                    let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+                    if add_tlc.payment_hash != filled_payment_hash {
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                    }
+                } else {
+                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+                }
+            } else {
+                peeled_packet_bytes = Some(peeled_packet.serialize());
+                assert!(received_amount >= forward_amount);
+                let forward_fee = received_amount.saturating_sub(forward_amount);
+                let fee_rate: u128 = state
+                    .public_channel_info
+                    .as_ref()
+                    .expect("public channel exits")
+                    .tlc_fee_proportional_millionths
+                    .unwrap_or_default();
+                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                if forward_fee < expected_fee {
+                    error!(
+                        "too low forward_fee: {}, expected_fee: {}",
+                        forward_fee, expected_fee
+                    );
+                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                }
+            }
+        }
+
+        let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
+        state.insert_tlc(tlc.clone())?;
+        if let Some(ref udt_type_script) = state.funding_udt_type_script {
+            self.subscribers
+                .pending_received_tlcs_subscribers
+                .send(TlcNotification {
+                    tlc: tlc.clone(),
+                    channel_id: state.get_id(),
+                    script: udt_type_script.clone(),
+                });
+        }
+        warn!("created tlc: {:?}", &tlc);
+
+        // TODO: here we didn't send any ack message to the peer.
+        // The peer may falsely believe that we have already processed this message,
+        // while we have crashed. We need a way to make sure that the peer will resend
+        // this message, and our processing of this message is idempotent.
+        Ok((tlc.id, peeled_packet_bytes))
+    }
+
+    async fn handle_forward_onion_packet(
+        &self,
+        state: &mut ChannelActorState,
+        onion_packet: Vec<u8>,
+        added_tlc_id: u64,
+    ) -> Result<(), ProcessingChannelError> {
+        let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
+        let rpc_reply = RpcReplyPort::from(send);
+        self.network
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::SendPaymentOnionPacket(
+                    SendOnionPacketCommand {
+                        packet: onion_packet,
+                        previous_tlc: Some((state.get_id(), added_tlc_id)),
+                    },
+                    rpc_reply,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let res = match recv.await.expect("expect command replied") {
+            Ok(tlc_id) => Ok(tlc_id),
+            Err(e) => Err(e),
+        };
+        // If we failed to forward the onion packet, we should remove the tlc.
+        if let Err(res) = res {
+            error!("Error forwarding onion packet: {:?}", res);
+            let (send, recv) = oneshot::channel::<Result<(), String>>();
+            let port = RpcReplyPort::from(send);
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                        channel_id: state.get_id(),
+                        command: ChannelCommand::RemoveTlc(
+                            RemoveTlcCommand {
+                                id: added_tlc_id,
+                                reason: RemoveTlcReason::RemoveTlcFail(res),
+                            },
+                            port,
+                        ),
+                    }),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            let _ = recv.await.expect("RemoveTlc command replied");
+        }
+        Ok(())
     }
 
     pub fn handle_commitment_signed_command(
@@ -865,7 +1081,7 @@ where
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
         state.check_for_tlc_update(None)?;
-        let tlc = state.remove_tlc_with_reason(TLCId::Received(command.id), command.reason)?;
+        let tlc = state.remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         let msg = FiberMessageWithPeerId::new(
             state.get_remote_peer_id(),
             FiberMessage::remove_tlc(RemoveTlc {
@@ -915,7 +1131,6 @@ where
         };
 
         state.check_shutdown_fee_rate(command.fee_rate, &command.close_script)?;
-
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1114,7 +1329,8 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        let _ = reply.send(Err(err.to_string()));
+                        let error_detail = self.get_tlc_detail_error(state, &err).await;
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail)));
                         Err(err)
                     }
                 }
@@ -1928,6 +2144,20 @@ pub enum ProcessingChannelError {
     Musig2SigningError(#[from] SigningError),
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
+    #[error("The amount in the HTLC is not expected")]
+    FinalIncorrectHTLCAmount,
+    #[error("The payment_hash is not expected for final hop")]
+    FinalIncorrectPaymentHash,
+    #[error("The payment_hash and preimage does not match for final hop")]
+    FinalIncorrectPreimage,
+    #[error("The tlc forward fee is tow low")]
+    TlcForwardFeeIsTooLow,
+    #[error("The tlc number exceed limit of this channel")]
+    TlcNumberExceedLimit,
+    #[error("The tlc flight value exceed limit of this channel")]
+    TlcValueInflightExceedLimit,
+    #[error("The tlc amount below minimal")]
+    TlcAmountIsTooLow,
 }
 
 bitflags! {
@@ -3038,7 +3268,7 @@ impl ChannelActorState {
                 );
                 tlc.creation_confirmed_at = Some(commitment_numbers);
             }
-            match (tlc.removed_at, tlc.removal_confirmed_at) {
+            match (tlc.removed_at.clone(), tlc.removal_confirmed_at) {
                 (Some((_removed_at, reason)), None) => {
                     tlc.removal_confirmed_at = Some(commitment_numbers);
                      match reason {
@@ -3193,6 +3423,17 @@ impl ChannelActorState {
     }
 
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
+        let payment_hash = tlc.payment_hash;
+        if let Some(tlc) = self
+            .tlcs
+            .values()
+            .find(|tlc| tlc.tlc.payment_hash == payment_hash && tlc.removed_at.is_none())
+        {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Trying to insert tlc with duplicate payment hash {:?} with tlc {:?}",
+                payment_hash, tlc
+            )));
+        }
         if let Some(current) = self.tlcs.get(&tlc.id) {
             if current.tlc == tlc {
                 debug!(
@@ -3208,10 +3449,7 @@ impl ChannelActorState {
             }
         };
         if tlc.amount == 0 {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Expect the amount of tlc with id {:?} is larger than zero",
-                tlc.id
-            )));
+            return Err(ProcessingChannelError::TlcAmountIsTooLow);
         }
         if tlc.is_offered() {
             // TODO: We should actually also consider all our fulfilled tlcs here.
@@ -3273,7 +3511,7 @@ impl ChannelActorState {
     pub fn remove_tlc_with_reason(
         &mut self,
         tlc_id: TLCId,
-        reason: RemoveTlcReason,
+        reason: &RemoveTlcReason,
     ) -> Result<DetailedTLCInfo, ProcessingChannelError> {
         let removed_at = self.get_current_commitment_numbers();
 
@@ -3285,9 +3523,9 @@ impl ChannelActorState {
                 )))
             }
             Some(current) => {
-                match current.removed_at {
+                match &current.removed_at {
                     Some((current_removed_at, current_remove_reason))
-                        if current_remove_reason == reason && removed_at == current_removed_at =>
+                        if current_remove_reason == reason && removed_at == *current_removed_at =>
                     {
                         debug!(
                             "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
@@ -3311,15 +3549,12 @@ impl ChannelActorState {
                                 .hash(fulfill.payment_preimage)
                                 .into();
                             if current.tlc.payment_hash != filled_payment_hash {
-                                return Err(ProcessingChannelError::InvalidParameter(format!(
-                                    "Preimage {:?} is hashed to {}, which does not match payment hash {:?}",
-                                    fulfill.payment_preimage, filled_payment_hash, current.tlc.payment_hash,
-                                )));
+                                return Err(ProcessingChannelError::FinalIncorrectPreimage);
                             }
                         }
                     }
                 };
-                current.removed_at = Some((removed_at, reason));
+                current.removed_at = Some((removed_at, reason.clone()));
                 current
             }
         };
@@ -3510,7 +3745,12 @@ impl ChannelActorState {
                     return am_i_sending_remove_tlc_message;
                 }
                 (_, Some(_), None) => {
-                    panic!("TLC {:?} is removed but not confirmed yet", info);
+                    if info.is_fullfill_removed() {
+                        panic!("TLC {:?} is fullfilled but not confirmed yet", info);
+                    }
+                    // This is a failed tlc, there is not `creation_confirmed_at` field means our peer does not inserted this tlc,
+                    // and we should not include it in the commitment transaction.
+                    return false;
                 }
                 (_, _, Some(n)) => {
                     debug!("Including TLC {:?} to commitment transaction because tlc confirmed at {:?}", tlc.id, n);
@@ -3682,11 +3922,17 @@ impl ChannelActorState {
 
     pub fn check_for_tlc_update(&self, add_tlc_amount: Option<u128>) -> ProcessingChannelResult {
         match self.state {
-            ChannelState::ChannelReady() | ChannelState::ShuttingDown(_) => {}
+            ChannelState::ChannelReady() => {}
+            ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
             _ => {
                 return Err(ProcessingChannelError::InvalidState(format!(
-                    "Invalid state {:?} for adding tlc",
-                    self.state
+                    "Invalid state {:?} for {} tlc",
+                    self.state,
+                    if add_tlc_amount.is_some() {
+                        "adding"
+                    } else {
+                        "removing"
+                    }
                 )))
             }
         }
@@ -3696,10 +3942,7 @@ impl ChannelActorState {
                 + self.get_active_received_tlcs(true).count();
 
             if active_tls_number as u64 + 1 > self.max_tlc_number_in_flight {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Exceeding the maximum number of tlcs: {}",
-                    self.max_tlc_number_in_flight
-                )));
+                return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
             if self
@@ -3709,10 +3952,7 @@ impl ChannelActorState {
                 + add_amount
                 > self.max_tlc_value_in_flight
             {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Exceeding the maximum amount of tlcs: {}",
-                    self.max_tlc_value_in_flight
-                )));
+                return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }
         Ok(())
@@ -3920,7 +4160,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn handle_accept_channel_message(
+    fn handle_accept_channel_message(
         &mut self,
         accept_channel: AcceptChannel,
     ) -> ProcessingChannelResult {
@@ -4077,7 +4317,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn handle_commitment_signed_message(
+    fn handle_commitment_signed_message(
         &mut self,
         commitment_signed: CommitmentSigned,
         network: &ActorRef<NetworkActorMessage>,
@@ -4201,7 +4441,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn maybe_transition_to_tx_signatures(
+    fn maybe_transition_to_tx_signatures(
         &mut self,
         flags: SigningCommitmentFlags,
         network: &ActorRef<NetworkActorMessage>,
@@ -4222,7 +4462,7 @@ impl ChannelActorState {
     // TODO: currently witnesses in the tx_signatures molecule message are a list of bytes.
     // It is unclear how can we compose two partial sets witnesses into a complete
     // set of witnesses.
-    pub fn handle_tx_signatures(
+    fn handle_tx_signatures(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         // If partial_witnesses is given, then it is the counterparty that send a message
@@ -4293,7 +4533,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub async fn maybe_public_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn maybe_public_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         debug!("Trying to create channel announcement message for public channel");
         if let Some((channel_announcement, channel_update)) =
             self.try_create_channel_messages(network).await
@@ -4334,7 +4574,7 @@ impl ChannelActorState {
         }
     }
 
-    pub async fn maybe_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn maybe_channel_is_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         match self.state {
             ChannelState::AwaitingChannelReady(flags) => {
                 if flags.contains(AwaitingChannelReadyFlags::CHANNEL_READY) {
@@ -4354,7 +4594,7 @@ impl ChannelActorState {
         }
     }
 
-    pub async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    async fn on_channel_ready(&mut self, network: &ActorRef<NetworkActorMessage>) {
         self.update_state(ChannelState::ChannelReady());
         self.increment_local_commitment_number();
         self.increment_remote_commitment_number();
@@ -4370,7 +4610,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    pub fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
+    fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
         debug!(
             "Setting remote commitment point #{} (counting from 0)): {:?}",
             self.remote_commitment_points.len(),
@@ -4383,7 +4623,7 @@ impl ChannelActorState {
         self.remote_commitment_points.push(commitment_point);
     }
 
-    pub fn handle_revoke_and_ack_message(
+    fn handle_revoke_and_ack_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
@@ -4539,7 +4779,7 @@ impl ChannelActorState {
 
                                 need_resend_commitment_signed = true;
                             }
-                        } else if let Some((commitment_number, remove_reason)) = info.removed_at {
+                        } else if let Some((commitment_number, remove_reason)) = &info.removed_at {
                             if commitment_number.get_local() >= acutal_local_commitment_number {
                                 // resend RemoveTlc message
                                 network
@@ -4550,7 +4790,7 @@ impl ChannelActorState {
                                                 FiberMessage::remove_tlc(RemoveTlc {
                                                     channel_id: self.get_id(),
                                                     tlc_id: info.tlc.get_id(),
-                                                    reason: remove_reason,
+                                                    reason: remove_reason.clone(),
                                                 }),
                                             ),
                                         ),
@@ -4610,7 +4850,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
+    fn is_tx_final(&self, tx: &Transaction) -> Result<bool, ProcessingChannelError> {
         // TODO: check if the tx is valid
         let tx = tx.clone().into_view();
 
@@ -4660,7 +4900,7 @@ impl ChannelActorState {
         }
     }
 
-    pub fn maybe_complete_tx_collaboration(
+    fn maybe_complete_tx_collaboration(
         &mut self,
         tx: Transaction,
         network: &ActorRef<NetworkActorMessage>,
@@ -4727,7 +4967,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn fill_in_channel_id(&mut self) {
+    fn fill_in_channel_id(&mut self) {
         assert!(
             self.remote_channel_parameters.is_some(),
             "Counterparty pubkeys is required to derive actual channel id"
@@ -4779,7 +5019,7 @@ impl ChannelActorState {
                 && self.should_local_go_first_in_musig2()
     }
 
-    pub fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
+    fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
         let local_shutdown_info = self.local_shutdown_info.as_ref().unwrap();
         let remote_shutdown_info = self.remote_shutdown_info.as_ref().unwrap();
 
@@ -4892,7 +5132,7 @@ impl ChannelActorState {
     // and the second element is the message to be signed by the each party,
     // so as to consume the funding cell. The last element is the witnesses for the
     // commitment transaction.
-    pub fn build_commitment_and_settlement_tx(
+    fn build_commitment_and_settlement_tx(
         &self,
         local: bool,
     ) -> (TransactionView, TransactionView) {
@@ -5112,7 +5352,7 @@ impl ChannelActorState {
         })
     }
 
-    pub fn build_and_sign_commitment_tx(
+    fn build_and_sign_commitment_tx(
         &self,
     ) -> Result<PartiallySignedCommitmentTransaction, ProcessingChannelError> {
         let (commitment_tx, settlement_tx) = self.build_commitment_and_settlement_tx(true);
@@ -5154,7 +5394,7 @@ impl ChannelActorState {
 
     /// Verify the partial signature from the peer and create a complete transaction
     /// with valid witnesses.
-    pub fn verify_and_complete_tx(
+    fn verify_and_complete_tx(
         &self,
         funding_tx_partial_signature: PartialSignature,
         commitment_tx_partial_signature: PartialSignature,
@@ -5494,6 +5734,14 @@ impl DetailedTLCInfo {
         } else {
             self.creation_confirmed_at
                 .expect("Commitment number is present")
+        }
+    }
+
+    fn is_fullfill_removed(&self) -> bool {
+        if let Some((_, removed_reason)) = &self.removed_at {
+            matches!(removed_reason, RemoveTlcReason::RemoveTlcFulfill(_))
+        } else {
+            false
         }
     }
 }

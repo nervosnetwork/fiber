@@ -323,7 +323,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
         })
         .await;
 
-    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+    call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {
                 channel_id: new_channel_id,
@@ -341,8 +341,6 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
-
-    dbg!(&remove_tlc_result);
 
     // Since we currently automatically send a `CommitmentSigned` message
     // after sending a `RemoveTlc` message, we can expect the `RemoteCommitmentSigned`
@@ -531,6 +529,9 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
     })
     .expect("node_b alive")
     .expect("successfully removed tlc");
+
+    dbg!("Sleeping for some time to wait for the RemoveTlc processed by both party");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -852,7 +853,7 @@ async fn test_revoke_old_commitment_transaction() {
         })
         .await;
 
-    let _ = node_a
+    node_a
         .network_actor
         .send_message(NetworkActorMessage::Command(
             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {

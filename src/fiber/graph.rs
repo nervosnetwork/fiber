@@ -1,9 +1,11 @@
-use super::network::{get_chain_hash, SendPaymentCommand};
+use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
+use crate::fiber::fee::calculate_tlc_forward_fee;
 use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use ckb_jsonrpc_types::JsonBytes;
@@ -337,6 +339,15 @@ where
             .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
     }
 
+    pub fn get_mut_channels_by_peer(
+        &mut self,
+        node_id: Pubkey,
+    ) -> impl Iterator<Item = &mut ChannelInfo> {
+        self.channels
+            .values_mut()
+            .filter(move |channel| channel.node1() == node_id || channel.node2() == node_id)
+    }
+
     pub fn get_channels_within_block_range(
         &self,
         start_block: u64,
@@ -437,14 +448,28 @@ where
         self.source
     }
 
-    pub fn calculate_fee(&self, amount: u128, fee_proportational_millionths: u128) -> u128 {
-        let fee = fee_proportational_millionths * amount;
-        let base_fee = fee / 1_000_000;
-        let remainder = fee % 1_000_000;
-        if remainder > 0 {
-            base_fee + 1
-        } else {
-            base_fee
+    pub(crate) fn mark_channel_failed(&mut self, channel_outpoint: &OutPoint) {
+        if let Some(channel) = self.channels.get_mut(channel_outpoint) {
+            if let Some(info) = channel.node1_to_node2.as_mut() {
+                info.enabled = false;
+            }
+            if let Some(info) = channel.node2_to_node1.as_mut() {
+                info.enabled = false;
+            }
+        }
+    }
+
+    pub(crate) fn mark_node_failed(&mut self, node_id: Pubkey) {
+        for channel in self.get_mut_channels_by_peer(node_id) {
+            if channel.node1() == node_id {
+                if let Some(info) = channel.node1_to_node2.as_mut() {
+                    info.enabled = false;
+                }
+            } else {
+                if let Some(info) = channel.node2_to_node1.as_mut() {
+                    info.enabled = false;
+                }
+            }
         }
     }
 
@@ -454,28 +479,17 @@ where
         self.nodes.clear();
     }
 
-    pub fn init_payment_session(&self, payment_request: SendPaymentCommand) -> PaymentSession {
-        let payment_session = PaymentSession::new(payment_request, 3);
-        if let Some(session) = self
-            .store
-            .get_payment_session(payment_session.payment_hash())
-        {
-            return session;
-        } else {
-            self.store.insert_payment_session(payment_session.clone());
-            payment_session
-        }
-    }
-
     /// Returns a list of `PaymentHopData` for all nodes in the route, including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_request: SendPaymentCommand,
+        payment_request: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, GraphError> {
         let source = self.get_source_pubkey();
-        let (target, amount, payment_hash, preimage, udt_type_script) = payment_request
-            .check_valid()
-            .map_err(|e| GraphError::Other(format!("payment request is invalid {:?}", e)))?;
+        let target = payment_request.target_pubkey;
+        let amount = payment_request.amount;
+        let preimage = payment_request.preimage;
+        let payment_hash = payment_request.payment_hash;
+        let udt_type_script = payment_request.udt_type_script;
         let invoice = payment_request
             .invoice
             .map(|x| x.parse::<CkbInvoice>().unwrap());
@@ -524,7 +538,7 @@ where
                 }
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
-                let fee = self.calculate_fee(current_amount, fee_rate as u128);
+                let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.cltv_expiry_delta;
                 (fee, expiry)
             };
@@ -544,15 +558,10 @@ where
             current_expiry += expiry;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
-        let next_hop = if !route.is_empty() {
-            Some(route[0].target)
-        } else {
-            None
-        };
         onion_infos.push(PaymentHopData {
             amount: current_amount,
             payment_hash,
-            next_hop,
+            next_hop: Some(route[0].target),
             tlc_hash_algorithm: hash_algorithm,
             expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
@@ -615,32 +624,23 @@ where
             next_hop: None,
             incoming_cltv_height: 0,
         });
-        loop {
-            nodes_visited += 1;
-            let Some(cur_hop) = nodes_heap.pop() else {
-                break;
-            };
-
+        while let Some(cur_hop) = nodes_heap.pop() {
             if cur_hop.node_id == source {
                 break;
             }
+            nodes_visited += 1;
 
             for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
                 edges_expanded += 1;
                 // if charge inbound fees for exit hop
-                let fee_rate = channel_update.fee_rate;
-                let next_hop_received_amount = cur_hop.amount_received;
-                let fee = self.calculate_fee(next_hop_received_amount, fee_rate as u128);
-                let amount_to_send = next_hop_received_amount + fee;
-
-                debug!(
-                    "fee_rate: {:?} next_hop_received_amount: {:?}, fee: {:?} amount_to_send: {:?} channel_capacity: {:?} htlc_max_value: {:?}",
-                    fee_rate, next_hop_received_amount, fee, amount_to_send, channel_info.capacity(), channel_update.htlc_maximum_value
-                );
-
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
                     continue;
                 }
+
+                let fee_rate = channel_update.fee_rate;
+                let next_hop_received_amount = cur_hop.amount_received;
+                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128);
+                let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
@@ -704,8 +704,6 @@ where
                         continue;
                     }
                 }
-                // info!("weight: {:?} dist: {:?} fee: {:?}", weight, dist, fee);
-                // TODO: update weight and distance here
                 let node: NodeHeapElement = NodeHeapElement {
                     node_id: from,
                     weight,
@@ -784,25 +782,87 @@ pub trait NetworkGraphStateStore {
     fn insert_payment_session(&self, session: PaymentSession);
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentSessionStatus {
+    // initial status, payment session is created, no HTLC is sent
+    Created,
+    // related HTLC is send and waiting for the response
+    Inflight,
+    // related HTLC is successfully settled
+    Success,
+    // related HTLC is failed
+    Failed,
+}
+
+#[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
-    pub command: SendPaymentCommand,
+    pub request: SendPaymentData,
     pub retried_times: u32,
     pub last_error: Option<String>,
     pub try_limit: u32,
+    pub status: PaymentSessionStatus,
+    pub created_at: u128,
+    pub last_updated_at: u128,
+    // The channel_outpoint and the tlc_id of the first hop
+    #[serde_as(as = "Option<EntityHex>")]
+    pub first_hop_channel_outpoint: Option<OutPoint>,
+    pub first_hop_tlc_id: Option<u64>,
 }
 
 impl PaymentSession {
-    pub fn new(command: SendPaymentCommand, try_limit: u32) -> Self {
+    pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
+        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
         Self {
-            command,
+            request,
             retried_times: 0,
             last_error: None,
             try_limit,
+            status: PaymentSessionStatus::Created,
+            created_at: now,
+            last_updated_at: now,
+            first_hop_channel_outpoint: None,
+            first_hop_tlc_id: None,
         }
     }
 
     pub fn payment_hash(&self) -> Hash256 {
-        self.command.payment_hash()
+        self.request.payment_hash
+    }
+
+    pub fn set_status(&mut self, status: PaymentSessionStatus) {
+        self.status = status;
+        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+    }
+
+    pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+        self.first_hop_channel_outpoint = Some(channel_outpoint);
+        self.first_hop_tlc_id = Some(tlc_id);
+    }
+
+    pub fn set_success_status(&mut self) {
+        self.set_status(PaymentSessionStatus::Success);
+        self.last_error = None;
+    }
+
+    pub fn set_failed_status(&mut self, error: &str) {
+        self.set_status(PaymentSessionStatus::Failed);
+        self.last_error = Some(error.to_string());
+    }
+
+    pub fn can_retry(&self) -> bool {
+        self.retried_times < self.try_limit
+    }
+}
+
+impl From<PaymentSession> for SendPaymentResponse {
+    fn from(session: PaymentSession) -> Self {
+        Self {
+            payment_hash: session.request.payment_hash,
+            status: session.status,
+            failed_error: session.last_error,
+            created_at: session.created_at,
+            last_updated_at: session.last_updated_at,
+        }
     }
 }

@@ -1,7 +1,8 @@
+
 meta {
-  name: Node1 send payment with router only with invoice
+  name: Node1 send get_nodes rpc request
   type: http
-  seq: 14
+  seq: 21
 }
 
 post {
@@ -19,12 +20,11 @@ body:json {
   {
     "id": "42",
     "jsonrpc": "2.0",
-    "method": "send_payment",
-    "params": [
-      {
-        "invoice": "{{encoded_invoice}}"
-      }
-    ]
+    "method": "graph_nodes",
+    "params": [{
+        "limit": "0x2",
+        "after": "{{last_cursor_2}}"
+    }]
   }
 }
 
@@ -32,16 +32,16 @@ assert {
   res.body.error: isUndefined
 }
 
-
 script:pre-request {
   // sleep for a while
   await new Promise(r => setTimeout(r, 1000));
 }
 
-
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("send payment result: ", res.body);
-
+  console.log("get result: ", res.body.result);
+  if (res.body.result.nodes.length != 0) {
+    throw new Error("Assertion failed: nodes number is not right");
+  }
 }

@@ -21,6 +21,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `remove_tlc`](#remove_tlc)
         * [Method `shutdown_channel`](#shutdown_channel)
         * [Method `send_payment`](#send_payment)
+        * [Method `get_payment`](#get_payment)
 
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#new_invoice)
@@ -188,7 +189,30 @@ If `invoice` is not provided, the `target_pubkey`, `amount` must be provided, if
 
 ###### Returns
 
-Returns the `payment_hash` when the request is successful. Otherwise, returns an error message.
+Return a `SendPaymentResult` object with the following fields:
+- `payment_hash` (type: `Hash256`): The identifier of the payment, should be the same as the `payment_hash` in the request.
+- `status` (type: `String`): The status of the payment, possible values are `created`, `inflight`, `success`, `failed`.
+- `last_update_time` (type: `u128`): The last update time of the payment.
+- `failed_error` (type: `Option<String>`): The error message if the payment failed.
+
+<a id="get_payment"></a>
+#### Method `get_payment`
+
+Get the payment by the payment hash.
+
+###### Params
+
+- `payment_hash` (type: `Hash256`): The hash to use within the payment's HTLC.
+
+###### Returns
+
+If success, return a `SendPaymentResult` object with the following fields:
+- `payment_hash` (type: `Hash256`): The identifier of the payment, should be the same as the `payment_hash` in the request.
+- `status` (type: `String`): The status of the payment, possible values are `created`, `inflight`, `success`, `failed`.
+- `last_update_time` (type: `u128`): The last update time of the payment.
+- `failed_error` (type: `Option<String>`): The error message if the payment failed.
+
+If the payment is not found, return error message.
 
 ### Module `Invoice`
 
