@@ -49,12 +49,7 @@ impl MockContext {
                     "../../tests/deploy/contracts/commitment-lock"
                 )),
             ),
-            (
-                Contract::AlwaysSuccess,
-                Bytes::from_static(include_bytes!(
-                    "../../tests/deploy/contracts/always_success"
-                )),
-            ),
+            // mock secp256k1 lock script
             (
                 Contract::Secp256k1Lock,
                 Bytes::from_static(include_bytes!(
@@ -120,7 +115,6 @@ pub enum Contract {
     FundingLock,
     CommitmentLock,
     Secp256k1Lock,
-    AlwaysSuccess,
     CkbAuth,
     SimpleUDT,
 }
@@ -184,7 +178,6 @@ fn get_environment_variable(
     let contract_name = match contract {
         Contract::FundingLock => "FUNDING_LOCK",
         Contract::CommitmentLock => "COMMITMENT_LOCK",
-        Contract::AlwaysSuccess => "ALWAYS_SUCCESS",
         Contract::SimpleUDT => "SIMPLE_UDT",
         _ => panic!("Unsupported contract type {:?}", contract),
     };
@@ -228,7 +221,6 @@ impl ContractsContext {
                 let mut map = HashMap::new();
                 let mut script_cell_deps = HashMap::new();
                 for (program_dep_type, group_dep_type, contracts) in [
-                    (DepType::Code, DepType::Code, vec![Contract::AlwaysSuccess]),
                     (
                         DepType::Code,
                         DepType::DepGroup,
