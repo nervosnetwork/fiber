@@ -16,72 +16,98 @@ use tentacle::secio::SecioKeyPair;
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NewInvoiceParams {
+    /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
     amount: u128,
+    /// The description of the invoice.
     description: Option<String>,
+    /// The currency of the invoice.
     currency: Currency,
+    /// The payment preimage of the invoice.
     payment_preimage: Hash256,
+    /// The expiry time of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     expiry: Option<u64>,
+    /// The fallback address of the invoice.
     fallback_address: Option<String>,
+    /// The final CLTV of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     final_cltv: Option<u64>,
+    /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     final_htlc_timeout: Option<u64>,
+    /// The UDT type script of the invoice.
     udt_type_script: Option<Script>,
+    /// The hash algorithm of the invoice.
     hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct InvoiceResult {
+    /// The encoded invoice address.
     invoice_address: String,
+    /// The invoice.
     invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ParseInvoiceParams {
+    /// The encoded invoice address.
     invoice: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ParseInvoiceResult {
+    /// The invoice.
     invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetInvoiceParams {
+    /// The payment hash of the invoice.
     payment_hash: Hash256,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 enum InvoiceStatus {
+    /// The invoice is unpaid.
     Unpaid,
+    /// The invoice is in flight.
     Inflight,
+    /// The invoice is paid, the payment is successful.
     Paid,
+    /// The invoice is expired, can'b be used anymore.
     Expired,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GetInvoiceResult {
+    /// The encoded invoice address.
     invoice_address: String,
+    /// The invoice.
     invoice: CkbInvoice,
+    /// The invoice status.
     status: InvoiceStatus,
 }
 
+/// RPC module for invoice management.
 #[rpc(server)]
 trait InvoiceRpc {
+    /// Generates a new invoice.
     #[method(name = "new_invoice")]
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned>;
 
+    /// Parses a encoded invoice.
     #[method(name = "parse_invoice")]
     async fn parse_invoice(
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 
+    /// Retrieves an invoice.
     #[method(name = "get_invoice")]
     async fn get_invoice(
         &self,

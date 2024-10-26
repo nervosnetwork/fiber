@@ -17,22 +17,30 @@ use tokio::sync::RwLock;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GraphNodesParams {
     #[serde_as(as = "Option<U64Hex>")]
+    /// The maximum number of nodes to return.
     limit: Option<u64>,
+    /// The cursor to start returning nodes from.
     after: Option<JsonBytes>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtScript {
+    /// The code hash of the script.
     code_hash: H256,
+    /// The hash type of the script.
     hash_type: ScriptHashType,
+    /// The arguments of the script.
     args: String,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtCellDep {
+    /// The type of the cell dep.
     dep_type: DepType,
+    /// The transaction hash of the cell dep.
     tx_hash: H256,
+    /// The index of the cell dep.
     #[serde_as(as = "U32Hex")]
     index: u32,
 }
@@ -40,10 +48,14 @@ struct UdtCellDep {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct UdtArgInfo {
+    /// The name of the UDT.
     name: String,
+    /// The script of the UDT.
     script: UdtScript,
     #[serde_as(as = "Option<U128Hex>")]
+    /// The minimum amount of the UDT that can be automatically accepted.
     auto_accept_amount: Option<u128>,
+    /// The cell deps of the UDT.
     cell_deps: Vec<UdtCellDep>,
 }
 
@@ -81,61 +93,84 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct NodeInfo {
+    /// The alias of the node.
     alias: String,
+    /// The addresses of the node.
     addresses: Vec<MultiAddr>,
+    /// The node ID.
     node_id: Pubkey,
     #[serde_as(as = "U64Hex")]
+    /// The timestamp of the node.
     timestamp: u64,
+    /// The chain hash of the node.
     chain_hash: Hash256,
     #[serde_as(as = "U64Hex")]
+    /// The minimum CKB funding amount for automatically accepting open channel requests.
     auto_accept_min_ckb_funding_amount: u64,
+    /// The UDT configuration infos of the node.
     udt_cfg_infos: UdtCfgInfos,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct GraphNodesResult {
+    /// The list of nodes.
     nodes: Vec<NodeInfo>,
+    /// The last cursor.
     last_cursor: JsonBytes,
 }
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct GraphChannelsParams {
+    /// The maximum number of channels to return.
     #[serde_as(as = "Option<U64Hex>")]
     limit: Option<u64>,
+    /// The cursor to start returning channels from.
     after: Option<JsonBytes>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct ChannelInfo {
+    /// The outpoint of the channel.
     #[serde_as(as = "EntityHex")]
     channel_outpoint: OutPoint,
+    /// The block number of the funding transaction.
     #[serde_as(as = "U64Hex")]
     funding_tx_block_number: u64,
+    /// The index of the funding transaction.
     #[serde_as(as = "U32Hex")]
     funding_tx_index: u32,
+    /// The node ID of the first node.
     node1: Pubkey,
+    /// The node ID of the second node.
     node2: Pubkey,
+    /// The last updated timestamp of the channel.
     #[serde_as(as = "Option<U64Hex>")]
     last_updated_timestamp: Option<u64>,
+    /// The created timestamp of the channel.
     created_timestamp: u64,
     #[serde_as(as = "Option<U64Hex>")]
+    /// The fee rate from node 1 to node 2.
     node1_to_node2_fee_rate: Option<u64>,
+    /// The fee rate from node 2 to node 1.
     #[serde_as(as = "Option<U64Hex>")]
     node2_to_node1_fee_rate: Option<u64>,
+    /// The capacity of the channel.
     #[serde_as(as = "U128Hex")]
     capacity: u128,
+    /// The chain hash of the channel.
     chain_hash: Hash256,
+    /// The UDT type script of the channel.
     udt_type_script: Option<Script>,
 }
-
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct GraphChannelsResult {
     channels: Vec<ChannelInfo>,
     last_cursor: JsonBytes,
 }
 
+/// RPC module for graph management.
 #[rpc(server)]
 trait GraphRpc {
     #[method(name = "graph_nodes")]
