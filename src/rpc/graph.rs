@@ -23,6 +23,7 @@ pub(crate) struct GraphNodesParams {
     after: Option<JsonBytes>,
 }
 
+/// The UDT script which is used to identify the UDT configuration for a Fiber Node
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtScript {
     /// The code hash of the script.
@@ -33,6 +34,7 @@ struct UdtScript {
     args: String,
 }
 
+/// The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct UdtCellDep {
@@ -45,6 +47,7 @@ struct UdtCellDep {
     index: u32,
 }
 
+/// The UDT argument info which is used to identify the UDT configuration
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct UdtArgInfo {
@@ -59,8 +62,12 @@ pub(crate) struct UdtArgInfo {
     cell_deps: Vec<UdtCellDep>,
 }
 
+/// A list of UDT configuration infos.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub(crate) struct UdtCfgInfos(Vec<UdtArgInfo>);
+pub(crate) struct UdtCfgInfos(
+    /// The list of UDT configuration infos.
+    Vec<UdtArgInfo>,
+);
 
 impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
     fn from(cfg: ConfigUdtCfgInfos) -> Self {
@@ -90,6 +97,7 @@ impl From<ConfigUdtCfgInfos> for UdtCfgInfos {
     }
 }
 
+/// The Node information.
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct NodeInfo {
@@ -129,6 +137,7 @@ pub(crate) struct GraphChannelsParams {
     after: Option<JsonBytes>,
 }
 
+/// The Channel information.
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 struct ChannelInfo {
@@ -164,21 +173,26 @@ struct ChannelInfo {
     /// The UDT type script of the channel.
     udt_type_script: Option<Script>,
 }
+
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct GraphChannelsResult {
+    /// A list of channels.
     channels: Vec<ChannelInfo>,
+    /// The last cursor for pagination.
     last_cursor: JsonBytes,
 }
 
 /// RPC module for graph management.
 #[rpc(server)]
 trait GraphRpc {
+    /// Get the list of nodes in the network graph.
     #[method(name = "graph_nodes")]
     async fn graph_nodes(
         &self,
         params: GraphNodesParams,
     ) -> Result<GraphNodesResult, ErrorObjectOwned>;
 
+    /// Get the list of channels in the network graph.
     #[method(name = "graph_channels")]
     async fn graph_channels(
         &self,

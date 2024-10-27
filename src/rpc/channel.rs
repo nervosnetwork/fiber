@@ -126,6 +126,7 @@ pub(crate) struct ListChannelsResult {
     channels: Vec<Channel>,
 }
 
+/// The channel data structure
 #[serde_as]
 #[derive(Clone, Serialize)]
 pub(crate) struct Channel {
@@ -191,6 +192,7 @@ pub(crate) struct RemoveTlcParams {
     reason: RemoveTlcReason,
 }
 
+/// The reason for removing a TLC
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]

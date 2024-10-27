@@ -339,7 +339,7 @@ RPC module for graph management.
 <a id="graph-graph_nodes"></a>
 #### Method `graph_nodes`
 
-TODO: add desc
+Get the list of nodes in the network graph.
 
 ##### Params
 
@@ -355,7 +355,7 @@ TODO: add desc
 <a id="graph-graph_channels"></a>
 #### Method `graph_channels`
 
-TODO: add desc
+Get the list of channels in the network graph.
 
 ##### Params
 
@@ -364,8 +364,8 @@ TODO: add desc
 
 ##### Returns
 
-* `channels` - `Vec<ChannelInfo>`, TODO: add desc
-* `last_cursor` - JsonBytes, TODO: add desc
+* `channels` - `Vec<ChannelInfo>`, A list of channels.
+* `last_cursor` - JsonBytes, The last cursor for pagination.
 
 
 <a id="invoice"></a>
@@ -503,7 +503,7 @@ Disconnect from a peer.
 <a id="#type-channel"></a>
 ### Type `Channel`
 
-TODO: add desc
+The channel data structure
 
 
 #### Fields
@@ -521,7 +521,7 @@ TODO: add desc
 <a id="#type-removetlcreason"></a>
 ### Type `RemoveTlcReason`
 
-TODO: add desc
+The reason for removing a TLC
 
 
 #### Enum with values of
@@ -532,7 +532,7 @@ TODO: add desc
 <a id="#type-udtscript"></a>
 ### Type `UdtScript`
 
-TODO: add desc
+The UDT script which is used to identify the UDT configuration for a Fiber Node
 
 
 #### Fields
@@ -544,7 +544,7 @@ TODO: add desc
 <a id="#type-udtcelldep"></a>
 ### Type `UdtCellDep`
 
-TODO: add desc
+The UDT cell dep which is used to identify the UDT configuration for a Fiber Node
 
 
 #### Fields
@@ -556,7 +556,7 @@ TODO: add desc
 <a id="#type-udtarginfo"></a>
 ### Type `UdtArgInfo`
 
-TODO: add desc
+The UDT argument info which is used to identify the UDT configuration
 
 
 #### Fields
@@ -569,17 +569,17 @@ TODO: add desc
 <a id="#type-udtcfginfos"></a>
 ### Type `UdtCfgInfos`
 
-TODO: add desc
+A list of UDT configuration infos.
 
 
 #### Fields
 
-* `` - `Vec<UdtArgInfo>`, TODO: add desc
+* `` - `Vec<UdtArgInfo>`, The list of UDT configuration infos.
 
 <a id="#type-nodeinfo"></a>
 ### Type `NodeInfo`
 
-TODO: add desc
+The Node information.
 
 
 #### Fields
@@ -595,7 +595,7 @@ TODO: add desc
 <a id="#type-channelinfo"></a>
 ### Type `ChannelInfo`
 
-TODO: add desc
+The Channel information.
 
 
 #### Fields
@@ -616,7 +616,7 @@ TODO: add desc
 <a id="#type-invoicestatus"></a>
 ### Type `InvoiceStatus`
 
-TODO: add desc
+The status of the invoice.
 
 
 #### Enum with values of

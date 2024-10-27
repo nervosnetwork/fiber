@@ -68,6 +68,7 @@ pub struct GetInvoiceParams {
     payment_hash: Hash256,
 }
 
+/// The status of the invoice.
 #[derive(Clone, Serialize, Deserialize)]
 enum InvoiceStatus {
     /// The invoice is unpaid.
