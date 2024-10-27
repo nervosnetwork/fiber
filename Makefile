@@ -53,7 +53,14 @@ coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
 gen-rpc-doc:
 	cargo install fiber-rpc-gen
 	fiber-rpc-gen ./src/rpc
+	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
+        echo "Warning: There are 'TODO: add desc' entries in src/rpc/README.md"; \
+    fi
 
 .PHONY: check-dirty-rpc-doc
 check-dirty-rpc-doc: gen-rpc-doc
 	git diff --exit-code ./src/rpc/README.md
+	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
+        echo "Warning: There are 'TODO: add desc' entries in src/rpc/README.md"; \
+		exit 1; \
+    fi
