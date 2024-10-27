@@ -30,18 +30,15 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
-    * [Module Config](#module-config)
-    * [Module Mod](#module-mod)
+    * [Module Info](#module-info)
+        * [Method `node_info`](#info-node_info)
     * [Module Invoice](#module-invoice)
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
-    * [Module Info](#module-info)
-        * [Method `node_info`](#info-node_info)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
-    * [Module Utils](#module-utils)
 * [RPC Types](#rpc-types)
 
     * [Type `Channel`](#type-channel)
@@ -368,6 +365,41 @@ Get the list of channels in the network graph.
 * `last_cursor` - JsonBytes, The last cursor for pagination.
 
 
+<a id="info"></a>
+### Module `Info`
+The RPC module for node information.
+
+
+<a id="info-node_info"></a>
+#### Method `node_info`
+
+Get the node information.
+
+##### Params
+* None
+
+##### Returns
+
+* `version` - String, The version of the node software.
+* `commit_hash` - String, The commit hash of the node software.
+* `public_key` - Pubkey, The public key of the node.
+* `node_name` - `Option<String>`, The optional name of the node.
+* `peer_id` - PeerId, The peer ID of the node, serialized as a string.
+* `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
+* `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
+* `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
+* `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
+* `tlc_locktime_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no minimum value limit.
+* `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
+* `tlc_fee_proportional_millionths` - u128, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
+* `channel_count` - u32, The number of channels associated with the node, serialized as a hexadecimal string.
+* `pending_channel_count` - u32, The number of pending channels associated with the node, serialized as a hexadecimal string.
+* `peers_count` - u32, The number of peers connected to the node, serialized as a hexadecimal string.
+* `network_sync_status` - String, The synchronization status of the node within the network.
+* `udt_cfg_infos` - UdtCfgInfos, Configuration information for User-Defined Tokens (UDT) associated with the node.
+
+
 <a id="invoice"></a>
 ### Module `Invoice`
 RPC module for invoice management.
@@ -425,41 +457,6 @@ Retrieves an invoice.
 * `invoice_address` - String, The encoded invoice address.
 * `invoice` - CkbInvoice, The invoice.
 * `status` - InvoiceStatus, The invoice status.
-
-
-<a id="info"></a>
-### Module `Info`
-The RPC module for node information.
-
-
-<a id="info-node_info"></a>
-#### Method `node_info`
-
-Get the node information.
-
-##### Params
-* None
-
-##### Returns
-
-* `version` - String, The version of the node software.
-* `commit_hash` - String, The commit hash of the node software.
-* `public_key` - Pubkey, The public key of the node.
-* `node_name` - `Option<String>`, The optional name of the node.
-* `peer_id` - PeerId, The peer ID of the node, serialized as a string.
-* `addresses` - `Vec<MultiAddr>`, A list of multi-addresses associated with the node.
-* `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
-* `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
-* `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
-* `tlc_locktime_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no minimum value limit.
-* `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
-* `tlc_fee_proportional_millionths` - u128, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
-* `channel_count` - u32, The number of channels associated with the node, serialized as a hexadecimal string.
-* `pending_channel_count` - u32, The number of pending channels associated with the node, serialized as a hexadecimal string.
-* `peers_count` - u32, The number of peers connected to the node, serialized as a hexadecimal string.
-* `network_sync_status` - String, The synchronization status of the node within the network.
-* `udt_cfg_infos` - UdtCfgInfos, Configuration information for User-Defined Tokens (UDT) associated with the node.
 
 
 <a id="peer"></a>
