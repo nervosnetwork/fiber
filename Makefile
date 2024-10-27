@@ -48,3 +48,12 @@ coverage-generate-report:
 	genhtml --ignore-errors inconsistent --ignore-errors corrupt --ignore-errors range --ignore-errors unmapped -o "${GRCOV_OUTPUT:.info=}" "${GRCOV_OUTPUT}"
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
+
+.PHONY: gen-rpc-doc
+gen-rpc-doc:
+	cargo install fiber-rpc-gen
+	fiber-rpc-gen ./src/rpc
+
+.PHONY: check-dirty-rpc-doc
+check-dirty-rpc-doc: gen-rpc-doc
+	git diff --exit-code ./src/rpc/README.md
