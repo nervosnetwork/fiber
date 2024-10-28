@@ -40,7 +40,14 @@ ckb-cli account export --lock-arg <lock_arg> --extended-privkey-path ./ckb/expor
 head -n 1 ./ckb/exported-key > ./ckb/key
 ```
 
-4. Start the node, by default it will output logs to the console, you may redirect it to a file:
+4. (Optional) Start your own CKB node. We need a CKB rpc server to query on chain information. The CKB node should have at least version 0.118.0, and with `indexer` service enabled. See [Run a Testnet Node | Nervos CKB](https://docs.nervos.org/docs/node/run-testnet-node) for how to run a ckb testnet node, and change `rpc_url` (under `ckb` section) in `config.yml` file accordingly. You may also use the testnet RPC services URL provided in `config/testnet/config.yml`.
+
+```
+ckb run --indexer
+```
+
+
+5. Start the node, by default it will output logs to the console, you may redirect it to a file:
 
 ```
 RUST_LOG=info ./fnn -c config.yml -d .

@@ -87,9 +87,9 @@ pub const FIBER_PROTOCOL_ID: ProtocolId = ProtocolId::new(42);
 
 pub const DEFAULT_CHAIN_ACTOR_TIMEOUT: u64 = 300000;
 
-// tx index is not returned on older ckb version, using dummy tx index instead.
-// Waiting for https://github.com/nervosnetwork/ckb/pull/4583/ to be released.
-const DUMMY_FUNDING_TX_INDEX: u32 = 0;
+// tx index is not returned on older ckb version, this is a dummy value to indicate that
+// the tx index is not available. It is assumed that normal tx will not have such a large index.
+const DUMMY_FUNDING_TX_INDEX: u32 = u32::MAX;
 
 // This is a temporary way to document that we assume the chain actor is always alive.
 // We may later relax this assumption. At the moment, if the chain actor fails, we
@@ -1931,9 +1931,14 @@ where
                             TxStatus {
                                 status: Status::Committed,
                                 block_number: Some(block_number),
+                                tx_index,
                                 ..
                             },
-                    }) => (tx, block_number.into(), DUMMY_FUNDING_TX_INDEX),
+                    }) => (
+                        tx,
+                        block_number.into(),
+                        tx_index.map(Into::into).unwrap_or(DUMMY_FUNDING_TX_INDEX),
+                    ),
                     err => {
                         return Err(Error::InvalidParameter(format!(
                             "Channel announcement transaction {:?} not found or not confirmed, result is: {:?}",
@@ -3355,6 +3360,7 @@ where
                         TxStatus {
                             status: Status::Committed,
                             block_number: Some(block_number),
+                            tx_index,
                             ..
                         },
                     ..
@@ -3363,7 +3369,7 @@ where
                     NetworkActorEvent::FundingTransactionConfirmed(
                         outpoint,
                         block_number.into(),
-                        DUMMY_FUNDING_TX_INDEX,
+                        tx_index.map(Into::into).unwrap_or(DUMMY_FUNDING_TX_INDEX),
                     )
                 }
                 Ok(status) => {
