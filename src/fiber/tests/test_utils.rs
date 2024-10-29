@@ -368,6 +368,11 @@ impl NetworkNode {
 
     pub async fn restart(&mut self) {
         self.stop().await;
+        // Tentacle shutdown may require some time to propagate to other nodes.
+        // If we start the node immediately, other nodes may deem our new connection
+        // as a duplicate connection and report RepeatedConnection error.
+        // And we will receive `ProtocolSelectError` error from tentacle.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         tracing::debug!("Node stopped, restarting");
         self.start().await;
     }
