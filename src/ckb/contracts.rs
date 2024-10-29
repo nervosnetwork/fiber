@@ -88,7 +88,7 @@ impl ContractsContext {
                 info!("Creating ContractsContext for testnet");
             }
             _ => {
-                info!("Creating ContractsContext for devnet");
+                info!("Creating ContractsContext for dev");
                 let len = genesis_tx.outputs().len();
                 // the last 4 cells are the default contracts: CkbAuth, FundingLock, CommitmentLock, SimpleUDT
                 let ckb_auth_cell_dep = CellDep::new_builder()
