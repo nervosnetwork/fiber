@@ -19,12 +19,35 @@ use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, PublicKey, Secp256k1,
 };
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
 pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
+
+/// The currency of the invoice, can also used to represent the CKB network chain.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CkbInvoiceStatus {
+    Open,
+    Cancelled,
+    Expired,
+    Received,
+    Paid,
+}
+
+impl Display for CkbInvoiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CkbInvoiceStatus::Open => write!(f, "Open"),
+            CkbInvoiceStatus::Cancelled => write!(f, "Cancelled"),
+            CkbInvoiceStatus::Expired => write!(f, "Expired"),
+            CkbInvoiceStatus::Received => write!(f, "Received"),
+            CkbInvoiceStatus::Paid => write!(f, "Paid"),
+        }
+    }
+}
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]

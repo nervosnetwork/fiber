@@ -42,13 +42,13 @@ async fn test_submit_one_output_tx() {
 }
 
 #[tokio::test]
-async fn test_submit_always_success_tx() {
+async fn test_submit_mocked_secp256k1_tx() {
     let actor = create_mock_chain_actor().await;
     let capacity = 100u64;
     let output = CellOutput::new_builder()
         .capacity(capacity.pack())
         .lock(get_script_by_contract(
-            Contract::AlwaysSuccess,
+            Contract::Secp256k1Lock,
             &b"whatever1"[..],
         ))
         .build();
@@ -62,7 +62,7 @@ async fn test_submit_always_success_tx() {
     );
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -89,7 +89,7 @@ async fn test_repeatedly_consume_the_same_cell() {
     let output = CellOutput::new_builder()
         .capacity(capacity.pack())
         .lock(get_script_by_contract(
-            Contract::AlwaysSuccess,
+            Contract::Secp256k1Lock,
             &b"whatever1"[..],
         ))
         .build();
@@ -103,7 +103,7 @@ async fn test_repeatedly_consume_the_same_cell() {
     );
     let out_point = tx.output_pts_iter().next().unwrap();
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
@@ -122,7 +122,7 @@ async fn test_repeatedly_consume_the_same_cell() {
         .build();
     assert_eq!(submit_tx(actor.clone(), tx).await, Status::Committed);
     let tx = TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::AlwaysSuccess]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
         .input(
             CellInput::new_builder()
                 .previous_output(out_point.clone())
