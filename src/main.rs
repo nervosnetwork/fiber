@@ -6,7 +6,7 @@ use fnn::ckb::{
     contracts::{get_script_by_contract, init_contracts_context, Contract},
     CkbChainActor,
 };
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph};
+use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -81,6 +81,7 @@ pub async fn main() {
             })
             .expect("load chain spec");
             let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+            init_chain_hash(genesis_block.hash().into());
             init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),

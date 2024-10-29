@@ -4,6 +4,7 @@ use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use musig2::CompactSignature;
+use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
     async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
@@ -107,8 +108,19 @@ const NUM_PEER_CONNECTIONS: usize = 40;
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
+static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
+
+pub fn init_chain_hash(chain_hash: Hash256) {
+    CHAIN_HASH_INSTANCE
+        .set(chain_hash)
+        .expect("init_chain_hash should only be called once");
+}
+
 pub(crate) fn get_chain_hash() -> Hash256 {
-    Default::default()
+    CHAIN_HASH_INSTANCE
+        .get()
+        .cloned()
+        .unwrap_or_default()
 }
 
 #[derive(Debug)]
