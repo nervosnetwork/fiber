@@ -36,6 +36,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `new_invoice`](#invoice-new_invoice)
         * [Method `parse_invoice`](#invoice-parse_invoice)
         * [Method `get_invoice`](#invoice-get_invoice)
+        * [Method `cancel_invoice`](#invoice-cancel_invoice)
     * [Module Peer](#module-peer)
         * [Method `connect_peer`](#peer-connect_peer)
         * [Method `disconnect_peer`](#peer-disconnect_peer)
@@ -43,7 +44,6 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
-    * [Type `InvoiceStatus`](#type-invoicestatus)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `UdtArgInfo`](#type-udtarginfo)
@@ -456,7 +456,23 @@ Retrieves an invoice.
 
 * `invoice_address` - String, The encoded invoice address.
 * `invoice` - CkbInvoice, The invoice.
-* `status` - InvoiceStatus, The invoice status.
+* `status` - CkbInvoiceStatus, The invoice status
+
+
+<a id="invoice-cancel_invoice"></a>
+#### Method `cancel_invoice`
+
+Cancels an invoice, only when invoice is in status `Open` can be canceled.
+
+##### Params
+
+* `payment_hash` - Hash256, The payment hash of the invoice.
+
+##### Returns
+
+* `invoice_address` - String, The encoded invoice address.
+* `invoice` - CkbInvoice, The invoice.
+* `status` - CkbInvoiceStatus, The invoice status
 
 
 <a id="peer"></a>
@@ -609,17 +625,4 @@ The Channel information.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.
-
-<a id="#type-invoicestatus"></a>
-### Type `InvoiceStatus`
-
-The status of the invoice.
-
-
-#### Enum with values of
-
-* `Unpaid` - , The invoice is unpaid.
-* `Inflight` - , The invoice is in flight.
-* `Paid` - , The invoice is paid, the payment is successful.
-* `Expired` - , The invoice is expired, can'b be used anymore.
 
