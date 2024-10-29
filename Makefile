@@ -17,6 +17,9 @@ bless:
 fmt:
 	cargo fmt --all -- --check
 
+test:
+	RUST_LOG=off cargo test
+
 coverage-clean:
 	rm -rf "${CARGO_TARGET_DIR}/*.profraw" "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"
 

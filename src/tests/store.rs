@@ -2,6 +2,11 @@ use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::history::TimedResult;
+use crate::fiber::network::SendPaymentData;
+use crate::fiber::tests::test_utils::gen_rand_public_key;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
 use crate::fiber::types::ChannelAnnouncement;
 use crate::fiber::types::Hash256;
@@ -18,20 +23,14 @@ use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
 use ckb_types::packed::Script;
 use ckb_types::prelude::*;
+use core::cmp::Ordering;
 use musig2::CompactSignature;
 use secp256k1::Keypair;
-use secp256k1::PublicKey;
 use secp256k1::Secp256k1;
 use tempfile::tempdir;
 
-fn gen_rand_public_key() -> PublicKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair)
-}
-
 fn mock_node() -> (Pubkey, NodeInfo) {
-    let node_id: Pubkey = gen_rand_public_key().into();
+    let node_id: Pubkey = gen_rand_public_key();
     let node = NodeInfo {
         node_id,
         anouncement_msg: NodeAnnouncement::new_unsigned(
@@ -47,8 +46,8 @@ fn mock_node() -> (Pubkey, NodeInfo) {
 }
 
 fn mock_channel() -> ChannelInfo {
-    let node1: Pubkey = gen_rand_public_key().into();
-    let node2: Pubkey = gen_rand_public_key().into();
+    let node1: Pubkey = gen_rand_public_key();
+    let node2: Pubkey = gen_rand_public_key();
     let secp = Secp256k1::new();
     let keypair = Keypair::new(&secp, &mut rand::thread_rng());
     let (xonly, _parity) = keypair.x_only_public_key();
@@ -201,4 +200,97 @@ fn test_store_wacthtower() {
 
     store.remove_watch_channel(channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_store_payment_session() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payment_history_store");
+    let store = Store::new(path);
+    let payment_hash = gen_sha256_hash();
+    let payment_data = SendPaymentData {
+        target_pubkey: gen_rand_public_key(),
+        amount: 100,
+        payment_hash,
+        invoice: None,
+        final_cltv_delta: Some(100),
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+    };
+    let payment_session = PaymentSession::new(payment_data.clone(), 10);
+    store.insert_payment_session(payment_session.clone());
+    let res = store.get_payment_session(payment_hash).unwrap();
+    eprintln!("{:?}", res);
+    assert_eq!(res.payment_hash(), payment_hash);
+    assert_eq!(res.request.max_fee_amount, Some(1000));
+    assert_eq!(res.status, PaymentSessionStatus::Created);
+}
+
+#[test]
+fn test_store_payment_hisotry() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payment_history_store");
+    let mut store = Store::new(path);
+
+    let pubkey = gen_rand_public_key();
+    let target = gen_rand_public_key();
+    let result = TimedResult {
+        fail_amount: 1,
+        fail_time: 2,
+        success_time: 3,
+        success_amount: 4,
+    };
+    store.insert_payment_history_result(pubkey.into(), target.clone(), result.clone());
+    assert_eq!(
+        store.get_payment_history_result(),
+        vec![(pubkey.into(), target.clone(), result)]
+    );
+
+    fn sort_results(results: &mut Vec<(Pubkey, Pubkey, TimedResult)>) {
+        results.sort_by(|a, b| match a.0.cmp(&b.0) {
+            Ordering::Equal => a.1.cmp(&b.1),
+            other => other,
+        });
+    }
+
+    let target_2 = gen_rand_public_key();
+    let result_2 = TimedResult {
+        fail_amount: 2,
+        fail_time: 3,
+        success_time: 4,
+        success_amount: 5,
+    };
+    store.insert_payment_history_result(pubkey.into(), target_2.clone(), result_2.clone());
+    let mut r1 = store.get_payment_history_result();
+    sort_results(&mut r1);
+    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
+        (pubkey.into(), target, result),
+        (pubkey.into(), target_2, result_2),
+    ];
+    sort_results(&mut r2);
+    assert_eq!(r1, r2);
+
+    let pubkey_3 = gen_rand_public_key();
+    let target_3 = gen_rand_public_key();
+    let result_3 = TimedResult {
+        fail_amount: 3,
+        fail_time: 4,
+        success_time: 5,
+        success_amount: 6,
+    };
+    store.insert_payment_history_result(pubkey_3.into(), target_3.clone(), result_3.clone());
+    let mut r1 = store.get_payment_history_result();
+    sort_results(&mut r1);
+
+    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
+        (pubkey.into(), target, result),
+        (pubkey.into(), target_2, result_2),
+        (pubkey_3.into(), target_3, result_3),
+    ];
+    sort_results(&mut r2);
+    assert_eq!(r1, r2);
 }
