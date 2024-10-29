@@ -3383,7 +3383,7 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        info!("Peer {:?} disconnected", id);
+        info!("Peer {:?} disconnected from us ({:?})", id, &self.peer_id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -3916,7 +3916,7 @@ where
 
         tracker.spawn(async move {
             service.run().await;
-            debug!("Tentacle service shutdown");
+            debug!("Tentacle service stopped");
         });
 
         let mut graph = self.network_graph.write().await;
@@ -4160,8 +4160,8 @@ impl ServiceProtocol for Handle {
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
         info!(
-            "proto id [{}] close on session [{}]",
-            context.proto_id, context.session.id
+            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
+            context.proto_id, context.session.id, &context.session.address, &context.session.ty
         );
 
         match context.session.remote_pubkey.as_ref() {

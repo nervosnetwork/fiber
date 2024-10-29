@@ -1387,6 +1387,8 @@ async fn test_commitment_tx_capacity() {
 
 #[tokio::test]
 async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    init_tracing();
+
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1395,6 +1397,32 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart() {
             .await;
 
     node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.stop().await;
+
+    node_b.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.peer_id),
+    )
+    .await;
+
+    node_a.start().await;
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),

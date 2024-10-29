@@ -368,6 +368,7 @@ impl NetworkNode {
 
     pub async fn restart(&mut self) {
         self.stop().await;
+        tracing::debug!("Node stopped, restarting");
         self.start().await;
     }
 
