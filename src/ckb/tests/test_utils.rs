@@ -1,16 +1,20 @@
-use std::collections::HashMap;
-
 use anyhow::anyhow;
 use ckb_jsonrpc_types::TxStatus;
+use ckb_testtool::context::Context;
 use ckb_types::{
-    core::TransactionView,
-    packed::{CellOutput, OutPoint},
+    bytes::Bytes,
+    core::{DepType, TransactionView},
+    packed::{CellDep, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec, Unpack},
 };
+use std::collections::HashMap;
 
-use crate::ckb::{TraceTxRequest, TraceTxResponse};
+use crate::ckb::{
+    config::UdtCfgInfos,
+    contracts::{Contract, ContractsContext, ContractsInfo, CONTRACTS_CONTEXT_INSTANCE},
+    TraceTxRequest, TraceTxResponse,
+};
 
-use crate::ckb::contracts::MockContext;
 use crate::ckb::CkbChainMessage;
 
 use ckb_types::packed::Byte32;
@@ -22,6 +26,88 @@ pub enum CellStatus {
     // This cell has been consumed. If any transaction
     // tries to consume the same cell, it should be rejected.
     Consumed,
+}
+
+pub struct MockContext {
+    pub context: Context,
+}
+
+impl MockContext {
+    pub fn new() -> Self {
+        let binaries = [
+            (
+                Contract::CkbAuth,
+                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/auth")),
+            ),
+            (
+                Contract::FundingLock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/funding-lock"
+                )),
+            ),
+            (
+                Contract::CommitmentLock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/commitment-lock"
+                )),
+            ),
+            // mock secp256k1 lock script
+            (
+                Contract::Secp256k1Lock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/always_success"
+                )),
+            ),
+            (
+                Contract::SimpleUDT,
+                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/simple_udt")),
+            ),
+        ];
+        let mut context = Context::new_with_deterministic_rng();
+        let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
+        let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
+
+        for (contract, binary) in binaries.into_iter() {
+            let out_point = context.deploy_cell(binary);
+            let script = context
+                .build_script(&out_point, Default::default())
+                .expect("valid script");
+            contract_default_scripts.insert(contract, script);
+            let cell_dep = CellDep::new_builder()
+                .out_point(out_point)
+                .dep_type(DepType::Code.into())
+                .build();
+
+            let cell_deps = if matches!(contract, Contract::FundingLock)
+                || matches!(contract, Contract::CommitmentLock)
+            {
+                // FundingLock and CommitmentLock depend on CkbAuth
+                vec![
+                    cell_dep,
+                    script_cell_deps
+                        .get(&Contract::CkbAuth)
+                        .unwrap()
+                        .clone()
+                        .get(0)
+                        .unwrap()
+                        .clone(),
+                ]
+            } else {
+                vec![cell_dep]
+            };
+            script_cell_deps.insert(contract, cell_deps);
+        }
+
+        let contracts = ContractsInfo {
+            contract_default_scripts,
+            script_cell_deps,
+            udt_whitelist: UdtCfgInfos::default(),
+        };
+        let contracts_context = ContractsContext { contracts };
+        let _ = CONTRACTS_CONTEXT_INSTANCE.set(contracts_context);
+
+        MockContext { context }
+    }
 }
 
 pub struct MockChainActorState {
@@ -179,7 +265,6 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let mut context = state.ctx.write();
                 let mut f = || {
                     // Mark the inputs as consumed
                     for input in tx.input_pts_iter() {
@@ -202,6 +287,7 @@ impl Actor for MockChainActor {
                             }
                         }
                     }
+                    let context = &mut state.ctx.context;
                     match context.verify_tx(&tx, MAX_CYCLES) {
                         Ok(c) => {
                             debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);

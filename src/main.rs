@@ -1,3 +1,5 @@
+use ckb_chain_spec::ChainSpec;
+use ckb_resource::Resource;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{
@@ -71,7 +73,19 @@ pub async fn main() {
             Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
             let node_public_key = fiber_config.public_key();
 
-            let _ = init_contracts_context(fiber_config.network, Some(&ckb_config));
+            let chain = fiber_config.chain.as_str();
+            let chain_spec = ChainSpec::load_from(&match chain {
+                "mainnet" => Resource::bundled("specs/mainnet.toml".to_string()),
+                "testnet" => Resource::bundled("specs/testnet.toml".to_string()),
+                path => Resource::file_system(path.into()),
+            })
+            .expect("load chain spec");
+            let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+            init_contracts_context(
+                genesis_block,
+                fiber_config.scripts.clone(),
+                ckb_config.udt_whitelist.clone().unwrap_or_default(),
+            );
 
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
