@@ -9,10 +9,10 @@ use crate::{
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        types::{Hash256, LockTime, Privkey, RemoveTlcFulfill, RemoveTlcReason},
+        types::{Hash256, Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
-    NetworkServiceEvent,
+    now_timestamp, NetworkServiceEvent,
 };
 use ckb_jsonrpc_types::Status;
 use ckb_types::{
@@ -23,6 +23,8 @@ use ckb_types::{
 use ractor::call;
 
 use super::test_utils::{init_tracing, NetworkNode};
+
+const DEFAULT_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
 #[test]
 fn test_per_commitment_point_and_secret_consistency() {
@@ -281,7 +283,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -485,7 +487,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: correct_algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -534,7 +536,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: wrong_algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -608,7 +610,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,

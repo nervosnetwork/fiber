@@ -11,11 +11,9 @@ use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
-use ckb_sdk::{Since, SinceType};
-use ckb_types::core::FeeRate;
-use ckb_types::packed::{OutPoint, Uint64};
 use ckb_types::{
-    packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
+    core::FeeRate,
+    packed::{Byte32 as MByte32, BytesVec, Script, Transaction, OutPoint},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
@@ -43,103 +41,6 @@ use tracing::{debug, trace};
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
-}
-
-// TODO: We actually use both relative
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LockTime(u64);
-
-impl LockTime {
-    pub fn new(blocks: u64) -> Self {
-        LockTime(blocks)
-    }
-}
-
-impl From<LockTime> for Since {
-    fn from(lock_time: LockTime) -> Since {
-        Since::new(SinceType::BlockNumber, lock_time.0, true)
-    }
-}
-
-impl TryFrom<Since> for LockTime {
-    type Error = Error;
-
-    fn try_from(since: Since) -> Result<Self, Self::Error> {
-        if !since.is_relative() {
-            return Err(Error::from(anyhow!(
-                "Invalid lock time type: must be relative"
-            )));
-        }
-        since
-            .extract_metric()
-            .map(|(ty, value)| {
-                if ty == SinceType::BlockNumber {
-                    Ok(LockTime(value))
-                } else {
-                    Err(Error::from(anyhow!(
-                        "Invalid lock time type: must be blocknumber"
-                    )))
-                }
-            })
-            .unwrap_or_else(|| {
-                Err(Error::from(anyhow!(
-                    "Invalid lock time type: unable to extract metric"
-                )))
-            })
-    }
-}
-
-impl From<LockTime> for Uint64 {
-    fn from(lock_time: LockTime) -> Uint64 {
-        let b: [u8; 8] = lock_time.into();
-        Uint64::from_slice(&b).expect("valid locktime serialized to 8 bytes")
-    }
-}
-
-impl TryFrom<Uint64> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: Uint64) -> Result<LockTime, Error> {
-        let b = value.as_slice();
-        LockTime::try_from(b)
-    }
-}
-
-impl From<u64> for LockTime {
-    fn from(value: u64) -> LockTime {
-        LockTime(value)
-    }
-}
-
-impl From<LockTime> for u64 {
-    fn from(lock_time: LockTime) -> u64 {
-        lock_time.0
-    }
-}
-
-impl From<[u8; 8]> for LockTime {
-    fn from(value: [u8; 8]) -> LockTime {
-        LockTime(u64::from_le_bytes(value))
-    }
-}
-
-impl From<LockTime> for [u8; 8] {
-    fn from(lock_time: LockTime) -> [u8; 8] {
-        lock_time.0.to_le_bytes()
-    }
-}
-
-impl TryFrom<&[u8]> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<LockTime, Error> {
-        if value.len() != 8 {
-            return Err(Error::from(anyhow!("Invalid lock time length")));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(value);
-        Ok(LockTime::from(bytes))
-    }
 }
 
 impl From<&Byte66> for PubNonce {
@@ -1135,7 +1036,7 @@ pub struct AddTlc {
     pub tlc_id: u64,
     pub amount: u128,
     pub payment_hash: Hash256,
-    pub expiry: LockTime,
+    pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Vec<u8>,
 }
@@ -1147,7 +1048,7 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .tlc_id(add_tlc.tlc_id.pack())
             .amount(add_tlc.amount.pack())
             .payment_hash(add_tlc.payment_hash.into())
-            .expiry(add_tlc.expiry.into())
+            .expiry(add_tlc.expiry.pack())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
             .onion_packet(add_tlc.onion_packet.pack())
             .build()
@@ -1163,7 +1064,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
             tlc_id: add_tlc.tlc_id().unpack(),
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
-            expiry: add_tlc.expiry().try_into()?,
+            expiry: add_tlc.expiry().unpack(),
             onion_packet: add_tlc.onion_packet().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()

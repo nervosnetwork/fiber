@@ -69,8 +69,8 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, LockTime, OpenChannel, Privkey,
-        Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel, Privkey, Pubkey,
+        ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
         TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
@@ -138,7 +138,7 @@ pub struct AddTlcCommand {
     pub amount: u128,
     pub preimage: Option<Hash256>,
     pub payment_hash: Option<Hash256>,
-    pub expiry: LockTime,
+    pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Vec<u8>,
     pub previous_tlc: Option<(Hash256, u64)>,
@@ -3930,7 +3930,7 @@ impl ChannelActorState {
                 result.extend_from_slice(&tlc.tlc.get_hash());
                 result.extend_from_slice(&local.serialize());
                 result.extend_from_slice(&remote.serialize());
-                result.extend_from_slice(&Since::from(tlc.tlc.lock_time).value().to_le_bytes());
+                result.extend_from_slice(&Since::new(SinceType::Timestamp, tlc.tlc.lock_time, false).value().to_le_bytes());
             }
             result
         }
@@ -5591,22 +5591,6 @@ pub fn aggregate_partial_signatures_for_msg(
     Ok(signature)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChannelParametersOneParty {
-    pub pubkeys: ChannelBasePublicKeys,
-    pub selected_contest_delay: LockTime,
-}
-
-impl ChannelParametersOneParty {
-    pub fn funding_pubkey(&self) -> &Pubkey {
-        &self.pubkeys.funding_pubkey
-    }
-
-    pub fn tlc_base_key(&self) -> &Pubkey {
-        &self.pubkeys.tlc_base_key
-    }
-}
-
 /// One counterparty's public keys which do not change over the life of a channel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelBasePublicKeys {
@@ -5646,7 +5630,7 @@ pub struct TLC {
     /// The value as it appears in the commitment transaction
     pub amount: u128,
     /// The CLTV lock-time at which this HTLC expires.
-    pub lock_time: LockTime,
+    pub lock_time: u64,
     /// The hash of the preimage which unlocks this HTLC.
     pub payment_hash: Hash256,
     /// The preimage of the hash to be sent to the counterparty.

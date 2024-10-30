@@ -7,7 +7,7 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
+    types::{Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -118,7 +118,8 @@ pub(crate) struct AddTlcParams {
     #[serde_as(as = "U128Hex")]
     amount: u128,
     payment_hash: Hash256,
-    expiry: LockTime,
+    #[serde_as(as = "U64Hex")]
+    expiry: u64,
     hash_algorithm: Option<HashAlgorithm>,
 }
 
