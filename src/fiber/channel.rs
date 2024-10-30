@@ -2503,7 +2503,7 @@ impl ChannelActorState {
                     &node1_id,
                     &node2_id,
                     channel_outpoint,
-                    Default::default(),
+                    get_chain_hash(),
                     &self.get_funding_lock_script_xonly_key(),
                     capacity,
                     self.funding_udt_type_script.clone(),
