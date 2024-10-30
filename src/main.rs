@@ -82,6 +82,7 @@ pub async fn main() {
             })
             .expect("load chain spec");
             let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+            eprintln!("genesis block hash: {}", genesis_block.hash());
             init_chain_hash(genesis_block.hash().into());
             init_contracts_context(
                 genesis_block,

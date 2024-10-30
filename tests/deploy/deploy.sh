@@ -66,9 +66,6 @@ run_udt_init() {
     )
 }
 
-deploy_and_generate_blocks funding-lock
-deploy_and_generate_blocks commitment-lock
-deploy_and_generate_blocks simple-udt
 deploy_and_generate_blocks xudt
 
 ./create-dotenv-file.sh >.env

@@ -1,3 +1,5 @@
+use ckb_chain_spec::ChainSpec;
+use ckb_resource::Resource;
 use ckb_sdk::{
     transaction::{
         builder::{sudt::SudtTransactionBuilder, CkbTransactionBuilder},
@@ -9,10 +11,15 @@ use ckb_sdk::{
     Address, CkbRpcClient, NetworkInfo, ScriptId,
 };
 use ckb_types::{
+    core::BlockView,
+    packed::CellOutput,
+    prelude::{Entity, Unpack},
+};
+use ckb_types::{
     core::{DepType, ScriptHashType},
     h256,
     packed::{OutPoint, Script},
-    prelude::{Entity, Pack},
+    prelude::Pack,
     H256,
 };
 use ckb_types::{packed::CellDep, prelude::Builder};
@@ -46,34 +53,64 @@ fn get_env_hex(name: &str) -> H256 {
 }
 
 fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
-    let udt_tx = get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt_kind).as_str());
-    let code_hash = get_code_hash(udt_kind);
-    let (out_point, script_id) = (
-        OutPoint::new_builder()
-            .tx_hash(udt_tx.pack())
-            .index(0u32.pack())
-            .build(),
-        ScriptId::new_data1(code_hash),
-    );
+    if udt_kind == "SIMPLE_UDT" {
+        let genesis_block = build_gensis_block();
+        let genesis_tx = genesis_block
+            .transaction(0)
+            .expect("genesis block transaction #0 should exist");
 
-    let cell_dep = CellDep::new_builder()
-        .out_point(out_point)
-        .dep_type(DepType::Code.into())
-        .build();
+        let output_data = genesis_tx.outputs_data().get(3).unwrap().raw_data();
+        let script_id = ScriptId::new_data1(CellOutput::calc_data_hash(&output_data).unpack());
 
-    ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(vec![cell_dep], script_id)
+        let simple_udt_cell_dep = CellDep::new_builder()
+            .out_point(
+                OutPoint::new_builder()
+                    .tx_hash(genesis_tx.hash())
+                    .index(3u32.pack())
+                    .build(),
+            )
+            .dep_type(DepType::Code.into())
+            .build();
+
+        ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
+            vec![simple_udt_cell_dep],
+            script_id,
+        )
+    } else {
+        let udt_tx = get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt_kind).as_str());
+        let code_hash = get_code_hash(udt_kind);
+        let (out_point, script_id) = (
+            OutPoint::new_builder()
+                .tx_hash(udt_tx.pack())
+                .index(0u32.pack())
+                .build(),
+            ScriptId::new_data1(code_hash),
+        );
+
+        let cell_dep = CellDep::new_builder()
+            .out_point(out_point)
+            .dep_type(DepType::Code.into())
+            .build();
+
+        ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
+            vec![cell_dep],
+            script_id,
+        )
+    }
 }
 
 fn gen_dev_sighash_handler() -> Secp256k1Blake160SighashAllScriptHandler {
-    let sighash_tx = get_env_hex("NEXT_PUBLIC_CKB_GENESIS_TX_1");
-
-    let out_point = OutPoint::new_builder()
-        .tx_hash(sighash_tx.pack())
+    let genesis_block = build_gensis_block();
+    let secp256k1_dep_group_tx_hash = genesis_block
+        .transaction(1)
+        .expect("genesis block transaction #1 should exist")
+        .hash();
+    let secp256k1_dep_group_out_point = OutPoint::new_builder()
+        .tx_hash(secp256k1_dep_group_tx_hash)
         .index(0u32.pack())
         .build();
-
     let cell_dep = CellDep::new_builder()
-        .out_point(out_point)
+        .out_point(secp256k1_dep_group_out_point)
         .dep_type(DepType::DepGroup.into())
         .build();
 
@@ -355,8 +392,19 @@ fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     Ok(())
 }
 
+fn build_gensis_block() -> BlockView {
+    let node_dir_env = std::env::var("NODES_DIR").expect("env var");
+    let nodes_dir = Path::new(&node_dir_env);
+    let dev_toml = nodes_dir.join("deployer/dev.toml");
+    let chain_spec =
+        ChainSpec::load_from(&Resource::file_system(dev_toml)).expect("load chain spec");
+    let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+    eprintln!("genesis block hash: {}", genesis_block.hash());
+    genesis_block
+}
+
 fn main() -> Result<(), Box<dyn StdErr>> {
-    init_udt_accounts()?;
     genrate_nodes_config();
+    init_udt_accounts()?;
     Ok(())
 }
