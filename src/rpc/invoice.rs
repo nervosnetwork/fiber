@@ -1,3 +1,4 @@
+use crate::fiber::config::CkbNetwork;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -89,11 +90,12 @@ trait InvoiceRpc {
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
     keypair: Option<(PublicKey, SecretKey)>,
+    currency: Option<Currency>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
     pub(crate) fn new(store: S, config: Option<FiberConfig>) -> Self {
-        let keypair = config.map(|config| {
+        let config = config.map(|config| {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -105,9 +107,25 @@ impl<S> InvoiceRpcServerImpl<S> {
                 PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
                 private_key.into(),
             );
-            keypair
+
+            // restrict currency to be the same as network
+            let currency = match config.network {
+                Some(CkbNetwork::Mainnet) => Some(Currency::Fibb),
+                Some(CkbNetwork::Testnet) => Some(Currency::Fibt),
+                Some(_) => Some(Currency::Fibd),
+                _ => None,
+            };
+
+            (keypair, currency)
         });
-        Self { store, keypair }
+        Self {
+            store,
+            keypair: config.as_ref().map(|(kp, _)| kp.clone()),
+            currency: config
+                .as_ref()
+                .map(|(_, currency)| *currency)
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -120,6 +138,15 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if let Some(currency) = self.currency {
+            if currency != params.currency {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    format!("Currency must be {:?} with the chain network", currency),
+                    Some(params),
+                ));
+            }
+        }
         let mut invoice_builder = InvoiceBuilder::new(params.currency)
             .amount(Some(params.amount))
             .payment_preimage(params.payment_preimage);
