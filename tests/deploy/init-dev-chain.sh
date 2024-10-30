@@ -64,13 +64,13 @@ if ! [[ -d "$data_dir" ]]; then
     ckb-cli wallet transfer --to-address $(cat "$nodes_dir/1/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
 
     sleep 1
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
     sleep 1
 
     # Transfer some money to the node 2.
     ckb-cli wallet transfer --to-address $(cat "$nodes_dir/2/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
     sleep 1
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
     sleep 1
 
     # Transfer some money to the node 3.
@@ -78,7 +78,7 @@ if ! [[ -d "$data_dir" ]]; then
     sleep 1
     # Generate a few blocks so that above transaction is confirmed.
     echo "begin to generate blocks for wallet updating..."
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
 
     # Also deploy the contracts.
     echo "deploy.sh..."
