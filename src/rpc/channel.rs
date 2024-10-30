@@ -203,9 +203,9 @@ pub(crate) struct SendPaymentCommandParams {
     // FIXME: this should be optional when AMP is enabled
     payment_hash: Option<Hash256>,
 
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    // The htlc expiry delta should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    final_cltv_delta: Option<u64>,
+    final_htlc_expiry_delta: Option<u64>,
 
     // the encoded invoice to send to the recipient
     invoice: Option<String>,
@@ -523,7 +523,7 @@ where
                     target_pubkey: params.target_pubkey,
                     amount: params.amount,
                     payment_hash: params.payment_hash,
-                    final_cltv_delta: params.final_cltv_delta,
+                    final_htlc_expiry_delta: params.final_htlc_expiry_delta,
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,

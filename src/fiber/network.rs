@@ -280,7 +280,7 @@ pub struct SendPaymentCommand {
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
     // The CLTV delta from the current height that should be used to set the timelock for the final hop
-    pub final_cltv_delta: Option<u64>,
+    pub final_htlc_expiry_delta: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -303,7 +303,7 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_cltv_delta: Option<u64>,
+    pub final_htlc_expiry_delta: Option<u64>,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -404,7 +404,7 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_cltv_delta: command.final_cltv_delta,
+            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,
