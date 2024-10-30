@@ -41,7 +41,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     funding_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -163,7 +163,7 @@ pub struct UpdateChannelParams {
     channel_id: Hash256,
     enabled: Option<bool>,
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -322,7 +322,7 @@ where
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
-                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
                     tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
@@ -501,7 +501,7 @@ where
                     command: ChannelCommand::Update(
                         UpdateCommand {
                             enabled: params.enabled,
-                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                            tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,

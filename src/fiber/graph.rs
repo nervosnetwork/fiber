@@ -402,7 +402,7 @@ where
             version: update.version,
             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
             enabled: !disabled,
-            htlc_expiry_delta: update.tlc_locktime_expiry_delta,
+            htlc_expiry_delta: update.tlc_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,

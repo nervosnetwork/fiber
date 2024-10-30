@@ -13,7 +13,7 @@ use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
 use ckb_types::{
     core::FeeRate,
-    packed::{Byte32 as MByte32, BytesVec, Script, Transaction, OutPoint},
+    packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
@@ -1881,7 +1881,7 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
     pub channel_flags: u32,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -1894,7 +1894,7 @@ impl ChannelUpdate {
         timestamp: u64,
         message_flags: u32,
         channel_flags: u32,
-        tlc_locktime_expiry_delta: u64,
+        tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_maximum_value: u128,
         tlc_fee_proportional_millionths: u128,
@@ -1906,7 +1906,7 @@ impl ChannelUpdate {
             version: timestamp,
             message_flags,
             channel_flags,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
             tlc_fee_proportional_millionths,
@@ -1921,7 +1921,7 @@ impl ChannelUpdate {
             version: self.version,
             message_flags: self.message_flags,
             channel_flags: self.channel_flags,
-            tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
+            tlc_expiry_delta: self.tlc_expiry_delta,
             tlc_minimum_value: self.tlc_minimum_value,
             tlc_maximum_value: self.tlc_maximum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
@@ -1944,7 +1944,7 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .timestamp(channel_update.version.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
-            .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
+            .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
@@ -1963,7 +1963,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             version: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),
-            tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),
+            tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
             tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update

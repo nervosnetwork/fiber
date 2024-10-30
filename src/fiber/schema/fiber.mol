@@ -234,7 +234,7 @@ table ChannelUpdate {
     timestamp: Uint64,
     message_flags: Uint32,
     channel_flags: Uint32,
-    tlc_locktime_expiry_delta: Uint64,
+    tlc_expiry_delta: Uint64,
     tlc_minimum_value: Uint128,
     tlc_maximum_value: Uint128,
     tlc_fee_proportional_millionths: Uint128,

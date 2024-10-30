@@ -291,7 +291,6 @@ impl CkbInvoice {
     attr_getter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_getter!(expiry_time, ExpiryTime, Duration);
     attr_getter!(description, Description, String);
-    attr_getter!(final_htlc_timeout, FinalHtlcTimeout, u64);
     attr_getter!(
         final_htlc_minimum_cltv_expiry,
         FinalHtlcMinimumCltvExpiry,

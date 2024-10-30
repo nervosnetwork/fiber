@@ -125,7 +125,7 @@ impl MockNetworkGraph {
             version: 0,
             message_flags: 1,
             channel_flags: 0,
-            tlc_locktime_expiry_delta: 144,
+            tlc_expiry_delta: 144,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
             tlc_maximum_value: max_htlc_value.unwrap_or(10000),
             tlc_minimum_value: min_htlc_value.unwrap_or(0),

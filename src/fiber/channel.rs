@@ -160,7 +160,7 @@ pub struct ShutdownCommand {
 #[derive(Debug)]
 pub struct UpdateCommand {
     pub enabled: Option<bool>,
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
@@ -1105,7 +1105,7 @@ where
                 tlc_id: tlc.id.into(),
                 amount: tlc.amount,
                 payment_hash: tlc.payment_hash,
-                expiry: tlc.lock_time,
+                expiry: tlc.expiry,
                 hash_algorithm: tlc.hash_algorithm,
                 onion_packet: tlc.onion_packet,
             }),
@@ -1220,7 +1220,7 @@ where
 
         let UpdateCommand {
             enabled,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
             tlc_fee_proportional_millionths,
@@ -1232,8 +1232,8 @@ where
             updated |= state.update_our_enabled(enabled);
         }
 
-        if let Some(delta) = tlc_locktime_expiry_delta {
-            updated |= state.update_our_locktime_expiry_delta(delta);
+        if let Some(delta) = tlc_expiry_delta {
+            updated |= state.update_our_tlc_expiry_delta(delta);
         }
 
         if let Some(value) = tlc_minimum_value {
@@ -2136,8 +2136,8 @@ pub struct PublicChannelInfo {
     // Max/min value of the tlc that we will accept.
     pub tlc_max_value: Option<u128>,
     pub tlc_min_value: Option<u128>,
-    // The locktime expiry delta. This is the number of blocks that the locktime.
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    // The expiry delta timestamp, in milliseconds, for the tlc.
+    pub tlc_expiry_delta: Option<u64>,
 
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -2150,7 +2150,7 @@ pub struct PublicChannelInfo {
 
 impl PublicChannelInfo {
     pub fn new(
-        tlc_locktime_expiry_delta: u64,
+        tlc_expiry_delta: u64,
         tlc_min_value: u128,
         tlc_max_value: u128,
         tlc_fee_proportional_millionths: u128,
@@ -2159,7 +2159,7 @@ impl PublicChannelInfo {
             tlc_fee_proportional_millionths: Some(tlc_fee_proportional_millionths),
             tlc_max_value: Some(tlc_max_value),
             tlc_min_value: Some(tlc_min_value),
-            tlc_locktime_expiry_delta: Some(tlc_locktime_expiry_delta),
+            tlc_expiry_delta: Some(tlc_expiry_delta),
             enabled: true,
             ..Default::default()
         }
@@ -2660,13 +2660,13 @@ impl ChannelActorState {
 
         self.public_channel_info.as_ref().and_then(|info| {
             match (
-                info.tlc_locktime_expiry_delta,
+                info.tlc_expiry_delta,
                 info.tlc_min_value,
                 info.tlc_max_value,
                 info.tlc_fee_proportional_millionths,
             ) {
                 (
-                    Some(locktime_expiry_delta),
+                    Some(expiry_delta),
                     Some(min_value),
                     Some(max_value),
                     Some(fee_proportional_millionths),
@@ -2676,7 +2676,7 @@ impl ChannelActorState {
                     std::time::UNIX_EPOCH.elapsed().unwrap().as_secs(),
                     message_flags,
                     0,
-                    locktime_expiry_delta,
+                    expiry_delta,
                     min_value,
                     max_value,
                     fee_proportional_millionths,
@@ -3164,18 +3164,18 @@ impl ChannelActorState {
         }
     }
 
-    fn get_our_locktime_expiry_delta(&self) -> Option<u64> {
+    fn get_our_tlc_expiry_delta(&self) -> Option<u64> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.tlc_locktime_expiry_delta)
+            .and_then(|state| state.tlc_expiry_delta)
     }
 
-    fn update_our_locktime_expiry_delta(&mut self, value: u64) -> bool {
-        let old_value = self.get_our_locktime_expiry_delta();
+    fn update_our_tlc_expiry_delta(&mut self, value: u64) -> bool {
+        let old_value = self.get_our_tlc_expiry_delta();
         match old_value {
             Some(old_value) if old_value == value => false,
             _ => {
-                self.public_channel_state_mut().tlc_locktime_expiry_delta = Some(value);
+                self.public_channel_state_mut().tlc_expiry_delta = Some(value);
                 true
             }
         }
@@ -3930,7 +3930,11 @@ impl ChannelActorState {
                 result.extend_from_slice(&tlc.tlc.get_hash());
                 result.extend_from_slice(&local.serialize());
                 result.extend_from_slice(&remote.serialize());
-                result.extend_from_slice(&Since::new(SinceType::Timestamp, tlc.tlc.lock_time, false).value().to_le_bytes());
+                result.extend_from_slice(
+                    &Since::new(SinceType::Timestamp, tlc.tlc.expiry, false)
+                        .value()
+                        .to_le_bytes(),
+                );
             }
             result
         }
@@ -4035,7 +4039,7 @@ impl ChannelActorState {
             id: TLCId::Offered(id),
             amount: command.amount,
             payment_hash,
-            lock_time: command.expiry,
+            expiry: command.expiry,
             payment_preimage: Some(preimage),
             hash_algorithm: command.hash_algorithm,
             onion_packet: command.onion_packet,
@@ -4067,7 +4071,7 @@ impl ChannelActorState {
             id: TLCId::Received(message.tlc_id),
             amount: message.amount,
             payment_hash: message.payment_hash,
-            lock_time: message.expiry,
+            expiry: message.expiry,
             payment_preimage,
             hash_algorithm: message.hash_algorithm,
             onion_packet: message.onion_packet,
@@ -4822,7 +4826,7 @@ impl ChannelActorState {
                                                     tlc_id: info.tlc.get_id(),
                                                     amount: info.tlc.amount,
                                                     payment_hash: info.tlc.payment_hash,
-                                                    expiry: info.tlc.lock_time,
+                                                    expiry: info.tlc.expiry,
                                                     hash_algorithm: info.tlc.hash_algorithm,
                                                     onion_packet: info.tlc.onion_packet.clone(),
                                                 }),
@@ -5629,8 +5633,8 @@ pub struct TLC {
     pub id: TLCId,
     /// The value as it appears in the commitment transaction
     pub amount: u128,
-    /// The CLTV lock-time at which this HTLC expires.
-    pub lock_time: u64,
+    /// The expiry timestamp in millisecond.
+    pub expiry: u64,
     /// The hash of the preimage which unlocks this HTLC.
     pub payment_hash: Hash256,
     /// The preimage of the hash to be sent to the counterparty.

@@ -146,7 +146,7 @@ pub struct NodeInfoResponse {
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
     pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -259,7 +259,7 @@ pub struct OpenChannelCommand {
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
     pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
@@ -279,7 +279,7 @@ pub struct SendPaymentCommand {
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    // The htlc expiry delta that should be used to set the timelock for the final hop
     pub final_htlc_expiry_delta: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
@@ -1798,7 +1798,7 @@ where
                         .open_channel_auto_accept_min_ckb_funding_amount,
                     auto_accept_channel_ckb_funding_amount: state
                         .auto_accept_channel_ckb_funding_amount,
-                    tlc_locktime_expiry_delta: state.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
                     tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
@@ -2555,8 +2555,8 @@ pub struct NetworkActorState<S> {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
-    // The default locktime expiry delta to forward tlcs.
-    tlc_locktime_expiry_delta: u64,
+    // The default expiry delta to forward tlcs.
+    tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
     tlc_max_value: u128,
@@ -2861,7 +2861,7 @@ where
             commitment_fee_rate,
             commitment_delay_epoch,
             funding_fee_rate,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_min_value,
             tlc_max_value,
             tlc_fee_proportional_millionths,
@@ -2900,7 +2900,7 @@ where
                 funding_amount,
                 seed,
                 public_channel_info: public.then_some(PublicChannelInfo::new(
-                    tlc_locktime_expiry_delta.unwrap_or(self.tlc_locktime_expiry_delta),
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_max_value.unwrap_or(self.tlc_max_value),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
@@ -2977,7 +2977,7 @@ where
                 funding_amount,
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
-                    self.tlc_locktime_expiry_delta,
+                    self.tlc_expiry_delta,
                     self.tlc_min_value,
                     self.tlc_max_value,
                     self.tlc_fee_proportional_millionths,
@@ -3950,7 +3950,7 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            tlc_locktime_expiry_delta: config.tlc_locktime_expiry_delta(),
+            tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),

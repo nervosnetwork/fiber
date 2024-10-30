@@ -25,8 +25,6 @@ pub(crate) struct NewInvoiceParams {
     fallback_address: Option<String>,
     #[serde_as(as = "Option<U64Hex>")]
     final_cltv: Option<u64>,
-    #[serde_as(as = "Option<U64Hex>")]
-    final_htlc_timeout: Option<u64>,
     udt_type_script: Option<Script>,
     hash_algorithm: Option<HashAlgorithm>,
 }

@@ -27,5 +27,4 @@ pub struct NewInvoiceParams {
     pub expiry: Option<u64>,
     pub fallback_address: Option<String>,
     pub final_cltv: Option<u64>,
-    pub final_htlc_timeout: Option<u64>,
 }
