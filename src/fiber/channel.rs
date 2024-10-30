@@ -411,12 +411,12 @@ where
                         .collect();
                     debug!(
                         "Updating funding tx witnesses of {:?} to {:?}",
-                        state.get_funding_transaction().calc_tx_hash(),
+                        state.must_get_funding_transaction().calc_tx_hash(),
                         new_witnesses.iter().map(|x| hex::encode(x.as_slice()))
                     );
                     state.funding_tx = Some(
                         state
-                            .get_funding_transaction()
+                            .must_get_funding_transaction()
                             .as_advanced_builder()
                             .set_witnesses(new_witnesses)
                             .build()
@@ -425,8 +425,8 @@ where
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::FundingTransactionPending(
-                                state.get_funding_transaction().clone(),
-                                state.get_funding_transaction_outpoint(),
+                                state.must_get_funding_transaction().clone(),
+                                state.must_get_funding_transaction_outpoint(),
                                 state.get_id(),
                             ),
                         ))
@@ -731,7 +731,7 @@ where
         };
         TlcErr::new_channel_fail(
             error_code,
-            state.get_funding_transaction_outpoint(),
+            state.must_get_funding_transaction_outpoint(),
             channel_update,
         )
     }
@@ -1829,7 +1829,7 @@ where
                             NetworkActorEvent::ChannelReady(
                                 channel.get_id(),
                                 channel.get_remote_peer_id(),
-                                channel.get_funding_transaction_outpoint(),
+                                channel.must_get_funding_transaction_outpoint(),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -2487,7 +2487,7 @@ impl ChannelActorState {
             Some(x) => x,
             // We have not created a channel announcement yet.
             None => {
-                let channel_outpoint = self.get_funding_transaction_outpoint();
+                let channel_outpoint = self.must_get_funding_transaction_outpoint();
                 let capacity = if self.funding_udt_type_script.is_some() {
                     self.get_total_udt_amount()
                 } else {
@@ -2672,7 +2672,7 @@ impl ChannelActorState {
                     Some(fee_proportional_millionths),
                 ) => Some(ChannelUpdate::new_unsigned(
                     Default::default(),
-                    self.get_funding_transaction_outpoint(),
+                    self.must_get_funding_transaction_outpoint(),
                     std::time::UNIX_EPOCH.elapsed().unwrap().as_secs(),
                     message_flags,
                     0,
@@ -3028,7 +3028,7 @@ impl ChannelActorState {
         let key_agg_ctx = self.get_musig2_agg_context();
         let channel_id = self.get_id();
         let peer_id = self.get_remote_peer_id();
-        let channel_outpoint = self.get_funding_transaction_outpoint();
+        let channel_outpoint = self.must_get_funding_transaction_outpoint();
 
         let partial_signature: PartialSignature = sign_partial(
             &key_agg_ctx,
@@ -3624,20 +3624,22 @@ impl ChannelActorState {
         self.remote_channel_public_keys.as_ref().unwrap()
     }
 
-    pub fn get_funding_transaction(&self) -> &Transaction {
+    pub fn must_get_funding_transaction(&self) -> &Transaction {
         self.funding_tx
             .as_ref()
             .expect("Funding transaction is present")
     }
 
-    pub fn get_funding_transaction_outpoint(&self) -> OutPoint {
-        let tx = self.get_funding_transaction();
-        debug!(
-            "Funding transaction lock args: {:?}",
-            tx.raw().outputs().get(0).unwrap().lock().args()
-        );
-        // By convention, the funding tx output for the channel is the first output.
-        OutPoint::new(tx.calc_tx_hash(), 0)
+    pub fn get_funding_transaction_outpoint(&self) -> Option<OutPoint> {
+        self.funding_tx.as_ref().map(|tx| {
+            // By convention, the funding tx output for the channel is the first output.
+            OutPoint::new(tx.calc_tx_hash(), 0)
+        })
+    }
+
+    pub fn must_get_funding_transaction_outpoint(&self) -> OutPoint {
+        self.get_funding_transaction_outpoint()
+            .expect("Funding transaction outpoint is present")
     }
 
     pub fn get_funding_transaction_block_number(&self) -> BlockNumber {
@@ -4091,7 +4093,7 @@ impl ChannelActorState {
         partial_signatures: [PartialSignature; 2],
         tx: &TransactionView,
     ) -> Result<TransactionView, ProcessingChannelError> {
-        let funding_out_point = self.get_funding_transaction_outpoint();
+        let funding_out_point = self.must_get_funding_transaction_outpoint();
         debug_assert_eq!(
             tx.input_pts_iter().next().as_ref(),
             Some(&funding_out_point),
@@ -4660,7 +4662,7 @@ impl ChannelActorState {
                 NetworkActorEvent::ChannelReady(
                     self.get_id(),
                     peer_id.clone(),
-                    self.get_funding_transaction_outpoint(),
+                    self.must_get_funding_transaction_outpoint(),
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -5095,7 +5097,7 @@ impl ChannelActorState {
         let cell_deps = get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
         let tx_builder = TransactionBuilder::default().cell_deps(cell_deps).input(
             CellInput::new_builder()
-                .previous_output(self.get_funding_transaction_outpoint())
+                .previous_output(self.must_get_funding_transaction_outpoint())
                 .build(),
         );
 
@@ -5182,7 +5184,7 @@ impl ChannelActorState {
         local: bool,
     ) -> (TransactionView, TransactionView) {
         let commitment_tx = {
-            let funding_out_point = self.get_funding_transaction_outpoint();
+            let funding_out_point = self.must_get_funding_transaction_outpoint();
             let cell_deps =
                 get_cell_deps(vec![Contract::FundingLock], &self.funding_udt_type_script);
             let (output, output_data) = self.build_commitment_transaction_output(local);
