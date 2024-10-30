@@ -130,7 +130,6 @@ fn init_or_send_udt(
     )?;
 
     let json_tx = ckb_jsonrpc_types::TransactionView::from(tx_with_groups.get_tx_view().clone());
-    //eprintln!("transaction: {:#?}", json_tx);
     if apply {
         let tx_hash = CkbRpcClient::new(network_info.url.as_str())
             .send_transaction(json_tx.inner, None)
@@ -309,10 +308,6 @@ fn genrate_nodes_config() {
         for config in std::fs::read_dir(bruno_dir).expect("read dir") {
             let config = config.expect("read config");
             for (default_port, port) in ports_map.iter() {
-                eprintln!(
-                    "update bruno config: {:?} {} -> {}",
-                    config, default_port, port
-                );
                 let content = std::fs::read_to_string(config.path()).expect("read config");
                 let new_content = content.replace(&default_port.to_string(), &port.to_string());
                 std::fs::write(config.path(), new_content).expect("write config");
@@ -336,14 +331,12 @@ fn genrate_nodes_config() {
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     let udt_owner = get_nodes_info("deployer");
     for udt in UDT_KINDS {
-        eprintln!("begin init udt: {} ...", udt);
         init_or_send_udt(udt, &udt_owner.0, &udt_owner, None, 1000000000000, true)
             .expect("init udt");
         generate_blocks(8).expect("ok");
         std::thread::sleep(std::time::Duration::from_millis(1000));
         for i in 0..3 {
             let wallet = get_nodes_info(&(i + 1).to_string());
-            eprintln!("begin send udt: {} to node {} ...", udt, i);
             init_or_send_udt(
                 udt,
                 &udt_owner.0,
