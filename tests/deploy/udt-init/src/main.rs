@@ -18,8 +18,8 @@ use ckb_types::{
 use ckb_types::{packed::CellDep, prelude::Builder};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::net::TcpListener;
+use std::{collections::HashSet, path::Path};
+use std::{fs, net::TcpListener};
 
 use std::{error::Error as StdErr, str::FromStr};
 
@@ -225,8 +225,9 @@ fn generate_ports(num_ports: usize) -> Vec<u16> {
 }
 
 fn genrate_nodes_config() {
-    let nodes_dir = std::env::var("NODES_DIR").expect("env var");
-    let yaml_file_path = format!("{}/deployer/config.yml", nodes_dir);
+    let node_dir_env = std::env::var("NODES_DIR").expect("env var");
+    let nodes_dir = Path::new(&node_dir_env);
+    let yaml_file_path = nodes_dir.join("deployer/config.yml");
     let content = std::fs::read_to_string(yaml_file_path).expect("read failed");
     let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
     let mut udt_infos = vec![];
@@ -257,6 +258,7 @@ fn genrate_nodes_config() {
     let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
     let gen_ports = generate_ports(6);
     let mut ports_iter = gen_ports.iter();
+    let dev_config = nodes_dir.join("deployer/dev.toml");
     for (i, config_dir) in config_dirs.iter().enumerate() {
         let use_gen_port = on_github_action && i != 0;
         let default_fiber_port = (8343 + i) as u16;
@@ -290,13 +292,14 @@ fn genrate_nodes_config() {
         }
 
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
-        let config_path = format!("{}/{}/config.yml", nodes_dir, config_dir);
-
+        let config_path = nodes_dir.join(config_dir).join("config.yml");
         std::fs::write(config_path, new_yaml).expect("write failed");
+        let node_dev_config = nodes_dir.join(config_dir).join("dev.toml");
+        fs::copy(dev_config.clone(), node_dev_config).expect("copy dev.toml failed");
     }
 
     if on_github_action {
-        let bruno_dir = format!("{}/../bruno/environments/", nodes_dir);
+        let bruno_dir = nodes_dir.join("../bruno/environments/");
         for config in std::fs::read_dir(bruno_dir).expect("read dir") {
             let config = config.expect("read config");
             for (default_port, port) in ports_map.iter() {
@@ -319,7 +322,8 @@ fn genrate_nodes_config() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let port_file_path = format!("{}/.ports", nodes_dir);
+    let port_file_path = nodes_dir.join(".ports");
+
     std::fs::write(port_file_path, content).expect("write ports list");
 }
 

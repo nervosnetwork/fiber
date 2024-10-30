@@ -15,6 +15,7 @@ use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
 
 use core::default::Default;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,7 +78,7 @@ pub async fn main() {
             let chain_spec = ChainSpec::load_from(&match chain {
                 "mainnet" => Resource::bundled("specs/mainnet.toml".to_string()),
                 "testnet" => Resource::bundled("specs/testnet.toml".to_string()),
-                path => Resource::file_system(path.into()),
+                path => Resource::file_system(Path::new(&config.base_dir).join(path)),
             })
             .expect("load chain spec");
             let genesis_block = chain_spec.build_genesis().expect("build genesis block");

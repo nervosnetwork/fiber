@@ -35,21 +35,21 @@ file = { bundled = "specs/cells/secp256k1_blake160_multisig_all" }
 create_type_id = true
 capacity = 100_000_0000_0000
 [[genesis.system_cells]]
-file = { file_system = "../../deploy/contracts/auth" }
+file = { file = "../../deploy/contracts/auth" }
 create_type_id = false
-capacity = 100_000_0000_0000
+capacity = 200_000_0000_0000
 [[genesis.system_cells]]
-file = { file_system = "../../deploy/contracts/funding-lock" }
+file = { file = "../../deploy/contracts/funding-lock" }
 create_type_id = false
-capacity = 100_000_0000_0000
+capacity = 200_000_0000_0000
 [[genesis.system_cells]]
-file = { file_system = "../../deploy/contracts/commitment-lock" }
+file = { file = "../../deploy/contracts/commitment-lock" }
 create_type_id = false
-capacity = 100_000_0000_0000
+capacity = 200_000_0000_0000
 [[genesis.system_cells]]
-file = { file_system = "../../deploy/contracts/simple_udt" }
+file = { file = "../../deploy/contracts/simple_udt" }
 create_type_id = false
-capacity = 100_000_0000_0000
+capacity = 200_000_0000_0000
 
 [genesis.system_cells_lock]
 code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
