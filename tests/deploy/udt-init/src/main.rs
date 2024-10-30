@@ -17,7 +17,6 @@ use ckb_types::{
 };
 use ckb_types::{
     core::{DepType, ScriptHashType},
-    h256,
     packed::{OutPoint, Script},
     prelude::Pack,
     H256,
@@ -30,73 +29,41 @@ use std::{fs, net::TcpListener};
 
 use std::{error::Error as StdErr, str::FromStr};
 
-const SIMPLE_CODE_HASH: H256 =
-    h256!("0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419");
-const XUDT_CODE_HASH: H256 =
-    h256!("0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95");
-
 const UDT_KINDS: [&str; 2] = ["SIMPLE_UDT", "XUDT"];
 
-fn get_code_hash(udt_kind: &str) -> H256 {
-    match udt_kind {
-        "SIMPLE_UDT" => SIMPLE_CODE_HASH.clone(),
-        "XUDT" => XUDT_CODE_HASH.clone(),
-        _ => panic!("unsupported udt kind"),
-    }
-}
+fn get_udt_info(udt_kind: &str) -> (H256, H256, usize) {
+    let genesis_block = build_gensis_block();
+    let genesis_tx = genesis_block
+        .transaction(0)
+        .expect("genesis block transaction #0 should exist");
 
-fn get_env_hex(name: &str) -> H256 {
-    let value = std::env::var(name).expect("env var");
-    // strip prefix 0x
-    let value = value.trim_start_matches("0x");
-    H256::from_str(value).expect("parse hex")
+    let index = if udt_kind == "SIMPLE_UDT" { 8 } else { 9 };
+    let output_data = genesis_tx.outputs_data().get(index).unwrap().raw_data();
+    (
+        CellOutput::calc_data_hash(&output_data).unpack(),
+        genesis_tx.hash().unpack(),
+        index,
+    )
 }
 
 fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
-    if udt_kind == "SIMPLE_UDT" {
-        let genesis_block = build_gensis_block();
-        let genesis_tx = genesis_block
-            .transaction(0)
-            .expect("genesis block transaction #0 should exist");
+    let (data_hash, genesis_tx, index) = get_udt_info(udt_kind);
+    let script_id = ScriptId::new_data1(data_hash);
 
-        let output_data = genesis_tx.outputs_data().get(3).unwrap().raw_data();
-        let script_id = ScriptId::new_data1(CellOutput::calc_data_hash(&output_data).unpack());
-
-        let simple_udt_cell_dep = CellDep::new_builder()
-            .out_point(
-                OutPoint::new_builder()
-                    .tx_hash(genesis_tx.hash())
-                    .index(3u32.pack())
-                    .build(),
-            )
-            .dep_type(DepType::Code.into())
-            .build();
-
-        ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
-            vec![simple_udt_cell_dep],
-            script_id,
-        )
-    } else {
-        let udt_tx = get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt_kind).as_str());
-        let code_hash = get_code_hash(udt_kind);
-        let (out_point, script_id) = (
+    let udt_cell_dep = CellDep::new_builder()
+        .out_point(
             OutPoint::new_builder()
-                .tx_hash(udt_tx.pack())
-                .index(0u32.pack())
+                .tx_hash(genesis_tx.pack())
+                .index(index.pack())
                 .build(),
-            ScriptId::new_data1(code_hash),
-        );
-
-        let cell_dep = CellDep::new_builder()
-            .out_point(out_point)
-            .dep_type(DepType::Code.into())
-            .build();
-
-        ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
-            vec![cell_dep],
-            script_id,
         )
-    }
+        .dep_type(DepType::Code.into())
+        .build();
+
+    ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
+        vec![udt_cell_dep],
+        script_id,
+    )
 }
 
 fn gen_dev_sighash_handler() -> Secp256k1Blake160SighashAllScriptHandler {
@@ -163,6 +130,7 @@ fn init_or_send_udt(
     )?;
 
     let json_tx = ckb_jsonrpc_types::TransactionView::from(tx_with_groups.get_tx_view().clone());
+    //eprintln!("transaction: {:#?}", json_tx);
     if apply {
         let tx_hash = CkbRpcClient::new(network_info.url.as_str())
             .send_transaction(json_tx.inner, None)
@@ -192,7 +160,7 @@ fn generate_blocks(num: u64) -> Result<(), Box<dyn StdErr>> {
 fn generate_udt_type_script(udt_kind: &str, address: &str) -> ckb_types::packed::Script {
     let address = Address::from_str(address).expect("parse address");
     let sudt_owner_lock_script: Script = (&address).into();
-    let code_hash = get_code_hash(udt_kind);
+    let (code_hash, _, _) = get_udt_info(udt_kind);
     Script::new_builder()
         .code_hash(code_hash.pack())
         .hash_type(ScriptHashType::Data1.into())
@@ -269,18 +237,19 @@ fn genrate_nodes_config() {
     let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
     let mut udt_infos = vec![];
     for udt in UDT_KINDS {
+        let (code_hash, genesis_tx, index) = get_udt_info(udt);
         let udt_info = UdtInfo {
             name: udt.to_string(),
             auto_accept_amount: Some(1000),
             script: UdtScript {
-                code_hash: get_code_hash(udt),
+                code_hash: code_hash,
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
             cell_deps: vec![UdtCellDep {
                 dep_type: "code".to_string(),
-                tx_hash: get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt).as_str()),
-                index: 0,
+                tx_hash: genesis_tx,
+                index: index as u32,
             }],
         };
         udt_infos.push(udt_info);
@@ -399,7 +368,6 @@ fn build_gensis_block() -> BlockView {
     let chain_spec =
         ChainSpec::load_from(&Resource::file_system(dev_toml)).expect("load chain spec");
     let genesis_block = chain_spec.build_genesis().expect("build genesis block");
-    eprintln!("genesis block hash: {}", genesis_block.hash());
     genesis_block
 }
 

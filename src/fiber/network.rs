@@ -117,10 +117,7 @@ pub fn init_chain_hash(chain_hash: Hash256) {
 }
 
 pub(crate) fn get_chain_hash() -> Hash256 {
-    CHAIN_HASH_INSTANCE
-        .get()
-        .cloned()
-        .unwrap_or_default()
+    CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
 }
 
 #[derive(Debug)]

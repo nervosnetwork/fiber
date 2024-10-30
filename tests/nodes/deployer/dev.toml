@@ -50,6 +50,10 @@ capacity = 200_000_0000_0000
 file = { file = "../../deploy/contracts/simple_udt" }
 create_type_id = false
 capacity = 200_000_0000_0000
+[[genesis.system_cells]]
+file = { file = "../../deploy/contracts/xudt_rce" }
+create_type_id = false
+capacity = 200_000_0000_0000
 
 [genesis.system_cells_lock]
 code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"

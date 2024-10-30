@@ -89,13 +89,12 @@ impl ContractsContext {
             }
             _ => {
                 info!("Creating ContractsContext for dev");
-                let len = genesis_tx.outputs().len();
-                // the last 4 cells are the default contracts: CkbAuth, FundingLock, CommitmentLock, SimpleUDT
+                // index from 5 ~ 8 are the default contracts: CkbAuth, FundingLock, CommitmentLock, SimpleUDT
                 let ckb_auth_cell_dep = CellDep::new_builder()
                     .out_point(
                         OutPoint::new_builder()
                             .tx_hash(genesis_tx.hash())
-                            .index((len - 4).pack())
+                            .index(5u32.pack())
                             .build(),
                     )
                     .dep_type(DepType::Code.into())
@@ -106,12 +105,12 @@ impl ContractsContext {
                     .out_point(
                         OutPoint::new_builder()
                             .tx_hash(genesis_tx.hash())
-                            .index((len - 3).pack())
+                            .index(6u32.pack())
                             .build(),
                     )
                     .dep_type(DepType::Code.into())
                     .build();
-                let output_data = genesis_tx.outputs_data().get(len - 3).unwrap().raw_data();
+                let output_data = genesis_tx.outputs_data().get(6).unwrap().raw_data();
                 script_cell_deps.insert(
                     Contract::FundingLock,
                     vec![funding_lock_cell_dep, ckb_auth_cell_dep.clone()],
@@ -128,12 +127,12 @@ impl ContractsContext {
                     .out_point(
                         OutPoint::new_builder()
                             .tx_hash(genesis_tx.hash())
-                            .index((len - 2).pack())
+                            .index(7u32.pack())
                             .build(),
                     )
                     .dep_type(DepType::Code.into())
                     .build();
-                let output_data = genesis_tx.outputs_data().get(len - 2).unwrap().raw_data();
+                let output_data = genesis_tx.outputs_data().get(7).unwrap().raw_data();
                 script_cell_deps.insert(
                     Contract::CommitmentLock,
                     vec![commitment_lock_cell_dep, ckb_auth_cell_dep],
@@ -150,12 +149,12 @@ impl ContractsContext {
                     .out_point(
                         OutPoint::new_builder()
                             .tx_hash(genesis_tx.hash())
-                            .index((len - 1).pack())
+                            .index(8u32.pack())
                             .build(),
                     )
                     .dep_type(DepType::Code.into())
                     .build();
-                let output_data = genesis_tx.outputs_data().get(len - 1).unwrap().raw_data();
+                let output_data = genesis_tx.outputs_data().get(8).unwrap().raw_data();
                 script_cell_deps.insert(Contract::SimpleUDT, vec![simple_udt_cell_dep]);
                 contract_default_scripts.insert(
                     Contract::SimpleUDT,

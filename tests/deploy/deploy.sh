@@ -25,38 +25,6 @@ if ! (echo | ckb-cli account import --local-only --privkey-path "$miner_key_file
     :
 fi
 
-function deploy() {
-    local DEPLOY_NAME="$1"
-    local MIGRATION_DIR="migrations/$DEPLOY_NAME"
-    local CONFIG_FILE="$MIGRATION_DIR/deployment.toml"
-    local INFO_FILE="$MIGRATION_DIR/deployment.json"
-    local TEMPLATE_FILE="migrations/templates/$DEPLOY_NAME.toml"
-
-    rm -rf "$MIGRATION_DIR" && mkdir -p "$MIGRATION_DIR"
-    GENESIS_TX0="$(ckb -C "$data_dir" list-hashes | sed -n 's/tx_hash = "\(.*\)"/\1/p' | head -1)"
-    sed "s/0x8f8c79eb6671709633fe6a46de93c0fedc9c1b8a6527a18d3983879542635c9f/$GENESIS_TX0/" "$TEMPLATE_FILE" >"$CONFIG_FILE"
-
-    ckb-cli deploy gen-txs --from-address $(cat "$nodes_dir/deployer/ckb/wallet") \
-        --fee-rate 100000 --deployment-config "$CONFIG_FILE" --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR"
-
-    ckb-cli deploy sign-txs --add-signatures --info-file "$INFO_FILE" --privkey-path "$miner_key_file" --output-format json | sed -n 's/: \("[^"]*"\)/: [\1]/p'
-
-    if ckb-cli deploy apply-txs --info-file "$INFO_FILE" --migration-dir "$MIGRATION_DIR" | grep -q "already exists in transaction_pool"; then
-        :
-    fi
-}
-
-generate_blocks() {
-    ./generate-blocks.sh 8
-    sleep 1
-}
-
-# try twice in case the indexer has not updated yet
-deploy_and_generate_blocks() {
-    deploy "$1" || deploy "$1"
-    generate_blocks
-}
-
 run_udt_init() {
     export $(xargs <".env")
     export NODES_DIR="$nodes_dir"
@@ -65,8 +33,6 @@ run_udt_init() {
         cargo run -- "$@"
     )
 }
-
-deploy_and_generate_blocks xudt
 
 ./create-dotenv-file.sh >.env
 run_udt_init
