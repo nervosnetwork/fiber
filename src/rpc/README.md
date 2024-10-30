@@ -178,7 +178,7 @@ Sends a payment to a peer.
 - `target_pubkey` (type: `Pubkey`): The identifier of the payment target.
 - `amount` (type: `u128`): The amount of the payment.
 - `payment_hash` (type: `Hash256`): The hash to use within the payment's HTLC.
-- `final_cltv_delta` (type: `Option<u64>`): The CLTV delta from the current height that should be used to set the timelock for the final hop.
+- `final_expiry_delta` (type: `Option<u64>`): The htlc expiry delta that should be used to set the timelock for the final hop, timestamp in milliseconds, default is 24 hours.
 - `invoice` (type: `Option<String>`): The encoded invoice to send to the recipient.
 - `timeout` (type: `Option<u64>`): The payment timeout in seconds. If the payment is not completed within this time, it will be cancelled.
 - `max_fee_amount` (type: `Option<u128>`): The maximum fee amounts in shannons that the sender is willing to pay.

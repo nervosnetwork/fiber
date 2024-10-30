@@ -101,7 +101,7 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Attribute {
     FinalHtlcTimeout(u64),
-    FinalHtlcMinimumCltvExpiry(u64),
+    FinalHtlcMinimumExpiryDelta(u64),
     ExpiryTime(Duration),
     Description(String),
     FallbackAddr(String),
@@ -292,8 +292,8 @@ impl CkbInvoice {
     attr_getter!(expiry_time, ExpiryTime, Duration);
     attr_getter!(description, Description, String);
     attr_getter!(
-        final_htlc_minimum_cltv_expiry,
-        FinalHtlcMinimumCltvExpiry,
+        final_htlc_minimum_expiry_delta,
+        FinalHtlcMinimumExpiryDelta,
         u64
     );
     attr_getter!(fallback_address, FallbackAddr, String);
@@ -459,9 +459,9 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::FinalHtlcTimeout(value) => InvoiceAttrUnion::FinalHtlcTimeout(
                 FinalHtlcTimeout::new_builder().value(value.pack()).build(),
             ),
-            Attribute::FinalHtlcMinimumCltvExpiry(value) => {
-                InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(
-                    FinalHtlcMinimumCltvExpiry::new_builder()
+            Attribute::FinalHtlcMinimumExpiryDelta(value) => {
+                InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(
+                    FinalHtlcMinimumExpiryDelta::new_builder()
                         .value(value.pack())
                         .build(),
                 )
@@ -507,8 +507,8 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::FinalHtlcTimeout(x) => {
                 Attribute::FinalHtlcTimeout(x.value().unpack())
             }
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(x) => {
-                Attribute::FinalHtlcMinimumCltvExpiry(x.value().unpack())
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(x) => {
+                Attribute::FinalHtlcMinimumExpiryDelta(x.value().unpack())
             }
             InvoiceAttrUnion::FallbackAddr(x) => {
                 let value: Vec<u8> = x.value().unpack();
@@ -600,7 +600,7 @@ impl InvoiceBuilder {
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
-    attr_setter!(final_cltv, FinalHtlcMinimumCltvExpiry, u64);
+    attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let preimage = self.payment_preimage;

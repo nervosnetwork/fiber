@@ -26,5 +26,5 @@ pub struct NewInvoiceParams {
     pub payment_preimage: Option<Hash256>,
     pub expiry: Option<u64>,
     pub fallback_address: Option<String>,
-    pub final_cltv: Option<u64>,
+    pub final_expiry_delta: Option<u64>,
 }
