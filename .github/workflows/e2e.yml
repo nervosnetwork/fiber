@@ -17,22 +17,22 @@ jobs:
           - router-pay
           - udt-router-pay
         release:
+          - "0.119.0"
+          - "0.118.0"
           - "0.116.1"
-        test_env:
-          - "test"
-        extra_bru_args:
-          - ""
         include:
+          # We can only override the added matrix variables, so we have to put test_env in the include section.
+          # Otherwise, the overriding of test_env below will create a new job instead of overriding the existing one.
+          # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/running-variations-of-jobs-in-a-workflow
+          # > Note that the original matrix values will not be overwritten, but added matrix values can be overwritten.
+          - test_env: "test"
           # add an extra workflow to run udt using the env file xudt-test
           - workflow: "udt"
             test_env: "xudt-test"
-            release: "0.116.1"
           # add an extra workflow to run 3-nodes-transfer with sha256 hash algorithm
           - workflow: "3-nodes-transfer"
-            test_env: "test"
-            release: "0.116.1"
             extra_bru_args: "--env-var HASH_ALGORITHM=sha256"
-    name: e2e test for ${{ matrix.workflow }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
+    name: e2e test for ${{ matrix.workflow }} ${{ matrix.release }} --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
