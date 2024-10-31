@@ -101,68 +101,41 @@ impl ContractsContext {
                     .build();
                 script_cell_deps.insert(Contract::CkbAuth, vec![ckb_auth_cell_dep.clone()]);
 
-                let funding_lock_cell_dep = CellDep::new_builder()
-                    .out_point(
-                        OutPoint::new_builder()
-                            .tx_hash(genesis_tx.hash())
-                            .index(6u32.pack())
+                let contract_map = [
+                    (Contract::FundingLock, 6u32),
+                    (Contract::CommitmentLock, 7u32),
+                    (Contract::SimpleUDT, 8u32),
+                ];
+                for (contract, index) in contract_map.into_iter() {
+                    let cell_dep = CellDep::new_builder()
+                        .out_point(
+                            OutPoint::new_builder()
+                                .tx_hash(genesis_tx.hash())
+                                .index(index.pack())
+                                .build(),
+                        )
+                        .dep_type(DepType::Code.into())
+                        .build();
+                    let output_data = genesis_tx
+                        .outputs_data()
+                        .get(index as usize)
+                        .unwrap()
+                        .raw_data();
+                    let cell_deps =
+                        if matches!(contract, Contract::FundingLock | Contract::CommitmentLock) {
+                            vec![cell_dep, ckb_auth_cell_dep.clone()]
+                        } else {
+                            vec![cell_dep]
+                        };
+                    script_cell_deps.insert(contract, cell_deps);
+                    contract_default_scripts.insert(
+                        contract,
+                        Script::new_builder()
+                            .code_hash(CellOutput::calc_data_hash(&output_data))
+                            .hash_type(ScriptHashType::Data1.into())
                             .build(),
-                    )
-                    .dep_type(DepType::Code.into())
-                    .build();
-                let output_data = genesis_tx.outputs_data().get(6).unwrap().raw_data();
-                script_cell_deps.insert(
-                    Contract::FundingLock,
-                    vec![funding_lock_cell_dep, ckb_auth_cell_dep.clone()],
-                );
-                contract_default_scripts.insert(
-                    Contract::FundingLock,
-                    Script::new_builder()
-                        .code_hash(CellOutput::calc_data_hash(&output_data))
-                        .hash_type(ScriptHashType::Data1.into())
-                        .build(),
-                );
-
-                let commitment_lock_cell_dep = CellDep::new_builder()
-                    .out_point(
-                        OutPoint::new_builder()
-                            .tx_hash(genesis_tx.hash())
-                            .index(7u32.pack())
-                            .build(),
-                    )
-                    .dep_type(DepType::Code.into())
-                    .build();
-                let output_data = genesis_tx.outputs_data().get(7).unwrap().raw_data();
-                script_cell_deps.insert(
-                    Contract::CommitmentLock,
-                    vec![commitment_lock_cell_dep, ckb_auth_cell_dep],
-                );
-                contract_default_scripts.insert(
-                    Contract::CommitmentLock,
-                    Script::new_builder()
-                        .code_hash(CellOutput::calc_data_hash(&output_data))
-                        .hash_type(ScriptHashType::Data1.into())
-                        .build(),
-                );
-
-                let simple_udt_cell_dep = CellDep::new_builder()
-                    .out_point(
-                        OutPoint::new_builder()
-                            .tx_hash(genesis_tx.hash())
-                            .index(8u32.pack())
-                            .build(),
-                    )
-                    .dep_type(DepType::Code.into())
-                    .build();
-                let output_data = genesis_tx.outputs_data().get(8).unwrap().raw_data();
-                script_cell_deps.insert(Contract::SimpleUDT, vec![simple_udt_cell_dep]);
-                contract_default_scripts.insert(
-                    Contract::SimpleUDT,
-                    Script::new_builder()
-                        .code_hash(CellOutput::calc_data_hash(&output_data))
-                        .hash_type(ScriptHashType::Data1.into())
-                        .build(),
-                );
+                    );
+                }
             }
         }
 
