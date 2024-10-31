@@ -522,7 +522,6 @@ fn test_graph_build_route_three_nodes() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -632,7 +631,6 @@ fn test_graph_mark_failed_channel() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 
     network.add_edge(0, 5, Some(500), Some(2));
@@ -653,7 +651,6 @@ fn test_graph_mark_failed_channel() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 }
 
@@ -682,7 +679,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
@@ -700,7 +696,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 
     network.mark_node_failed(2);
@@ -720,7 +715,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 
     // Test build route from node1 to node4
@@ -738,7 +732,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 }
 

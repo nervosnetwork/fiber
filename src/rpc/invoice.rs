@@ -1,4 +1,3 @@
-use crate::fiber::config::CkbNetwork;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -107,11 +106,10 @@ impl<S> InvoiceRpcServerImpl<S> {
             );
 
             // restrict currency to be the same as network
-            let currency = match config.network {
-                Some(CkbNetwork::Mainnet) => Some(Currency::Fibb),
-                Some(CkbNetwork::Testnet) => Some(Currency::Fibt),
-                Some(_) => Some(Currency::Fibd),
-                _ => None,
+            let currency = match config.chain.as_str() {
+                "mainnet" => Currency::Fibb,
+                "testnet" => Currency::Fibt,
+                _ => Currency::Fibd,
             };
 
             (keypair, currency)
@@ -119,10 +117,7 @@ impl<S> InvoiceRpcServerImpl<S> {
         Self {
             store,
             keypair: config.as_ref().map(|(kp, _)| kp.clone()),
-            currency: config
-                .as_ref()
-                .map(|(_, currency)| *currency)
-                .unwrap_or_default(),
+            currency: config.as_ref().map(|(_, currency)| *currency),
         }
     }
 }

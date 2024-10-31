@@ -27,6 +27,8 @@ molecule = { version = "0.8.0", default-features = false }
 ckb-types = "0.118.0"
 ckb-gen-types = "0.118.0"
 ckb-jsonrpc-types = "0.118.0"
+ckb-chain-spec    = "0.118.0"
+ckb-resource      = "0.118.0"
 rocksdb = { package = "ckb-rocksdb", version = "=0.21.1", features = [
     "snappy",
 ], default-features = false }

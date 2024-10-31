@@ -1,3 +1,5 @@
+use ckb_chain_spec::ChainSpec;
+use ckb_resource::Resource;
 use ckb_sdk::{
     transaction::{
         builder::{sudt::SudtTransactionBuilder, CkbTransactionBuilder},
@@ -9,71 +11,73 @@ use ckb_sdk::{
     Address, CkbRpcClient, NetworkInfo, ScriptId,
 };
 use ckb_types::{
+    core::BlockView,
+    packed::CellOutput,
+    prelude::{Entity, Unpack},
+};
+use ckb_types::{
     core::{DepType, ScriptHashType},
-    h256,
     packed::{OutPoint, Script},
-    prelude::{Entity, Pack},
+    prelude::Pack,
     H256,
 };
 use ckb_types::{packed::CellDep, prelude::Builder};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::net::TcpListener;
+use std::{collections::HashSet, path::Path};
+use std::{fs, net::TcpListener};
 
 use std::{error::Error as StdErr, str::FromStr};
 
-const SIMPLE_CODE_HASH: H256 =
-    h256!("0xe1e354d6d643ad42724d40967e334984534e0367405c5ae42a9d7d63d77df419");
-const XUDT_CODE_HASH: H256 =
-    h256!("0x50bd8d6680b8b9cf98b73f3c08faf8b2a21914311954118ad6609be6e78a1b95");
-
 const UDT_KINDS: [&str; 2] = ["SIMPLE_UDT", "XUDT"];
 
-fn get_code_hash(udt_kind: &str) -> H256 {
-    match udt_kind {
-        "SIMPLE_UDT" => SIMPLE_CODE_HASH.clone(),
-        "XUDT" => XUDT_CODE_HASH.clone(),
-        _ => panic!("unsupported udt kind"),
-    }
-}
+fn get_udt_info(udt_kind: &str) -> (H256, H256, usize) {
+    let genesis_block = build_gensis_block();
+    let genesis_tx = genesis_block
+        .transaction(0)
+        .expect("genesis block transaction #0 should exist");
 
-fn get_env_hex(name: &str) -> H256 {
-    let value = std::env::var(name).expect("env var");
-    // strip prefix 0x
-    let value = value.trim_start_matches("0x");
-    H256::from_str(value).expect("parse hex")
+    let index = if udt_kind == "SIMPLE_UDT" { 8 } else { 9 };
+    let output_data = genesis_tx.outputs_data().get(index).unwrap().raw_data();
+    (
+        CellOutput::calc_data_hash(&output_data).unpack(),
+        genesis_tx.hash().unpack(),
+        index,
+    )
 }
 
 fn gen_dev_udt_handler(udt_kind: &str) -> SudtHandler {
-    let udt_tx = get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt_kind).as_str());
-    let code_hash = get_code_hash(udt_kind);
-    let (out_point, script_id) = (
-        OutPoint::new_builder()
-            .tx_hash(udt_tx.pack())
-            .index(0u32.pack())
-            .build(),
-        ScriptId::new_data1(code_hash),
-    );
+    let (data_hash, genesis_tx, index) = get_udt_info(udt_kind);
+    let script_id = ScriptId::new_data1(data_hash);
 
-    let cell_dep = CellDep::new_builder()
-        .out_point(out_point)
+    let udt_cell_dep = CellDep::new_builder()
+        .out_point(
+            OutPoint::new_builder()
+                .tx_hash(genesis_tx.pack())
+                .index(index.pack())
+                .build(),
+        )
         .dep_type(DepType::Code.into())
         .build();
 
-    ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(vec![cell_dep], script_id)
+    ckb_sdk::transaction::handler::sudt::SudtHandler::new_with_customize(
+        vec![udt_cell_dep],
+        script_id,
+    )
 }
 
 fn gen_dev_sighash_handler() -> Secp256k1Blake160SighashAllScriptHandler {
-    let sighash_tx = get_env_hex("NEXT_PUBLIC_CKB_GENESIS_TX_1");
-
-    let out_point = OutPoint::new_builder()
-        .tx_hash(sighash_tx.pack())
+    let genesis_block = build_gensis_block();
+    let secp256k1_dep_group_tx_hash = genesis_block
+        .transaction(1)
+        .expect("genesis block transaction #1 should exist")
+        .hash();
+    let secp256k1_dep_group_out_point = OutPoint::new_builder()
+        .tx_hash(secp256k1_dep_group_tx_hash)
         .index(0u32.pack())
         .build();
-
     let cell_dep = CellDep::new_builder()
-        .out_point(out_point)
+        .out_point(secp256k1_dep_group_out_point)
         .dep_type(DepType::DepGroup.into())
         .build();
 
@@ -155,7 +159,7 @@ fn generate_blocks(num: u64) -> Result<(), Box<dyn StdErr>> {
 fn generate_udt_type_script(udt_kind: &str, address: &str) -> ckb_types::packed::Script {
     let address = Address::from_str(address).expect("parse address");
     let sudt_owner_lock_script: Script = (&address).into();
-    let code_hash = get_code_hash(udt_kind);
+    let (code_hash, _, _) = get_udt_info(udt_kind);
     Script::new_builder()
         .code_hash(code_hash.pack())
         .hash_type(ScriptHashType::Data1.into())
@@ -225,24 +229,26 @@ fn generate_ports(num_ports: usize) -> Vec<u16> {
 }
 
 fn genrate_nodes_config() {
-    let nodes_dir = std::env::var("NODES_DIR").expect("env var");
-    let yaml_file_path = format!("{}/deployer/config.yml", nodes_dir);
+    let node_dir_env = std::env::var("NODES_DIR").expect("env var");
+    let nodes_dir = Path::new(&node_dir_env);
+    let yaml_file_path = nodes_dir.join("deployer/config.yml");
     let content = std::fs::read_to_string(yaml_file_path).expect("read failed");
     let data: serde_yaml::Value = serde_yaml::from_str(&content).expect("Unable to parse YAML");
     let mut udt_infos = vec![];
     for udt in UDT_KINDS {
+        let (code_hash, genesis_tx, index) = get_udt_info(udt);
         let udt_info = UdtInfo {
             name: udt.to_string(),
             auto_accept_amount: Some(1000),
             script: UdtScript {
-                code_hash: get_code_hash(udt),
+                code_hash: code_hash,
                 hash_type: "Data1".to_string(),
                 args: "0x.*".to_string(),
             },
             cell_deps: vec![UdtCellDep {
                 dep_type: "code".to_string(),
-                tx_hash: get_env_hex(format!("NEXT_PUBLIC_{}_TX_HASH", udt).as_str()),
-                index: 0,
+                tx_hash: genesis_tx,
+                index: index as u32,
             }],
         };
         udt_infos.push(udt_info);
@@ -257,6 +263,7 @@ fn genrate_nodes_config() {
     let on_github_action = std::env::var("ON_GITHUB_ACTION").is_ok();
     let gen_ports = generate_ports(6);
     let mut ports_iter = gen_ports.iter();
+    let dev_config = nodes_dir.join("deployer/dev.toml");
     for (i, config_dir) in config_dirs.iter().enumerate() {
         let use_gen_port = on_github_action && i != 0;
         let default_fiber_port = (8343 + i) as u16;
@@ -290,20 +297,17 @@ fn genrate_nodes_config() {
         }
 
         let new_yaml = header.to_string() + &serde_yaml::to_string(&data).unwrap();
-        let config_path = format!("{}/{}/config.yml", nodes_dir, config_dir);
-
+        let config_path = nodes_dir.join(config_dir).join("config.yml");
         std::fs::write(config_path, new_yaml).expect("write failed");
+        let node_dev_config = nodes_dir.join(config_dir).join("dev.toml");
+        fs::copy(dev_config.clone(), node_dev_config).expect("copy dev.toml failed");
     }
 
     if on_github_action {
-        let bruno_dir = format!("{}/../bruno/environments/", nodes_dir);
+        let bruno_dir = nodes_dir.join("../bruno/environments/");
         for config in std::fs::read_dir(bruno_dir).expect("read dir") {
             let config = config.expect("read config");
             for (default_port, port) in ports_map.iter() {
-                eprintln!(
-                    "update bruno config: {:?} {} -> {}",
-                    config, default_port, port
-                );
                 let content = std::fs::read_to_string(config.path()).expect("read config");
                 let new_content = content.replace(&default_port.to_string(), &port.to_string());
                 std::fs::write(config.path(), new_content).expect("write config");
@@ -319,21 +323,20 @@ fn genrate_nodes_config() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let port_file_path = format!("{}/.ports", nodes_dir);
+    let port_file_path = nodes_dir.join(".ports");
+
     std::fs::write(port_file_path, content).expect("write ports list");
 }
 
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     let udt_owner = get_nodes_info("deployer");
     for udt in UDT_KINDS {
-        eprintln!("begin init udt: {} ...", udt);
         init_or_send_udt(udt, &udt_owner.0, &udt_owner, None, 1000000000000, true)
             .expect("init udt");
         generate_blocks(8).expect("ok");
         std::thread::sleep(std::time::Duration::from_millis(1000));
         for i in 0..3 {
             let wallet = get_nodes_info(&(i + 1).to_string());
-            eprintln!("begin send udt: {} to node {} ...", udt, i);
             init_or_send_udt(
                 udt,
                 &udt_owner.0,
@@ -351,8 +354,18 @@ fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     Ok(())
 }
 
+fn build_gensis_block() -> BlockView {
+    let node_dir_env = std::env::var("NODES_DIR").expect("env var");
+    let nodes_dir = Path::new(&node_dir_env);
+    let dev_toml = nodes_dir.join("deployer/dev.toml");
+    let chain_spec =
+        ChainSpec::load_from(&Resource::file_system(dev_toml)).expect("load chain spec");
+    let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+    genesis_block
+}
+
 fn main() -> Result<(), Box<dyn StdErr>> {
-    init_udt_accounts()?;
     genrate_nodes_config();
+    init_udt_accounts()?;
     Ok(())
 }
