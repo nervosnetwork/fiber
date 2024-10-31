@@ -26,7 +26,6 @@ if ! (echo | ckb-cli account import --local-only --privkey-path "$miner_key_file
 fi
 
 run_udt_init() {
-    export $(xargs <".env")
     export NODES_DIR="$nodes_dir"
     (
         cd "$udt_init_dir" || exit 1
@@ -34,5 +33,4 @@ run_udt_init() {
     )
 }
 
-./create-dotenv-file.sh >.env
 run_udt_init
