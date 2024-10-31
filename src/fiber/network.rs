@@ -573,6 +573,12 @@ pub enum GraphSyncerExitStatus {
     Failed,
 }
 
+impl Default for GraphSyncerExitStatus {
+    fn default() -> Self {
+        Self::Failed
+    }
+}
+
 #[derive(Debug)]
 pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
@@ -3438,7 +3444,7 @@ where
     fn maybe_tell_syncer_peer_disconnected(&self, peer_id: &PeerId) {
         if let NetworkSyncStatus::Running(ref state) = self.sync_status {
             if let Some(syncer) = state.get_graph_syncer(peer_id) {
-                let _ = syncer.send_message(GraphSyncerMessage::PeerDisConnected);
+                syncer.stop(Some("Peer disconnected".to_string()));
             }
         }
     }
