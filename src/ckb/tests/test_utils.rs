@@ -7,11 +7,12 @@ use ckb_types::{
     packed::{CellDep, CellOutput, OutPoint, Script},
     prelude::{Builder, Entity, Pack, PackVec, Unpack},
 };
-use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use std::{collections::HashMap, sync::RwLock};
 
 use crate::ckb::{
     config::UdtCfgInfos,
-    contracts::{Contract, ContractsContext, ContractsInfo, CONTRACTS_CONTEXT_INSTANCE},
+    contracts::{Contract, ContractsContext, ContractsInfo},
     TraceTxRequest, TraceTxResponse,
 };
 
@@ -28,8 +29,11 @@ pub enum CellStatus {
     Consumed,
 }
 
+pub static MOCK_CONTEXT: Lazy<RwLock<MockContext>> = Lazy::new(|| RwLock::new(MockContext::new()));
+
 pub struct MockContext {
     pub context: Context,
+    pub contracts_context: ContractsContext,
 }
 
 impl MockContext {
@@ -104,14 +108,14 @@ impl MockContext {
             udt_whitelist: UdtCfgInfos::default(),
         };
         let contracts_context = ContractsContext { contracts };
-        let _ = CONTRACTS_CONTEXT_INSTANCE.set(contracts_context);
-
-        MockContext { context }
+        MockContext {
+            context,
+            contracts_context,
+        }
     }
 }
 
 pub struct MockChainActorState {
-    ctx: MockContext,
     tx_status: HashMap<
         Byte32,
         (
@@ -131,7 +135,6 @@ impl Default for MockChainActorState {
 impl MockChainActorState {
     pub fn new() -> Self {
         Self {
-            ctx: MockContext::new(),
             tx_status: HashMap::new(),
             cell_status: HashMap::new(),
         }
@@ -287,7 +290,7 @@ impl Actor for MockChainActor {
                             }
                         }
                     }
-                    let context = &mut state.ctx.context;
+                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
                     match context.verify_tx(&tx, MAX_CYCLES) {
                         Ok(c) => {
                             debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);

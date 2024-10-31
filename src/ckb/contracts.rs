@@ -247,10 +247,20 @@ pub fn init_contracts_context(
         .expect("init_contracts_context should only be called once");
 }
 
+#[cfg(not(test))]
 fn get_contracts_context() -> &'static ContractsContext {
     CONTRACTS_CONTEXT_INSTANCE
         .get()
         .expect("init_contracts_context should be called first")
+}
+
+#[cfg(test)]
+fn get_contracts_context<'a>() -> ContractsContext {
+    super::tests::test_utils::MOCK_CONTEXT
+        .read()
+        .unwrap()
+        .contracts_context
+        .clone()
 }
 
 pub fn get_script_by_contract(contract: Contract, args: &[u8]) -> Script {
@@ -261,8 +271,8 @@ pub fn get_cell_deps_by_contracts(contracts: Vec<Contract>) -> CellDepVec {
     get_contracts_context().get_cell_deps(contracts)
 }
 
-fn get_udt_info(script: &Script) -> Option<&UdtArgInfo> {
-    get_contracts_context().get_udt_info(script)
+fn get_udt_info(script: &Script) -> Option<UdtArgInfo> {
+    get_contracts_context().get_udt_info(script).cloned()
 }
 
 pub fn check_udt_script(script: &Script) -> bool {
