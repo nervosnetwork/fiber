@@ -36,8 +36,8 @@ pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
 pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
     DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
-/// The locktime expiry delta to forward a tlc, in seconds. 86400 means 1 day.
-pub const DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA: u64 = 86400;
+/// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
+pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
@@ -119,14 +119,14 @@ pub struct FiberConfig {
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 
-    /// The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]
+    /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
-        name = "FIBER_TLC_LOCKTIME_EXPIRY_DELTA",
-        long = "fiber-tlc-locktime-expiry-delta",
+        name = "FIBER_TLC_EXPIRY_DELTA",
+        long = "fiber-tlc-expiry-delta",
         env,
-        help = "The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]"
+        help = "The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]"
     )]
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
 
     /// The minimal value of a tlc. [default: 0 (no minimal value)]
     #[arg(
@@ -315,9 +315,8 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
     }
 
-    pub fn tlc_locktime_expiry_delta(&self) -> u64 {
-        self.tlc_locktime_expiry_delta
-            .unwrap_or(DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA)
+    pub fn tlc_expiry_delta(&self) -> u64 {
+        self.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA)
     }
 
     pub fn tlc_min_value(&self) -> u128 {

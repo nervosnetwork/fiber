@@ -6,8 +6,8 @@ use clap_serde_derive::ClapSerde;
 pub const DEFAULT_ORDER_EXPIRY_TIME: u64 = 3600;
 /// Default BTC final-hop HTLC expiry time in seconds.
 pub const DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME: u64 = 36;
-/// Default CKB final-hop HTLC expiry time in blocks.
-pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_BLOCKS: u64 = 10;
+/// Default CKB final-hop HTLC expiry delta in timestamp (in milliseconds), 24 hours.
+pub const DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 // Use prefix `cch-`/`CCH_`
 #[derive(ClapSerde, Debug, Clone)]
@@ -93,15 +93,15 @@ pub struct CchConfig {
     )]
     pub btc_final_tlc_expiry: u64,
 
-    /// Final tlc expiry time for CKB network in blocks.
-    #[default(DEFAULT_CKB_FINAL_TLC_EXPIRY_BLOCKS)]
+    ///  Tlc expiry time for CKB network in blocks.
+    #[default(DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA)]
     #[arg(
-        name = "CCH_CKB_FINAL_TLC_EXPIRY_BLOCKS",
-        long = "cch-ckb-final-tlc-expiry-blocks",
+        name = "CCH_CKB_FINAL_TLC_EXPIRY_DELTA",
+        long = "cch-ckb-final-tlc-expiry-delta",
         env,
-        help = format!("final tlc expiry time in blocks for CKB network, default is {}", DEFAULT_CKB_FINAL_TLC_EXPIRY_BLOCKS),
+        help = format!("final tlc expiry delta in timestamp for CKB network, default is {}", DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA),
     )]
-    pub ckb_final_tlc_expiry_blocks: u64,
+    pub ckb_final_tlc_expiry_delta: u64,
 
     /// Ignore the failure when starting the cch service.
     #[default(false)]

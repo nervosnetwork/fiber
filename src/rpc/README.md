@@ -74,7 +74,7 @@ Attempts to open a channel with a peer.
 * `commitment_fee_rate` - The fee rate for the commitment transaction, an optional parameter
 * `commitment_delay_epoch` - The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours
 * `funding_fee_rate` - The fee rate for the funding transaction, an optional parameter
-* `tlc_locktime_expiry_delta` - The expiry delta for the TLC locktime, an optional parameter
+* `tlc_expiry_delta` - The expiry delta for the TLC, timestamp in milliseconds, an optional parameter, default value is 24 hours
 * `tlc_min_value` - The minimum value for a TLC, an optional parameter
 * `tlc_max_value` - The maximum value for a TLC, an optional parameter
 * `tlc_fee_proportional_millionths` - The fee proportional millionths for a TLC, an optional parameter
@@ -178,7 +178,7 @@ Sends a payment to a peer.
 - `target_pubkey` (type: `Pubkey`): The identifier of the payment target.
 - `amount` (type: `u128`): The amount of the payment.
 - `payment_hash` (type: `Hash256`): The hash to use within the payment's HTLC.
-- `final_cltv_delta` (type: `Option<u64>`): The CLTV delta from the current height that should be used to set the timelock for the final hop.
+- `final_expiry_delta` (type: `Option<u64>`): The htlc expiry delta that should be used to set the timelock for the final hop, timestamp in milliseconds, default is 24 hours.
 - `invoice` (type: `Option<String>`): The encoded invoice to send to the recipient.
 - `timeout` (type: `Option<u64>`): The payment timeout in seconds. If the payment is not completed within this time, it will be cancelled.
 - `max_fee_amount` (type: `Option<u128>`): The maximum fee amounts in shannons that the sender is willing to pay.
@@ -364,7 +364,7 @@ Returns a struct with these fields:
 * `chain_hash`: The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount`: The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount`: The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
-* `tlc_locktime_expiry_delta`: The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_expiry_delta`: The expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_min_value`: The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no minimum value limit.
 * `tlc_max_value`: The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
 * `tlc_fee_proportional_millionths`: The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.

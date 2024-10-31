@@ -25,9 +25,7 @@ pub(crate) struct NewInvoiceParams {
     expiry: Option<u64>,
     fallback_address: Option<String>,
     #[serde_as(as = "Option<U64Hex>")]
-    final_cltv: Option<u64>,
-    #[serde_as(as = "Option<U64Hex>")]
-    final_htlc_timeout: Option<u64>,
+    final_expiry_delta: Option<u64>,
     udt_type_script: Option<Script>,
     hash_algorithm: Option<HashAlgorithm>,
 }
@@ -160,8 +158,8 @@ where
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
-        if let Some(final_cltv) = params.final_cltv {
-            invoice_builder = invoice_builder.final_cltv(final_cltv);
+        if let Some(final_expiry_delta) = params.final_expiry_delta {
+            invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
         };
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());

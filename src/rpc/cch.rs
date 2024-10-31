@@ -32,7 +32,7 @@ pub(crate) struct SendBTCResponse {
     expiry: u64,
     // The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    ckb_final_tlc_expiry: u64,
+    ckb_final_tlc_expiry_delta: u64,
 
     currency: Currency,
     wrapped_btc_type_script: ckb_jsonrpc_types::Script,
@@ -81,7 +81,7 @@ pub(crate) struct ReceiveBTCResponse {
     expiry: u64,
     // The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    ckb_final_tlc_expiry: u64,
+    ckb_final_tlc_expiry_delta: u64,
 
     wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 
@@ -154,7 +154,7 @@ impl CchRpcServer for CchRpcServerImpl {
             .map(|order| SendBTCResponse {
                 timestamp: order.created_at,
                 expiry: order.expires_after,
-                ckb_final_tlc_expiry: order.ckb_final_tlc_expiry,
+                ckb_final_tlc_expiry_delta: order.ckb_final_tlc_expiry_delta,
                 currency: order.currency,
                 wrapped_btc_type_script: order.wrapped_btc_type_script,
                 btc_pay_req: order.btc_pay_req,
@@ -220,7 +220,7 @@ impl From<ReceiveBTCOrder> for ReceiveBTCResponse {
         Self {
             timestamp: value.created_at,
             expiry: value.expires_after,
-            ckb_final_tlc_expiry: value.ckb_final_tlc_expiry,
+            ckb_final_tlc_expiry_delta: value.ckb_final_tlc_expiry_delta,
             wrapped_btc_type_script: value.wrapped_btc_type_script,
             btc_pay_req: value.btc_pay_req,
             payment_hash: value.payment_hash,

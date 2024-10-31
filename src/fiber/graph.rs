@@ -113,8 +113,8 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
-    /// The difference in CLTV values that you must have when routing through this channel.
-    pub cltv_expiry_delta: u64,
+    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    pub htlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub htlc_minimum_value: u128,
     /// The maximum value which may be relayed to the next hop via the channel.
@@ -402,7 +402,7 @@ where
             version: update.version,
             timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
             enabled: !disabled,
-            cltv_expiry_delta: update.tlc_locktime_expiry_delta,
+            htlc_expiry_delta: update.tlc_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -548,7 +548,7 @@ where
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
-                let expiry = channel_update.cltv_expiry_delta;
+                let expiry = channel_update.htlc_expiry_delta;
                 (fee, expiry)
             };
 
@@ -634,7 +634,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_cltv_height: 0,
+            incoming_htlc_expiry: 0,
         });
         let route_to_self = source == target;
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -688,11 +688,11 @@ where
                     );
                     continue;
                 }
-                let incomming_cltv = cur_hop.incoming_cltv_height
+                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry
                     + if from == source {
                         0
                     } else {
-                        channel_update.cltv_expiry_delta
+                        channel_update.htlc_expiry_delta
                     };
 
                 let probability = cur_hop.probability
@@ -709,7 +709,7 @@ where
                 }
                 debug!("probability: {:?}", probability);
                 let agg_weight =
-                    self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
+                    self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -723,7 +723,7 @@ where
                     weight,
                     distance,
                     amount_received: amount_to_send,
-                    incoming_cltv_height: incomming_cltv,
+                    incoming_htlc_expiry,
                     fee_charged: fee,
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
@@ -762,9 +762,9 @@ where
         Ok(result)
     }
 
-    fn edge_weight(&self, amount: u128, fee: u128, cltv_expiry_delta: u64) -> u128 {
+    fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
         let risk_factor: u128 = 15;
-        let time_lock_penalty = amount * cltv_expiry_delta as u128 * (risk_factor / 1000000000);
+        let time_lock_penalty = amount * htlc_expiry_delta as u128 * (risk_factor / 1000000000);
         fee + time_lock_penalty
     }
 

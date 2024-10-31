@@ -19,9 +19,10 @@ use crate::fiber::channel::{
     AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason};
+use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
+use crate::now_timestamp;
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
@@ -311,7 +312,7 @@ impl CchActor {
             fee_sats,
             currency: send_btc.currency,
             created_at: duration_since_epoch.as_secs(),
-            ckb_final_tlc_expiry: self.config.ckb_final_tlc_expiry_blocks,
+            ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             btc_pay_req: send_btc.btc_pay_req,
             ckb_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
@@ -533,7 +534,7 @@ impl CchActor {
         let order = ReceiveBTCOrder {
             created_at: duration_since_epoch.as_secs(),
             expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
-            ckb_final_tlc_expiry: receive_btc.final_tlc_expiry,
+            ckb_final_tlc_expiry_delta: receive_btc.final_tlc_expiry,
             btc_pay_req,
             payment_hash: receive_btc.payment_hash.clone(),
             payment_preimage: None,
@@ -591,7 +592,7 @@ impl CchActor {
                                 payment_hash: Some(
                                     Hash256::from_str(&order.payment_hash).expect("parse Hash256"),
                                 ),
-                                expiry: LockTime::new(self.config.ckb_final_tlc_expiry_blocks),
+                                expiry: now_timestamp() + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
                                 onion_packet: vec![],
                                 previous_tlc: None,

@@ -7,7 +7,7 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
+    types::{Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -44,7 +44,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     funding_fee_rate: Option<u64>,
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -124,7 +124,8 @@ pub(crate) struct AddTlcParams {
     #[serde_as(as = "U128Hex")]
     amount: u128,
     payment_hash: Hash256,
-    expiry: LockTime,
+    #[serde_as(as = "U64Hex")]
+    expiry: u64,
     hash_algorithm: Option<HashAlgorithm>,
 }
 
@@ -168,7 +169,7 @@ pub struct UpdateChannelParams {
     channel_id: Hash256,
     enabled: Option<bool>,
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
     #[serde_as(as = "Option<U128Hex>")]
@@ -209,9 +210,9 @@ pub(crate) struct SendPaymentCommandParams {
     // FIXME: this should be optional when AMP is enabled
     payment_hash: Option<Hash256>,
 
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    // The htlc expiry delta should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    final_cltv_delta: Option<u64>,
+    final_htlc_expiry_delta: Option<u64>,
 
     // the encoded invoice to send to the recipient
     invoice: Option<String>,
@@ -327,7 +328,7 @@ where
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
-                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
                     tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
@@ -508,7 +509,7 @@ where
                     command: ChannelCommand::Update(
                         UpdateCommand {
                             enabled: params.enabled,
-                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                            tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
@@ -531,7 +532,7 @@ where
                     target_pubkey: params.target_pubkey,
                     amount: params.amount,
                     payment_hash: params.payment_hash,
-                    final_cltv_delta: params.final_cltv_delta,
+                    final_htlc_expiry_delta: params.final_htlc_expiry_delta,
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,

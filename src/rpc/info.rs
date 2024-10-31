@@ -34,7 +34,7 @@ pub(crate) struct NodeInfoResult {
     #[serde_as(as = "U64Hex")]
     auto_accept_channel_ckb_funding_amount: u64,
     #[serde_as(as = "U64Hex")]
-    tlc_locktime_expiry_delta: u64,
+    tlc_expiry_delta: u64,
     #[serde_as(as = "U128Hex")]
     tlc_min_value: u128,
     #[serde_as(as = "U128Hex")]
@@ -91,7 +91,7 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: response
                 .open_channel_auto_accept_min_ckb_funding_amount,
             auto_accept_channel_ckb_funding_amount: response.auto_accept_channel_ckb_funding_amount,
-            tlc_locktime_expiry_delta: response.tlc_locktime_expiry_delta,
+            tlc_expiry_delta: response.tlc_expiry_delta,
             tlc_min_value: response.tlc_min_value,
             tlc_max_value: response.tlc_max_value,
             tlc_fee_proportional_millionths: response.tlc_fee_proportional_millionths,
