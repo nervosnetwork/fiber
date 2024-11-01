@@ -2439,7 +2439,11 @@ impl NetworkSyncState {
 
         if should_create {
             let graph_syncer = Actor::spawn_linked(
-                Some(format!("Graph syncer to {}", peer_id)),
+                Some(format!(
+                    "Graph syncer to {} started at {:?}",
+                    peer_id,
+                    SystemTime::now()
+                )),
                 GraphSyncer::new(
                     network.clone(),
                     peer_id.clone(),
