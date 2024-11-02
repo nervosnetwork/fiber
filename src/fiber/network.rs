@@ -1553,7 +1553,10 @@ where
                 // TODO: It is possible that the remote peer of the channel may repeatedly
                 // receive the same message.
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
-                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
+                debug!(
+                    "Broadcasting message to randomly selected peers {:?} (from {:?})",
+                    &peer_ids, &state.peer_id
+                );
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1729,10 +1732,10 @@ where
                 channel_announcement,
             ) => {
                 debug!(
-                    "Received channel announcement message for channel (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
-                    &peer_id,
+                    "Processing our channel announcement message (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
                     &block_number,
                     &tx_index,
+                    &peer_id,
                     &channel_announcement
                 );
                 // Adding this owned channel to the network graph.
@@ -1771,6 +1774,10 @@ where
             }
 
             NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                debug!(
+                    "Processing our channel update message to peer {:?}: {:?}",
+                    &peer_id, &channel_update
+                );
                 let mut graph = self.network_graph.write().await;
                 graph
                     .process_channel_update(channel_update.clone())
@@ -1955,6 +1962,11 @@ where
                         &channel_announcement.node2_id
                     )));
                 }
+
+                debug!(
+                    "Node signatures in channel announcement message verified: {:?}",
+                    &channel_announcement
+                );
 
                 let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
                     self.chain_actor,
@@ -3371,7 +3383,7 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        info!("Peer {:?} disconnected", id);
+        info!("Peer {:?} disconnected from us ({:?})", id, &self.peer_id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -3904,7 +3916,7 @@ where
 
         tracker.spawn(async move {
             service.run().await;
-            debug!("Tentacle service shutdown");
+            debug!("Tentacle service stopped");
         });
 
         let mut graph = self.network_graph.write().await;
@@ -4148,8 +4160,8 @@ impl ServiceProtocol for Handle {
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
         info!(
-            "proto id [{}] close on session [{}]",
-            context.proto_id, context.session.id
+            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
+            context.proto_id, context.session.id, &context.session.address, &context.session.ty
         );
 
         match context.session.remote_pubkey.as_ref() {
