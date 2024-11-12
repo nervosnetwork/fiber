@@ -748,7 +748,7 @@ where
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
-            last_hop_channels = cur_hop_channels.clone();
+            last_hop_channels = cur_hop_channels;
         }
 
         let mut current = source_node.node_id;
