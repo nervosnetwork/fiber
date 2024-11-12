@@ -3310,7 +3310,7 @@ where
 
         debug!("Reestablishing channel {:x}", &channel_id);
         let (channel, _) = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, peer_id)),
             ChannelActor::new(
                 self.get_public_key(),
                 remote_pubkey,
