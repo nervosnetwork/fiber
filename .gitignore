@@ -6,6 +6,7 @@
 
 /tests/nodes/*/fiber/store
 /tests/nodes/*/config.yml
+/tests/nodes/*/dev.toml
 /tests/deploy/udt-init/target
 tests/nodes/.ports
 /coverage-report

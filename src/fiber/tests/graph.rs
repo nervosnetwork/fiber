@@ -125,7 +125,7 @@ impl MockNetworkGraph {
             version: 0,
             message_flags: 1,
             channel_flags: 0,
-            tlc_locktime_expiry_delta: 144,
+            tlc_expiry_delta: 144,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
             tlc_maximum_value: max_htlc_value.unwrap_or(10000),
             tlc_minimum_value: min_htlc_value.unwrap_or(0),
@@ -513,7 +513,7 @@ fn test_graph_build_route_three_nodes() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -522,7 +522,6 @@ fn test_graph_build_route_three_nodes() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
@@ -552,7 +551,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         amount: 100, // Exceeds max_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -578,7 +577,7 @@ fn test_graph_build_route_below_min_htlc_value() {
         amount: 10, // Below min_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -623,7 +622,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -632,7 +631,6 @@ fn test_graph_mark_failed_channel() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 
     network.add_edge(0, 5, Some(500), Some(2));
@@ -644,7 +642,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -653,7 +651,6 @@ fn test_graph_mark_failed_channel() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 }
 
@@ -673,7 +670,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -682,7 +679,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 
     // Test build route from node1 to node4 should be Ok
@@ -691,7 +687,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -700,7 +696,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_ok());
 
     network.mark_node_failed(2);
@@ -711,7 +706,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -720,7 +715,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 
     // Test build route from node1 to node4
@@ -729,7 +723,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -738,7 +732,6 @@ fn test_graph_mark_failed_node() {
         preimage: None,
         allow_self_payment: false,
     });
-    eprintln!("return {:?}", route);
     assert!(route.is_err());
 }
 
@@ -756,7 +749,7 @@ fn test_graph_payment_self_default_is_false() {
         target_pubkey: Some(node0.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -774,7 +767,7 @@ fn test_graph_payment_self_default_is_false() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -801,7 +794,7 @@ fn test_graph_payment_pay_single_path() {
         target_pubkey: Some(network.keys[6].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -834,7 +827,7 @@ fn test_graph_payment_pay_self_will_ok() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),

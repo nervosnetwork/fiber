@@ -72,7 +72,7 @@ Send BTC to a address.
 
 * `timestamp` - u64, Seconds since epoch when the order is created
 * `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry` - u64, The minimal expiry in seconds of the final TLC in the CKB network
+* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
 * `currency` - Currency, Request currency
 * `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
 * `btc_pay_req` - String, Payment request for BTC
@@ -99,7 +99,7 @@ Receive BTC from a payment hash.
 
 * `timestamp` - u64, Seconds since epoch when the order is created
 * `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry` - u64, The minimal expiry in seconds of the final TLC in the CKB network
+* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
 * `btc_pay_req` - String, Payment request for BTC
 * `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
@@ -123,7 +123,7 @@ Get receive BTC order by payment hash.
 
 * `timestamp` - u64, Seconds since epoch when the order is created
 * `expiry` - u64, Seconds after timestamp that the order expires
-* `ckb_final_tlc_expiry` - u64, The minimal expiry in seconds of the final TLC in the CKB network
+* `ckb_final_tlc_expiry_delta` - u64, The minimal expiry in seconds of the final TLC in the CKB network
 * `wrapped_btc_type_script` - ckb_jsonrpc_types::Script, Wrapped BTC type script
 * `btc_pay_req` - String, Payment request for BTC
 * `payment_hash` - String, Payment hash for the HTLC for both CKB and BTC.
@@ -154,7 +154,7 @@ Attempts to open a channel with a peer.
 * `commitment_delay_epoch` - `Option<EpochNumberWithFraction>`, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
 * `commitment_fee_rate` - `Option<u64>`, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - `Option<u64>`, The fee rate for the funding transaction, an optional parameter.
-* `tlc_locktime_expiry_delta` - `Option<u64>`, The expiry delta for the TLC locktime, an optional parameter.
+* `tlc_expiry_delta` - `Option<u64>`, The expiry delta for the TLC locktime, an optional parameter.
 * `tlc_min_value` - `Option<u128>`, The minimum value for a TLC, an optional parameter.
 * `tlc_max_value` - `Option<u128>`, The maximum value for a TLC, an optional parameter.
 * `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, an optional parameter.
@@ -221,7 +221,7 @@ Adds a TLC to a channel.
 * `channel_id` - Hash256, The channel ID of the channel to add the TLC to
 * `amount` - u128, The amount of the TLC
 * `payment_hash` - Hash256, The payment hash of the TLC
-* `expiry` - LockTime, The expiry of the TLC
+* `expiry` - u64, The expiry of the TLC
 * `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the TLC
 
 ##### Returns
@@ -271,7 +271,9 @@ Updates a channel.
 
 * `channel_id` - Hash256, The channel ID of the channel to update
 * `enabled` - `Option<bool>`, Whether the channel is enabled
-* `tlc_locktime_expiry_delta` - `Option<u64>`, The CLTV delta from the current height that should be used to set the timelock for the final hop
+* `tlc_expiry_delta` - `Option<u64>`, The CLTV delta from the current height that should be used to set the timelock for the final hop
+
+ The expiry delta for the TLC locktime
 * `tlc_minimum_value` - `Option<u128>`, The minimum value for a TLC
 * `tlc_maximum_value` - `Option<u128>`, The maximum value for a TLC
 * `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC
@@ -290,9 +292,8 @@ Sends a payment to a peer.
 
 * `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
 * `amount` - `Option<u128>`, the amount of the payment
-* `payment_hash` - `Option<Hash256>`, The hash to use within the payment's HTLC
- FIXME: this should be optional when AMP is enabled
-* `final_cltv_delta` - `Option<u64>`, The CLTV delta from the current height that should be used to set the timelock for the final hop
+* `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
+* `final_htlc_expiry_delta` - `Option<u64>`, the htlc expiry delta should be used to set the timelock for the final hop
 * `invoice` - `Option<String>`, the encoded invoice to send to the recipient
 * `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay
@@ -389,8 +390,8 @@ Get the node information.
 * `chain_hash` - Hash256, The hash of the blockchain that the node is connected to.
 * `open_channel_auto_accept_min_ckb_funding_amount` - u64, The minimum CKB funding amount for automatically accepting open channel requests, serialized as a hexadecimal string.
 * `auto_accept_channel_ckb_funding_amount` - u64, The CKB funding amount for automatically accepting channel requests, serialized as a hexadecimal string.
-* `tlc_locktime_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
-* `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no minimum value limit.
+* `tlc_expiry_delta` - u64, The locktime expiry delta for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
+* `tlc_min_value` - u128, The minimum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string.
 * `tlc_max_value` - u128, The maximum value for Time-Locked Contracts (TLC), serialized as a hexadecimal string, `0` means no maximum value limit.
 * `tlc_fee_proportional_millionths` - u128, The fee proportional to the value of Time-Locked Contracts (TLC), expressed in millionths and serialized as a hexadecimal string.
 * `channel_count` - u32, The number of channels associated with the node, serialized as a hexadecimal string.
@@ -419,7 +420,7 @@ Generates a new invoice.
 * `expiry` - `Option<u64>`, The expiry time of the invoice.
 * `fallback_address` - `Option<String>`, The fallback address of the invoice.
 * `final_cltv` - `Option<u64>`, The final CLTV of the invoice.
-* `final_htlc_timeout` - `Option<u64>`, The final HTLC timeout of the invoice.
+* `final_expiry_delta` - `Option<u64>`, The final HTLC timeout of the invoice.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the invoice.
 * `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the invoice.
 
@@ -522,6 +523,8 @@ The channel data structure
 #### Fields
 
 * `channel_id` - Hash256, The channel ID
+* `is_public` - bool, Whether the channel is public
+* `channel_outpoint` - `Option<OutPoint>`, The outpoint of the channel
 * `peer_id` - PeerId, The peer ID of the channel
 * `funding_udt_type_script` - `Option<Script>`, The UDT type script of the channel
 * `state` - ChannelState, The state of the channel

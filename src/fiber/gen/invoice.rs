@@ -3315,8 +3315,8 @@ impl molecule::prelude::Builder for FinalHtlcTimeoutBuilder {
     }
 }
 #[derive(Clone)]
-pub struct FinalHtlcMinimumCltvExpiry(molecule::bytes::Bytes);
-impl ::core::fmt::LowerHex for FinalHtlcMinimumCltvExpiry {
+pub struct FinalHtlcMinimumExpiryDelta(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for FinalHtlcMinimumExpiryDelta {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -3325,25 +3325,25 @@ impl ::core::fmt::LowerHex for FinalHtlcMinimumCltvExpiry {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl ::core::fmt::Debug for FinalHtlcMinimumCltvExpiry {
+impl ::core::fmt::Debug for FinalHtlcMinimumExpiryDelta {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl ::core::fmt::Display for FinalHtlcMinimumCltvExpiry {
+impl ::core::fmt::Display for FinalHtlcMinimumExpiryDelta {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "value", self.value())?;
         write!(f, " }}")
     }
 }
-impl ::core::default::Default for FinalHtlcMinimumCltvExpiry {
+impl ::core::default::Default for FinalHtlcMinimumExpiryDelta {
     fn default() -> Self {
         let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
-        FinalHtlcMinimumCltvExpiry::new_unchecked(v)
+        FinalHtlcMinimumExpiryDelta::new_unchecked(v)
     }
 }
-impl FinalHtlcMinimumCltvExpiry {
+impl FinalHtlcMinimumExpiryDelta {
     const DEFAULT_VALUE: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
     pub const TOTAL_SIZE: usize = 8;
     pub const FIELD_SIZES: [usize; 1] = [8];
@@ -3351,15 +3351,15 @@ impl FinalHtlcMinimumCltvExpiry {
     pub fn value(&self) -> Uint64 {
         Uint64::new_unchecked(self.0.slice(0..8))
     }
-    pub fn as_reader<'r>(&'r self) -> FinalHtlcMinimumCltvExpiryReader<'r> {
-        FinalHtlcMinimumCltvExpiryReader::new_unchecked(self.as_slice())
+    pub fn as_reader<'r>(&'r self) -> FinalHtlcMinimumExpiryDeltaReader<'r> {
+        FinalHtlcMinimumExpiryDeltaReader::new_unchecked(self.as_slice())
     }
 }
-impl molecule::prelude::Entity for FinalHtlcMinimumCltvExpiry {
-    type Builder = FinalHtlcMinimumCltvExpiryBuilder;
-    const NAME: &'static str = "FinalHtlcMinimumCltvExpiry";
+impl molecule::prelude::Entity for FinalHtlcMinimumExpiryDelta {
+    type Builder = FinalHtlcMinimumExpiryDeltaBuilder;
+    const NAME: &'static str = "FinalHtlcMinimumExpiryDelta";
     fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
-        FinalHtlcMinimumCltvExpiry(data)
+        FinalHtlcMinimumExpiryDelta(data)
     }
     fn as_bytes(&self) -> molecule::bytes::Bytes {
         self.0.clone()
@@ -3368,10 +3368,10 @@ impl molecule::prelude::Entity for FinalHtlcMinimumCltvExpiry {
         &self.0[..]
     }
     fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        FinalHtlcMinimumCltvExpiryReader::from_slice(slice).map(|reader| reader.to_entity())
+        FinalHtlcMinimumExpiryDeltaReader::from_slice(slice).map(|reader| reader.to_entity())
     }
     fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
-        FinalHtlcMinimumCltvExpiryReader::from_compatible_slice(slice)
+        FinalHtlcMinimumExpiryDeltaReader::from_compatible_slice(slice)
             .map(|reader| reader.to_entity())
     }
     fn new_builder() -> Self::Builder {
@@ -3382,8 +3382,8 @@ impl molecule::prelude::Entity for FinalHtlcMinimumCltvExpiry {
     }
 }
 #[derive(Clone, Copy)]
-pub struct FinalHtlcMinimumCltvExpiryReader<'r>(&'r [u8]);
-impl<'r> ::core::fmt::LowerHex for FinalHtlcMinimumCltvExpiryReader<'r> {
+pub struct FinalHtlcMinimumExpiryDeltaReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for FinalHtlcMinimumExpiryDeltaReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         use molecule::hex_string;
         if f.alternate() {
@@ -3392,19 +3392,19 @@ impl<'r> ::core::fmt::LowerHex for FinalHtlcMinimumCltvExpiryReader<'r> {
         write!(f, "{}", hex_string(self.as_slice()))
     }
 }
-impl<'r> ::core::fmt::Debug for FinalHtlcMinimumCltvExpiryReader<'r> {
+impl<'r> ::core::fmt::Debug for FinalHtlcMinimumExpiryDeltaReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{}({:#x})", Self::NAME, self)
     }
 }
-impl<'r> ::core::fmt::Display for FinalHtlcMinimumCltvExpiryReader<'r> {
+impl<'r> ::core::fmt::Display for FinalHtlcMinimumExpiryDeltaReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "value", self.value())?;
         write!(f, " }}")
     }
 }
-impl<'r> FinalHtlcMinimumCltvExpiryReader<'r> {
+impl<'r> FinalHtlcMinimumExpiryDeltaReader<'r> {
     pub const TOTAL_SIZE: usize = 8;
     pub const FIELD_SIZES: [usize; 1] = [8];
     pub const FIELD_COUNT: usize = 1;
@@ -3412,14 +3412,14 @@ impl<'r> FinalHtlcMinimumCltvExpiryReader<'r> {
         Uint64Reader::new_unchecked(&self.as_slice()[0..8])
     }
 }
-impl<'r> molecule::prelude::Reader<'r> for FinalHtlcMinimumCltvExpiryReader<'r> {
-    type Entity = FinalHtlcMinimumCltvExpiry;
-    const NAME: &'static str = "FinalHtlcMinimumCltvExpiryReader";
+impl<'r> molecule::prelude::Reader<'r> for FinalHtlcMinimumExpiryDeltaReader<'r> {
+    type Entity = FinalHtlcMinimumExpiryDelta;
+    const NAME: &'static str = "FinalHtlcMinimumExpiryDeltaReader";
     fn to_entity(&self) -> Self::Entity {
         Self::Entity::new_unchecked(self.as_slice().to_owned().into())
     }
     fn new_unchecked(slice: &'r [u8]) -> Self {
-        FinalHtlcMinimumCltvExpiryReader(slice)
+        FinalHtlcMinimumExpiryDeltaReader(slice)
     }
     fn as_slice(&self) -> &'r [u8] {
         self.0
@@ -3434,10 +3434,10 @@ impl<'r> molecule::prelude::Reader<'r> for FinalHtlcMinimumCltvExpiryReader<'r> 
     }
 }
 #[derive(Clone, Debug, Default)]
-pub struct FinalHtlcMinimumCltvExpiryBuilder {
+pub struct FinalHtlcMinimumExpiryDeltaBuilder {
     pub(crate) value: Uint64,
 }
-impl FinalHtlcMinimumCltvExpiryBuilder {
+impl FinalHtlcMinimumExpiryDeltaBuilder {
     pub const TOTAL_SIZE: usize = 8;
     pub const FIELD_SIZES: [usize; 1] = [8];
     pub const FIELD_COUNT: usize = 1;
@@ -3446,9 +3446,9 @@ impl FinalHtlcMinimumCltvExpiryBuilder {
         self
     }
 }
-impl molecule::prelude::Builder for FinalHtlcMinimumCltvExpiryBuilder {
-    type Entity = FinalHtlcMinimumCltvExpiry;
-    const NAME: &'static str = "FinalHtlcMinimumCltvExpiryBuilder";
+impl molecule::prelude::Builder for FinalHtlcMinimumExpiryDeltaBuilder {
+    type Entity = FinalHtlcMinimumExpiryDelta;
+    const NAME: &'static str = "FinalHtlcMinimumExpiryDeltaBuilder";
     fn expected_length(&self) -> usize {
         Self::TOTAL_SIZE
     }
@@ -3460,7 +3460,7 @@ impl molecule::prelude::Builder for FinalHtlcMinimumCltvExpiryBuilder {
         let mut inner = Vec::with_capacity(self.expected_length());
         self.write(&mut inner)
             .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
-        FinalHtlcMinimumCltvExpiry::new_unchecked(inner.into())
+        FinalHtlcMinimumExpiryDelta::new_unchecked(inner.into())
     }
 }
 #[derive(Clone)]
@@ -4884,7 +4884,7 @@ impl InvoiceAttr {
             0 => ExpiryTime::new_unchecked(inner).into(),
             1 => Description::new_unchecked(inner).into(),
             2 => FinalHtlcTimeout::new_unchecked(inner).into(),
-            3 => FinalHtlcMinimumCltvExpiry::new_unchecked(inner).into(),
+            3 => FinalHtlcMinimumExpiryDelta::new_unchecked(inner).into(),
             4 => FallbackAddr::new_unchecked(inner).into(),
             5 => Feature::new_unchecked(inner).into(),
             6 => UdtScript::new_unchecked(inner).into(),
@@ -4956,7 +4956,7 @@ impl<'r> InvoiceAttrReader<'r> {
             0 => ExpiryTimeReader::new_unchecked(inner).into(),
             1 => DescriptionReader::new_unchecked(inner).into(),
             2 => FinalHtlcTimeoutReader::new_unchecked(inner).into(),
-            3 => FinalHtlcMinimumCltvExpiryReader::new_unchecked(inner).into(),
+            3 => FinalHtlcMinimumExpiryDeltaReader::new_unchecked(inner).into(),
             4 => FallbackAddrReader::new_unchecked(inner).into(),
             5 => FeatureReader::new_unchecked(inner).into(),
             6 => UdtScriptReader::new_unchecked(inner).into(),
@@ -4990,7 +4990,7 @@ impl<'r> molecule::prelude::Reader<'r> for InvoiceAttrReader<'r> {
             0 => ExpiryTimeReader::verify(inner_slice, compatible),
             1 => DescriptionReader::verify(inner_slice, compatible),
             2 => FinalHtlcTimeoutReader::verify(inner_slice, compatible),
-            3 => FinalHtlcMinimumCltvExpiryReader::verify(inner_slice, compatible),
+            3 => FinalHtlcMinimumExpiryDeltaReader::verify(inner_slice, compatible),
             4 => FallbackAddrReader::verify(inner_slice, compatible),
             5 => FeatureReader::verify(inner_slice, compatible),
             6 => UdtScriptReader::verify(inner_slice, compatible),
@@ -5035,7 +5035,7 @@ pub enum InvoiceAttrUnion {
     ExpiryTime(ExpiryTime),
     Description(Description),
     FinalHtlcTimeout(FinalHtlcTimeout),
-    FinalHtlcMinimumCltvExpiry(FinalHtlcMinimumCltvExpiry),
+    FinalHtlcMinimumExpiryDelta(FinalHtlcMinimumExpiryDelta),
     FallbackAddr(FallbackAddr),
     Feature(Feature),
     UdtScript(UdtScript),
@@ -5047,7 +5047,7 @@ pub enum InvoiceAttrUnionReader<'r> {
     ExpiryTime(ExpiryTimeReader<'r>),
     Description(DescriptionReader<'r>),
     FinalHtlcTimeout(FinalHtlcTimeoutReader<'r>),
-    FinalHtlcMinimumCltvExpiry(FinalHtlcMinimumCltvExpiryReader<'r>),
+    FinalHtlcMinimumExpiryDelta(FinalHtlcMinimumExpiryDeltaReader<'r>),
     FallbackAddr(FallbackAddrReader<'r>),
     Feature(FeatureReader<'r>),
     UdtScript(UdtScriptReader<'r>),
@@ -5071,12 +5071,12 @@ impl ::core::fmt::Display for InvoiceAttrUnion {
             InvoiceAttrUnion::FinalHtlcTimeout(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, FinalHtlcTimeout::NAME, item)
             }
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(ref item) => {
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(ref item) => {
                 write!(
                     f,
                     "{}::{}({})",
                     Self::NAME,
-                    FinalHtlcMinimumCltvExpiry::NAME,
+                    FinalHtlcMinimumExpiryDelta::NAME,
                     item
                 )
             }
@@ -5110,12 +5110,12 @@ impl<'r> ::core::fmt::Display for InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::FinalHtlcTimeout(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, FinalHtlcTimeout::NAME, item)
             }
-            InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(ref item) => {
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(ref item) => {
                 write!(
                     f,
                     "{}::{}({})",
                     Self::NAME,
-                    FinalHtlcMinimumCltvExpiry::NAME,
+                    FinalHtlcMinimumExpiryDelta::NAME,
                     item
                 )
             }
@@ -5143,7 +5143,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::Description(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::FinalHtlcTimeout(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::FallbackAddr(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnion::UdtScript(ref item) => write!(f, "{}", item),
@@ -5158,7 +5158,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::ExpiryTime(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::Description(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::FinalHtlcTimeout(ref item) => write!(f, "{}", item),
-            InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(ref item) => write!(f, "{}", item),
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::FallbackAddr(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::Feature(ref item) => write!(f, "{}", item),
             InvoiceAttrUnionReader::UdtScript(ref item) => write!(f, "{}", item),
@@ -5182,9 +5182,9 @@ impl ::core::convert::From<FinalHtlcTimeout> for InvoiceAttrUnion {
         InvoiceAttrUnion::FinalHtlcTimeout(item)
     }
 }
-impl ::core::convert::From<FinalHtlcMinimumCltvExpiry> for InvoiceAttrUnion {
-    fn from(item: FinalHtlcMinimumCltvExpiry) -> Self {
-        InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(item)
+impl ::core::convert::From<FinalHtlcMinimumExpiryDelta> for InvoiceAttrUnion {
+    fn from(item: FinalHtlcMinimumExpiryDelta) -> Self {
+        InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item)
     }
 }
 impl ::core::convert::From<FallbackAddr> for InvoiceAttrUnion {
@@ -5227,11 +5227,11 @@ impl<'r> ::core::convert::From<FinalHtlcTimeoutReader<'r>> for InvoiceAttrUnionR
         InvoiceAttrUnionReader::FinalHtlcTimeout(item)
     }
 }
-impl<'r> ::core::convert::From<FinalHtlcMinimumCltvExpiryReader<'r>>
+impl<'r> ::core::convert::From<FinalHtlcMinimumExpiryDeltaReader<'r>>
     for InvoiceAttrUnionReader<'r>
 {
-    fn from(item: FinalHtlcMinimumCltvExpiryReader<'r>) -> Self {
-        InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(item)
+    fn from(item: FinalHtlcMinimumExpiryDeltaReader<'r>) -> Self {
+        InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(item)
     }
 }
 impl<'r> ::core::convert::From<FallbackAddrReader<'r>> for InvoiceAttrUnionReader<'r> {
@@ -5266,7 +5266,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_bytes(),
             InvoiceAttrUnion::Description(item) => item.as_bytes(),
             InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_bytes(),
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(item) => item.as_bytes(),
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_bytes(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_bytes(),
             InvoiceAttrUnion::Feature(item) => item.as_bytes(),
             InvoiceAttrUnion::UdtScript(item) => item.as_bytes(),
@@ -5279,7 +5279,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_slice(),
             InvoiceAttrUnion::Description(item) => item.as_slice(),
             InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_slice(),
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(item) => item.as_slice(),
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_slice(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_slice(),
             InvoiceAttrUnion::Feature(item) => item.as_slice(),
             InvoiceAttrUnion::UdtScript(item) => item.as_slice(),
@@ -5292,7 +5292,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(_) => 0,
             InvoiceAttrUnion::Description(_) => 1,
             InvoiceAttrUnion::FinalHtlcTimeout(_) => 2,
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(_) => 3,
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(_) => 3,
             InvoiceAttrUnion::FallbackAddr(_) => 4,
             InvoiceAttrUnion::Feature(_) => 5,
             InvoiceAttrUnion::UdtScript(_) => 6,
@@ -5305,7 +5305,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(_) => "ExpiryTime",
             InvoiceAttrUnion::Description(_) => "Description",
             InvoiceAttrUnion::FinalHtlcTimeout(_) => "FinalHtlcTimeout",
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(_) => "FinalHtlcMinimumCltvExpiry",
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(_) => "FinalHtlcMinimumExpiryDelta",
             InvoiceAttrUnion::FallbackAddr(_) => "FallbackAddr",
             InvoiceAttrUnion::Feature(_) => "Feature",
             InvoiceAttrUnion::UdtScript(_) => "UdtScript",
@@ -5318,7 +5318,7 @@ impl InvoiceAttrUnion {
             InvoiceAttrUnion::ExpiryTime(item) => item.as_reader().into(),
             InvoiceAttrUnion::Description(item) => item.as_reader().into(),
             InvoiceAttrUnion::FinalHtlcTimeout(item) => item.as_reader().into(),
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(item) => item.as_reader().into(),
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(item) => item.as_reader().into(),
             InvoiceAttrUnion::FallbackAddr(item) => item.as_reader().into(),
             InvoiceAttrUnion::Feature(item) => item.as_reader().into(),
             InvoiceAttrUnion::UdtScript(item) => item.as_reader().into(),
@@ -5334,7 +5334,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::ExpiryTime(item) => item.as_slice(),
             InvoiceAttrUnionReader::Description(item) => item.as_slice(),
             InvoiceAttrUnionReader::FinalHtlcTimeout(item) => item.as_slice(),
-            InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(item) => item.as_slice(),
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(item) => item.as_slice(),
             InvoiceAttrUnionReader::FallbackAddr(item) => item.as_slice(),
             InvoiceAttrUnionReader::Feature(item) => item.as_slice(),
             InvoiceAttrUnionReader::UdtScript(item) => item.as_slice(),
@@ -5347,7 +5347,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::ExpiryTime(_) => 0,
             InvoiceAttrUnionReader::Description(_) => 1,
             InvoiceAttrUnionReader::FinalHtlcTimeout(_) => 2,
-            InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(_) => 3,
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(_) => 3,
             InvoiceAttrUnionReader::FallbackAddr(_) => 4,
             InvoiceAttrUnionReader::Feature(_) => 5,
             InvoiceAttrUnionReader::UdtScript(_) => 6,
@@ -5360,7 +5360,7 @@ impl<'r> InvoiceAttrUnionReader<'r> {
             InvoiceAttrUnionReader::ExpiryTime(_) => "ExpiryTime",
             InvoiceAttrUnionReader::Description(_) => "Description",
             InvoiceAttrUnionReader::FinalHtlcTimeout(_) => "FinalHtlcTimeout",
-            InvoiceAttrUnionReader::FinalHtlcMinimumCltvExpiry(_) => "FinalHtlcMinimumCltvExpiry",
+            InvoiceAttrUnionReader::FinalHtlcMinimumExpiryDelta(_) => "FinalHtlcMinimumExpiryDelta",
             InvoiceAttrUnionReader::FallbackAddr(_) => "FallbackAddr",
             InvoiceAttrUnionReader::Feature(_) => "Feature",
             InvoiceAttrUnionReader::UdtScript(_) => "UdtScript",
@@ -5384,8 +5384,8 @@ impl From<FinalHtlcTimeout> for InvoiceAttr {
         Self::new_builder().set(value).build()
     }
 }
-impl From<FinalHtlcMinimumCltvExpiry> for InvoiceAttr {
-    fn from(value: FinalHtlcMinimumCltvExpiry) -> Self {
+impl From<FinalHtlcMinimumExpiryDelta> for InvoiceAttr {
+    fn from(value: FinalHtlcMinimumExpiryDelta) -> Self {
         Self::new_builder().set(value).build()
     }
 }

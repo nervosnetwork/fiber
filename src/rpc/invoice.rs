@@ -34,7 +34,7 @@ pub(crate) struct NewInvoiceParams {
     final_cltv: Option<u64>,
     /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
-    final_htlc_timeout: Option<u64>,
+    final_expiry_delta: Option<u64>,
     /// The UDT type script of the invoice.
     udt_type_script: Option<Script>,
     /// The hash algorithm of the invoice.
@@ -113,11 +113,12 @@ trait InvoiceRpc {
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
     keypair: Option<(PublicKey, SecretKey)>,
+    currency: Option<Currency>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
     pub(crate) fn new(store: S, config: Option<FiberConfig>) -> Self {
-        let keypair = config.map(|config| {
+        let config = config.map(|config| {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -129,9 +130,21 @@ impl<S> InvoiceRpcServerImpl<S> {
                 PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
                 private_key.into(),
             );
-            keypair
+
+            // restrict currency to be the same as network
+            let currency = match config.chain.as_str() {
+                "mainnet" => Currency::Fibb,
+                "testnet" => Currency::Fibt,
+                _ => Currency::Fibd,
+            };
+
+            (keypair, currency)
         });
-        Self { store, keypair }
+        Self {
+            store,
+            keypair: config.as_ref().map(|(kp, _)| kp.clone()),
+            currency: config.as_ref().map(|(_, currency)| *currency),
+        }
     }
 }
 
@@ -144,6 +157,15 @@ where
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if let Some(currency) = self.currency {
+            if currency != params.currency {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    format!("Currency must be {:?} with the chain network", currency),
+                    Some(params),
+                ));
+            }
+        }
         let mut invoice_builder = InvoiceBuilder::new(params.currency)
             .amount(Some(params.amount))
             .payment_preimage(params.payment_preimage);
@@ -157,8 +179,8 @@ where
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
-        if let Some(final_cltv) = params.final_cltv {
-            invoice_builder = invoice_builder.final_cltv(final_cltv);
+        if let Some(final_expiry_delta) = params.final_expiry_delta {
+            invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
         };
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());

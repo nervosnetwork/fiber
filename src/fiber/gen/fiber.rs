@@ -13510,12 +13510,7 @@ impl ::core::fmt::Display for ChannelUpdate {
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(
-            f,
-            ", {}: {}",
-            "tlc_locktime_expiry_delta",
-            self.tlc_locktime_expiry_delta()
-        )?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
         write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
         write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
@@ -13600,7 +13595,7 @@ impl ChannelUpdate {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tlc_locktime_expiry_delta(&self) -> Uint64 {
+    pub fn tlc_expiry_delta(&self) -> Uint64 {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
@@ -13661,7 +13656,7 @@ impl molecule::prelude::Entity for ChannelUpdate {
             .timestamp(self.timestamp())
             .message_flags(self.message_flags())
             .channel_flags(self.channel_flags())
-            .tlc_locktime_expiry_delta(self.tlc_locktime_expiry_delta())
+            .tlc_expiry_delta(self.tlc_expiry_delta())
             .tlc_minimum_value(self.tlc_minimum_value())
             .tlc_maximum_value(self.tlc_maximum_value())
             .tlc_fee_proportional_millionths(self.tlc_fee_proportional_millionths())
@@ -13692,12 +13687,7 @@ impl<'r> ::core::fmt::Display for ChannelUpdateReader<'r> {
         write!(f, ", {}: {}", "timestamp", self.timestamp())?;
         write!(f, ", {}: {}", "message_flags", self.message_flags())?;
         write!(f, ", {}: {}", "channel_flags", self.channel_flags())?;
-        write!(
-            f,
-            ", {}: {}",
-            "tlc_locktime_expiry_delta",
-            self.tlc_locktime_expiry_delta()
-        )?;
+        write!(f, ", {}: {}", "tlc_expiry_delta", self.tlc_expiry_delta())?;
         write!(f, ", {}: {}", "tlc_minimum_value", self.tlc_minimum_value())?;
         write!(f, ", {}: {}", "tlc_maximum_value", self.tlc_maximum_value())?;
         write!(
@@ -13767,7 +13757,7 @@ impl<'r> ChannelUpdateReader<'r> {
         let end = molecule::unpack_number(&slice[28..]) as usize;
         Uint32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tlc_locktime_expiry_delta(&self) -> Uint64Reader<'r> {
+    pub fn tlc_expiry_delta(&self) -> Uint64Reader<'r> {
         let slice = self.as_slice();
         let start = molecule::unpack_number(&slice[28..]) as usize;
         let end = molecule::unpack_number(&slice[32..]) as usize;
@@ -13863,7 +13853,7 @@ pub struct ChannelUpdateBuilder {
     pub(crate) timestamp: Uint64,
     pub(crate) message_flags: Uint32,
     pub(crate) channel_flags: Uint32,
-    pub(crate) tlc_locktime_expiry_delta: Uint64,
+    pub(crate) tlc_expiry_delta: Uint64,
     pub(crate) tlc_minimum_value: Uint128,
     pub(crate) tlc_maximum_value: Uint128,
     pub(crate) tlc_fee_proportional_millionths: Uint128,
@@ -13894,8 +13884,8 @@ impl ChannelUpdateBuilder {
         self.channel_flags = v;
         self
     }
-    pub fn tlc_locktime_expiry_delta(mut self, v: Uint64) -> Self {
-        self.tlc_locktime_expiry_delta = v;
+    pub fn tlc_expiry_delta(mut self, v: Uint64) -> Self {
+        self.tlc_expiry_delta = v;
         self
     }
     pub fn tlc_minimum_value(mut self, v: Uint128) -> Self {
@@ -13922,7 +13912,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
             + self.timestamp.as_slice().len()
             + self.message_flags.as_slice().len()
             + self.channel_flags.as_slice().len()
-            + self.tlc_locktime_expiry_delta.as_slice().len()
+            + self.tlc_expiry_delta.as_slice().len()
             + self.tlc_minimum_value.as_slice().len()
             + self.tlc_maximum_value.as_slice().len()
             + self.tlc_fee_proportional_millionths.as_slice().len()
@@ -13943,7 +13933,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         offsets.push(total_size);
         total_size += self.channel_flags.as_slice().len();
         offsets.push(total_size);
-        total_size += self.tlc_locktime_expiry_delta.as_slice().len();
+        total_size += self.tlc_expiry_delta.as_slice().len();
         offsets.push(total_size);
         total_size += self.tlc_minimum_value.as_slice().len();
         offsets.push(total_size);
@@ -13960,7 +13950,7 @@ impl molecule::prelude::Builder for ChannelUpdateBuilder {
         writer.write_all(self.timestamp.as_slice())?;
         writer.write_all(self.message_flags.as_slice())?;
         writer.write_all(self.channel_flags.as_slice())?;
-        writer.write_all(self.tlc_locktime_expiry_delta.as_slice())?;
+        writer.write_all(self.tlc_expiry_delta.as_slice())?;
         writer.write_all(self.tlc_minimum_value.as_slice())?;
         writer.write_all(self.tlc_maximum_value.as_slice())?;
         writer.write_all(self.tlc_fee_proportional_millionths.as_slice())?;

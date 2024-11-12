@@ -2,8 +2,7 @@
 ## Instead the initialize program `udt-init` will use it as a config template to generate `config.yml` for nodes
 
 fiber:
-  listening_port: 8346
-  #announce_node_interval_seconds: 36000
+  chain: dev.toml
   auto_announce_node: true
 
 rpc:

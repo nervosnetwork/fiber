@@ -33,7 +33,7 @@ fn test_add_tlc_serialization() {
         tlc_id: 42,
         amount: 42,
         payment_hash: [42; 32].into(),
-        expiry: 42.into(),
+        expiry: 42,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: vec![],
     };

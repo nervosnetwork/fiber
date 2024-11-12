@@ -4,6 +4,7 @@ use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use musig2::CompactSignature;
+use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
     async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
@@ -107,8 +108,16 @@ const NUM_PEER_CONNECTIONS: usize = 40;
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
+static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
+
+pub fn init_chain_hash(chain_hash: Hash256) {
+    CHAIN_HASH_INSTANCE
+        .set(chain_hash)
+        .expect("init_chain_hash should only be called once");
+}
+
 pub(crate) fn get_chain_hash() -> Hash256 {
-    Default::default()
+    CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -146,7 +155,7 @@ pub struct NodeInfoResponse {
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
     pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -259,7 +268,7 @@ pub struct OpenChannelCommand {
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
     pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
@@ -275,12 +284,11 @@ pub struct SendPaymentCommand {
     // the amount of the payment
     pub amount: Option<u128>,
     // The hash to use within the payment's HTLC
-    // FIXME: this should be optional when AMP is enabled
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
-    pub final_cltv_delta: Option<u64>,
+    // The htlc expiry delta that should be used to set the timelock for the final hop
+    pub final_htlc_expiry_delta: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -303,7 +311,7 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_cltv_delta: Option<u64>,
+    pub final_htlc_expiry_delta: Option<u64>,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -404,7 +412,7 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_cltv_delta: command.final_cltv_delta,
+            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,
@@ -1544,7 +1552,10 @@ where
                 // TODO: It is possible that the remote peer of the channel may repeatedly
                 // receive the same message.
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
-                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
+                debug!(
+                    "Broadcasting message to randomly selected peers {:?} (from {:?})",
+                    &peer_ids, &state.peer_id
+                );
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1720,10 +1731,10 @@ where
                 channel_announcement,
             ) => {
                 debug!(
-                    "Received channel announcement message for channel (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
-                    &peer_id,
+                    "Processing our channel announcement message (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
                     &block_number,
                     &tx_index,
+                    &peer_id,
                     &channel_announcement
                 );
                 // Adding this owned channel to the network graph.
@@ -1762,6 +1773,10 @@ where
             }
 
             NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                debug!(
+                    "Processing our channel update message to peer {:?}: {:?}",
+                    &peer_id, &channel_update
+                );
                 let mut graph = self.network_graph.write().await;
                 graph
                     .process_channel_update(channel_update.clone())
@@ -1798,7 +1813,7 @@ where
                         .open_channel_auto_accept_min_ckb_funding_amount,
                     auto_accept_channel_ckb_funding_amount: state
                         .auto_accept_channel_ckb_funding_amount,
-                    tlc_locktime_expiry_delta: state.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
                     tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
@@ -1946,6 +1961,11 @@ where
                         &channel_announcement.node2_id
                     )));
                 }
+
+                debug!(
+                    "Node signatures in channel announcement message verified: {:?}",
+                    &channel_announcement
+                );
 
                 let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
                     self.chain_actor,
@@ -2555,8 +2575,8 @@ pub struct NetworkActorState<S> {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
-    // The default locktime expiry delta to forward tlcs.
-    tlc_locktime_expiry_delta: u64,
+    // The default expiry delta to forward tlcs.
+    tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
     tlc_max_value: u128,
@@ -2861,7 +2881,7 @@ where
             commitment_fee_rate,
             commitment_delay_epoch,
             funding_fee_rate,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_min_value,
             tlc_max_value,
             tlc_fee_proportional_millionths,
@@ -2900,7 +2920,7 @@ where
                 funding_amount,
                 seed,
                 public_channel_info: public.then_some(PublicChannelInfo::new(
-                    tlc_locktime_expiry_delta.unwrap_or(self.tlc_locktime_expiry_delta),
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_max_value.unwrap_or(self.tlc_max_value),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
@@ -2977,7 +2997,7 @@ where
                 funding_amount,
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
-                    self.tlc_locktime_expiry_delta,
+                    self.tlc_expiry_delta,
                     self.tlc_min_value,
                     self.tlc_max_value,
                     self.tlc_fee_proportional_millionths,
@@ -3362,7 +3382,7 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        info!("Peer {:?} disconnected", id);
+        info!("Peer {:?} disconnected from us ({:?})", id, &self.peer_id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -3895,7 +3915,7 @@ where
 
         tracker.spawn(async move {
             service.run().await;
-            debug!("Tentacle service shutdown");
+            debug!("Tentacle service stopped");
         });
 
         let mut graph = self.network_graph.write().await;
@@ -3950,7 +3970,7 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            tlc_locktime_expiry_delta: config.tlc_locktime_expiry_delta(),
+            tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
@@ -4139,8 +4159,8 @@ impl ServiceProtocol for Handle {
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
         info!(
-            "proto id [{}] close on session [{}]",
-            context.proto_id, context.session.id
+            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
+            context.proto_id, context.session.id, &context.session.address, &context.session.ty
         );
 
         match context.session.remote_pubkey.as_ref() {

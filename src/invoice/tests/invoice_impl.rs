@@ -48,7 +48,7 @@ fn mock_invoice() -> CkbInvoice {
                 .as_millis(),
             attrs: vec![
                 Attribute::FinalHtlcTimeout(5),
-                Attribute::FinalHtlcMinimumCltvExpiry(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
                 Attribute::FallbackAddr("address".to_string()),
@@ -161,7 +161,7 @@ fn test_invoice_bc32m_not_same() {
             timestamp: 0,
             attrs: vec![
                 Attribute::FinalHtlcTimeout(5),
-                Attribute::FinalHtlcMinimumCltvExpiry(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description hello".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
                 Attribute::FallbackAddr("address".to_string()),
@@ -202,7 +202,7 @@ fn test_invoice_builder() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
@@ -231,7 +231,7 @@ fn test_invoice_check_signature() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
@@ -264,7 +264,7 @@ fn test_invoice_check_signature() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .build()
         .unwrap();
 
@@ -288,7 +288,7 @@ fn test_invoice_signature_check() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));

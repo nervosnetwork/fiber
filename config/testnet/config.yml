@@ -1,10 +1,42 @@
 fiber:
   listening_addr: "/ip4/127.0.0.1/tcp/8228"
-  network: "Testnet"
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/54.179.226.154/tcp/18228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
   announce_listening_addr: true
+  # chain spec, can be mainnet | testnet | "path to chain spec file"
+  chain: testnet
+  # lock script configurations related to fiber network
+  # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2024-09-14-084742.json
+  scripts:
+    - name: FundingLock
+      script:
+        code_hash: 0x6c67887fe201ee0c7853f1682c0b77c0e6214044c156c7558269390a8afa6d7c
+        hash_type: type
+        args: 0x
+      cell_deps:
+        - out_point:
+            tx_hash: 0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43
+            index: 0x0
+          dep_type: code
+        - out_point:
+            tx_hash: 0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49 # ckb_auth
+            index: 0x0
+          dep_type: code
+    - name: CommitmentLock
+      script:
+        code_hash: 0x740dee83f87c6f309824d8fd3fbdd3c8380ee6fc9acc90b1a748438afcdf81d8
+        hash_type: type
+        args: 0x
+      cell_deps:
+        - out_point:
+            tx_hash: 0x89af398edc7ed0054506b33349b031097d94378e11e77bf0690ee69d82623a43
+            index: 0x1
+          dep_type: code
+        - out_point:
+            tx_hash: 0xbfd6d68b328a02606f1f65ee0f79f8ed5f76dfe86998c7aaa9ee4720d53f4c49 #ckb_auth
+            index: 0x0
+          dep_type: code
 
 rpc:
   listening_addr: "127.0.0.1:8227"

@@ -6,13 +6,16 @@ use crate::fiber::{
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
-    serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
+    serde_utils::{EntityHex, U128Hex, U64Hex},
+    types::{Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
-use ckb_types::core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate};
+use ckb_types::{
+    core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
+    packed::OutPoint,
+};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -58,7 +61,7 @@ pub(crate) struct OpenChannelParams {
 
     /// The expiry delta for the TLC locktime, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
 
     /// The minimum value for a TLC, an optional parameter.
     #[serde_as(as = "Option<U128Hex>")]
@@ -132,6 +135,11 @@ pub(crate) struct ListChannelsResult {
 pub(crate) struct Channel {
     /// The channel ID
     channel_id: Hash256,
+    /// Whether the channel is public
+    is_public: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    /// The outpoint of the channel
+    channel_outpoint: Option<OutPoint>,
     /// The peer ID of the channel
     #[serde_as(as = "DisplayFromStr")]
     peer_id: PeerId,
@@ -161,13 +169,14 @@ pub(crate) struct Channel {
 pub(crate) struct AddTlcParams {
     /// The channel ID of the channel to add the TLC to
     channel_id: Hash256,
-    #[serde_as(as = "U128Hex")]
     /// The amount of the TLC
+    #[serde_as(as = "U128Hex")]
     amount: u128,
     /// The payment hash of the TLC
     payment_hash: Hash256,
     /// The expiry of the TLC
-    expiry: LockTime,
+    #[serde_as(as = "U64Hex")]
+    expiry: u64,
     /// The hash algorithm of the TLC
     hash_algorithm: Option<HashAlgorithm>,
 }
@@ -226,7 +235,8 @@ pub struct UpdateChannelParams {
     enabled: Option<bool>,
     /// The CLTV delta from the current height that should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    /// The expiry delta for the TLC locktime
+    tlc_expiry_delta: Option<u64>,
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
@@ -272,13 +282,12 @@ pub(crate) struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U128Hex>")]
     amount: Option<u128>,
 
-    /// The hash to use within the payment's HTLC
-    /// FIXME: this should be optional when AMP is enabled
+    /// the hash to use within the payment's HTLC
     payment_hash: Option<Hash256>,
 
-    /// The CLTV delta from the current height that should be used to set the timelock for the final hop
+    /// the htlc expiry delta should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    final_cltv_delta: Option<u64>,
+    final_htlc_expiry_delta: Option<u64>,
 
     /// the encoded invoice to send to the recipient
     invoice: Option<String>,
@@ -405,7 +414,7 @@ where
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
-                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
                     tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
@@ -453,6 +462,8 @@ where
                     .get_channel_actor_state(&channel_id)
                     .map(|state| Channel {
                         channel_id,
+                        is_public: state.is_public(),
+                        channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state
                             .funding_udt_type_script
@@ -584,7 +595,7 @@ where
                     command: ChannelCommand::Update(
                         UpdateCommand {
                             enabled: params.enabled,
-                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                            tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
                             tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
@@ -607,7 +618,7 @@ where
                     target_pubkey: params.target_pubkey,
                     amount: params.amount,
                     payment_hash: params.payment_hash,
-                    final_cltv_delta: params.final_cltv_delta,
+                    final_htlc_expiry_delta: params.final_htlc_expiry_delta,
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
