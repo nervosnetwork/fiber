@@ -92,6 +92,7 @@ impl MockNetworkGraph {
         min_htlc_value: Option<u128>,
         max_htlc_value: Option<u128>,
         udt_type_script: Option<Script>,
+        other_fee_rate: Option<u128>,
     ) {
         let public_key1 = self.keys[node_a];
         let public_key2 = self.keys[node_b];
@@ -132,6 +133,21 @@ impl MockNetworkGraph {
             channel_outpoint: channel_outpoint.clone(),
         };
         self.graph.process_channel_update(channel_update).unwrap();
+        if let Some(fee_rate) = other_fee_rate {
+            let channel_update = ChannelUpdate {
+                signature: None,
+                chain_hash: get_chain_hash(),
+                version: 0,
+                message_flags: 0,
+                channel_flags: 0,
+                tlc_expiry_delta: 144,
+                tlc_fee_proportional_millionths: fee_rate,
+                tlc_maximum_value: max_htlc_value.unwrap_or(10000),
+                tlc_minimum_value: min_htlc_value.unwrap_or(0),
+                channel_outpoint: channel_outpoint.clone(),
+            };
+            self.graph.process_channel_update(channel_update).unwrap();
+        }
     }
 
     pub fn add_edge(
@@ -148,6 +164,7 @@ impl MockNetworkGraph {
             fee_rate,
             Some(0),
             Some(10000),
+            None,
             None,
         );
     }
@@ -168,6 +185,7 @@ impl MockNetworkGraph {
             Some(0),
             Some(10000),
             Some(udt_type_script),
+            None,
         );
     }
 
@@ -541,8 +559,8 @@ fn test_graph_build_route_three_nodes() {
 fn test_graph_build_route_exceed_max_htlc_value() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with max_htlc_value set to 50
-    network.add_edge_with_config(0, 2, Some(500), Some(2), None, Some(50), None);
-    network.add_edge_with_config(2, 3, Some(500), Some(2), None, Some(50), None);
+    network.add_edge_with_config(0, 2, Some(500), Some(2), None, Some(50), None, None);
+    network.add_edge_with_config(2, 3, Some(500), Some(2), None, Some(50), None, None);
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount exceeding max_htlc_value
@@ -567,8 +585,8 @@ fn test_graph_build_route_exceed_max_htlc_value() {
 fn test_graph_build_route_below_min_htlc_value() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_htlc_value set to 50
-    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
-    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None);
+    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
+    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, None);
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_htlc_value
@@ -837,6 +855,35 @@ fn test_graph_payment_pay_self_with_one_node() {
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
+    let route = network.graph.build_route(&payment_data);
+    assert!(route.is_ok());
+}
+
+#[test]
+fn test_graph_build_route_with_double_edge_node() {
+    let mut network = MockNetworkGraph::new(3);
+    // Add edges with min_htlc_value set to 50
+    network.add_edge_with_config(0, 2, Some(500), Some(500), Some(50), None, None, Some(100));
+    network.add_edge_with_config(2, 0, Some(500), Some(300), Some(50), None, None, Some(200));
+    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, Some(1));
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[0].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_htlc_expiry_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
     let route = network.graph.build_route(&payment_data);
     assert!(route.is_ok());
 }
