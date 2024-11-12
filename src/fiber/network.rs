@@ -597,12 +597,6 @@ pub struct FiberMessageWithSessionId {
     pub message: FiberMessage,
 }
 
-#[derive(Debug)]
-pub struct FiberMessageWithChannelId {
-    pub channel_id: Hash256,
-    pub message: FiberMessage,
-}
-
 pub struct NetworkActor<S> {
     // An event emitter to notify ourside observers.
     event_sender: mpsc::Sender<NetworkServiceEvent>,
@@ -2186,7 +2180,7 @@ where
                 return unknown_next_peer(reply);
             }
             Err(err) => {
-                // must be some error fron tentacle, set it as temporary node failure
+                // must be some error from tentacle, set it as temporary node failure
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err

@@ -548,6 +548,7 @@ where
                         "begin to remove tlc from previous channel: {:?}",
                         &previous_tlc
                     );
+                    assert!(previous_channel_id != state.get_id());
                     let (send, recv) = oneshot::channel::<Result<(), String>>();
                     let port = RpcReplyPort::from(send);
                     self.network
@@ -773,10 +774,8 @@ where
             } else if let Some(preimage) = self.store.get_invoice_preimage(&tlc.payment_hash) {
                 preimage
             } else {
-                error!(
-                    "No preimage found for payment hash: {:?}",
-                    &tlc.payment_hash
-                );
+                // here maybe the tlc is not the last hop, we can not settle down it now.
+                // maybe we should exclude it from the settle down list.
                 continue;
             };
             let command = RemoveTlcCommand {
@@ -935,12 +934,9 @@ where
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        let res = match recv.await.expect("expect command replied") {
-            Ok(tlc_id) => Ok(tlc_id),
-            Err(e) => Err(e),
-        };
+
         // If we failed to forward the onion packet, we should remove the tlc.
-        if let Err(res) = res {
+        if let Err(res) = recv.await.expect("expect command replied") {
             error!("Error forwarding onion packet: {:?}", res);
             let (send, recv) = oneshot::channel::<Result<(), String>>();
             let port = RpcReplyPort::from(send);
@@ -3848,7 +3844,6 @@ impl ChannelActorState {
     // will have the second pubkey.
     // This tlc must have valid local_committed_at and remote_committed_at fields.
     pub fn get_tlc_pubkeys(&self, tlc: &DetailedTLCInfo, local: bool) -> (Pubkey, Pubkey) {
-        debug!("Getting tlc pubkeys for tlc: {:?}", tlc);
         let is_offered = tlc.tlc.is_offered();
         let CommitmentNumbers {
             local: local_commitment_number,
@@ -3896,7 +3891,6 @@ impl ChannelActorState {
 
     fn get_active_htlcs(&self, local: bool) -> Vec<u8> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
-        debug!("All tlcs: {:?}", self.tlcs);
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
                 self.get_active_received_tlc_with_pubkeys(local)

@@ -1,0 +1,46 @@
+meta {
+  name: Node2 open a channel to Node1
+  type: http
+  seq: 26
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "open_channel",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}",
+        "funding_amount": "0x277aab54d000",
+        "public": true,
+        "tlc_fee_proportional_millionths": "0x4B0"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.temporary_channel_id: isDefined
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 1000));
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("26 step result: ", res.body);
+}

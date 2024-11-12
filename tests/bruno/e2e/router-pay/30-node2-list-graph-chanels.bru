@@ -1,7 +1,7 @@
 meta {
   name: get channels from node2
   type: http
-  seq: 11
+  seq: 30
 }
 
 post {
@@ -19,20 +19,22 @@ body:json {
   {
     "id": 42,
     "jsonrpc": "2.0",
-    "method": "list_channels",
+    "method": "graph_channels",
     "params": [
-      {
-        "peer_id": "{{NODE3_PEERID}}"
-      }
+      { }
     ]
   }
 }
+
 
 assert {
   res.status: eq 200
 }
 
 script:post-response {
-  await new Promise(r => setTimeout(r, 5000));
-  console.log("step 11 list channels: ", res.body.result.channels);
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("list channels: ", res.body.result.channels);
+  if (res.body.result.channels.length != 3) {
+    throw new Error("graph channels length is not right");
+  }
 }

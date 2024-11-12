@@ -812,6 +812,36 @@ fn test_graph_payment_pay_single_path() {
 }
 
 #[test]
+fn test_graph_payment_pay_self_with_one_node() {
+    let mut network = MockNetworkGraph::new(9);
+    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(2, 0, Some(500), Some(2));
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[0].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_htlc_expiry_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into());
+    assert!(payment_data.is_ok());
+    let payment_data = payment_data.unwrap();
+
+    let route = network.graph.build_route(&payment_data);
+    assert!(route.is_ok());
+}
+
+#[test]
 fn test_graph_payment_pay_self_will_ok() {
     let mut network = MockNetworkGraph::new(9);
     network.add_edge(0, 2, Some(500), Some(2));

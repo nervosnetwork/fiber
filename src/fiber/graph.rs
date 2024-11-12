@@ -12,7 +12,7 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
@@ -646,15 +646,23 @@ where
             incoming_htlc_expiry: 0,
         });
         let route_to_self = source == target;
+        let mut last_hop_channels = HashSet::new();
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
+            let mut cur_hop_channels = HashSet::new();
             for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
                 if from == target && !route_to_self {
                     continue;
                 }
                 // if charge inbound fees for exit hop
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
+                    continue;
+                }
+
+                // if the channel is already visited in the last hop, skip it
+                if last_hop_channels.contains(&channel_info.out_point()) {
+                    error!("debug skip the same channel {:?}", channel_info.out_point());
                     continue;
                 }
 
@@ -716,7 +724,6 @@ where
                     debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                debug!("probability: {:?}", probability);
                 let agg_weight =
                     self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
@@ -727,7 +734,7 @@ where
                         continue;
                     }
                 }
-                let node: NodeHeapElement = NodeHeapElement {
+                let node = NodeHeapElement {
                     node_id: from,
                     weight,
                     distance,
@@ -737,9 +744,11 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
                 };
+                cur_hop_channels.insert(channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
+            last_hop_channels = cur_hop_channels.clone();
         }
 
         let mut current = source_node.node_id;
@@ -760,10 +769,11 @@ where
         }
 
         info!(
-            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}, result: {:?}",
             nodes_visited,
             edges_expanded,
-            started_time.elapsed()
+            started_time.elapsed(),
+            result
         );
         if result.is_empty() || current != target {
             return Err(GraphError::PathFind("no path found".to_string()));
