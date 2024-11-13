@@ -721,7 +721,6 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    debug!("probability is too low: {:?}", probability);
                     continue;
                 }
                 let agg_weight =
