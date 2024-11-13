@@ -383,6 +383,17 @@ impl SendPaymentData {
             Err(e) => return Err(e),
         };
 
+        if let Some(final_htlc_expiry_delta) = command.final_htlc_expiry_delta {
+            if let Some(invoice_final_htlc_minimum_expiry_delta) = invoice
+                .as_ref()
+                .and_then(|i| i.final_htlc_minimum_expiry_delta())
+            {
+                if *invoice_final_htlc_minimum_expiry_delta > final_htlc_expiry_delta {
+                    return Err("final_htlc_expiry_delta is less than invoice final_htlc_minimum_expiry_delta".to_string());
+                }
+            }
+        }
+
         let keysend = command.keysend.unwrap_or(false);
         let (payment_hash, preimage) = if !keysend {
             (

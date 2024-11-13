@@ -285,7 +285,7 @@ pub(crate) struct SendPaymentCommandParams {
     /// the hash to use within the payment's HTLC
     payment_hash: Option<Hash256>,
 
-    /// the htlc expiry delta should be used to set the timelock for the final hop
+    /// the htlc expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
     final_htlc_expiry_delta: Option<u64>,
 
