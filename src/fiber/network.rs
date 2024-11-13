@@ -284,7 +284,6 @@ pub struct SendPaymentCommand {
     // the amount of the payment
     pub amount: Option<u128>,
     // The hash to use within the payment's HTLC
-    // FIXME: this should be optional when AMP is enabled
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,

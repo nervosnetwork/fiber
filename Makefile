@@ -52,3 +52,16 @@ coverage-generate-report:
 	genhtml --ignore-errors inconsistent --ignore-errors corrupt --ignore-errors range --ignore-errors unmapped -o "${GRCOV_OUTPUT:.info=}" "${GRCOV_OUTPUT}"
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
+
+.PHONY: gen-rpc-doc
+gen-rpc-doc:
+	cargo install fiber-rpc-gen
+	fiber-rpc-gen ./src/rpc
+	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
+        echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
+		exit 1; \
+    fi
+
+.PHONY: check-dirty-rpc-doc
+check-dirty-rpc-doc: gen-rpc-doc
+	git diff --exit-code ./src/rpc/README.md

@@ -10,7 +10,9 @@ jobs:
       - uses: actions/checkout@v2
       - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
-      - run: cargo check
+      - run: |
+          cargo check
+          make check-dirty-rpc-doc
 
   cargo-shear:
     name: Cargo Shear

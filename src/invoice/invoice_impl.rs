@@ -30,10 +30,15 @@ pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CkbInvoiceStatus {
+    /// The invoice is open and can be paid.
     Open,
+    /// The invoice is cancelled.
     Cancelled,
+    /// The invoice is expired.
     Expired,
+    /// The invoice is received, but not settled yet.
     Received,
+    /// The invoice is paid.
     Paid,
 }
 
