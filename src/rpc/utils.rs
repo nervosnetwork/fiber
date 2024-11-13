@@ -26,12 +26,12 @@ macro_rules! handle_actor_call {
             Ok(result) => match result {
                 Ok(res) => Ok(res),
                 Err(e) => {
-                    debug!("Error: {:?}", e);
+                    error!("Error: {:?}", e);
                     Err(e)
                 }
             },
             Err(e) => {
-                debug!("Error: {:?}", e);
+                error!("Error: {:?}", e);
                 Err(e)
             }
         }

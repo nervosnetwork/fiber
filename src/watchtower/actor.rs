@@ -97,7 +97,11 @@ where
                                                 let tx: Transaction = tx.inner.into();
                                                 self.store.insert_watch_channel(
                                                     channel_id,
-                                                    tx.raw().outputs().get(0).unwrap().lock(),
+                                                    tx.raw()
+                                                        .outputs()
+                                                        .get(0)
+                                                        .expect("get output 0 of tx")
+                                                        .lock(),
                                                 );
                                             }
                                             Either::Right(_tx) => {
@@ -148,7 +152,9 @@ where
                     if channel_data.revocation_data.is_none() {
                         continue;
                     }
-                    let revocation_data = channel_data.revocation_data.unwrap();
+                    let revocation_data = channel_data
+                        .revocation_data
+                        .expect("get channel revocation data");
                     let secret_key = state.secret_key;
                     let rpc_url = state.config.rpc_url.clone();
                     tokio::task::block_in_place(move || {
@@ -188,14 +194,16 @@ where
                                                                     .raw()
                                                                     .outputs()
                                                                     .get(0)
-                                                                    .unwrap();
+                                                                    .expect("get output 0 of tx");
                                                                 let lock_args =
                                                                     output.lock().args().raw_data();
                                                                 let commitment_number =
                                                                     u64::from_le_bytes(
                                                                         lock_args[28..36]
                                                                             .try_into()
-                                                                            .unwrap(),
+                                                                            .expect(
+                                                                                "u64 from slice",
+                                                                            ),
                                                                     );
                                                                 if revocation_data.commitment_number
                                                                     >= commitment_number
@@ -292,7 +300,7 @@ fn build_revocation_tx(
         .build();
     let change_output_occupied_capacity = change_output
         .occupied_capacity(Capacity::shannons(0))
-        .unwrap()
+        .expect("capacity does not overflow")
         .as_u64();
     let placeholder_witness = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(vec![0u8; 65])).pack())
@@ -358,7 +366,7 @@ fn sign_revocation_tx(
     secret_key: SecretKey,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
     let tx = tx.data();
-    let witness = tx.witnesses().get(1).unwrap();
+    let witness = tx.witnesses().get(1).expect("get witness at index 1");
     let mut blake2b = new_blake2b();
     blake2b.update(tx.calc_tx_hash().as_slice());
     blake2b.update(&(witness.as_bytes().len() as u64).to_le_bytes());
@@ -376,7 +384,10 @@ fn sign_revocation_tx(
     let witness = WitnessArgs::new_builder()
         .lock(Some(ckb_types::bytes::Bytes::from(signature_bytes.to_vec())).pack())
         .build();
-    let witnesses = vec![tx.witnesses().get(0).unwrap(), witness.as_bytes().pack()];
+    let witnesses = vec![
+        tx.witnesses().get(0).expect("get witness at index 0"),
+        witness.as_bytes().pack(),
+    ];
 
     Ok(tx.as_advanced_builder().set_witnesses(witnesses).build())
 }

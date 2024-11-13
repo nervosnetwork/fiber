@@ -14,6 +14,7 @@ use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
+use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, warn};
@@ -55,6 +56,14 @@ impl ChannelInfo {
 
     pub fn node2(&self) -> Pubkey {
         self.announcement_msg.node2_id
+    }
+
+    pub fn node1_peerid(&self) -> PeerId {
+        self.announcement_msg.node1_id.tentacle_peer_id()
+    }
+
+    pub fn node2_peerid(&self) -> PeerId {
+        self.announcement_msg.node2_id.tentacle_peer_id()
     }
 
     pub fn channel_annoucement_timestamp(&self) -> u64 {
@@ -114,8 +123,8 @@ pub struct ChannelUpdateInfo {
     pub timestamp: u64,
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
-    /// The difference in CLTV values that you must have when routing through this channel.
-    pub cltv_expiry_delta: u64,
+    /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
+    pub htlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub htlc_minimum_value: u128,
     /// The maximum value which may be relayed to the next hop via the channel.
@@ -226,7 +235,10 @@ where
         let node_id = node_announcement.node_id;
         let node_info = NodeInfo {
             node_id,
-            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            timestamp: std::time::UNIX_EPOCH
+                .elapsed()
+                .expect("Duration since unix epoch")
+                .as_millis() as u64,
             anouncement_msg: node_announcement,
         };
         self.add_node(node_info);
@@ -403,9 +415,12 @@ where
 
         *update_info = Some(ChannelUpdateInfo {
             version: update.version,
-            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            timestamp: std::time::UNIX_EPOCH
+                .elapsed()
+                .expect("Duration since unix epoch")
+                .as_millis() as u64,
             enabled: !disabled,
-            cltv_expiry_delta: update.tlc_locktime_expiry_delta,
+            htlc_expiry_delta: update.tlc_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
             htlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
@@ -506,17 +521,18 @@ where
     /// including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_request: SendPaymentData,
+        payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
+        let payment_data = payment_data.clone();
         let source = self.get_source_pubkey();
-        let target = payment_request.target_pubkey;
-        let amount = payment_request.amount;
-        let preimage = payment_request.preimage;
-        let payment_hash = payment_request.payment_hash;
-        let udt_type_script = payment_request.udt_type_script;
-        let invoice = payment_request
+        let target = payment_data.target_pubkey;
+        let amount = payment_data.amount;
+        let preimage = payment_data.preimage;
+        let payment_hash = payment_data.payment_hash;
+        let udt_type_script = payment_data.udt_type_script;
+        let invoice = payment_data
             .invoice
-            .map(|x| x.parse::<CkbInvoice>().unwrap());
+            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
         let hash_algorithm = invoice
             .as_ref()
             .and_then(|x| x.hash_algorithm().copied())
@@ -527,12 +543,20 @@ where
             source, target, amount, payment_hash
         );
 
+        let allow_self_payment = payment_data.allow_self_payment;
+        if source == target && !allow_self_payment {
+            return Err(PathFindError::PathFind(
+                "source and target are the same and allow_self_payment is not enable".to_string(),
+            ));
+        }
+
         let route = self.find_path(
             source,
             target,
             amount,
-            payment_request.max_fee_amount,
+            payment_data.max_fee_amount,
             udt_type_script,
+            allow_self_payment,
         )?;
         assert!(!route.is_empty());
 
@@ -563,7 +587,7 @@ where
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
-                let expiry = channel_update.cltv_expiry_delta;
+                let expiry = channel_update.htlc_expiry_delta;
                 (fee, expiry)
             };
 
@@ -615,6 +639,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
+        allow_self: bool,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -630,11 +655,12 @@ where
             ));
         }
 
-        if source == target {
+        if source == target && !allow_self {
             return Err(PathFindError::PathFind(
                 "source and target are the same".to_string(),
             ));
         }
+
         let Some(source_node) = self.nodes.get(&source) else {
             return Err(PathFindError::PathFind(format!(
                 "source node not found: {:?}",
@@ -647,6 +673,7 @@ where
                 &target
             )));
         };
+
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -656,21 +683,31 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_cltv_height: 0,
+            incoming_htlc_expiry: 0,
         });
+        let route_to_self = source == target;
+        let mut last_hop_channels = HashMap::new();
         while let Some(cur_hop) = nodes_heap.pop() {
-            if cur_hop.node_id == source {
-                break;
-            }
             nodes_visited += 1;
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
-                edges_expanded += 1;
-                // if charge inbound fees for exit hop
+                if from == target && !route_to_self {
+                    continue;
+                }
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
                     continue;
                 }
+
+                // if the channel is already visited in the last hop, skip it
+                if last_hop_channels
+                    .values()
+                    .any(|x| x == &channel_info.out_point())
+                {
+                    continue;
+                }
+
+                edges_expanded += 1;
 
                 let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
@@ -709,11 +746,11 @@ where
                     );
                     continue;
                 }
-                let incomming_cltv = cur_hop.incoming_cltv_height
+                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry
                     + if from == source {
                         0
                     } else {
-                        channel_update.cltv_expiry_delta
+                        channel_update.htlc_expiry_delta
                     };
 
                 let probability = cur_hop.probability
@@ -728,9 +765,8 @@ where
                     debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                debug!("probability: {:?}", probability);
                 let agg_weight =
-                    self.edge_weight(amount_to_send, fee, channel_update.cltv_expiry_delta);
+                    self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -739,23 +775,24 @@ where
                         continue;
                     }
                 }
-                let node: NodeHeapElement = NodeHeapElement {
+                let node = NodeHeapElement {
                     node_id: from,
                     weight,
                     distance,
                     amount_received: amount_to_send,
-                    incoming_cltv_height: incomming_cltv,
+                    incoming_htlc_expiry,
                     fee_charged: fee,
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
                 };
+                last_hop_channels.insert(node.node_id, channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
         }
 
         let mut current = source_node.node_id;
-        while current != target {
+        loop {
             if let Some(elem) = distances.get(&current) {
                 let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
                 result.push(PathEdge {
@@ -766,13 +803,17 @@ where
             } else {
                 break;
             }
+            if current == target {
+                break;
+            }
         }
 
         info!(
-            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}, result: {:?}",
             nodes_visited,
             edges_expanded,
-            started_time.elapsed()
+            started_time.elapsed(),
+            result
         );
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
@@ -780,9 +821,9 @@ where
         Ok(result)
     }
 
-    fn edge_weight(&self, amount: u128, fee: u128, cltv_expiry_delta: u64) -> u128 {
+    fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
         let risk_factor: u128 = 15;
-        let time_lock_penalty = amount * cltv_expiry_delta as u128 * (risk_factor / 1000000000);
+        let time_lock_penalty = amount * htlc_expiry_delta as u128 * (risk_factor / 1000000000);
         fee + time_lock_penalty
     }
 
@@ -905,7 +946,10 @@ pub struct PaymentSession {
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
         Self {
             request,
             retried_times: 0,
@@ -926,7 +970,10 @@ impl PaymentSession {
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+        self.last_updated_at = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_micros();
     }
 
     pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {

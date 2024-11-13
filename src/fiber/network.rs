@@ -1,9 +1,10 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
-use ckb_types::core::TransactionView;
+use ckb_types::core::{EpochNumberWithFraction, TransactionView};
 use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
 use musig2::CompactSignature;
+use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
     async_trait as rasync_trait, call, call_t, Actor, ActorCell, ActorProcessingErr, ActorRef,
@@ -107,8 +108,16 @@ const NUM_PEER_CONNECTIONS: usize = 40;
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
 
+static CHAIN_HASH_INSTANCE: OnceCell<Hash256> = OnceCell::new();
+
+pub fn init_chain_hash(chain_hash: Hash256) {
+    CHAIN_HASH_INSTANCE
+        .set(chain_hash)
+        .expect("init_chain_hash should only be called once");
+}
+
 pub(crate) fn get_chain_hash() -> Hash256 {
-    Default::default()
+    CHAIN_HASH_INSTANCE.get().cloned().unwrap_or_default()
 }
 
 #[derive(Debug)]
@@ -146,7 +155,7 @@ pub struct NodeInfoResponse {
     pub chain_hash: Hash256,
     pub open_channel_auto_accept_min_ckb_funding_amount: u64,
     pub auto_accept_channel_ckb_funding_amount: u64,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_min_value: u128,
     pub tlc_max_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -257,8 +266,9 @@ pub struct OpenChannelCommand {
     pub shutdown_script: Option<Script>,
     pub funding_udt_type_script: Option<Script>,
     pub commitment_fee_rate: Option<u64>,
+    pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
     pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
@@ -274,12 +284,11 @@ pub struct SendPaymentCommand {
     // the amount of the payment
     pub amount: Option<u128>,
     // The hash to use within the payment's HTLC
-    // FIXME: this should be optional when AMP is enabled
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
-    pub final_cltv_delta: Option<u64>,
+    // The htlc expiry delta that should be used to set the timelock for the final hop
+    pub final_htlc_expiry_delta: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -291,6 +300,8 @@ pub struct SendPaymentCommand {
     // udt type script
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
+    // allow self payment, default is false
+    pub allow_self_payment: bool,
 }
 
 #[serde_as]
@@ -300,7 +311,7 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_cltv_delta: Option<u64>,
+    pub final_htlc_expiry_delta: Option<u64>,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -308,10 +319,11 @@ pub struct SendPaymentData {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
+    pub allow_self_payment: bool,
 }
 
 impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
+    pub fn new(command: SendPaymentCommand, source: Pubkey) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -350,6 +362,10 @@ impl SendPaymentData {
                 .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
             "target_pubkey",
         )?;
+
+        if !command.allow_self_payment && target == source {
+            return Err("allow_self_payment is not enable, can not pay self".to_string());
+        }
 
         let amount = validate_field(
             command.amount,
@@ -399,13 +415,14 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_cltv_delta: command.final_cltv_delta,
+            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,
             keysend,
             udt_type_script,
             preimage,
+            allow_self_payment: command.allow_self_payment,
         })
     }
 }
@@ -558,6 +575,12 @@ pub enum GraphSyncerExitStatus {
     Failed,
 }
 
+impl Default for GraphSyncerExitStatus {
+    fn default() -> Self {
+        Self::Failed
+    }
+}
+
 #[derive(Debug)]
 pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
@@ -579,12 +602,6 @@ impl FiberMessageWithPeerId {
 #[derive(Debug)]
 pub struct FiberMessageWithSessionId {
     pub session_id: SessionId,
-    pub message: FiberMessage,
-}
-
-#[derive(Debug)]
-pub struct FiberMessageWithChannelId {
-    pub channel_id: Hash256,
     pub message: FiberMessage,
 }
 
@@ -1538,7 +1555,10 @@ where
                 // TODO: It is possible that the remote peer of the channel may repeatedly
                 // receive the same message.
                 let peer_ids = state.get_n_peer_peer_ids(MAX_BROADCAST_SESSIONS, HashSet::new());
-                debug!("Broadcasting message random selected peers {:?}", &peer_ids);
+                debug!(
+                    "Broadcasting message to randomly selected peers {:?} (from {:?})",
+                    &peer_ids, &state.peer_id
+                );
                 // The order matters here because should_message_be_broadcasted
                 // will change the state, and we don't want to change the state
                 // if there is not peer to broadcast the message.
@@ -1714,10 +1734,10 @@ where
                 channel_announcement,
             ) => {
                 debug!(
-                    "Received channel announcement message for channel (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
-                    &peer_id,
+                    "Processing our channel announcement message (confirmed at #{} block #{} tx) to peer {:?}: {:?}",
                     &block_number,
                     &tx_index,
+                    &peer_id,
                     &channel_announcement
                 );
                 // Adding this owned channel to the network graph.
@@ -1727,7 +1747,10 @@ where
                     announcement_msg: channel_announcement.clone(),
                     node1_to_node2: None, // wait for channel update message
                     node2_to_node1: None,
-                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                    timestamp: std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis() as u64,
                 };
                 let mut graph = self.network_graph.write().await;
                 graph.add_channel(channel_info);
@@ -1756,6 +1779,10 @@ where
             }
 
             NetworkActorCommand::ProccessChannelUpdate(peer_id, channel_update) => {
+                debug!(
+                    "Processing our channel update message to peer {:?}: {:?}",
+                    &peer_id, &channel_update
+                );
                 let mut graph = self.network_graph.write().await;
                 graph
                     .process_channel_update(channel_update.clone())
@@ -1792,7 +1819,7 @@ where
                         .open_channel_auto_accept_min_ckb_funding_amount,
                     auto_accept_channel_ckb_funding_amount: state
                         .auto_accept_channel_ckb_funding_amount,
-                    tlc_locktime_expiry_delta: state.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: state.tlc_expiry_delta,
                     tlc_min_value: state.tlc_min_value,
                     tlc_max_value: state.tlc_max_value,
                     tlc_fee_proportional_millionths: state.tlc_fee_proportional_millionths,
@@ -1941,6 +1968,11 @@ where
                     )));
                 }
 
+                debug!(
+                    "Node signatures in channel announcement message verified: {:?}",
+                    &channel_announcement
+                );
+
                 let (tx, block_number, tx_index): (_, u64, _) = match call_t!(
                     self.chain_actor,
                     CkbChainMessage::TraceTx,
@@ -2028,7 +2060,10 @@ where
                     announcement_msg: channel_announcement.clone(),
                     node1_to_node2: None, // wait for channel update message
                     node2_to_node1: None,
-                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                    timestamp: std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis() as u64,
                 };
                 self.network_graph.write().await.add_channel(channel_info);
                 Ok(())
@@ -2160,7 +2195,7 @@ where
                 return unknown_next_peer(reply);
             }
             Err(err) => {
-                // must be some error fron tentacle, set it as temporary node failure
+                // must be some error from tentacle, set it as temporary node failure
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err
@@ -2410,10 +2445,11 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
-        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
-            error!("Failed to validate payment request: {:?}", e);
-            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-        })?;
+        let payment_data = SendPaymentData::new(payment_request.clone(), state.get_public_key())
+            .map_err(|e| {
+                error!("Failed to validate payment request: {:?}", e);
+                Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+            })?;
 
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
@@ -2507,7 +2543,11 @@ impl NetworkSyncState {
 
         if should_create {
             let graph_syncer = Actor::spawn_linked(
-                Some(format!("Graph syncer to {}", peer_id)),
+                Some(format!(
+                    "Graph syncer to {} started at {:?}",
+                    peer_id,
+                    SystemTime::now()
+                )),
                 GraphSyncer::new(
                     network.clone(),
                     peer_id.clone(),
@@ -2632,8 +2672,8 @@ pub struct NetworkActorState<S> {
     open_channel_auto_accept_min_ckb_funding_amount: u64,
     // Tha default amount of CKB to be funded when auto accepting a channel.
     auto_accept_channel_ckb_funding_amount: u64,
-    // The default locktime expiry delta to forward tlcs.
-    tlc_locktime_expiry_delta: u64,
+    // The default expiry delta to forward tlcs.
+    tlc_expiry_delta: u64,
     // The default tlc min and max value of tlcs to be accepted.
     tlc_min_value: u128,
     tlc_max_value: u128,
@@ -2789,7 +2829,10 @@ where
         + 'static,
 {
     pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis() as u64;
         match self.last_node_announcement_message {
             // If the last node announcement message is still relatively new, we don't need to create a new one.
             // Because otherwise the receiving node may be confused by the multiple announcements,
@@ -2816,7 +2859,9 @@ where
                 self.last_node_announcement_message = Some(announcement);
             }
         }
-        self.last_node_announcement_message.clone().unwrap()
+        self.last_node_announcement_message
+            .clone()
+            .expect("last node announcement message is present")
     }
 
     pub fn should_message_be_broadcasted(&mut self, message: &FiberBroadcastMessage) -> bool {
@@ -2915,7 +2960,7 @@ where
         }
         self.broadcast_message_responses
             .get_mut(&(peer_id.clone(), old_id))
-            .unwrap()
+            .expect("key must exist in the hash map")
             .0 = RequestState::RequestReturned(next_offset, is_finished);
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -2936,8 +2981,9 @@ where
             shutdown_script,
             funding_udt_type_script,
             commitment_fee_rate,
+            commitment_delay_epoch,
             funding_fee_rate,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_min_value,
             tlc_max_value,
             tlc_fee_proportional_millionths,
@@ -2976,7 +3022,7 @@ where
                 funding_amount,
                 seed,
                 public_channel_info: public.then_some(PublicChannelInfo::new(
-                    tlc_locktime_expiry_delta.unwrap_or(self.tlc_locktime_expiry_delta),
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_max_value.unwrap_or(self.tlc_max_value),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
@@ -2986,6 +3032,7 @@ where
                     .unwrap_or_else(|| self.default_shutdown_script.clone()),
                 channel_id_sender: tx,
                 commitment_fee_rate,
+                commitment_delay_epoch,
                 funding_fee_rate,
                 max_tlc_value_in_flight,
                 max_tlc_number_in_flight,
@@ -3052,7 +3099,7 @@ where
                 funding_amount,
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
-                    self.tlc_locktime_expiry_delta,
+                    self.tlc_expiry_delta,
                     self.tlc_min_value,
                     self.tlc_max_value,
                     self.tlc_fee_proportional_millionths,
@@ -3313,8 +3360,10 @@ where
                             }
                         };
 
-                        // when channel is in ChannelReady or ShuttingDown state, the latest_commitment_transaction should exist
-                        let transaction = state.latest_commitment_transaction.clone().unwrap();
+                        let transaction = state
+                            .latest_commitment_transaction
+                            .clone()
+                            .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::CommitmentTransactionPending(
@@ -3366,7 +3415,7 @@ where
 
         debug!("Reestablishing channel {:x}", &channel_id);
         let (channel, _) = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, peer_id)),
             ChannelActor::new(
                 self.get_public_key(),
                 remote_pubkey,
@@ -3437,7 +3486,7 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        info!("Peer {:?} disconnected", id);
+        info!("Peer {:?} disconnected from us ({:?})", id, &self.peer_id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -3500,7 +3549,7 @@ where
     fn maybe_tell_syncer_peer_disconnected(&self, peer_id: &PeerId) {
         if let NetworkSyncStatus::Running(ref state) = self.sync_status {
             if let Some(syncer) = state.get_graph_syncer(peer_id) {
-                let _ = syncer.send_message(GraphSyncerMessage::PeerDisConnected);
+                syncer.stop(Some("Peer disconnected".to_string()));
             }
         }
     }
@@ -3970,7 +4019,7 @@ where
 
         tracker.spawn(async move {
             service.run().await;
-            debug!("Tentacle service shutdown");
+            debug!("Tentacle service stopped");
         });
 
         let mut graph = self.network_graph.write().await;
@@ -4025,7 +4074,7 @@ where
             open_channel_auto_accept_min_ckb_funding_amount: config
                 .open_channel_auto_accept_min_ckb_funding_amount(),
             auto_accept_channel_ckb_funding_amount: config.auto_accept_channel_ckb_funding_amount(),
-            tlc_locktime_expiry_delta: config.tlc_locktime_expiry_delta(),
+            tlc_expiry_delta: config.tlc_expiry_delta(),
             tlc_min_value: config.tlc_min_value(),
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
@@ -4214,8 +4263,8 @@ impl ServiceProtocol for Handle {
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
         info!(
-            "proto id [{}] close on session [{}]",
-            context.proto_id, context.session.id
+            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
+            context.proto_id, context.session.id, &context.session.address, &context.session.ty
         );
 
         match context.session.remote_pubkey.as_ref() {

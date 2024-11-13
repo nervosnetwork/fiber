@@ -39,23 +39,28 @@ fn build_server(addr: &str) -> Server {
         // so that we can restart the server without waiting for the port to be released.
         // it will avoid the error: "Address already in use" in CI.
         use socket2::{Domain, Socket, Type};
-        let addr = addr.parse().unwrap();
+        let addr = addr.parse().expect("valid address");
         let domain = Domain::for_address(addr);
-        let socket = Socket::new(domain, Type::STREAM, None).unwrap();
-        socket.set_nonblocking(true).unwrap();
+        let socket = Socket::new(domain, Type::STREAM, None).expect("new socket");
+        socket
+            .set_nonblocking(true)
+            .expect("set socket nonblocking");
         socket.set_reuse_address(true).expect("set reuse address");
         socket.set_reuse_port(true).expect("set reuse port");
 
-        socket.bind(&addr.into()).unwrap();
-        socket.listen(4096).unwrap();
+        socket.bind(&addr.into()).expect("bind socket to address");
+        socket.listen(4096).expect("listen socket at the port");
 
         jsonrpsee::server::Server::builder()
             .build_from_tcp(socket)
-            .unwrap()
+            .expect("JsonRPC server built from TCP")
     }
     #[cfg(release)]
     {
-        Server::builder().build(addr).await.unwrap()
+        Server::builder()
+            .build(addr)
+            .await
+            .expect("JsonRPC server built")
     }
 }
 
@@ -77,14 +82,16 @@ pub async fn start_rpc<
         let peer = PeerRpcServerImpl::new(network_actor.clone());
         let channel = ChannelRpcServerImpl::new(network_actor, store.clone());
         let network_graph = GraphRpcServerImpl::new(network_graph, store.clone());
-        methods.merge(info.into_rpc()).unwrap();
-        methods.merge(peer.into_rpc()).unwrap();
-        methods.merge(channel.into_rpc()).unwrap();
-        methods.merge(network_graph.into_rpc()).unwrap();
+        methods.merge(info.into_rpc()).expect("add info RPC");
+        methods.merge(peer.into_rpc()).expect("add peer RPC");
+        methods.merge(channel.into_rpc()).expect("add channel RPC");
+        methods
+            .merge(network_graph.into_rpc())
+            .expect("add network graph RPC");
     }
     if let Some(cch_actor) = cch_actor {
         let cch = CchRpcServerImpl::new(cch_actor);
-        methods.merge(cch.into_rpc()).unwrap();
+        methods.merge(cch.into_rpc()).expect("add cch RPC");
     }
     server.start(methods)
 }

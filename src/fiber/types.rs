@@ -11,11 +11,9 @@ use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
 use anyhow::anyhow;
-use ckb_sdk::{Since, SinceType};
-use ckb_types::core::FeeRate;
-use ckb_types::packed::{OutPoint, Uint64};
 use ckb_types::{
-    packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
+    core::FeeRate,
+    packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
@@ -45,106 +43,9 @@ pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     INSTANCE.get_or_init(Secp256k1::new)
 }
 
-// TODO: We actually use both relative
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LockTime(u64);
-
-impl LockTime {
-    pub fn new(blocks: u64) -> Self {
-        LockTime(blocks)
-    }
-}
-
-impl From<LockTime> for Since {
-    fn from(lock_time: LockTime) -> Since {
-        Since::new(SinceType::BlockNumber, lock_time.0, true)
-    }
-}
-
-impl TryFrom<Since> for LockTime {
-    type Error = Error;
-
-    fn try_from(since: Since) -> Result<Self, Self::Error> {
-        if !since.is_relative() {
-            return Err(Error::from(anyhow!(
-                "Invalid lock time type: must be relative"
-            )));
-        }
-        since
-            .extract_metric()
-            .map(|(ty, value)| {
-                if ty == SinceType::BlockNumber {
-                    Ok(LockTime(value))
-                } else {
-                    Err(Error::from(anyhow!(
-                        "Invalid lock time type: must be blocknumber"
-                    )))
-                }
-            })
-            .unwrap_or_else(|| {
-                Err(Error::from(anyhow!(
-                    "Invalid lock time type: unable to extract metric"
-                )))
-            })
-    }
-}
-
-impl From<LockTime> for Uint64 {
-    fn from(lock_time: LockTime) -> Uint64 {
-        let b: [u8; 8] = lock_time.into();
-        Uint64::from_slice(&b).expect("valid locktime serialized to 8 bytes")
-    }
-}
-
-impl TryFrom<Uint64> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: Uint64) -> Result<LockTime, Error> {
-        let b = value.as_slice();
-        LockTime::try_from(b)
-    }
-}
-
-impl From<u64> for LockTime {
-    fn from(value: u64) -> LockTime {
-        LockTime(value)
-    }
-}
-
-impl From<LockTime> for u64 {
-    fn from(lock_time: LockTime) -> u64 {
-        lock_time.0
-    }
-}
-
-impl From<[u8; 8]> for LockTime {
-    fn from(value: [u8; 8]) -> LockTime {
-        LockTime(u64::from_le_bytes(value))
-    }
-}
-
-impl From<LockTime> for [u8; 8] {
-    fn from(lock_time: LockTime) -> [u8; 8] {
-        lock_time.0.to_le_bytes()
-    }
-}
-
-impl TryFrom<&[u8]> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<LockTime, Error> {
-        if value.len() != 8 {
-            return Err(Error::from(anyhow!("Invalid lock time length")));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(value);
-        Ok(LockTime::from(bytes))
-    }
-}
-
 impl From<&Byte66> for PubNonce {
     fn from(value: &Byte66) -> Self {
-        PubNonce::from_bytes(value.as_slice()).unwrap()
+        PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
     }
 }
 
@@ -247,7 +148,7 @@ impl From<&Hash256> for MByte32 {
                     .map(Byte::new)
                     .collect::<Vec<_>>()
                     .try_into()
-                    .unwrap(),
+                    .expect("Byte32 from Hash256"),
             )
             .build()
     }
@@ -261,7 +162,13 @@ impl From<Hash256> for MByte32 {
 
 impl From<&MByte32> for Hash256 {
     fn from(value: &MByte32) -> Self {
-        Hash256(value.as_bytes().to_vec().try_into().unwrap())
+        Hash256(
+            value
+                .as_bytes()
+                .to_vec()
+                .try_into()
+                .expect("Hash256 from Byte32"),
+        )
     }
 }
 
@@ -279,7 +186,7 @@ fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
                 .map(|v| Byte::new(*v))
                 .collect::<Vec<_>>()
                 .try_into()
-                .unwrap(),
+                .expect("[u8; 32] to Byte32"),
         )
         .build()
 }
@@ -337,7 +244,10 @@ impl Privkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let sk = Scalar::from(self);
-        (scalar + sk).unwrap().into()
+        (scalar + sk)
+            .not_zero()
+            .expect("valid secp256k1 scalar addition")
+            .into()
     }
 
     // Essentially https://docs.rs/ckb-crypto/latest/ckb_crypto/secp/struct.Privkey.html#method.sign_recoverable
@@ -452,7 +362,7 @@ impl Pubkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let result = Point::from(self) + scalar.base_point_mul();
-        PublicKey::from(result.unwrap()).into()
+        PublicKey::from(result.not_inf().expect("valid public key")).into()
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
@@ -642,14 +552,11 @@ pub struct OpenChannel {
     pub reserved_ckb_amount: u64,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -682,15 +589,12 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .reserved_ckb_amount(open_channel.reserved_ckb_amount.pack())
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
+            .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
             .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
-            .to_self_delay(open_channel.to_local_delay.into())
             .funding_pubkey(open_channel.funding_pubkey.into())
-            .revocation_basepoint(open_channel.revocation_basepoint.into())
-            .payment_basepoint(open_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(open_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
@@ -718,14 +622,11 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             shutdown_script: open_channel.shutdown_script(),
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
+            commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: open_channel.min_tlc_value().unpack(),
-            to_local_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: open_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: open_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
@@ -754,12 +655,8 @@ pub struct AcceptChannel {
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -777,11 +674,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
             .min_tlc_value(accept_channel.min_tlc_value.pack())
-            .to_self_delay(accept_channel.to_local_delay.into())
             .funding_pubkey(accept_channel.funding_pubkey.into())
-            .revocation_basepoint(accept_channel.revocation_basepoint.into())
-            .payment_basepoint(accept_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(accept_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
@@ -811,11 +704,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
             min_tlc_value: accept_channel.min_tlc_value().unpack(),
-            to_local_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: accept_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: accept_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
@@ -850,7 +739,7 @@ fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32
                 .map(Byte::new)
                 .collect::<Vec<_>>()
                 .try_into()
-                .unwrap(),
+                .expect("[Byte; 32] from [u8; 32]"),
         )
         .build()
 }
@@ -1156,7 +1045,7 @@ pub struct AddTlc {
     pub tlc_id: u64,
     pub amount: u128,
     pub payment_hash: Hash256,
-    pub expiry: LockTime,
+    pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     pub onion_packet: Vec<u8>,
 }
@@ -1168,7 +1057,7 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .tlc_id(add_tlc.tlc_id.pack())
             .amount(add_tlc.amount.pack())
             .payment_hash(add_tlc.payment_hash.into())
-            .expiry(add_tlc.expiry.into())
+            .expiry(add_tlc.expiry.pack())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
             .onion_packet(add_tlc.onion_packet.pack())
             .build()
@@ -1184,7 +1073,7 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
             tlc_id: add_tlc.tlc_id().unpack(),
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
-            expiry: add_tlc.expiry().try_into()?,
+            expiry: add_tlc.expiry().unpack(),
             onion_packet: add_tlc.onion_packet().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()
@@ -1412,12 +1301,13 @@ pub enum TlcErrorCode {
     UnknownNextPeer = PERM | 10,
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
-    // TODO: cltv expiry check
-    IncorrectCltvExpiry = UPDATE | 13,
+    // TODO: htlc expiry check
+    IncorrectHtlcExpiry = UPDATE | 13,
     ExpiryTooSoon = UPDATE | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
     InvoiceExpired = PERM | 16,
-    FinalIncorrectCltvExpiry = 18,
+    InvoiceCancelled = PERM | 17,
+    FinalIncorrectExpiryDelta = 18,
     FinalIncorrectHtlcAmount = 19,
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = 21,
@@ -1446,9 +1336,10 @@ impl TlcErrorCode {
     pub fn payment_failed(&self) -> bool {
         match self {
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcErrorCode::FinalIncorrectCltvExpiry
+            | TlcErrorCode::FinalIncorrectExpiryDelta
             | TlcErrorCode::FinalIncorrectHtlcAmount
             | TlcErrorCode::InvoiceExpired
+            | TlcErrorCode::InvoiceCancelled
             | TlcErrorCode::MppTimeout => true,
             _ => false,
         }
@@ -1999,7 +1890,7 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
     pub channel_flags: u32,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
     pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
@@ -2012,7 +1903,7 @@ impl ChannelUpdate {
         timestamp: u64,
         message_flags: u32,
         channel_flags: u32,
-        tlc_locktime_expiry_delta: u64,
+        tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
         tlc_maximum_value: u128,
         tlc_fee_proportional_millionths: u128,
@@ -2024,7 +1915,7 @@ impl ChannelUpdate {
             version: timestamp,
             message_flags,
             channel_flags,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_minimum_value,
             tlc_maximum_value,
             tlc_fee_proportional_millionths,
@@ -2039,7 +1930,7 @@ impl ChannelUpdate {
             version: self.version,
             message_flags: self.message_flags,
             channel_flags: self.channel_flags,
-            tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
+            tlc_expiry_delta: self.tlc_expiry_delta,
             tlc_minimum_value: self.tlc_minimum_value,
             tlc_maximum_value: self.tlc_maximum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
@@ -2062,7 +1953,7 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .timestamp(channel_update.version.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
-            .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
+            .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
             .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
@@ -2081,7 +1972,7 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             version: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),
-            tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),
+            tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
             tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
@@ -3196,7 +3087,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .iter()
             .map(HopData::next_hop)
             .take_while(Option::is_some)
-            .map(|opt| opt.unwrap().into())
+            .map(|opt| opt.expect("must be some").into())
             .collect();
 
         // Add length as the header
@@ -3295,7 +3186,11 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         return None;
     }
     Some(
-        u64::from_be_bytes(buf[0..HOP_DATA_HEAD_LEN].try_into().unwrap()) as usize
+        u64::from_be_bytes(
+            buf[0..HOP_DATA_HEAD_LEN]
+                .try_into()
+                .expect("u64 from slice"),
+        ) as usize
             + HOP_DATA_HEAD_LEN,
     )
 }

@@ -34,5 +34,5 @@ assert {
 
 script:post-response {
   await new Promise(r => setTimeout(r, 5000));
-  console.log("list channels: ", res.body.result.channels[0]);
+  console.log("step 11 list channels: ", res.body.result.channels);
 }

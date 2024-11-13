@@ -141,7 +141,8 @@ impl InternalResult {
             }
         } else if index == len - 1 {
             match error_code {
-                TlcErrorCode::FinalIncorrectCltvExpiry | TlcErrorCode::FinalIncorrectHtlcAmount => {
+                TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectHtlcAmount => {
                     if len == 2 {
                         need_to_retry = false;
                         self.fail_node(nodes, len - 1);
@@ -186,7 +187,7 @@ impl InternalResult {
                 TlcErrorCode::PermanentChannelFailure => {
                     self.fail_pair(nodes, index);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectCltvExpiry => {
+                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectHtlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);

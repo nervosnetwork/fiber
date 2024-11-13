@@ -1,10 +1,12 @@
+use ckb_chain_spec::ChainSpec;
+use ckb_resource::Resource;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{
     contracts::{get_script_by_contract, init_contracts_context, Contract},
     CkbChainActor,
 };
-use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph};
+use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
 use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
@@ -13,6 +15,7 @@ use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
 
 use core::default::Default;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,7 +63,7 @@ pub async fn main() {
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
 
-    let store = Store::new(config.fiber.as_ref().unwrap().store_path());
+    let store = Store::new(config.fiber.as_ref().expect("Fiber config").store_path());
     let subscribers = ChannelSubscribers::default();
 
     let (fiber_command_sender, network_graph) = match config.fiber.clone() {
@@ -71,7 +74,21 @@ pub async fn main() {
             Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
             let node_public_key = fiber_config.public_key();
 
-            let _ = init_contracts_context(fiber_config.network, Some(&ckb_config));
+            let chain = fiber_config.chain.as_str();
+            let chain_spec = ChainSpec::load_from(&match chain {
+                "mainnet" => Resource::bundled("specs/mainnet.toml".to_string()),
+                "testnet" => Resource::bundled("specs/testnet.toml".to_string()),
+                path => Resource::file_system(Path::new(&config.base_dir).join(path)),
+            })
+            .expect("load chain spec");
+            let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+
+            init_chain_hash(genesis_block.hash().into());
+            init_contracts_context(
+                genesis_block,
+                fiber_config.scripts.clone(),
+                ckb_config.udt_whitelist.clone().unwrap_or_default(),
+            );
 
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
@@ -91,7 +108,9 @@ pub async fn main() {
                 node_public_key.clone().into(),
             )));
 
-            let secret_key = ckb_config.read_secret_key().unwrap();
+            let secret_key = ckb_config
+                .read_secret_key()
+                .expect("read secret key from ckb config");
             let secp = Secp256k1::new();
             let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
             let default_shutdown_script =
@@ -213,7 +232,7 @@ pub async fn main() {
                 fiber_command_sender,
                 cch_actor,
                 store,
-                network_graph.unwrap(),
+                network_graph.expect("RPC requires network graph"),
             )
             .await;
             Some(handle)
@@ -224,7 +243,7 @@ pub async fn main() {
     signal::ctrl_c().await.expect("Failed to listen for event");
     info!("Received Ctrl-C, shutting down");
     if let Some(handle) = rpc_server_handle {
-        handle.stop().unwrap();
+        handle.stop().expect("stop rpc server");
         handle.stopped().await;
     }
     cancel_tasks_and_wait_for_completion().await;

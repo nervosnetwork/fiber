@@ -2,31 +2,36 @@ use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::gen_rand_public_key;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
+
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
         channel::{
-            derive_private_key, derive_revocation_pubkey, derive_tlc_pubkey, AddTlcCommand,
-            ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, InMemorySigner,
-            RemoveTlcCommand, ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
+            derive_private_key, derive_tlc_pubkey, AddTlcCommand, ChannelActorStateStore,
+            ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
+            ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
         config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
+        graph::NetworkGraphStateStore,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
-        types::{Hash256, LockTime, Privkey, RemoveTlcFulfill, RemoveTlcReason},
+        types::{Hash256, Privkey, RemoveTlcFulfill, RemoveTlcReason},
         NetworkActorCommand, NetworkActorMessage,
     },
-    NetworkServiceEvent,
+    now_timestamp, NetworkServiceEvent,
 };
 use ckb_jsonrpc_types::Status;
 use ckb_types::{
-    core::FeeRate,
+    core::{FeeRate, TransactionView},
     packed::{CellInput, Script, Transaction},
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use ractor::call;
+use std::collections::HashSet;
 
 use super::test_utils::{init_tracing, NetworkNode};
+
+const DEFAULT_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000; // 24 hours
 
 #[test]
 fn test_per_commitment_point_and_secret_consistency() {
@@ -48,18 +53,6 @@ fn test_derive_private_and_public_tlc_keys() {
     assert_eq!(derived_privkey.pubkey(), derived_pubkey);
 }
 
-#[test]
-fn test_derive_private_and_public_revocation_keys() {
-    let base_revocation_key = Privkey::from(&[1; 32]);
-    let per_commitment_secret = Privkey::from(&[2; 32]);
-    let derived_privkey = derive_private_key(&per_commitment_secret, &base_revocation_key.pubkey());
-    let derived_pubkey = derive_revocation_pubkey(
-        &base_revocation_key.pubkey(),
-        &per_commitment_secret.pubkey(),
-    );
-    assert_eq!(derived_privkey.pubkey(), derived_pubkey);
-}
-
 #[tokio::test]
 async fn test_open_channel_to_peer() {
     let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
@@ -73,8 +66,9 @@ async fn test_open_channel_to_peer() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -113,8 +107,9 @@ async fn test_open_and_accept_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -156,10 +151,20 @@ async fn test_open_and_accept_channel() {
 }
 
 #[tokio::test]
-async fn test_create_public_channel() {
+async fn test_create_private_channel() {
     init_tracing();
 
-    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (_node_a, _node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+}
+
+#[tokio::test]
+async fn test_create_public_channel() {
+    init_tracing();
 
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
@@ -167,9 +172,125 @@ async fn test_create_public_channel() {
     let (_node_a, _node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
+}
+
+#[tokio::test]
+async fn test_public_channel_saved_to_the_owner_graph() {
+    init_tracing();
+
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let (mut node1, mut node2, _new_channel_id) =
+        create_nodes_with_established_channel(node1_funding_amount, node2_funding_amount, true)
+            .await;
+
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
-    // FIXME: add assertion
+
+    let node1_store = node1.store.clone();
+    let node1_id = node1.peer_id.clone();
+    node1.stop().await;
+    let node2_store = node2.store.clone();
+    let node2_id = node2.peer_id.clone();
+    node2.stop().await;
+
+    let node1_channels = node1_store.get_channels(None);
+    assert_eq!(node1_channels.len(), 1);
+    let node1_channel = &node1_channels[0];
+    assert_eq!(
+        HashSet::from([node1_channel.node1_peerid(), node1_channel.node2_peerid()]),
+        HashSet::from([node1_id.clone(), node2_id.clone()])
+    );
+    let node1_nodes = node1_store.get_nodes(None);
+    assert_eq!(node1_nodes.len(), 2);
+    for node in node1_nodes {
+        assert!(node.node_id == node1_channel.node1() || node.node_id == node1_channel.node2());
+    }
+
+    let node2_channels = node2_store.get_channels(None);
+    assert_eq!(node2_channels.len(), 1);
+    let node2_channel = &node2_channels[0];
+    assert_eq!(
+        HashSet::from([node2_channel.node1_peerid(), node2_channel.node2_peerid()]),
+        HashSet::from([node1_id, node2_id])
+    );
+    let node2_nodes = node2_store.get_nodes(None);
+    assert_eq!(node2_nodes.len(), 2);
+    for node in node2_nodes {
+        assert!(node.node_id == node2_channel.node1() || node.node_id == node2_channel.node2());
+    }
+}
+
+#[tokio::test]
+async fn test_public_channel_saved_to_the_other_nodes_graph() {
+    init_tracing();
+
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
+    let (_channel_id, funding_tx) = establish_channel_between_nodes(
+        &mut node1,
+        &mut node2,
+        node1_funding_amount,
+        node2_funding_amount,
+        true,
+    )
+    .await;
+    let status = node3.submit_tx(funding_tx).await;
+    assert_eq!(status, Status::Committed);
+
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node3_store = node3.store.clone();
+    node3.stop().await;
+    let channels = node3_store.get_channels(None);
+    assert_eq!(channels.len(), 1);
+    let channel = &channels[0];
+    assert_eq!(
+        HashSet::from([channel.node1_peerid(), channel.node2_peerid()]),
+        HashSet::from([node1.peer_id.clone(), node2.peer_id.clone()])
+    );
+    let nodes = node3_store.get_nodes(None);
+    let node_pubkeys = nodes
+        .iter()
+        .map(|node| node.node_id)
+        .collect::<HashSet<_>>();
+    assert!(node_pubkeys.contains(&channel.node1()));
+    assert!(node_pubkeys.contains(&channel.node2()));
+}
+
+#[tokio::test]
+async fn test_public_channel_with_unconfirmed_funding_tx() {
+    init_tracing();
+
+    let node1_funding_amount = 100000000000;
+    let node2_funding_amount = 6200000000;
+
+    let [mut node1, mut node2, mut node3] = NetworkNode::new_n_interconnected_nodes().await;
+    let (_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node1,
+        &mut node2,
+        node1_funding_amount,
+        node2_funding_amount,
+        true,
+    )
+    .await;
+
+    // We should submit the transaction to node 3's chain actor here.
+    // If we don't do that node 3 will deem the funding transaction unconfirmed,
+    // thus refusing to save the channel to the graph.
+
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node3_store = node3.store.clone();
+    node3.stop().await;
+    let channels = node3_store.get_channels(None);
+    // No channels here as node 3 didn't think the funding transaction is confirmed.
+    assert_eq!(channels.len(), 0);
 }
 
 #[tokio::test]
@@ -194,13 +315,14 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: None,
-                final_cltv_delta: None,
+                final_htlc_expiry_delta: None,
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: Some(true),
                 udt_type_script: None,
+                allow_self_payment: false,
             },
             rpc_reply,
         ))
@@ -249,13 +371,14 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_cltv_delta: None,
+                final_htlc_expiry_delta: None,
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: Some(true),
                 udt_type_script: None,
+                allow_self_payment: false,
             },
             rpc_reply,
         ))
@@ -292,13 +415,14 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(payment_hash),
-                final_cltv_delta: None,
+                final_htlc_expiry_delta: None,
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: None,
                 udt_type_script: None,
+                allow_self_payment: false,
             },
             rpc_reply,
         ))
@@ -351,13 +475,14 @@ async fn test_network_send_payment_target_not_found() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(10000),
                 payment_hash: Some(gen_sha256_hash()),
-                final_cltv_delta: None,
+                final_htlc_expiry_delta: None,
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: None,
                 udt_type_script: None,
+                allow_self_payment: false,
             },
             rpc_reply,
         ))
@@ -389,13 +514,14 @@ async fn test_network_send_payment_amount_is_too_large() {
                 target_pubkey: Some(node_b_pubkey),
                 amount: Some(100000000000 + 5),
                 payment_hash: Some(gen_sha256_hash()),
-                final_cltv_delta: None,
+                final_htlc_expiry_delta: None,
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
                 max_parts: None,
                 keysend: None,
                 udt_type_script: None,
+                allow_self_payment: false,
             },
             rpc_reply,
         ))
@@ -447,8 +573,9 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -530,7 +657,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -621,13 +748,13 @@ async fn test_channel_commitment_tx_after_add_tlc_sha256() {
     do_test_channel_commitment_tx_after_add_tlc(HashAlgorithm::Sha256).await
 }
 
-async fn create_nodes_with_established_channel(
+async fn establish_channel_between_nodes(
+    node_a: &mut NetworkNode,
+    node_b: &mut NetworkNode,
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
     public: bool,
-) -> (NetworkNode, NetworkNode, Hash256) {
-    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
-
+) -> (Hash256, TransactionView) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -637,8 +764,9 @@ async fn create_nodes_with_established_channel(
                 funding_amount: node_a_funding_amount,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -677,18 +805,18 @@ async fn create_nodes_with_established_channel(
         .expect("accept channel success");
     let new_channel_id = accept_channel_result.new_channel_id;
 
-    node_a
-        .expect_event(|event| match event {
-            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+    let funding_tx_outpoint = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
                 println!(
                     "A channel ({:?}) to {:?} is now ready",
                     &channel_id, &peer_id
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                true
+                Some(funding_tx_outpoint.clone())
             }
-            _ => false,
+            _ => None,
         })
         .await;
 
@@ -706,7 +834,31 @@ async fn create_nodes_with_established_channel(
             _ => false,
         })
         .await;
-    (node_a, node_b, new_channel_id)
+
+    let funding_tx = node_a
+        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
+        .await
+        .expect("tx found");
+    (new_channel_id, funding_tx)
+}
+
+async fn create_nodes_with_established_channel(
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    public: bool,
+) -> (NetworkNode, NetworkNode, Hash256) {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        public,
+    )
+    .await;
+
+    (node_a, node_b, channel_id)
 }
 
 async fn do_test_remove_tlc_with_wrong_hash_algorithm(
@@ -733,7 +885,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: correct_algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -782,7 +934,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         amount: tlc_amount,
                         hash_algorithm: wrong_algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -856,7 +1008,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         amount: tlc_amount,
                         hash_algorithm: algorithm,
                         payment_hash: Some(digest.into()),
-                        expiry: LockTime::new(100),
+                        expiry: now_timestamp() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
                         onion_packet: vec![],
                         previous_tlc: None,
@@ -974,8 +1126,9 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
                 funding_amount: 0xfffffffffffffffffffffffffffffff,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -986,7 +1139,6 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
         ))
     };
     let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
-    eprintln!("{:?}", open_channel_result.as_ref().err().unwrap());
     assert!(open_channel_result
         .err()
         .unwrap()
@@ -1008,8 +1160,9 @@ async fn test_revoke_old_commitment_transaction() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -1185,8 +1338,9 @@ async fn test_create_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -1309,8 +1463,9 @@ async fn test_reestablish_channel() {
                 funding_amount: 100000000000,
                 funding_udt_type_script: None,
                 commitment_fee_rate: None,
+                commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_locktime_expiry_delta: None,
+                tlc_expiry_delta: None,
                 tlc_min_value: None,
                 tlc_max_value: None,
                 tlc_fee_proportional_millionths: None,
@@ -1477,6 +1632,8 @@ async fn test_commitment_tx_capacity() {
 
 #[tokio::test]
 async fn test_connect_to_peers_with_mutual_channel_on_restart() {
+    init_tracing();
+
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
@@ -1485,6 +1642,32 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart() {
             .await;
 
     node_a.restart().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    node_a.stop().await;
+
+    node_b.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerDisConnected(id, _addr) if id == &node_a.peer_id),
+    )
+    .await;
+
+    node_a.start().await;
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),

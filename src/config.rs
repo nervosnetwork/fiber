@@ -106,6 +106,7 @@ pub struct Config {
     pub rpc: Option<RpcConfig>,
     // ckb actor config, None represents that we should not run ckb actor
     pub ckb: Option<CkbConfig>,
+    pub base_dir: PathBuf,
 }
 
 pub(crate) fn print_help_and_exit(code: i32) {
@@ -197,6 +198,7 @@ impl Config {
             cch,
             rpc,
             ckb,
+            base_dir,
         }
     }
 }

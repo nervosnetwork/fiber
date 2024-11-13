@@ -1,21 +1,38 @@
-use std::collections::HashMap;
-
 use anyhow::anyhow;
 use ckb_jsonrpc_types::TxStatus;
+use ckb_testtool::context::Context;
 use ckb_types::{
-    core::TransactionView,
-    packed::{CellOutput, OutPoint},
-    prelude::{Builder, Entity, Pack, PackVec, Unpack},
+    bytes::Bytes,
+    core::{DepType, TransactionView},
+    packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
+    prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
+};
+use once_cell::sync::Lazy;
+use std::{collections::HashMap, sync::Arc, sync::RwLock};
+
+use crate::ckb::{
+    config::UdtCfgInfos,
+    contracts::{Contract, ContractsContext, ContractsInfo},
+    TraceTxRequest, TraceTxResponse,
 };
 
-use crate::ckb::{TraceTxRequest, TraceTxResponse};
-
-use crate::ckb::contracts::MockContext;
 use crate::ckb::CkbChainMessage;
 
 use ckb_types::packed::Byte32;
-use ractor::{call_t, Actor, ActorProcessingErr, ActorRef};
+use ractor::{
+    call_t, concurrency::Duration, Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort,
+    SupervisionEvent,
+};
 use tracing::{debug, error};
+
+pub const TRACE_TX_WAITING_FOR_NOTIFICATION_MS: u64 = 2 * 1000;
+pub const TRACE_TX_TIMEOUT_MS: u64 = 3 * 1000;
+
+type TxNotification = (
+    Byte32,
+    ckb_jsonrpc_types::TransactionView,
+    ckb_jsonrpc_types::Status,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellStatus {
@@ -24,8 +41,191 @@ pub enum CellStatus {
     Consumed,
 }
 
+pub static MOCK_CONTEXT: Lazy<RwLock<MockContext>> = Lazy::new(|| RwLock::new(MockContext::new()));
+
+pub struct MockContext {
+    pub context: Context,
+    pub contracts_context: ContractsContext,
+}
+
+impl MockContext {
+    pub fn new() -> Self {
+        let binaries = [
+            (
+                Contract::CkbAuth,
+                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/auth")),
+            ),
+            (
+                Contract::FundingLock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/funding-lock"
+                )),
+            ),
+            (
+                Contract::CommitmentLock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/commitment-lock"
+                )),
+            ),
+            // mock secp256k1 lock script
+            (
+                Contract::Secp256k1Lock,
+                Bytes::from_static(include_bytes!(
+                    "../../../tests/deploy/contracts/always_success"
+                )),
+            ),
+            (
+                Contract::SimpleUDT,
+                Bytes::from_static(include_bytes!("../../../tests/deploy/contracts/simple_udt")),
+            ),
+        ];
+        let mut context = Context::new_with_deterministic_rng();
+        let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
+        let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
+
+        for (contract, binary) in binaries.into_iter() {
+            let out_point = context.deploy_cell(binary);
+            let script = context
+                .build_script(&out_point, Default::default())
+                .expect("valid script");
+            contract_default_scripts.insert(contract, script);
+            let cell_dep = CellDep::new_builder()
+                .out_point(out_point)
+                .dep_type(DepType::Code.into())
+                .build();
+
+            let cell_deps = if matches!(contract, Contract::FundingLock)
+                || matches!(contract, Contract::CommitmentLock)
+            {
+                // FundingLock and CommitmentLock depend on CkbAuth
+                vec![
+                    cell_dep,
+                    script_cell_deps
+                        .get(&Contract::CkbAuth)
+                        .unwrap()
+                        .clone()
+                        .get(0)
+                        .unwrap()
+                        .clone(),
+                ]
+            } else {
+                vec![cell_dep]
+            };
+            script_cell_deps.insert(contract, cell_deps);
+        }
+
+        let contracts = ContractsInfo {
+            contract_default_scripts,
+            script_cell_deps,
+            udt_whitelist: UdtCfgInfos::default(),
+        };
+        let contracts_context = ContractsContext { contracts };
+        MockContext {
+            context,
+            contracts_context,
+        }
+    }
+}
+
+enum TraceTxResult {
+    Found(TxNotification),
+    Timeout(),
+}
+
+// A simple actor to wait for the tx notifications from mock chain actor,
+// Sometimes we are sending SendTx to the mock chain actor after a TraceTx request.
+// In this case, we don't want to prematurely tell the caller that the transaction
+// does not exists. So we use this actor to wait for the tx notifications from the
+// mock chain actor.
+struct TraceTxReplier {
+    tx_hash: Byte32,
+}
+
+impl TraceTxReplier {
+    pub fn new(tx_hash: Byte32) -> Self {
+        Self { tx_hash }
+    }
+}
+
+#[ractor::async_trait]
+impl Actor for TraceTxReplier {
+    type Msg = TraceTxResult;
+    type Arguments = (
+        Arc<OutputPort<TxNotification>>,
+        Duration,
+        RpcReplyPort<TraceTxResponse>,
+    );
+    type State = Option<RpcReplyPort<TraceTxResponse>>;
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        (notifier, timeout, reply_port): Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        let _ = myself.send_after(timeout, || TraceTxResult::Timeout());
+        let hash = self.tx_hash.clone();
+        notifier.subscribe(myself, move |notification| {
+            if notification.0 == hash {
+                Some(TraceTxResult::Found(notification))
+            } else {
+                None
+            }
+        });
+        Ok(Some(reply_port))
+    }
+
+    async fn handle(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        reply_port: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let (tx, status) = match message {
+            TraceTxResult::Found((_hash, tx, status)) => (Some(tx), status),
+            TraceTxResult::Timeout() => {
+                debug!("Timeout waiting for tx notification: {:?}", self.tx_hash);
+                (None, ckb_jsonrpc_types::Status::Unknown)
+            }
+        };
+
+        reply_trace_tx(
+            tx,
+            status,
+            reply_port
+                .take()
+                .expect("state is initialized, and handle function will only be called once"),
+        );
+
+        myself.stop(Some("handled trace tx result".to_string()));
+        Ok(())
+    }
+}
+
+fn reply_trace_tx(
+    tx: Option<ckb_jsonrpc_types::TransactionView>,
+    status: ckb_jsonrpc_types::Status,
+    reply_port: RpcReplyPort<TraceTxResponse>,
+) {
+    let block_hash = tx.as_ref().map(|tx| tx.hash.clone());
+    let status = TxStatus {
+        status,
+        // Some tests may require the block hash and block number to be set.
+        block_number: Some(Default::default()),
+        block_hash: block_hash.clone(),
+        tx_index: None,
+        reason: None,
+    };
+    let response = TraceTxResponse { tx, status };
+
+    if let Err(e) = reply_port.send(response) {
+        error!(
+            "Sending trace tx result of {:?} failed: {:?}",
+            block_hash, e
+        );
+    };
+}
+
 pub struct MockChainActorState {
-    ctx: MockContext,
     tx_status: HashMap<
         Byte32,
         (
@@ -33,6 +233,7 @@ pub struct MockChainActorState {
             ckb_jsonrpc_types::Status,
         ),
     >,
+    tx_notifications: Arc<OutputPort<TxNotification>>,
     cell_status: HashMap<OutPoint, CellStatus>,
 }
 
@@ -45,8 +246,8 @@ impl Default for MockChainActorState {
 impl MockChainActorState {
     pub fn new() -> Self {
         Self {
-            ctx: MockContext::new(),
             tx_status: HashMap::new(),
+            tx_notifications: Arc::new(OutputPort::default()),
             cell_status: HashMap::new(),
         }
     }
@@ -63,6 +264,24 @@ impl Default for MockChainActor {
 impl MockChainActor {
     pub fn new() -> Self {
         Self {}
+    }
+
+    pub async fn start_trace_tx_replier(
+        &self,
+        myself: ActorRef<CkbChainMessage>,
+        tx_hash: Byte32,
+        notifier: Arc<OutputPort<TxNotification>>,
+        timeout: Duration,
+        reply_port: RpcReplyPort<TraceTxResponse>,
+    ) {
+        let _ = Actor::spawn_linked(
+            None,
+            TraceTxReplier::new(tx_hash),
+            (notifier, timeout, reply_port),
+            myself.get_cell(),
+        )
+        .await
+        .expect("start trace tx replier");
     }
 }
 
@@ -86,6 +305,7 @@ impl Actor for MockChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        debug!("MockChainActor received message: {:?}", message);
         use CkbChainMessage::*;
         match message {
             GetCurrentBlockNumber(_, reply) => {
@@ -179,7 +399,6 @@ impl Actor for MockChainActor {
             }
             SendTx(tx, reply_port) => {
                 const MAX_CYCLES: u64 = 100_000_000;
-                let mut context = state.ctx.write();
                 let mut f = || {
                     // Mark the inputs as consumed
                     for input in tx.input_pts_iter() {
@@ -202,6 +421,7 @@ impl Actor for MockChainActor {
                             }
                         }
                     }
+                    let context = &mut MOCK_CONTEXT.write().unwrap().context;
                     match context.verify_tx(&tx, MAX_CYCLES) {
                         Ok(c) => {
                             debug!("Verified transaction: {:?} with {} CPU cycles", tx, c);
@@ -235,6 +455,13 @@ impl Actor for MockChainActor {
                     }
                 };
                 let (status, result) = f();
+                debug!(
+                    "Transaction verfication result: tx {:?}, status: {:?}",
+                    &tx, &status
+                );
+                state
+                    .tx_notifications
+                    .send((tx.hash(), tx.clone().into(), status.clone()));
                 state.tx_status.insert(tx.hash(), (tx.into(), status));
                 if let Err(e) = reply_port.send(result) {
                     error!(
@@ -245,39 +472,34 @@ impl Actor for MockChainActor {
                 }
             }
             TraceTx(tx, reply_port) => {
-                let (tx_view, status) = match state.tx_status.get(&tx.tx_hash).cloned() {
-                    Some((tx_view, status)) => (Some(tx_view), status),
-                    None => (None, ckb_jsonrpc_types::Status::Unknown),
+                match state.tx_status.get(&tx.tx_hash).cloned() {
+                    Some((tx_view, status)) => {
+                        reply_trace_tx(Some(tx_view), status, reply_port);
+                    }
+                    // The transaction is not found in the tx_status, we need to wait for the
+                    // tx notification from the mock chain actor.
+                    None => {
+                        self.start_trace_tx_replier(
+                            myself,
+                            tx.tx_hash,
+                            state.tx_notifications.clone(),
+                            Duration::from_millis(TRACE_TX_WAITING_FOR_NOTIFICATION_MS),
+                            reply_port,
+                        )
+                        .await;
+                    }
                 };
-
-                debug!(
-                    "Tracing transaction: {:?}, status: {:?}",
-                    &tx.tx_hash, &status
-                );
-                let status = TxStatus {
-                    status,
-                    // Some tests may require the block hash and block number to be set.
-                    block_number: Some(Default::default()),
-                    block_hash: Some(ckb_types::H256(
-                        tx.tx_hash.clone().as_slice().try_into().unwrap(),
-                    )),
-                    tx_index: None,
-                    reason: None,
-                };
-                let response = TraceTxResponse {
-                    tx: tx_view,
-                    status,
-                };
-
-                if let Err(e) = reply_port.send(response) {
-                    error!(
-                        "[{}] send reply failed: {:?}",
-                        myself.get_name().unwrap_or_default(),
-                        e
-                    );
-                }
             }
         }
+        Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _message: SupervisionEvent,
+        _state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 }
@@ -287,6 +509,7 @@ pub async fn submit_tx(
     tx: TransactionView,
 ) -> ckb_jsonrpc_types::Status {
     pub const TIMEOUT: u64 = 1000;
+    debug!("Calling chain actor to submit tx: {:?}", &tx);
     if let Err(error) = call_t!(mock_actor, CkbChainMessage::SendTx, TIMEOUT, tx.clone())
         .expect("chain actor alive")
     {
@@ -307,6 +530,25 @@ pub async fn trace_tx_hash(
     mock_actor: ActorRef<CkbChainMessage>,
     tx_hash: Byte32,
 ) -> ckb_jsonrpc_types::Status {
+    let request = TraceTxRequest {
+        tx_hash,
+        confirmations: 1,
+    };
+    call_t!(
+        mock_actor,
+        CkbChainMessage::TraceTx,
+        TRACE_TX_TIMEOUT_MS,
+        request
+    )
+    .expect("chain actor alive")
+    .status
+    .status
+}
+
+pub async fn get_tx_from_hash(
+    mock_actor: ActorRef<CkbChainMessage>,
+    tx_hash: Byte32,
+) -> Result<TransactionView, anyhow::Error> {
     pub const TIMEOUT: u64 = 1000;
     let request = TraceTxRequest {
         tx_hash,
@@ -317,8 +559,8 @@ pub async fn trace_tx_hash(
         CkbChainMessage::TraceTx,
         TIMEOUT,
         request.clone()
-    )
-    .expect("chain actor alive")
-    .status
-    .status
+    )?
+    .tx
+    .map(|tx| Transaction::from(tx.inner).into_view())
+    .ok_or(anyhow!("tx not found in trace tx response"))
 }

@@ -1,8 +1,7 @@
-use crate::fiber::graph::{NetworkGraphStateStore, PaymentSessionStatus};
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
-use crate::invoice::{CkbInvoice, Currency, InvoiceBuilder, InvoiceStore};
+use crate::invoice::{CkbInvoice, CkbInvoiceStatus, Currency, InvoiceBuilder, InvoiceStore};
 use crate::FiberConfig;
 use ckb_jsonrpc_types::Script;
 use jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE;
@@ -16,87 +15,110 @@ use tentacle::secio::SecioKeyPair;
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct NewInvoiceParams {
+    /// The amount of the invoice.
     #[serde_as(as = "U128Hex")]
     amount: u128,
+    /// The description of the invoice.
     description: Option<String>,
+    /// The currency of the invoice.
     currency: Currency,
+    /// The payment preimage of the invoice.
     payment_preimage: Hash256,
+    /// The expiry time of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     expiry: Option<u64>,
+    /// The fallback address of the invoice.
     fallback_address: Option<String>,
+    /// The final CLTV of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     final_cltv: Option<u64>,
+    /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
-    final_htlc_timeout: Option<u64>,
+    final_expiry_delta: Option<u64>,
+    /// The UDT type script of the invoice.
     udt_type_script: Option<Script>,
+    /// The hash algorithm of the invoice.
     hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct InvoiceResult {
+    /// The encoded invoice address.
     invoice_address: String,
+    /// The invoice.
     invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ParseInvoiceParams {
+    /// The encoded invoice address.
     invoice: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ParseInvoiceResult {
+    /// The invoice.
     invoice: CkbInvoice,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct GetInvoiceParams {
+pub struct InvoiceParams {
+    /// The payment hash of the invoice.
     payment_hash: Hash256,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-enum InvoiceStatus {
-    Unpaid,
-    Inflight,
-    Paid,
-    Expired,
-}
-
+/// The status of the invoice.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct GetInvoiceResult {
+    /// The encoded invoice address.
     invoice_address: String,
+    /// The invoice.
     invoice: CkbInvoice,
-    status: InvoiceStatus,
+    /// The invoice status
+    status: CkbInvoiceStatus,
 }
 
+/// RPC module for invoice management.
 #[rpc(server)]
 trait InvoiceRpc {
+    /// Generates a new invoice.
     #[method(name = "new_invoice")]
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned>;
 
+    /// Parses a encoded invoice.
     #[method(name = "parse_invoice")]
     async fn parse_invoice(
         &self,
         params: ParseInvoiceParams,
     ) -> Result<ParseInvoiceResult, ErrorObjectOwned>;
 
+    /// Retrieves an invoice.
     #[method(name = "get_invoice")]
     async fn get_invoice(
         &self,
-        payment_hash: GetInvoiceParams,
+        payment_hash: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
+
+    /// Cancels an invoice, only when invoice is in status `Open` can be canceled.
+    #[method(name = "cancel_invoice")]
+    async fn cancel_invoice(
+        &self,
+        payment_hash: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct InvoiceRpcServerImpl<S> {
     store: S,
     keypair: Option<(PublicKey, SecretKey)>,
+    currency: Option<Currency>,
 }
 
 impl<S> InvoiceRpcServerImpl<S> {
     pub(crate) fn new(store: S, config: Option<FiberConfig>) -> Self {
-        let keypair = config.map(|config| {
+        let config = config.map(|config| {
             let kp = config
                 .read_or_generate_secret_key()
                 .expect("read or generate secret key");
@@ -108,21 +130,42 @@ impl<S> InvoiceRpcServerImpl<S> {
                 PublicKey::from_slice(secio_kp.public_key().inner_ref()).expect("valid public key"),
                 private_key.into(),
             );
-            keypair
+
+            // restrict currency to be the same as network
+            let currency = match config.chain.as_str() {
+                "mainnet" => Currency::Fibb,
+                "testnet" => Currency::Fibt,
+                _ => Currency::Fibd,
+            };
+
+            (keypair, currency)
         });
-        Self { store, keypair }
+        Self {
+            store,
+            keypair: config.as_ref().map(|(kp, _)| kp.clone()),
+            currency: config.as_ref().map(|(_, currency)| *currency),
+        }
     }
 }
 
 #[async_trait]
 impl<S> InvoiceRpcServer for InvoiceRpcServerImpl<S>
 where
-    S: InvoiceStore + NetworkGraphStateStore + Send + Sync + 'static,
+    S: InvoiceStore + Send + Sync + 'static,
 {
     async fn new_invoice(
         &self,
         params: NewInvoiceParams,
     ) -> Result<InvoiceResult, ErrorObjectOwned> {
+        if let Some(currency) = self.currency {
+            if currency != params.currency {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    format!("Currency must be {:?} with the chain network", currency),
+                    Some(params),
+                ));
+            }
+        }
         let mut invoice_builder = InvoiceBuilder::new(params.currency)
             .amount(Some(params.amount))
             .payment_preimage(params.payment_preimage);
@@ -136,8 +179,8 @@ where
         if let Some(fallback_address) = params.fallback_address.clone() {
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
-        if let Some(final_cltv) = params.final_cltv {
-            invoice_builder = invoice_builder.final_cltv(final_cltv);
+        if let Some(final_expiry_delta) = params.final_expiry_delta {
+            invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
         };
         if let Some(udt_type_script) = &params.udt_type_script {
             invoice_builder = invoice_builder.udt_type_script(udt_type_script.clone().into());
@@ -196,29 +239,73 @@ where
 
     async fn get_invoice(
         &self,
-        params: GetInvoiceParams,
+        params: InvoiceParams,
     ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
         let payment_hash = params.payment_hash;
         match self.store.get_invoice(&payment_hash) {
             Some(invoice) => {
-                let invoice_status = if invoice.is_expired() {
-                    InvoiceStatus::Expired
-                } else {
-                    InvoiceStatus::Unpaid
+                let status = match self
+                    .store
+                    .get_invoice_status(&payment_hash)
+                    .expect("no invoice status found")
+                {
+                    CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+                    status => status,
                 };
-                let payment_session = self.store.get_payment_session(payment_hash);
-                let status = match payment_session {
-                    Some(session) => match session.status {
-                        PaymentSessionStatus::Inflight => InvoiceStatus::Inflight,
-                        PaymentSessionStatus::Success => InvoiceStatus::Paid,
-                        _ => invoice_status,
-                    },
-                    None => invoice_status,
-                };
+
                 Ok(GetInvoiceResult {
                     invoice_address: invoice.to_string(),
                     invoice,
                     status,
+                })
+            }
+            None => Err(ErrorObjectOwned::owned(
+                CALL_EXECUTION_FAILED_CODE,
+                "invoice not found".to_string(),
+                Some(payment_hash),
+            )),
+        }
+    }
+
+    async fn cancel_invoice(
+        &self,
+        params: InvoiceParams,
+    ) -> Result<GetInvoiceResult, ErrorObjectOwned> {
+        let payment_hash = params.payment_hash;
+        match self.store.get_invoice(&payment_hash) {
+            Some(invoice) => {
+                let status = match self
+                    .store
+                    .get_invoice_status(&payment_hash)
+                    .expect("no invoice status found")
+                {
+                    CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
+                    status => status,
+                };
+
+                let new_status = match status {
+                    CkbInvoiceStatus::Paid | CkbInvoiceStatus::Cancelled => {
+                        return Err(ErrorObjectOwned::owned(
+                            CALL_EXECUTION_FAILED_CODE,
+                            format!("invoice can not be canceled, current status: {}", status),
+                            Some(payment_hash),
+                        ));
+                    }
+                    _ => CkbInvoiceStatus::Cancelled,
+                };
+                self.store
+                    .update_invoice_status(&payment_hash, new_status)
+                    .map_err(|e| {
+                        ErrorObjectOwned::owned(
+                            CALL_EXECUTION_FAILED_CODE,
+                            e.to_string(),
+                            Some(payment_hash),
+                        )
+                    })?;
+                Ok(GetInvoiceResult {
+                    invoice_address: invoice.to_string(),
+                    invoice,
+                    status: new_status,
                 })
             }
             None => Err(ErrorObjectOwned::owned(

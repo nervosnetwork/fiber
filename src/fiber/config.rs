@@ -1,14 +1,13 @@
-use crate::Result;
-use ckb_sdk::NetworkType;
-use clap::ValueEnum;
+use crate::{ckb::contracts::Contract, Result};
+use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
 #[cfg(not(test))]
 use once_cell::sync::OnceCell;
-use serde::{Deserialize, Deserializer, Serializer};
-use std::{fs, path::PathBuf};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
@@ -36,8 +35,8 @@ pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
 pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
     DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
-/// The locktime expiry delta to forward a tlc, in seconds. 86400 means 1 day.
-pub const DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA: u64 = 86400;
+/// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
+pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
@@ -98,9 +97,13 @@ pub struct FiberConfig {
     )]
     pub(crate) announced_node_name: Option<AnnouncedNodeName>,
 
-    /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
-    #[arg(name = "FIBER_NETWORK", long = "fiber-network", env)]
-    pub network: Option<CkbNetwork>,
+    /// chain spec file path, can be "mainnet", "testnet", or a file path to a custom chain spec
+    #[arg(name = "FIBER_CHAIN", long = "fiber-chain", env)]
+    pub chain: String,
+
+    /// lock script configurations related to fiber network
+    #[arg(name = "FIBER_SCRIPTS", long = "fiber-scripts", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    pub scripts: Vec<FiberScript>,
 
     /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
     #[arg(
@@ -119,14 +122,14 @@ pub struct FiberConfig {
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 
-    /// The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]
+    /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
-        name = "FIBER_TLC_LOCKTIME_EXPIRY_DELTA",
-        long = "fiber-tlc-locktime-expiry-delta",
+        name = "FIBER_TLC_EXPIRY_DELTA",
+        long = "fiber-tlc-expiry-delta",
         env,
-        help = "The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]"
+        help = "The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]"
     )]
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
 
     /// The minimal value of a tlc. [default: 0 (no minimal value)]
     #[arg(
@@ -315,9 +318,8 @@ impl FiberConfig {
             .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
     }
 
-    pub fn tlc_locktime_expiry_delta(&self) -> u64 {
-        self.tlc_locktime_expiry_delta
-            .unwrap_or(DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA)
+    pub fn tlc_expiry_delta(&self) -> u64 {
+        self.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA)
     }
 
     pub fn tlc_min_value(&self) -> u128 {
@@ -357,25 +359,17 @@ impl FiberConfig {
     }
 }
 
-// Basically ckb_sdk::types::NetworkType. But we added a `Mocknet` variant.
-// And we can't use `ckb_sdk::types::NetworkType` directly because it is not `ValueEnum`.
-#[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
-pub enum CkbNetwork {
-    Mocknet,
-    Mainnet,
-    Testnet,
-    Staging,
-    Dev,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FiberScript {
+    pub name: Contract,
+    pub script: Script,
+    pub cell_deps: Vec<CellDep>,
 }
 
-impl From<CkbNetwork> for Option<NetworkType> {
-    fn from(network: CkbNetwork) -> Self {
-        match network {
-            CkbNetwork::Mocknet => None,
-            CkbNetwork::Mainnet => Some(NetworkType::Mainnet),
-            CkbNetwork::Testnet => Some(NetworkType::Testnet),
-            CkbNetwork::Staging => Some(NetworkType::Staging),
-            CkbNetwork::Dev => Some(NetworkType::Dev),
-        }
+impl FromStr for FiberScript {
+    type Err = serde_json::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_str(s)
     }
 }

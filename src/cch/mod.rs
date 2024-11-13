@@ -6,7 +6,7 @@ pub use error::{CchError, CchResult};
 
 mod config;
 pub use config::{
-    CchConfig, DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME, DEFAULT_CKB_FINAL_TLC_EXPIRY_BLOCKS,
+    CchConfig, DEFAULT_BTC_FINAL_TLC_EXPIRY_TIME, DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA,
     DEFAULT_ORDER_EXPIRY_TIME,
 };
 

@@ -61,11 +61,11 @@ pub(crate) fn construct_invoice_preimage(
     let overhang = (data_part.len() * 5) % 8;
     if overhang > 0 {
         // add padding if data does not end at a byte boundary
-        data_part.push(u5::try_from_u8(0).unwrap());
+        data_part.push(u5::try_from_u8(0).expect("u5 from u8"));
 
         // if overhang is in (1..3) we need to add u5(0) padding two times
         if overhang < 3 {
-            data_part.push(u5::try_from_u8(0).unwrap());
+            data_part.push(u5::try_from_u8(0).expect("u5 from u8"));
         }
     }
 

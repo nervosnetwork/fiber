@@ -25,8 +25,8 @@ pub(crate) struct NodeHeapElement {
     // The probability of this node.
     pub probability: f64,
 
-    // The expected aboslute expiry height for the incoming HTLC of this Node
-    pub incoming_cltv_height: u64,
+    // The expected aboslute expiry timestamp (in milliseconds) for the incoming HTLC of this Node
+    pub incoming_htlc_expiry: u64,
 
     // next_hop is the edge this route comes from
     pub next_hop: Option<(Pubkey, OutPoint)>,
@@ -60,7 +60,7 @@ impl PartialEq for NodeHeapElement {
             && self.amount_received == other.amount_received
             && self.fee_charged == other.fee_charged
             && self.probability == other.probability
-            && self.incoming_cltv_height == other.incoming_cltv_height
+            && self.incoming_htlc_expiry == other.incoming_htlc_expiry
             && self.next_hop == other.next_hop
     }
 }

@@ -3,15 +3,18 @@ use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
+    ckb::tests::test_utils::{
+        get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
+    },
     ckb::CkbChainMessage,
     fiber::channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
     fiber::graph::NetworkGraphStateStore,
     fiber::graph::PaymentSession,
     fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo},
-    fiber::network::NetworkActorStartArguments,
-    fiber::network::{NetworkActor, NetworkActorCommand, NetworkActorMessage},
-    fiber::network::{NetworkActorStateStore, PersistentNetworkActorState},
+    fiber::network::{
+        NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
+        NetworkActorStateStore, PersistentNetworkActorState,
+    },
     fiber::types::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
@@ -52,6 +55,10 @@ impl TempDir {
         Self(ManuallyDrop::new(
             OldTempDir::with_prefix(prefix).expect("create temp directory"),
         ))
+    }
+
+    pub fn to_str(&self) -> &str {
+        self.0.path().to_str().expect("path to str")
     }
 }
 
@@ -202,6 +209,10 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
+    pub fn base_dir_prefix(self, prefix: &str) -> Self {
+        self.base_dir(Arc::new(TempDir::new(prefix)))
+    }
+
     pub fn node_name(mut self, node_name: Option<String>) -> Self {
         self.node_name = node_name;
         self
@@ -265,6 +276,9 @@ impl NetworkNode {
             store,
             fiber_config,
         } = config;
+
+        let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
+
         let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
@@ -284,7 +298,7 @@ impl NetworkNode {
             public_key.clone(),
         )));
         let network_actor = Actor::spawn_linked(
-            Some(format!("network actor at {:?}", base_dir.as_ref())),
+            Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
@@ -362,13 +376,25 @@ impl NetworkNode {
 
     pub async fn restart(&mut self) {
         self.stop().await;
+        // Tentacle shutdown may require some time to propagate to other nodes.
+        // If we start the node immediately, other nodes may deem our new connection
+        // as a duplicate connection and report RepeatedConnection error.
+        // And we will receive `ProtocolSelectError` error from tentacle.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        tracing::debug!("Node stopped, restarting");
         self.start().await;
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
         let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
         for i in 0..N {
-            let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
+            let new = Self::new_with_config(
+                NetworkNodeConfigBuilder::new()
+                    .node_name(Some(format!("node-{}", i)))
+                    .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+                    .build(),
+            )
+            .await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
@@ -464,6 +490,13 @@ impl NetworkNode {
 
     pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
         trace_tx_hash(self.chain_actor.clone(), tx_hash).await
+    }
+
+    pub async fn get_tx_from_hash(
+        &mut self,
+        tx_hash: Byte32,
+    ) -> Result<TransactionView, anyhow::Error> {
+        get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
     }
 }
 
@@ -672,6 +705,18 @@ impl InvoiceStore for MemoryStore {
             .unwrap()
             .get(hash)
             .cloned()
+    }
+
+    fn get_invoice_status(&self, _id: &Hash256) -> Option<crate::invoice::CkbInvoiceStatus> {
+        unimplemented!()
+    }
+
+    fn update_invoice_status(
+        &self,
+        _id: &Hash256,
+        _status: crate::invoice::CkbInvoiceStatus,
+    ) -> Result<(), InvoiceError> {
+        unimplemented!()
     }
 }
 

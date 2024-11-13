@@ -62,9 +62,9 @@ pub struct SendBTCOrder {
     // Seconds after timestamp that the order expires
     #[serde_as(as = "U64Hex")]
     pub expires_after: u64,
-    // The minimal expiry in seconds of the final TLC in the CKB network
+    // The minimal expiry delta in milliseconds of the final TLC hop in the CKB network
     #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry: u64,
+    pub ckb_final_tlc_expiry_delta: u64,
 
     pub currency: Currency,
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
@@ -95,7 +95,7 @@ impl SendBTCOrder {
                     .map_err(|_| CchError::HexDecodingError(self.payment_hash.clone()))?,
             )
             .expiry_time(Duration::from_secs(self.expires_after))
-            .final_cltv(self.ckb_final_tlc_expiry)
+            .final_expiry_delta(self.ckb_final_tlc_expiry_delta)
             .udt_type_script(self.wrapped_btc_type_script.clone().into());
 
         let invoice = invoice_builder.build()?;
@@ -116,7 +116,7 @@ pub struct ReceiveBTCOrder {
     pub expires_after: u64,
     // The minimal expiry in seconds of the final TLC in the CKB network
     #[serde_as(as = "U64Hex")]
-    pub ckb_final_tlc_expiry: u64,
+    pub ckb_final_tlc_expiry_delta: u64,
 
     pub wrapped_btc_type_script: ckb_jsonrpc_types::Script,
 

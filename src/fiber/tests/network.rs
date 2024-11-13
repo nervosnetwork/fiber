@@ -654,16 +654,17 @@ fn test_send_payment_validate_payment_hash() {
         target_pubkey: Some(generate_pubkey()),
         amount: Some(10000),
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: None,
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: None,
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("payment_hash is missing"));
 }
@@ -674,16 +675,17 @@ fn test_send_payment_validate_amount() {
         target_pubkey: Some(generate_pubkey()),
         amount: None,
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: None,
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: None,
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("amount is missing"));
 }
@@ -705,7 +707,7 @@ fn test_send_payment_validate_invoice() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
@@ -715,16 +717,17 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: Some(generate_pubkey()),
         amount: None,
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: None,
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     eprintln!("invoice: {:?}", result);
     assert!(result.is_err());
     assert!(result
@@ -735,18 +738,18 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: Some(10),
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: None,
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
     // keysend is set with invoice, should be error
-    let result = SendPaymentData::new(send_command);
-    eprintln!("invoice: {:?}", result);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -756,17 +759,17 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: None,
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: Some(true),
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
-    eprintln!("invoice: {:?}", result);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     assert!(result.is_err());
 
     // normal invoice send payment
@@ -774,16 +777,17 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: None,
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: None,
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
 
@@ -792,16 +796,17 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: Some(generate_pubkey()),
         amount: Some(10),
         payment_hash: None,
-        final_cltv_delta: None,
+        final_htlc_expiry_delta: None,
         invoice: None,
         timeout: None,
         max_fee_amount: None,
         max_parts: None,
         keysend: Some(true),
         udt_type_script: None,
+        allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command);
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
     eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
 }

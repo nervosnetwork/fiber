@@ -97,6 +97,13 @@ fn test_store_invoice() {
 
     let invalid_hash = gen_sha256_hash();
     assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
+
+    assert_eq!(store.get_invoice_status(hash), Some(CkbInvoiceStatus::Open));
+    assert_eq!(store.get_invoice_status(&gen_sha256_hash()), None);
+
+    let status = CkbInvoiceStatus::Paid;
+    store.update_invoice_status(hash, status).unwrap();
+    assert_eq!(store.get_invoice_status(hash), Some(status));
 }
 
 #[test]
@@ -213,13 +220,14 @@ fn test_store_payment_session() {
         amount: 100,
         payment_hash,
         invoice: None,
-        final_cltv_delta: Some(100),
+        final_htlc_expiry_delta: Some(100),
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
         keysend: false,
         udt_type_script: None,
         preimage: None,
+        allow_self_payment: false,
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
