@@ -2669,7 +2669,7 @@ impl ChannelActorState {
                 ) => Some(ChannelUpdate::new_unsigned(
                     Default::default(),
                     self.must_get_funding_transaction_outpoint(),
-                    std::time::UNIX_EPOCH.elapsed().unwrap().as_secs(),
+                    std::time::UNIX_EPOCH.elapsed().expect("Duration since unix epoch").as_secs(),
                     message_flags,
                     0,
                     expiry_delta,
@@ -2984,7 +2984,7 @@ impl ChannelActorState {
     pub fn get_created_at_in_microseconds(&self) -> u64 {
         self.created_at
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("Duration since unix epoch")
             .as_micros() as u64
     }
 
@@ -3058,7 +3058,9 @@ impl ChannelActorState {
     }
 
     fn public_channel_state_mut(&mut self) -> &mut PublicChannelInfo {
-        self.public_channel_info.as_mut().unwrap()
+        self.public_channel_info
+            .as_mut()
+            .expect("public channel info exists")
     }
 
     fn get_remote_channel_announcement_nonce(&self) -> Option<PubNonce> {
@@ -3089,7 +3091,7 @@ impl ChannelActorState {
         assert!(self.is_public());
         self.public_channel_info
             .as_mut()
-            .unwrap()
+            .expect("public channel info exists")
             .remote_channel_announcement_signature = Some((ecdsa_signature, partial_signatures));
     }
 
@@ -3392,11 +3394,17 @@ impl ChannelActorState {
     }
 
     pub fn get_remote_nonce(&self) -> PubNonce {
-        self.remote_nonce.as_ref().unwrap().clone()
+        self.remote_nonce
+            .as_ref()
+            .expect("remote nonce exists")
+            .clone()
     }
 
     pub fn get_previous_remote_nonce(&self) -> PubNonce {
-        self.previous_remote_nonce.as_ref().unwrap().clone()
+        self.previous_remote_nonce
+            .as_ref()
+            .expect("previous remote nonce exists")
+            .clone()
     }
 
     pub fn get_current_commitment_numbers(&self) -> CommitmentNumbers {
@@ -3617,7 +3625,9 @@ impl ChannelActorState {
     }
 
     pub fn get_remote_channel_public_keys(&self) -> &ChannelBasePublicKeys {
-        self.remote_channel_public_keys.as_ref().unwrap()
+        self.remote_channel_public_keys
+            .as_ref()
+            .expect("remote channel public keys exist")
     }
 
     pub fn must_get_funding_transaction(&self) -> &Transaction {
@@ -3639,11 +3649,15 @@ impl ChannelActorState {
     }
 
     pub fn get_funding_transaction_block_number(&self) -> BlockNumber {
-        self.funding_tx_confirmed_at.unwrap().0
+        self.funding_tx_confirmed_at
+            .expect("funding tx confirmed_at is present")
+            .0
     }
 
     pub fn get_funding_transaction_index(&self) -> u32 {
-        self.funding_tx_confirmed_at.unwrap().1
+        self.funding_tx_confirmed_at
+            .expect("funding tx confirmed_at is present")
+            .1
     }
 
     pub fn get_local_shutdown_script(&self) -> Script {
@@ -4153,7 +4167,10 @@ impl ChannelActorState {
             let shutdown_tx = self.build_shutdown_tx()?;
             let sign_ctx = Musig2SignContext::from(&*self);
 
-            let local_shutdown_info = self.local_shutdown_info.as_mut().unwrap();
+            let local_shutdown_info = self
+                .local_shutdown_info
+                .as_mut()
+                .expect("local shudown info exists");
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
@@ -4175,8 +4192,11 @@ impl ChannelActorState {
                 }
             };
 
-            if let Some(remote_shutdown_signature) =
-                self.remote_shutdown_info.as_ref().unwrap().signature
+            if let Some(remote_shutdown_signature) = self
+                .remote_shutdown_info
+                .as_ref()
+                .expect("remote shutdown info exists")
+                .signature
             {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
@@ -4188,8 +4208,12 @@ impl ChannelActorState {
                     shutdown_tx_size(
                         &self.funding_udt_type_script,
                         (
-                            self.local_shutdown_script.clone().unwrap(),
-                            self.remote_shutdown_script.clone().unwrap()
+                            self.local_shutdown_script
+                                .clone()
+                                .expect("local shutdown script exists"),
+                            self.remote_shutdown_script
+                                .clone()
+                                .expect("remote shutdown script exists")
                         )
                     )
                 );
@@ -4530,7 +4554,7 @@ impl ChannelActorState {
             {
                 return Err(ProcessingChannelError::RepeatedProcessing(format!(
                     "tx_signatures partial witnesses {:?}",
-                    partial_witnesses.unwrap()
+                    partial_witnesses
                 )));
             }
             ChannelState::AwaitingTxSignatures(flags)
@@ -5061,8 +5085,14 @@ impl ChannelActorState {
     }
 
     fn build_shutdown_tx(&self) -> Result<TransactionView, ProcessingChannelError> {
-        let local_shutdown_info = self.local_shutdown_info.as_ref().unwrap();
-        let remote_shutdown_info = self.remote_shutdown_info.as_ref().unwrap();
+        let local_shutdown_info = self
+            .local_shutdown_info
+            .as_ref()
+            .expect("local shutdown info exists");
+        let remote_shutdown_info = self
+            .remote_shutdown_info
+            .as_ref()
+            .expect("remote shutdown info exists");
 
         let local_shutdown_script = local_shutdown_info.close_script.clone();
         let remote_shutdown_script = remote_shutdown_info.close_script.clone();
@@ -5358,14 +5388,26 @@ impl ChannelActorState {
         )?;
 
         let verify_ctx = Musig2VerifyContext::from((self, false));
-        let to_local_output = settlement_tx.outputs().get(0).unwrap();
-        let to_local_output_data = settlement_tx.outputs_data().get(0).unwrap();
-        let to_remote_output = settlement_tx.outputs().get(1).unwrap();
-        let to_remote_output_data = settlement_tx.outputs_data().get(1).unwrap();
+        let to_local_output = settlement_tx
+            .outputs()
+            .get(0)
+            .expect("get output 0 of settlement tx");
+        let to_local_output_data = settlement_tx
+            .outputs_data()
+            .get(0)
+            .expect("get output 0 data of settlement tx");
+        let to_remote_output = settlement_tx
+            .outputs()
+            .get(1)
+            .expect("get output 1 of settlement tx");
+        let to_remote_output_data = settlement_tx
+            .outputs_data()
+            .get(1)
+            .expect("get output 1 data of settlement tx");
         let args = commitment_tx
             .outputs()
             .get(0)
-            .unwrap()
+            .expect("get output 0 of commitment tx")
             .lock()
             .args()
             .raw_data();
@@ -5398,14 +5440,26 @@ impl ChannelActorState {
         let funding_tx_partial_signature = sign_ctx.sign(commitment_tx.hash().as_slice())?;
 
         let sign_ctx = Musig2SignContext::from((self, true));
-        let to_local_output = settlement_tx.outputs().get(0).unwrap();
-        let to_local_output_data = settlement_tx.outputs_data().get(0).unwrap();
-        let to_remote_output = settlement_tx.outputs().get(1).unwrap();
-        let to_remote_output_data = settlement_tx.outputs_data().get(1).unwrap();
+        let to_local_output = settlement_tx
+            .outputs()
+            .get(0)
+            .expect("get output 0 of settlement tx");
+        let to_local_output_data = settlement_tx
+            .outputs_data()
+            .get(0)
+            .expect("get output 0 data of settlement tx");
+        let to_remote_output = settlement_tx
+            .outputs()
+            .get(1)
+            .expect("get output 1 of settlement tx");
+        let to_remote_output_data = settlement_tx
+            .outputs_data()
+            .get(1)
+            .expect("get output 1 data of settlement tx");
         let args = commitment_tx
             .outputs()
             .get(0)
-            .unwrap()
+            .expect("get output 0 of commitment tx")
             .lock()
             .args()
             .raw_data();
@@ -5668,7 +5722,9 @@ impl TLC {
     }
 
     fn get_hash(&self) -> ShortHash {
-        self.payment_hash.as_ref()[..20].try_into().unwrap()
+        self.payment_hash.as_ref()[..20]
+            .try_into()
+            .expect("short hash from payment hash")
     }
 
     fn get_id(&self) -> u64 {

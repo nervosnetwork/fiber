@@ -1744,7 +1744,10 @@ where
                     announcement_msg: channel_announcement.clone(),
                     node1_to_node2: None, // wait for channel update message
                     node2_to_node1: None,
-                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                    timestamp: std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis() as u64,
                 };
                 let mut graph = self.network_graph.write().await;
                 graph.add_channel(channel_info);
@@ -2054,7 +2057,10 @@ where
                     announcement_msg: channel_announcement.clone(),
                     node1_to_node2: None, // wait for channel update message
                     node2_to_node1: None,
-                    timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+                    timestamp: std::time::UNIX_EPOCH
+                        .elapsed()
+                        .expect("Duration since unix epoch")
+                        .as_millis() as u64,
                 };
                 self.network_graph.write().await.add_channel(channel_info);
                 Ok(())
@@ -2736,7 +2742,10 @@ where
         + 'static,
 {
     pub fn get_or_create_new_node_announcement_message(&mut self) -> NodeAnnouncement {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis() as u64;
         match self.last_node_announcement_message {
             // If the last node announcement message is still relatively new, we don't need to create a new one.
             // Because otherwise the receiving node may be confused by the multiple announcements,
@@ -2763,7 +2772,9 @@ where
                 self.last_node_announcement_message = Some(announcement);
             }
         }
-        self.last_node_announcement_message.clone().unwrap()
+        self.last_node_announcement_message
+            .clone()
+            .expect("last node announcement message is present")
     }
 
     pub fn should_message_be_broadcasted(&mut self, message: &FiberBroadcastMessage) -> bool {
@@ -2862,7 +2873,7 @@ where
         }
         self.broadcast_message_responses
             .get_mut(&(peer_id.clone(), old_id))
-            .unwrap()
+            .expect("key must exist in the hash map")
             .0 = RequestState::RequestReturned(next_offset, is_finished);
         let id = self.next_request_id;
         self.next_request_id += 1;
@@ -3262,8 +3273,10 @@ where
                             }
                         };
 
-                        // when channel is in ChannelReady or ShuttingDown state, the latest_commitment_transaction should exist
-                        let transaction = state.latest_commitment_transaction.clone().unwrap();
+                        let transaction = state
+                            .latest_commitment_transaction
+                            .clone()
+                            .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
                         self.network
                             .send_message(NetworkActorMessage::new_event(
                                 NetworkActorEvent::CommitmentTransactionPending(
