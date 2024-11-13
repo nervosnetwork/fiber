@@ -885,7 +885,6 @@ fn test_graph_build_route_with_double_edge_node() {
         None,
         Some(200),
     );
-    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, Some(1));
 
     let node0 = network.keys[0];
 
