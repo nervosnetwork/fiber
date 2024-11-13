@@ -52,7 +52,7 @@ use super::channel::{
     ProcessingChannelResult, PublicChannelInfo, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
     DEFAULT_FEE_RATE,
 };
-use super::config::AnnouncedNodeName;
+use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
 use super::graph::{NetworkGraph, NetworkGraphStateStore};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
@@ -2915,6 +2915,13 @@ where
                     "Invalid UDT type script".to_string(),
                 ));
             }
+        }
+
+        if let Some(_delta) = tlc_expiry_delta.filter(|&d| d < MIN_TLC_EXPIRY_DELTA) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "TLC expiry delta is too small, expect larger than {}",
+                MIN_TLC_EXPIRY_DELTA
+            )));
         }
         // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
         let (_funding_amount, _reserved_ckb_amount) =

@@ -61,7 +61,7 @@ use crate::{
 };
 
 use super::{
-    config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_UDT_OCCUPIED_CAPACITY},
+    config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_TLC_EXPIRY_DELTA, MIN_UDT_OCCUPIED_CAPACITY},
     fee::{calculate_shutdown_tx_fee, default_minimal_ckb_amount},
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
@@ -1229,6 +1229,12 @@ where
         }
 
         if let Some(delta) = tlc_expiry_delta {
+            if delta < MIN_TLC_EXPIRY_DELTA {
+                return Err(ProcessingChannelError::InvalidParameter(format!(
+                    "TLC expiry delta is too small, expect larger than {}",
+                    MIN_TLC_EXPIRY_DELTA
+                )));
+            }
             updated |= state.update_our_tlc_expiry_delta(delta);
         }
 

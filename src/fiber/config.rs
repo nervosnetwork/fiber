@@ -38,6 +38,9 @@ pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
+/// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
 
