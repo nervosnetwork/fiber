@@ -232,7 +232,10 @@ where
         let node_id = node_announcement.node_id;
         let node_info = NodeInfo {
             node_id,
-            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            timestamp: std::time::UNIX_EPOCH
+                .elapsed()
+                .expect("Duration since unix epoch")
+                .as_millis() as u64,
             anouncement_msg: node_announcement,
         };
         self.add_node(node_info);
@@ -409,7 +412,10 @@ where
 
         *update_info = Some(ChannelUpdateInfo {
             version: update.version,
-            timestamp: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64,
+            timestamp: std::time::UNIX_EPOCH
+                .elapsed()
+                .expect("Duration since unix epoch")
+                .as_millis() as u64,
             enabled: !disabled,
             htlc_expiry_delta: update.tlc_expiry_delta,
             htlc_minimum_value: update.tlc_minimum_value,
@@ -502,7 +508,7 @@ where
         let udt_type_script = payment_data.udt_type_script;
         let invoice = payment_data
             .invoice
-            .map(|x| x.parse::<CkbInvoice>().unwrap());
+            .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
         let hash_algorithm = invoice
             .as_ref()
             .and_then(|x| x.hash_algorithm().copied())
@@ -838,7 +844,10 @@ pub struct PaymentSession {
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
         Self {
             request,
             retried_times: 0,
@@ -858,7 +867,10 @@ impl PaymentSession {
 
     pub fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = std::time::UNIX_EPOCH.elapsed().unwrap().as_micros();
+        self.last_updated_at = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_micros();
     }
 
     pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {

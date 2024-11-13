@@ -119,7 +119,7 @@ impl ContractsContext {
                     let output_data = genesis_tx
                         .outputs_data()
                         .get(index as usize)
-                        .unwrap()
+                        .expect("contract output data should exist in the genesis tx")
                         .raw_data();
                     let cell_deps =
                         if matches!(contract, Contract::FundingLock | Contract::CommitmentLock) {
@@ -231,7 +231,7 @@ fn get_contracts_context() -> &'static ContractsContext {
 fn get_contracts_context<'a>() -> ContractsContext {
     super::tests::test_utils::MOCK_CONTEXT
         .read()
-        .unwrap()
+        .expect("read mock context")
         .contracts_context
         .clone()
 }

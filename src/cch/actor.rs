@@ -602,9 +602,14 @@ impl CchActor {
                     },
                 ))
             };
-            let tlc_response = call!(self.network_actor.as_ref().unwrap(), message)
-                .expect("call actor")
-                .map_err(|msg| anyhow!(msg))?;
+            let tlc_response = call!(
+                self.network_actor
+                    .as_ref()
+                    .expect("CCH requires network actor"),
+                message
+            )
+            .expect("call actor")
+            .map_err(|msg| anyhow!(msg))?;
             order.tlc_id = Some(tlc_response.tlc_id);
         }
 

@@ -45,7 +45,7 @@ pub fn secp256k1_instance() -> &'static Secp256k1<All> {
 
 impl From<&Byte66> for PubNonce {
     fn from(value: &Byte66) -> Self {
-        PubNonce::from_bytes(value.as_slice()).unwrap()
+        PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
     }
 }
 
@@ -148,7 +148,7 @@ impl From<&Hash256> for MByte32 {
                     .map(Byte::new)
                     .collect::<Vec<_>>()
                     .try_into()
-                    .unwrap(),
+                    .expect("Byte32 from Hash256"),
             )
             .build()
     }
@@ -162,7 +162,13 @@ impl From<Hash256> for MByte32 {
 
 impl From<&MByte32> for Hash256 {
     fn from(value: &MByte32) -> Self {
-        Hash256(value.as_bytes().to_vec().try_into().unwrap())
+        Hash256(
+            value
+                .as_bytes()
+                .to_vec()
+                .try_into()
+                .expect("Hash256 from Byte32"),
+        )
     }
 }
 
@@ -180,7 +186,7 @@ fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
                 .map(|v| Byte::new(*v))
                 .collect::<Vec<_>>()
                 .try_into()
-                .unwrap(),
+                .expect("[u8; 32] to Byte32"),
         )
         .build()
 }
@@ -238,7 +244,10 @@ impl Privkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let sk = Scalar::from(self);
-        (scalar + sk).unwrap().into()
+        (scalar + sk)
+            .not_zero()
+            .expect("valid secp256k1 scalar addition")
+            .into()
     }
 
     // Essentially https://docs.rs/ckb-crypto/latest/ckb_crypto/secp/struct.Privkey.html#method.sign_recoverable
@@ -353,7 +362,7 @@ impl Pubkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let result = Point::from(self) + scalar.base_point_mul();
-        PublicKey::from(result.unwrap()).into()
+        PublicKey::from(result.not_inf().expect("valid public key")).into()
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
@@ -730,7 +739,7 @@ fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32
                 .map(Byte::new)
                 .collect::<Vec<_>>()
                 .try_into()
-                .unwrap(),
+                .expect("[Byte; 32] from [u8; 32]"),
         )
         .build()
 }
@@ -3078,7 +3087,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .iter()
             .map(HopData::next_hop)
             .take_while(Option::is_some)
-            .map(|opt| opt.unwrap().into())
+            .map(|opt| opt.expect("must be some").into())
             .collect();
 
         // Add length as the header
@@ -3177,7 +3186,11 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         return None;
     }
     Some(
-        u64::from_be_bytes(buf[0..HOP_DATA_HEAD_LEN].try_into().unwrap()) as usize
+        u64::from_be_bytes(
+            buf[0..HOP_DATA_HEAD_LEN]
+                .try_into()
+                .expect("u64 from slice"),
+        ) as usize
             + HOP_DATA_HEAD_LEN,
     )
 }

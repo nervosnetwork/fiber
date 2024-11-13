@@ -212,7 +212,9 @@ impl FundingTxBuilder {
             return Ok(());
         }
 
-        let udt_type_script = self.request.udt_type_script.clone().unwrap();
+        let udt_type_script = self.request.udt_type_script.clone().ok_or_else(|| {
+            TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
+        })?;
         let owner = self.context.funding_source_lock_script.clone();
         let mut found_udt_amount = 0;
 
@@ -248,8 +250,11 @@ impl FundingTxBuilder {
                         .type_(Some(udt_type_script.clone()).pack())
                         .build();
                     let required_capacity = dummy_output
-                        .occupied_capacity(Capacity::bytes(change_output_data.len()).unwrap())
-                        .unwrap()
+                        .occupied_capacity(
+                            Capacity::bytes(change_output_data.len())
+                                .map_err(|err| TxBuilderError::Other(err.into()))?,
+                        )
+                        .map_err(|err| TxBuilderError::Other(err.into()))?
                         .pack();
                     let change_output = dummy_output
                         .as_builder()
@@ -304,8 +309,12 @@ impl FundingTxBuilder {
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
         let cell_dep_resolver = {
-            let genesis_block = ckb_client.get_block_by_number(0.into()).unwrap().unwrap();
-            DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).unwrap()
+            let genesis_block = ckb_client
+                .get_block_by_number(0.into())
+                .expect("Genesis block exists")
+                .expect("Get genesis block via CKB PRC");
+            DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block))
+                .expect("DefaultCellDepResolver from genesis block")
         };
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
@@ -375,7 +384,7 @@ impl FundingTx {
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
             hex::encode(secret_key.as_ref()).as_ref(),
         )
-        .unwrap()]);
+        .expect("SecpCkbRawKeySigner")]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers = HashMap::default();
