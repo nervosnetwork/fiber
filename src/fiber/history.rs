@@ -42,7 +42,10 @@ pub(crate) struct InternalResult {
 }
 
 fn current_time() -> u128 {
-    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+    std::time::UNIX_EPOCH
+        .elapsed()
+        .expect("unix epoch")
+        .as_millis()
 }
 
 impl InternalResult {

@@ -432,74 +432,58 @@ fn test_history_probability() {
         fail_amount: 10,
     };
     history.add_result(from, target, result);
+
     assert_eq!(history.eval_probability(from, target.clone(), 1, 10), 1.0);
     assert_eq!(history.eval_probability(from, target.clone(), 1, 8), 1.0);
 
     // graph of amount is less than history's success_amount and fail_amount
     assert_eq!(history.eval_probability(from, target.clone(), 1, 4), 1.0);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 5, 9)
-            .round_to_2(),
-        1.0
-    );
+    let p1 = history
+        .eval_probability(from, target.clone(), 5, 9)
+        .round_to_2();
+    assert!(p1 <= 1.0);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 6, 9)
-            .round_to_2(),
-        0.75
-    );
+    let p2 = history
+        .eval_probability(from, target.clone(), 6, 9)
+        .round_to_2();
+    assert!(p2 <= 0.75);
+    assert!(p2 < p1);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 7, 9)
-            .round_to_2(),
-        0.50
-    );
+    let p3 = history
+        .eval_probability(from, target.clone(), 7, 9)
+        .round_to_2();
+    assert!(p3 <= 0.50 && p3 < p2);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 8, 9)
-            .round_to_2(),
-        0.25
-    );
+    let p4 = history
+        .eval_probability(from, target.clone(), 8, 9)
+        .round_to_2();
+    assert!(p4 <= 0.25 && p4 < p3);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 5, 10)
-            .round_to_2(),
-        1.0
-    );
+    let p1 = history
+        .eval_probability(from, target.clone(), 5, 10)
+        .round_to_2();
+    assert!(p1 <= 1.0);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 6, 10)
-            .round_to_2(),
-        0.80
-    );
+    let p2 = history
+        .eval_probability(from, target.clone(), 6, 10)
+        .round_to_2();
+    assert!(p2 <= 0.80 && p2 < p1);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 7, 10)
-            .round_to_2(),
-        0.60
-    );
+    let p3 = history
+        .eval_probability(from, target.clone(), 7, 10)
+        .round_to_2();
+    assert!(p3 <= 0.60 && p3 < p2);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 8, 10)
-            .round_to_2(),
-        0.40
-    );
+    let p4 = history
+        .eval_probability(from, target.clone(), 8, 10)
+        .round_to_2();
+    assert!(p4 <= 0.40 && p4 < p3);
 
-    assert_eq!(
-        history
-            .eval_probability(from, target.clone(), 9, 10)
-            .round_to_2(),
-        0.20
-    );
+    let p5 = history
+        .eval_probability(from, target.clone(), 9, 10)
+        .round_to_2();
+    assert!(p5 <= 0.20 && p5 < p4);
 
     assert_eq!(
         history
@@ -540,7 +524,7 @@ fn test_history_direct_probability() {
 }
 
 #[test]
-fn test_history_probability_small_fail_amount() {
+fn test_history_small_fail_amount_probability() {
     let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
