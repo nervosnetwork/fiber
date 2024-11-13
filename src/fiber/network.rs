@@ -573,6 +573,12 @@ pub enum GraphSyncerExitStatus {
     Failed,
 }
 
+impl Default for GraphSyncerExitStatus {
+    fn default() -> Self {
+        Self::Failed
+    }
+}
+
 #[derive(Debug)]
 pub enum NetworkActorMessage {
     Command(NetworkActorCommand),
@@ -2445,7 +2451,11 @@ impl NetworkSyncState {
 
         if should_create {
             let graph_syncer = Actor::spawn_linked(
-                Some(format!("Graph syncer to {}", peer_id)),
+                Some(format!(
+                    "Graph syncer to {} started at {:?}",
+                    peer_id,
+                    SystemTime::now()
+                )),
                 GraphSyncer::new(
                     network.clone(),
                     peer_id.clone(),
@@ -3306,7 +3316,7 @@ where
 
         debug!("Reestablishing channel {:x}", &channel_id);
         let (channel, _) = Actor::spawn_linked(
-            None,
+            Some(generate_channel_actor_name(&self.peer_id, peer_id)),
             ChannelActor::new(
                 self.get_public_key(),
                 remote_pubkey,
@@ -3440,7 +3450,7 @@ where
     fn maybe_tell_syncer_peer_disconnected(&self, peer_id: &PeerId) {
         if let NetworkSyncStatus::Running(ref state) = self.sync_status {
             if let Some(syncer) = state.get_graph_syncer(peer_id) {
-                let _ = syncer.send_message(GraphSyncerMessage::PeerDisConnected);
+                syncer.stop(Some("Peer disconnected".to_string()));
             }
         }
     }
