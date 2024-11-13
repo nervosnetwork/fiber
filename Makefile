@@ -5,6 +5,10 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
+.PHONY: test
+test:
+	RUST_LOG=off cargo nextest run
+
 .PHONY: clippy
 clippy:
 	cargo clippy --all --all-targets --all-features

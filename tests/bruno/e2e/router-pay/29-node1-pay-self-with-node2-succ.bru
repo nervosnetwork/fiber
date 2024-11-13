@@ -1,0 +1,42 @@
+
+meta {
+  name: Node1 send payment with router
+  type: http
+  seq: 29
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{encoded_invoice_self}}",
+        "allow_self_payment": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("31 step result: ", res.body);
+  // for pay self router A -> B -> A, note A -> B and B -> A will use different channel
+}

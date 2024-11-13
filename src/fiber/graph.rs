@@ -646,6 +646,7 @@ where
             incoming_htlc_expiry: 0,
         });
         let route_to_self = source == target;
+        let mut last_hop_channels = HashMap::new();
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
@@ -653,8 +654,15 @@ where
                 if from == target && !route_to_self {
                     continue;
                 }
-                // if charge inbound fees for exit hop
                 if udt_type_script != channel_info.announcement_msg.udt_type_script {
+                    continue;
+                }
+
+                // if the channel is already visited in the last hop, skip it
+                if last_hop_channels
+                    .values()
+                    .any(|x| x == &channel_info.out_point())
+                {
                     continue;
                 }
 
@@ -716,7 +724,6 @@ where
                     debug!("probability is too low: {:?}", probability);
                     continue;
                 }
-                debug!("probability: {:?}", probability);
                 let agg_weight =
                     self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
@@ -727,7 +734,7 @@ where
                         continue;
                     }
                 }
-                let node: NodeHeapElement = NodeHeapElement {
+                let node = NodeHeapElement {
                     node_id: from,
                     weight,
                     distance,
@@ -737,6 +744,7 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
                 };
+                last_hop_channels.insert(node.node_id, channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
@@ -760,10 +768,11 @@ where
         }
 
         info!(
-            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}",
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}, result: {:?}",
             nodes_visited,
             edges_expanded,
-            started_time.elapsed()
+            started_time.elapsed(),
+            result
         );
         if result.is_empty() || current != target {
             return Err(GraphError::PathFind("no path found".to_string()));

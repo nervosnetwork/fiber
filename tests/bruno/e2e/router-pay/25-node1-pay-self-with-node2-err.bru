@@ -1,0 +1,45 @@
+
+meta {
+  name: Node1 send payment with router
+  type: http
+  seq: 25
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "send_payment",
+    "params": [
+      {
+        "invoice": "{{encoded_invoice_self}}",
+        "allow_self_payment": true
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isDefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("25 step result: ", res.body);
+  // for pay self router A -> B -> A, can not use the same channel from A -> B and B -> A
+  if (!(res.body.error.message.includes("Failed to build route"))) {
+    throw new Error("Assertion failed: error message is not right");
+  }
+}
