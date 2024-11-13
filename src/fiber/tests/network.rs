@@ -728,7 +728,6 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -788,7 +787,6 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
 
     // normal keysend send payment
@@ -807,6 +805,5 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
 }
