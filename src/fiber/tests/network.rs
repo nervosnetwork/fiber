@@ -728,7 +728,6 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -788,7 +787,6 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
 
     // normal keysend send payment
@@ -807,6 +805,26 @@ fn test_send_payment_validate_invoice() {
     };
 
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
-    eprintln!("invoice: {:?}", result);
     assert!(result.is_ok());
+
+    // invoice with invalid final_htlc_expiry_delta
+    let send_command = SendPaymentCommand {
+        target_pubkey: None,
+        amount: None,
+        payment_hash: None,
+        final_htlc_expiry_delta: Some(11),
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("final_htlc_expiry_delta is less than invoice"));
 }
