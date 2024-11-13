@@ -239,7 +239,7 @@ fn test_store_payment_session() {
 }
 
 #[test]
-fn test_store_payment_hisotry() {
+fn test_store_payment_history() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("payment_history_store");
     let mut store = Store::new(path);
