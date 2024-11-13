@@ -5,9 +5,18 @@ fiber:
   chain: dev.toml
   auto_announce_node: true
   announce_private_addr: true
+  watchtower_check_interval_seconds: 1
 
 rpc:
   listening_addr: 127.0.0.1:41716
+  enabled_modules:
+    - cch
+    - channel
+    - graph
+    - info
+    - invoice
+    - peer
+    - dev
 
 cch:
   ignore_startup_failure: true

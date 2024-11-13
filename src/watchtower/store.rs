@@ -1,9 +1,12 @@
-use ckb_types::packed::{Bytes, CellOutput, Script};
-use musig2::CompactSignature;
+use ckb_types::packed::Script;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::fiber::{serde_utils::CompactSignatureAsBytes, serde_utils::EntityHex, types::Hash256};
+use crate::fiber::{
+    channel::{RevocationData, SettlementData},
+    serde_utils::EntityHex,
+    types::Hash256,
+};
 
 pub trait WatchtowerStore {
     /// Get the channels that are currently being watched by the watchtower
@@ -15,6 +18,8 @@ pub trait WatchtowerStore {
     fn remove_watch_channel(&self, channel_id: Hash256);
     /// Update the revocation data of a channel, the watchtower will use this data to revoke an old version commitment transaction
     fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData);
+    /// Update the settlement data of a channel, the watchtower will use this data to settle the commitment transaction of a force closed channel
+    fn update_settlement(&self, channel_id: Hash256, settlement_data: SettlementData);
 }
 
 /// The data of a channel that the watchtower is monitoring
@@ -25,17 +30,5 @@ pub struct ChannelData {
     #[serde_as(as = "EntityHex")]
     pub funding_tx_lock: Script,
     pub revocation_data: Option<RevocationData>,
-}
-
-#[serde_as]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RevocationData {
-    pub commitment_number: u64,
-    pub x_only_aggregated_pubkey: [u8; 32],
-    #[serde_as(as = "CompactSignatureAsBytes")]
-    pub aggregated_signature: CompactSignature,
-    #[serde_as(as = "EntityHex")]
-    pub output: CellOutput,
-    #[serde_as(as = "EntityHex")]
-    pub output_data: Bytes,
+    pub settlement_data: Option<SettlementData>,
 }

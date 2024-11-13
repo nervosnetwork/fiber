@@ -1,0 +1,34 @@
+meta {
+  name: generate a few blocks for watchtower to generate settlement tx, default delay epoch is 6 epochs
+  type: http
+  seq: 10
+}
+
+post {
+  url: {{CKB_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "generate_epochs",
+    "params": ["0x7"]
+  }
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  // Wait for the commitment tx to be revoked by the watchtower
+  await new Promise(r => setTimeout(r, 5000));
+}

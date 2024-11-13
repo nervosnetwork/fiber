@@ -1,9 +1,8 @@
 use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{BlockNumber, Status, TxStatus};
 use ckb_types::core::{EpochNumberWithFraction, TransactionView};
-use ckb_types::packed::{self, Byte32, CellOutput, OutPoint, Script, Transaction};
+use ckb_types::packed::{Byte32, OutPoint, Script, Transaction};
 use ckb_types::prelude::{IntoTransactionView, Pack, Unpack};
-use musig2::CompactSignature;
 use once_cell::sync::OnceCell;
 use ractor::concurrency::Duration;
 use ractor::{
@@ -504,7 +503,7 @@ impl NetworkActorMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
     NetworkStopped(PeerId),
@@ -520,30 +519,18 @@ pub enum NetworkServiceEvent {
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
     ChannelClosed(PeerId, Hash256, Byte32),
-    // We should sign a commitment transaction and send it to the other party.
-    CommitmentSignaturePending(PeerId, Hash256, u64),
-    // We have signed a commitment transaction and sent it to the other party.
-    LocalCommitmentSigned(
-        PeerId,          /* Peer Id */
-        Hash256,         /* Channel Id */
-        u64,             /* Commitment number */
-        TransactionView, /* Commitment transaction, not valid per se (requires other party's signature) */
-    ),
     // A RevokeAndAck is received from the peer. Other data relevant to this
     // RevokeAndAck message are also assembled here. The watch tower may use this.
     RevokeAndAckReceived(
-        PeerId,           /* Peer Id */
-        Hash256,          /* Channel Id */
-        u64,              /* Commitment number */
-        [u8; 32],         /* Aggregated public key x-only */
-        CompactSignature, /* Aggregated signature */
-        CellOutput,
-        packed::Bytes,
+        PeerId,  /* Peer Id */
+        Hash256, /* Channel Id */
+        RevocationData,
+        SettlementData,
     ),
     // The other party has signed a valid commitment transaction,
     // and we successfully assemble the partial signature from other party
-    // to create a complete commitment transaction.
-    RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
+    // to create a complete commitment transaction and a settlement transaction.
+    RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
     // The syncing of network information has completed.
     SyncingCompleted,
 }
@@ -589,9 +576,6 @@ pub enum NetworkActorEvent {
 
     /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
-
-    /// A commitment transaction is signed by us and has sent to the other party.
-    LocalCommitmentSigned(PeerId, Hash256, u64, TransactionView),
 
     /// Channel is going to be closed forcely, and the closing transaction is ready to be broadcasted.
     CommitmentTransactionPending(Transaction, Hash256),
@@ -1246,16 +1230,6 @@ where
                     "Closing transaction failed for channel {:?}, tx hash: {:?}, peer id: {:?}",
                     &channel_id, &tx_hash, &peer_id
                 );
-            }
-            NetworkActorEvent::LocalCommitmentSigned(peer_id, channel_id, version, tx) => {
-                // Notify outside observers.
-                myself
-                    .send_message(NetworkActorMessage::new_notification(
-                        NetworkServiceEvent::LocalCommitmentSigned(
-                            peer_id, channel_id, version, tx,
-                        ),
-                    ))
-                    .expect("myself alive");
             }
             NetworkActorEvent::GraphSyncerExited(peer_id, reason) => {
                 debug!(

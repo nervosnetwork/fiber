@@ -2,14 +2,16 @@ use super::db_migrate::DbMigrate;
 use super::schema::*;
 use crate::{
     fiber::{
-        channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
+        channel::{
+            ChannelActorState, ChannelActorStateStore, ChannelState, RevocationData, SettlementData,
+        },
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
         history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PersistentNetworkActorState},
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
-    watchtower::{ChannelData, RevocationData, WatchtowerStore},
+    watchtower::{ChannelData, WatchtowerStore},
 };
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
@@ -624,6 +626,7 @@ impl WatchtowerStore for Store {
                 channel_id,
                 funding_tx_lock,
                 revocation_data: None,
+                settlement_data: None,
             },
             "ChannelData",
         );
@@ -644,6 +647,19 @@ impl WatchtowerStore for Store {
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
             channel_data.revocation_data = Some(revocation_data);
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.commit();
+        }
+    }
+
+    fn update_settlement(&self, channel_id: Hash256, settlement_data: SettlementData) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
+            channel_data.settlement_data = Some(settlement_data);
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();

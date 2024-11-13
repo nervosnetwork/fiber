@@ -1,0 +1,40 @@
+meta {
+  name: get auto accepted channel id from Node1
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE3_PEERID}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result.channels: isDefined
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+  console.log(res.body.result);
+  bru.setVar("CHANNEL_ID", res.body.result.channels.at(-1).channel_id);
+}

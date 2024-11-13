@@ -193,7 +193,8 @@ fn test_store_wacthtower() {
         vec![ChannelData {
             channel_id,
             funding_tx_lock: funding_tx_lock.clone(),
-            revocation_data: None
+            revocation_data: None,
+            settlement_data: None
         }]
     );
 
@@ -211,7 +212,8 @@ fn test_store_wacthtower() {
         vec![ChannelData {
             channel_id,
             funding_tx_lock,
-            revocation_data: Some(revocation_data)
+            revocation_data: Some(revocation_data),
+            settlement_data: None
         }]
     );
 
