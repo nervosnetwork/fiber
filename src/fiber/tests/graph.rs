@@ -200,8 +200,16 @@ impl MockNetworkGraph {
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
-        self.graph
-            .find_path(source, target, amount, Some(max_fee), None, false)
+        self.graph.find_path(
+            source,
+            target,
+            amount,
+            Some(max_fee),
+            None,
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+        )
     }
 
     pub fn find_route_udt(
@@ -220,6 +228,8 @@ impl MockNetworkGraph {
             amount,
             Some(max_fee),
             Some(udt_type_script),
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
         )
     }
@@ -504,6 +514,8 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
     );
     assert!(route.is_err());
@@ -514,6 +526,40 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_build_route_with_expiry_limit() {
+    let mut network = MockNetworkGraph::new(6);
+    let (node1, node2) = (network.keys[1], network.keys[2]);
+
+    network.add_edge(1, 2, Some(1000), Some(4));
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_ok());
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        100,
         false,
     );
     assert!(route.is_err());

@@ -555,6 +555,8 @@ where
             amount,
             payment_data.max_fee_amount,
             udt_type_script,
+            payment_data.final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
             allow_self_payment,
         )?;
         assert!(!route.is_empty());
@@ -638,6 +640,8 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
+        fianl_tlc_expiry_delta: u64,
+        tlc_expiry_limit: u64,
         allow_self: bool,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
@@ -690,7 +694,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_htlc_expiry: 0,
+            incoming_htlc_expiry: fianl_tlc_expiry_delta,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -737,12 +741,17 @@ where
                 if amount_to_send < channel_update.htlc_minimum_value {
                     continue;
                 }
-                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry
-                    + if from == source {
-                        0
-                    } else {
-                        channel_update.htlc_expiry_delta
-                    };
+
+                let expiry_delta = if from == source {
+                    0
+                } else {
+                    channel_update.htlc_expiry_delta
+                };
+
+                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry + expiry_delta;
+                if incoming_htlc_expiry > tlc_expiry_limit {
+                    continue;
+                }
 
                 let probability = cur_hop.probability
                     * self.history.eval_probability(
