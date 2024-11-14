@@ -67,7 +67,7 @@ impl InternalResult {
         self.add(from, target, current_time(), amount, false);
     }
 
-    pub fn fail_node(&mut self, nodes: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_node(&mut self, nodes: &[SessionRouteNode], index: usize) {
         self.fail_node = Some(nodes[index].pubkey);
         if index > 0 {
             self.fail_pair(nodes, index);
@@ -77,7 +77,7 @@ impl InternalResult {
         }
     }
 
-    pub fn fail_pair(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_pair(&mut self, route: &[SessionRouteNode], index: usize) {
         if index > 0 {
             let a = route[index - 1].pubkey;
             let b = route[index].pubkey;
@@ -85,7 +85,7 @@ impl InternalResult {
         }
     }
 
-    pub fn fail_pair_balanced(&mut self, nodes: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_pair_balanced(&mut self, nodes: &[SessionRouteNode], index: usize) {
         if index > 0 {
             let a = nodes[index - 1].pubkey;
             let b = nodes[index].pubkey;
@@ -94,7 +94,7 @@ impl InternalResult {
         }
     }
 
-    pub fn succeed_range_pairs(&mut self, nodes: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn succeed_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for i in start..end {
             self.add(
                 nodes[i].pubkey,
@@ -105,13 +105,13 @@ impl InternalResult {
             );
         }
     }
-    pub fn fail_range_pairs(&mut self, nodes: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn fail_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for index in start.max(1)..=end {
             self.fail_pair(nodes, index);
         }
     }
 
-    pub fn record_payment_fail(&mut self, nodes: &Vec<SessionRouteNode>, tlc_err: TlcErr) -> bool {
+    pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
         let mut need_to_retry = true;
 
         let error_index = nodes.iter().position(|s| {
@@ -271,10 +271,7 @@ where
     }
 
     pub(crate) fn add_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
-        self.inner
-            .entry(from)
-            .or_insert_with(HashMap::new)
-            .insert(target, result);
+        self.inner.entry(from).or_default().insert(target, result);
         self.save_result(from, target, result);
     }
 
@@ -285,11 +282,8 @@ where
 
     pub(crate) fn load_from_store(&mut self) {
         let results = self.store.get_payment_history_result();
-        for (from, target, result) in results.iter() {
-            self.inner
-                .entry(from.clone())
-                .or_insert_with(HashMap::new)
-                .insert(target.clone(), *result);
+        for (from, target, result) in results.into_iter() {
+            self.inner.entry(from).or_default().insert(target, result);
         }
     }
 
@@ -338,27 +332,27 @@ where
     }
 
     pub(crate) fn apply_internal_result(&mut self, result: InternalResult) {
-        for ((from, target), pair_result) in result.pairs.iter() {
+        let InternalResult { pairs, fail_node } = result;
+        for ((from, target), pair_result) in pairs.into_iter() {
             self.apply_pair_result(
-                *from,
-                *target,
+                from,
+                target,
                 pair_result.amount,
                 pair_result.success,
                 pair_result.time,
             );
         }
-
-        if let Some(fail_node) = result.fail_node {
-            let mut pairs = vec![];
-            for (from, target) in self.inner.keys().flat_map(|from| {
-                self.inner[from]
-                    .keys()
-                    .map(move |target| (from.clone(), target.clone()))
-            }) {
-                if from == fail_node || target == fail_node {
-                    pairs.push((from, target));
-                }
-            }
+        if let Some(fail_node) = fail_node {
+            let pairs: Vec<(Pubkey, Pubkey)> = self
+                .inner
+                .iter()
+                .flat_map(|(from, targets)| {
+                    targets.keys().filter_map(move |target| {
+                        (*from == fail_node || *target == fail_node)
+                            .then_some((from.clone(), target.clone()))
+                    })
+                })
+                .collect();
             for (from, target) in pairs {
                 self.apply_pair_result(from, target, 0, false, current_time());
             }

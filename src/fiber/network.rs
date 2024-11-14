@@ -2260,9 +2260,7 @@ where
                         self.network_graph
                             .write()
                             .await
-                            .record_payment_success(&payment_session);
-                        payment_session.set_success_status();
-                        self.store.insert_payment_session(payment_session);
+                            .record_payment_success(payment_session);
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
                         let error_detail = reason.decode().expect("decoded error");
@@ -2272,7 +2270,7 @@ where
                             .write()
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
-                        if payment_session.can_retry() && need_to_retry {
+                        if need_to_retry {
                             let res = self.try_payment_session(state, payment_session).await;
                             if res.is_err() {
                                 debug!("Failed to retry payment session: {:?}", res);
@@ -2370,37 +2368,33 @@ where
         hops: Vec<PaymentHopData>,
     ) -> Result<PaymentSession, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        let peeled_packet = match PeeledPaymentOnionPacket::create(
-            session_key,
-            hops.clone(),
-            &Secp256k1::signing_only(),
-        ) {
-            Ok(packet) => packet,
-            Err(e) => {
-                let err = format!(
-                    "Failed to create onion packet: {:?}, error: {:?}",
-                    payment_data.payment_hash, e
-                );
-                self.set_payment_fail_with_error(payment_session, &err);
-                return Err(Error::SendPaymentError(err));
-            }
-        };
-
         let first_channel_outpoint = hops[0]
             .channel_outpoint
             .clone()
             .expect("first hop channel must exist");
 
-        let session_route =
+        payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
         let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
+        let peeled_packet =
+            match PeeledPaymentOnionPacket::create(session_key, hops, &Secp256k1::signing_only()) {
+                Ok(packet) => packet,
+                Err(e) => {
+                    let err = format!(
+                        "Failed to create onion packet: {:?}, error: {:?}",
+                        payment_data.payment_hash, e
+                    );
+                    self.set_payment_fail_with_error(payment_session, &err);
+                    return Err(Error::SendPaymentError(err));
+                }
+            };
         let command = SendOnionPacketCommand {
             packet: peeled_packet.serialize(),
             previous_tlc: None,
         };
-        payment_session.route = session_route.clone();
+
         self.handle_send_onion_packet_command(state, command, rpc_reply)
             .await;
         match recv.await.expect("msg recv error") {
