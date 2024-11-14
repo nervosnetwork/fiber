@@ -74,7 +74,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
-use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -314,7 +314,7 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_tlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: u64,
     pub tlc_expiry_limit: u64,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
@@ -388,33 +388,35 @@ impl SendPaymentData {
         };
 
         // check htlc expiry delta and limit are both valid if it is set
-        if let Some(final_tlc_expiry_delta) = command.final_tlc_expiry_delta {
-            if let Some(invoice_final_htlc_minimum_expiry_delta) = invoice
-                .as_ref()
-                .and_then(|i| i.final_htlc_minimum_expiry_delta())
-            {
-                if *invoice_final_htlc_minimum_expiry_delta > final_tlc_expiry_delta {
-                    return Err("final_tlc_expiry_delta is less than invoice final_htlc_minimum_expiry_delta".to_string());
-                }
-            }
-
-            if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA {
-                return Err("final_tlc_expiry_delta is too small".to_string());
-            }
+        let final_tlc_expiry_delta = command
+            .final_tlc_expiry_delta
+            .or_else(|| {
+                invoice
+                    .as_ref()
+                    .and_then(|i| i.final_htlc_minimum_expiry_delta().copied())
+            })
+            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA
+            || final_tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT
+        {
+            return Err(format!(
+                "invalid final_tlc_expiry_delta, expect between {} and {}",
+                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
         }
-        if let Some(tlc_expiry_limit) = command.tlc_expiry_limit {
-            let final_tlc_expiry_delta = command.final_tlc_expiry_delta.unwrap_or(0);
-            if tlc_expiry_limit <= final_tlc_expiry_delta
-                || tlc_expiry_limit <= MIN_TLC_EXPIRY_DELTA
-            {
-                return Err("tlc_expiry_limit too small".to_string());
-            }
-            if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
-                return Err(format!(
-                    "tlc_expiry_limit too large, expect it to less than {}",
-                    MAX_PAYMENT_TLC_EXPIRY_LIMIT
-                ));
-            }
+
+        let tlc_expiry_limit = command
+            .tlc_expiry_limit
+            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
+
+        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
+            return Err("tlc_expiry_limit is too small".to_string());
+        }
+        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return Err(format!(
+                "tlc_expiry_limit is too large, expect it to less than {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
         }
 
         let keysend = command.keysend.unwrap_or(false);
@@ -449,10 +451,8 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_tlc_expiry_delta: command.final_tlc_expiry_delta,
-            tlc_expiry_limit: command
-                .tlc_expiry_limit
-                .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
+            final_tlc_expiry_delta,
+            tlc_expiry_limit,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,

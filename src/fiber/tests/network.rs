@@ -1,4 +1,5 @@
 use super::test_utils::{init_tracing, NetworkNode};
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::gen_rand_keypair;
 use crate::fiber::tests::test_utils::generate_pubkey;
@@ -712,7 +713,9 @@ fn test_send_payment_validate_invoice() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(
+            DEFAULT_TLC_EXPIRY_DELTA,
+        ))
         .add_attr(Attribute::Description("description".to_string()))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
@@ -837,7 +840,41 @@ fn test_send_payment_validate_invoice() {
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
-        .contains("final_tlc_expiry_delta is less than invoice"));
+        .contains("invalid final_tlc_expiry_delta"));
+
+    // invoice with invalid final_tlc_expiry_delta
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(11))
+        .add_attr(Attribute::Description("description".to_string()))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+    let invoice_encoded = invoice.to_string();
+    let send_command = SendPaymentCommand {
+        target_pubkey: None,
+        amount: None,
+        payment_hash: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("invalid final_tlc_expiry_delta"));
 }
 
 #[test]
@@ -862,5 +899,5 @@ fn test_send_payment_validate_htlc_expiry_delta() {
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
-        .contains("final_tlc_expiry_delta is too small"));
+        .contains("invalid final_tlc_expiry_delta"));
 }

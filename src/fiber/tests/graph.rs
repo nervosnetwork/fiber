@@ -1,4 +1,4 @@
-use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::Pubkey;
 use crate::{
@@ -533,7 +533,7 @@ fn test_graph_build_route_three_nodes() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -572,7 +572,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         amount: 100, // Exceeds max_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -599,7 +599,7 @@ fn test_graph_build_route_below_min_htlc_value() {
         amount: 10, // Below min_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -645,7 +645,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -666,7 +666,7 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -697,7 +697,7 @@ fn test_graph_session_router() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -734,9 +734,8 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -753,7 +752,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 
         timeout: Some(10),
@@ -774,7 +773,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
 
         timeout: Some(10),
@@ -793,7 +792,7 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -840,7 +839,7 @@ fn test_graph_payment_self_default_is_false() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_tlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
         tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
