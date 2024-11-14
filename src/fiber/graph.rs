@@ -809,7 +809,7 @@ where
         }
 
         info!(
-            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}, result: {:?}",
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?} \nresult: {:?}",
             nodes_visited,
             edges_expanded,
             started_time.elapsed(),
