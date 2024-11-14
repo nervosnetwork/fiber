@@ -650,7 +650,7 @@ where
 
         if amount == 0 {
             return Err(PathFindError::Amount(
-                "Amount must be greater than 0".to_string(),
+                "amount must be greater than 0".to_string(),
             ));
         }
 
