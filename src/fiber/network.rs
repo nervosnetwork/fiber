@@ -74,6 +74,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -288,7 +289,9 @@ pub struct SendPaymentCommand {
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
     // The htlc expiry delta that should be used to set the timelock for the final hop
-    pub final_htlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: Option<u64>,
+    // The htlc expiry for whole payment, in milliseconds
+    pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -311,7 +314,8 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_htlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: Option<u64>,
+    pub tlc_expiry_limit: u64,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -383,14 +387,33 @@ impl SendPaymentData {
             Err(e) => return Err(e),
         };
 
-        if let Some(final_htlc_expiry_delta) = command.final_htlc_expiry_delta {
+        // check htlc expiry delta and limit are both valid if it is set
+        if let Some(final_tlc_expiry_delta) = command.final_tlc_expiry_delta {
             if let Some(invoice_final_htlc_minimum_expiry_delta) = invoice
                 .as_ref()
                 .and_then(|i| i.final_htlc_minimum_expiry_delta())
             {
-                if *invoice_final_htlc_minimum_expiry_delta > final_htlc_expiry_delta {
-                    return Err("final_htlc_expiry_delta is less than invoice final_htlc_minimum_expiry_delta".to_string());
+                if *invoice_final_htlc_minimum_expiry_delta > final_tlc_expiry_delta {
+                    return Err("final_tlc_expiry_delta is less than invoice final_htlc_minimum_expiry_delta".to_string());
                 }
+            }
+
+            if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA {
+                return Err("final_tlc_expiry_delta is too small".to_string());
+            }
+        }
+        if let Some(tlc_expiry_limit) = command.tlc_expiry_limit {
+            let final_tlc_expiry_delta = command.final_tlc_expiry_delta.unwrap_or(0);
+            if tlc_expiry_limit <= final_tlc_expiry_delta
+                || tlc_expiry_limit <= MIN_TLC_EXPIRY_DELTA
+            {
+                return Err("tlc_expiry_limit too small".to_string());
+            }
+            if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+                return Err(format!(
+                    "tlc_expiry_limit too large, expect it to less than {}",
+                    MAX_PAYMENT_TLC_EXPIRY_LIMIT
+                ));
             }
         }
 
@@ -426,7 +449,10 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
+            final_tlc_expiry_delta: command.final_tlc_expiry_delta,
+            tlc_expiry_limit: command
+                .tlc_expiry_limit
+                .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT),
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,

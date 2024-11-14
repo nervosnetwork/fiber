@@ -41,6 +41,9 @@ pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 /// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
 pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
 
+/// The maximum expiry delta for a payment, in milliseconds. 2 days
+pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 2 * 24 * 60 * 60 * 1000; // 2 days
+
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
 

@@ -523,7 +523,6 @@ where
         &self,
         payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
-        let payment_data = payment_data.clone();
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;

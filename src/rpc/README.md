@@ -293,7 +293,7 @@ Sends a payment to a peer.
 * `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
 * `amount` - `Option<u128>`, the amount of the payment
 * `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
-* `final_htlc_expiry_delta` - `Option<u64>`, the htlc expiry delta should be used to set the timelock for the final hop
+* `final_tlc_expiry_delta` - `Option<u64>`, the htlc expiry delta should be used to set the timelock for the final hop
 * `invoice` - `Option<String>`, the encoded invoice to send to the recipient
 * `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay

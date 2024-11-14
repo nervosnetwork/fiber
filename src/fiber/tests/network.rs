@@ -2,6 +2,7 @@ use super::test_utils::{init_tracing, NetworkNode};
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::gen_rand_keypair;
 use crate::fiber::tests::test_utils::generate_pubkey;
+use crate::fiber::tests::test_utils::rand_sha256_hash;
 use crate::invoice::InvoiceBuilder;
 use crate::{
     fiber::{
@@ -654,7 +655,9 @@ fn test_send_payment_validate_payment_hash() {
         target_pubkey: Some(generate_pubkey()),
         amount: Some(10000),
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+
         invoice: None,
         timeout: None,
         max_fee_amount: None,
@@ -675,7 +678,9 @@ fn test_send_payment_validate_amount() {
         target_pubkey: Some(generate_pubkey()),
         amount: None,
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+
         invoice: None,
         timeout: None,
         max_fee_amount: None,
@@ -717,7 +722,8 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: Some(generate_pubkey()),
         amount: None,
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
@@ -737,7 +743,8 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: Some(10),
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
@@ -758,7 +765,8 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: None,
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
@@ -776,7 +784,8 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: None,
         amount: None,
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
@@ -794,7 +803,8 @@ fn test_send_payment_validate_invoice() {
         target_pubkey: Some(generate_pubkey()),
         amount: Some(10),
         payment_hash: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: None,
         max_fee_amount: None,
@@ -807,12 +817,13 @@ fn test_send_payment_validate_invoice() {
     let result = SendPaymentData::new(send_command, generate_pubkey().into());
     assert!(result.is_ok());
 
-    // invoice with invalid final_htlc_expiry_delta
+    // invoice with invalid final_tlc_expiry_delta
     let send_command = SendPaymentCommand {
         target_pubkey: None,
         amount: None,
         payment_hash: None,
-        final_htlc_expiry_delta: Some(11),
+        final_tlc_expiry_delta: Some(11),
+        tlc_expiry_limit: None,
         invoice: Some(invoice_encoded.clone()),
         timeout: None,
         max_fee_amount: None,
@@ -826,5 +837,30 @@ fn test_send_payment_validate_invoice() {
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
-        .contains("final_htlc_expiry_delta is less than invoice"));
+        .contains("final_tlc_expiry_delta is less than invoice"));
+}
+
+#[test]
+fn test_send_payment_validate_htlc_expiry_delta() {
+    let send_command = SendPaymentCommand {
+        target_pubkey: Some(generate_pubkey()),
+        amount: Some(1000),
+        payment_hash: Some(rand_sha256_hash()),
+        final_tlc_expiry_delta: Some(100),
+        tlc_expiry_limit: None,
+        invoice: None,
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    eprintln!("{:?}", result);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("final_tlc_expiry_delta is too small"));
 }
