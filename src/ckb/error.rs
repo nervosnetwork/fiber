@@ -5,6 +5,7 @@ use thiserror::Error;
 pub enum FundingError {
     #[error("Funding tx is absent")]
     AbsentTx,
+
     #[error("Failed to call CKB node RPC: {0}")]
     CkbRpcError(#[from] RpcError),
 
