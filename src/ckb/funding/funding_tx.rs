@@ -266,8 +266,8 @@ impl FundingTxBuilder {
 
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps =
-                        get_udt_cell_deps(&udt_type_script).expect("get_udt_cell_deps failed");
+                    let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
+                        .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
                     }
@@ -302,20 +302,21 @@ impl FundingTxBuilder {
             self.request.funding_fee_rate
         );
         let balancer = CapacityBalancer::new_simple(
-            sender,
+            sender.clone(),
             placeholder_witness,
             self.request.funding_fee_rate,
         );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
-        let cell_dep_resolver = {
-            let genesis_block = ckb_client
-                .get_block_by_number(0.into())
-                .expect("Genesis block exists")
-                .expect("Get genesis block via CKB PRC");
-            DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block))
-                .expect("DefaultCellDepResolver from genesis block")
-        };
+        let cell_dep_resolver = ckb_client
+            .get_block_by_number(0.into())
+            .map_err(|err| FundingError::CkbRpcError(err))?
+            .and_then(|genesis_block| {
+                DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
+            })
+            .ok_or_else(|| {
+                FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(sender))
+            })?;
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
@@ -381,10 +382,13 @@ impl FundingTx {
         // ```
         //
         // However, ckb-sdk-rust still uses 0.24.
+        //
+        // It's complex to use map_err and return an error as well because secp256k1 used by ckb sdk is not public.
+        // Expect is OK here since the secret key is valid and can be parsed in both versions.
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
             hex::encode(secret_key.as_ref()).as_ref(),
         )
-        .expect("SecpCkbRawKeySigner")]);
+        .expect("convert secret key between different secp256k1 versions")]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers = HashMap::default();
