@@ -2502,7 +2502,6 @@ where
 
         let payment_session = PaymentSession::new(payment_data.clone(), 5);
         self.store.insert_payment_session(payment_session.clone());
-        eprintln!("debug here payment session created: {:?}", payment_session);
         let session = self.try_payment_session(state, payment_session).await?;
         return Ok(session.into());
     }

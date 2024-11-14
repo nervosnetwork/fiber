@@ -127,7 +127,21 @@ impl InternalResult {
         let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
-        if index == 1 {
+        if index == 0 {
+            // we get error from the source node
+            match error_code {
+                TlcErrorCode::InvalidOnionVersion
+                | TlcErrorCode::InvalidOnionHmac
+                | TlcErrorCode::InvalidOnionKey
+                | TlcErrorCode::InvalidOnionPayload => need_to_retry = false,
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                    need_to_retry = false;
+                }
+                _ => {
+                    // we can not penalize our own node, the whole payment session need to retry
+                }
+            }
+        } else if index == 1 {
             match error_code {
                 // we received an error from the first node, we trust our own node
                 // so we need to penalize the first node
@@ -450,7 +464,7 @@ where
         fail_amount: u128,
         amount: u128,
     ) -> f64 {
-        if amount > capacity || amount == 0 {
+        if amount > capacity || amount == 0 || capacity == 0 {
             return 0.0;
         }
 
@@ -460,11 +474,13 @@ where
         if fail_amount == success_amount {
             // if the graph has latest information
             // we don't continue to calculate the probability
-            if amount <= capacity {
+            if amount < capacity {
                 return 1.0;
             }
             return 0.0;
-        } else if fail_amount < success_amount {
+        }
+
+        if fail_amount < success_amount {
             // suppose a malioucious node report wrong information
             // here we return 0.0 to avoid to choose this channel
             error!(
@@ -474,7 +490,7 @@ where
             return 0.0;
         }
 
-        if amount > fail_amount {
+        if amount >= fail_amount {
             return 0.0;
         }
 

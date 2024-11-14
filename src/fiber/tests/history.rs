@@ -519,7 +519,6 @@ fn test_history_direct_probability() {
     };
     history.add_result(from, target, result);
     let prob = history.get_direct_probability(&from, &target);
-    eprintln!("prob: {}", prob);
     assert_eq!(prob, 0.0);
 }
 
@@ -572,10 +571,6 @@ fn test_history_channel_probability_range() {
     let mut prev_prob = history.eval_probability(from, target.clone(), 10000000, 100000000);
     for amount in (10000005..50000000).step_by(10000) {
         let prob = history.eval_probability(from, target.clone(), amount, 100000000);
-        eprintln!(
-            "amount: {}, prob: {}, prev_prob: {}",
-            amount, prob, prev_prob
-        );
         assert!(prob < prev_prob);
         prev_prob = prob;
     }
@@ -614,8 +609,6 @@ fn test_history_eval_probability_range() {
     for _i in 0..3 {
         std::thread::sleep(std::time::Duration::from_millis(500));
         let prob = history.eval_probability(from, target.clone(), 50000000 - 10, 100000000);
-        eprintln!("prob: {}", prob);
-        eprintln!("prev_prob: {}", prev_prob);
         assert!(prob > prev_prob);
         prev_prob = prob;
     }
@@ -648,7 +641,6 @@ fn test_history_eval_probability_range() {
         };
         history.add_result(from, target, result);
         let prob = history.eval_probability(from, target, 50000000 - 10, 100000000);
-        eprintln!("prob --> : {}", prob);
         assert!(prob > prev_prob);
         prev_prob = prob;
     }

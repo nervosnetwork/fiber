@@ -234,7 +234,6 @@ fn test_store_payment_session() {
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
     let res = store.get_payment_session(payment_hash).unwrap();
-    eprintln!("{:?}", res);
     assert_eq!(res.payment_hash(), payment_hash);
     assert_eq!(res.request.max_fee_amount, Some(1000));
     assert_eq!(res.status, PaymentSessionStatus::Created);
