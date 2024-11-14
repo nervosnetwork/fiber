@@ -491,11 +491,13 @@ where
         }
     }
 
-    pub(crate) fn record_payment_success(&mut self, payment_session: &PaymentSession) {
+    pub(crate) fn record_payment_success(&mut self, mut payment_session: PaymentSession) {
         let session_route = &payment_session.route.nodes;
         let mut result = InternalResult::default();
         result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
         self.history.apply_internal_result(result);
+        payment_session.set_success_status();
+        self.store.insert_payment_session(payment_session);
     }
 
     pub(crate) fn record_payment_fail(
@@ -507,7 +509,7 @@ where
         let nodes = &payment_session.route.nodes;
         let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
         self.history.apply_internal_result(internal_result);
-        return need_to_retry;
+        return need_to_retry && payment_session.can_retry();
     }
 
     #[cfg(test)]
@@ -782,13 +784,13 @@ where
         }
 
         let mut current = source_node.node_id;
-        while let Some(elem) = distances.get(&current) {
-            let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
+        while let Some(elem) = distances.remove(&current) {
+            let (next_pubkey, next_out_point) = elem.next_hop.expect("next_hop is none");
             result.push(PathEdge {
-                target: next_hop.0,
-                channel_outpoint: next_hop.1.clone(),
+                target: next_pubkey,
+                channel_outpoint: next_out_point,
             });
-            current = next_hop.0;
+            current = next_pubkey;
             if current == target {
                 break;
             }
@@ -884,32 +886,21 @@ impl SessionRoute {
     // for a payment route A -> B -> C -> D
     // the `payment_hops` is [B, C, D], which is a convinent way for onion routing.
     // here we need to create a session route with source, which is A -> B -> C -> D
-    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &Vec<PaymentHopData>) -> Self {
-        let mut router = Self::default();
-        let mut current = source;
-        for hop in payment_hops {
-            if let Some(key) = hop.next_hop {
-                router.add_node(
-                    current,
-                    hop.channel_outpoint
-                        .clone()
-                        .expect("expect channel outpoint"),
-                    hop.amount,
-                );
-                current = key;
-            }
-        }
-        assert_eq!(current, target);
-        router.add_node(target, OutPoint::default(), 0);
-        router
-    }
-
-    fn add_node(&mut self, pubkey: Pubkey, channel_outpoint: OutPoint, amount: u128) {
-        self.nodes.push(SessionRouteNode {
-            pubkey,
-            channel_outpoint,
-            amount,
-        });
+    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
+        let nodes = std::iter::once(source)
+            .chain(
+                payment_hops
+                    .iter()
+                    .map(|hop| hop.next_hop.clone().unwrap_or(target)),
+            )
+            .zip(payment_hops)
+            .map(|(pubkey, hop)| SessionRouteNode {
+                pubkey,
+                channel_outpoint: hop.channel_outpoint.clone().unwrap_or_default(),
+                amount: hop.amount,
+            })
+            .collect();
+        Self { nodes }
     }
 }
 
