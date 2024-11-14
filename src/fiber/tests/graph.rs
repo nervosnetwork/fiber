@@ -944,7 +944,7 @@ fn test_graph_build_route_with_double_edge_node() {
         allow_self_payment: true,
     };
     let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
-    let route = network.graph.build_route(&payment_data);
+    let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
 }
 
