@@ -523,7 +523,6 @@ where
         &self,
         payment_data: SendPaymentData,
     ) -> Result<Vec<PaymentHopData>, PathFindError> {
-        let payment_data = payment_data.clone();
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
@@ -792,17 +791,13 @@ where
         }
 
         let mut current = source_node.node_id;
-        loop {
-            if let Some(elem) = distances.get(&current) {
-                let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
-                result.push(PathEdge {
-                    target: next_hop.0,
-                    channel_outpoint: next_hop.1.clone(),
-                });
-                current = next_hop.0;
-            } else {
-                break;
-            }
+        while let Some(elem) = distances.get(&current) {
+            let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
+            result.push(PathEdge {
+                target: next_hop.0,
+                channel_outpoint: next_hop.1.clone(),
+            });
+            current = next_hop.0;
             if current == target {
                 break;
             }

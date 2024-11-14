@@ -896,6 +896,8 @@ fn test_graph_payment_pay_self_with_one_node() {
 
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
+    let route = route.unwrap();
+    assert_eq!(route[1].next_hop, Some(node0.into()));
 }
 
 #[test]
@@ -907,6 +909,7 @@ fn test_graph_build_route_with_double_edge_node() {
     network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, Some(1));
 
     let node0 = network.keys[0];
+    let node1 = network.keys[2];
 
     // node0 is the source node
     let command = SendPaymentCommand {
@@ -925,6 +928,9 @@ fn test_graph_build_route_with_double_edge_node() {
     let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
+    let route = route.unwrap();
+    assert_eq!(route[0].next_hop, Some(node1.into()));
+    assert_eq!(route[1].next_hop, Some(node0.into()));
 }
 
 #[test]
