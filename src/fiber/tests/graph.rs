@@ -863,8 +863,77 @@ fn test_graph_payment_pay_self_with_one_node() {
 fn test_graph_build_route_with_double_edge_node() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_htlc_value set to 50
-    network.add_edge_with_config(0, 2, Some(500), Some(500), Some(50), None, None, Some(100));
-    network.add_edge_with_config(2, 0, Some(500), Some(300), Some(50), None, None, Some(200));
+    // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
+    network.add_edge_with_config(
+        0,
+        2,
+        Some(500),
+        Some(5000),
+        Some(50),
+        None,
+        None,
+        Some(600000),
+    );
+    // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
+    network.add_edge_with_config(
+        2,
+        0,
+        Some(500),
+        Some(100000),
+        Some(50),
+        None,
+        None,
+        Some(200),
+    );
+
+    let node0 = network.keys[0];
+
+    // node0 is the source node
+    let command = SendPaymentCommand {
+        target_pubkey: Some(network.keys[0].into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_htlc_expiry_delta: Some(100),
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: true,
+    };
+    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let route = network.graph.build_route(&payment_data);
+    assert!(route.is_ok());
+}
+
+#[test]
+fn test_graph_build_route_with_other_node_maybe_better() {
+    let mut network = MockNetworkGraph::new(3);
+    // Add edges with min_htlc_value set to 50
+    // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
+    network.add_edge_with_config(
+        0,
+        2,
+        Some(500),
+        Some(600000),
+        Some(50),
+        None,
+        None,
+        Some(600000),
+    );
+    // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
+    network.add_edge_with_config(
+        2,
+        0,
+        Some(500),
+        Some(100000),
+        Some(50),
+        None,
+        None,
+        Some(600000),
+    );
+    // B <-> C, B is initiator
     network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, Some(1));
 
     let node0 = network.keys[0];
