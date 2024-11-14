@@ -642,15 +642,23 @@ where
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
+        let route_to_self = source == target;
+
         let mut result = vec![];
         let mut nodes_visited = 0;
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
+        // a map from node_id to the selected channel outpoint
+        // suppose the scenario of A <-- channel_1 --> B <-- channel_2 --> A
+        // when we starting iterate channels from A, we may considerting channel_1 and channel_2,
+        // and we selected channel_1 according to weight
+        // in this case, `last_hop_channels` stores (B -> channel_1) so that we can skip channel_1 when we iterate channels from B
+        let mut last_hop_channels = HashMap::new();
 
         if amount == 0 {
             return Err(PathFindError::Amount(
-                "Amount must be greater than 0".to_string(),
+                "amount must be greater than 0".to_string(),
             ));
         }
 
@@ -684,8 +692,7 @@ where
             next_hop: None,
             incoming_htlc_expiry: 0,
         });
-        let route_to_self = source == target;
-        let mut last_hop_channels = HashMap::new();
+
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
@@ -716,11 +723,6 @@ where
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
                     if amount_to_send > amount + max_fee_amount {
-                        debug!(
-                            "amount_to_send: {:?} is greater than sum_amount sum_amount: {:?}",
-                            amount_to_send,
-                            amount + max_fee_amount
-                        );
                         continue;
                     }
                 }
@@ -730,19 +732,9 @@ where
                     || (channel_update.htlc_maximum_value != 0
                         && amount_to_send > channel_update.htlc_maximum_value)
                 {
-                    debug!(
-                        "amount_to_send is greater than channel capacity: {:?} capacity: {:?}, htlc_max_value: {:?}",
-                        amount_to_send,
-                        channel_info.capacity(),
-                        channel_update.htlc_maximum_value
-                    );
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
-                    debug!(
-                        "amount_to_send is less than htlc_minimum_value: {:?} min_value: {:?}",
-                        amount_to_send, channel_update.htlc_minimum_value
-                    );
                     continue;
                 }
                 let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry
@@ -761,7 +753,6 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    debug!("probability is too low: {:?}", probability);
                     continue;
                 }
                 let agg_weight =
@@ -791,17 +782,13 @@ where
         }
 
         let mut current = source_node.node_id;
-        loop {
-            if let Some(elem) = distances.get(&current) {
-                let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
-                result.push(PathEdge {
-                    target: next_hop.0,
-                    channel_outpoint: next_hop.1.clone(),
-                });
-                current = next_hop.0;
-            } else {
-                break;
-            }
+        while let Some(elem) = distances.get(&current) {
+            let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
+            result.push(PathEdge {
+                target: next_hop.0,
+                channel_outpoint: next_hop.1.clone(),
+            });
+            current = next_hop.0;
             if current == target {
                 break;
             }
