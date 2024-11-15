@@ -15,6 +15,7 @@ use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
 
 use core::default::Default;
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +25,13 @@ use ractor::Actor;
 use secp256k1::Secp256k1;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
-use tracing::{debug, error, info, info_span, trace};
+use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
+pub struct ExitMessage(String);
+
 #[tokio::main]
-pub async fn main() {
+pub async fn main() -> Result<(), ExitMessage> {
     // ractor will set "id" for each actor:
     // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
     // here we map it with the node prefix
@@ -192,8 +195,10 @@ pub async fn main() {
                         info!("Cross-chain service failed to start and is ignored by the config option ignore_startup_failure: {}", err);
                         None
                     } else {
-                        error!("Cross-chain service failed to start: {}", err);
-                        return;
+                        return ExitMessage::failure(format!(
+                            "cross-chain service failed to start: {}",
+                            err
+                        ));
                     }
                 }
                 Ok(actor) => {
@@ -220,12 +225,6 @@ pub async fn main() {
     // Start rpc service
     let rpc_server_handle = match config.rpc {
         Some(rpc_config) => {
-            if fiber_command_sender.is_none() && cch_actor.is_none() {
-                error!("Rpc service requires ckb and cch service to be started. Exiting.");
-                return;
-            }
-
-            info!("Starting rpc");
             let handle = start_rpc(
                 rpc_config,
                 config.fiber,
@@ -247,4 +246,18 @@ pub async fn main() {
         handle.stopped().await;
     }
     cancel_tasks_and_wait_for_completion().await;
+
+    Ok(())
+}
+
+impl Debug for ExitMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Exit because {}", self.0)
+    }
+}
+
+impl ExitMessage {
+    pub fn failure(message: String) -> Result<(), ExitMessage> {
+        Err(ExitMessage(message))
+    }
 }
