@@ -317,6 +317,26 @@ fn test_invoice_builder_duplicated_attr() {
 }
 
 #[test]
+fn test_invoice_check_description_length() {
+    let gen_payment_hash = rand_sha256_hash();
+    let private_key = gen_rand_private_key();
+    const MAX_DESCRIPTION_LEN: usize = 639;
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .description("a".repeat(MAX_DESCRIPTION_LEN + 1))
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert!(invoice.is_err());
+    let message = invoice.err().unwrap().to_string();
+    assert_eq!(
+        message,
+        "Description with length of 640 is too long, max length is 639"
+    );
+}
+
+#[test]
 fn test_invoice_builder_missing() {
     let private_key = gen_rand_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
