@@ -135,8 +135,8 @@ pub struct AcceptChannelResponse {
 pub struct SendPaymentResponse {
     pub payment_hash: Hash256,
     pub status: PaymentSessionStatus,
-    pub created_at: u128,
-    pub last_updated_at: u128,
+    pub created_at: u64,
+    pub last_updated_at: u64,
     pub failed_error: Option<String>,
 }
 

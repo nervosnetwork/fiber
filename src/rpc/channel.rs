@@ -159,7 +159,7 @@ pub(crate) struct Channel {
     /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
     received_tlc_balance: u128,
-    /// The time the channel was created at
+    /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
     created_at: u64,
 }
@@ -262,12 +262,12 @@ pub struct GetPaymentCommandResult {
     pub payment_hash: Hash256,
     /// The status of the payment
     pub status: PaymentSessionStatus,
-    #[serde_as(as = "U128Hex")]
-    /// The time the payment was created at
-    created_at: u128,
-    #[serde_as(as = "U128Hex")]
-    /// The time the payment was last updated at
-    pub last_updated_at: u128,
+    #[serde_as(as = "U64Hex")]
+    /// The time the payment was created at, in milliseconds from UNIX epoch
+    created_at: u64,
+    #[serde_as(as = "U64Hex")]
+    /// The time the payment was last updated at, in milliseconds from UNIX epoch
+    pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
 }
