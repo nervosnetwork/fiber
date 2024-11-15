@@ -668,7 +668,7 @@ fn test_send_payment_validate_payment_hash() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("payment_hash is missing"));
 }
@@ -691,7 +691,7 @@ fn test_send_payment_validate_amount() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("amount is missing"));
 }
@@ -736,7 +736,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -758,7 +758,7 @@ fn test_send_payment_validate_invoice() {
     };
 
     // keysend is set with invoice, should be error
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -779,7 +779,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
 
     // normal invoice send payment
@@ -798,7 +798,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_ok());
 
     // normal keysend send payment
@@ -817,7 +817,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_ok());
 
     // invoice with invalid final_tlc_expiry_delta
@@ -836,7 +836,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -870,7 +870,7 @@ fn test_send_payment_validate_invoice() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
@@ -894,7 +894,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         allow_self_payment: false,
     };
 
-    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    let result = SendPaymentData::new(send_command);
     eprintln!("{:?}", result);
     assert!(result.is_err());
     assert!(result

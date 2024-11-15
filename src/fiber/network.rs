@@ -327,7 +327,7 @@ pub struct SendPaymentData {
 }
 
 impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand, source: Pubkey) -> Result<SendPaymentData, String> {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -366,10 +366,6 @@ impl SendPaymentData {
                 .and_then(|i| i.payee_pub_key().cloned().map(Pubkey::from)),
             "target_pubkey",
         )?;
-
-        if !command.allow_self_payment && target == source {
-            return Err("allow_self_payment is not enable, can not pay self".to_string());
-        }
 
         let amount = validate_field(
             command.amount,
@@ -2476,11 +2472,10 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
-        let payment_data = SendPaymentData::new(payment_request.clone(), state.get_public_key())
-            .map_err(|e| {
-                error!("Failed to validate payment request: {:?}", e);
-                Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-            })?;
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
 
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {

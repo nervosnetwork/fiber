@@ -531,6 +531,7 @@ where
         let preimage = payment_data.preimage;
         let payment_hash = payment_data.payment_hash;
         let udt_type_script = payment_data.udt_type_script;
+        let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let invoice = payment_data
             .invoice
             .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
@@ -547,7 +548,7 @@ where
         let allow_self_payment = payment_data.allow_self_payment;
         if source == target && !allow_self_payment {
             return Err(PathFindError::PathFind(
-                "source and target are the same and allow_self_payment is not enable".to_string(),
+                "allow_self_payment is not enable, can not pay to self".to_string(),
             ));
         }
 
@@ -557,7 +558,7 @@ where
             amount,
             payment_data.max_fee_amount,
             udt_type_script,
-            payment_data.final_tlc_expiry_delta,
+            final_tlc_expiry_delta,
             payment_data.tlc_expiry_limit,
             allow_self_payment,
         )?;
@@ -577,7 +578,7 @@ where
                 )
             };
             let (fee, expiry) = if is_last {
-                (0, 0)
+                (0, final_tlc_expiry_delta)
             } else {
                 let channel_info = self
                     .get_channel(&route[i + 1].channel_outpoint)
@@ -605,8 +606,8 @@ where
                 channel_outpoint: next_channel_outpoint,
                 preimage: if is_last { preimage } else { None },
             });
-            current_amount += fee;
             current_expiry += expiry;
+            current_amount += fee;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
@@ -670,7 +671,7 @@ where
 
         if source == target && !allow_self {
             return Err(PathFindError::PathFind(
-                "source and target are the same".to_string(),
+                "allow_self_payment is not enable, can not pay self".to_string(),
             ));
         }
 
