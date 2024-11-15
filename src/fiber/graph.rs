@@ -124,11 +124,11 @@ pub struct ChannelUpdateInfo {
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    pub htlc_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
-    pub htlc_minimum_value: u128,
+    pub tlc_minimum_value: u128,
     /// The maximum value which may be relayed to the next hop via the channel.
-    pub htlc_maximum_value: u128,
+    pub tlc_maximum_value: u128,
     pub fee_rate: u64,
     /// Most recent update for the channel received from the network
     /// Mostly redundant with the data we store in fields explicitly.
@@ -420,9 +420,9 @@ where
                 .expect("Duration since unix epoch")
                 .as_millis() as u64,
             enabled: !disabled,
-            htlc_expiry_delta: update.tlc_expiry_delta,
-            htlc_minimum_value: update.tlc_minimum_value,
-            htlc_maximum_value: update.tlc_maximum_value,
+            tlc_expiry_delta: update.tlc_expiry_delta,
+            tlc_minimum_value: update.tlc_minimum_value,
+            tlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
             last_update_message: update.clone(),
         });
@@ -591,7 +591,7 @@ where
                 .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
-                let expiry = channel_update.htlc_expiry_delta;
+                let expiry = channel_update.tlc_expiry_delta;
                 (fee, expiry)
             };
 
@@ -697,7 +697,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_htlc_expiry: fianl_tlc_expiry_delta,
+            incoming_tlc_expiry: fianl_tlc_expiry_delta,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -734,24 +734,24 @@ where
                     }
                 }
                 // check to make sure the current hop can send the amount
-                // if `htlc_maximum_value` equals 0, it means there is no limit
+                // if `tlc_maximum_value` equals 0, it means there is no limit
                 if amount_to_send > channel_info.capacity()
-                    || (channel_update.htlc_maximum_value != 0
-                        && amount_to_send > channel_update.htlc_maximum_value)
+                    || (channel_update.tlc_maximum_value != 0
+                        && amount_to_send > channel_update.tlc_maximum_value)
                 {
                     continue;
                 }
-                if amount_to_send < channel_update.htlc_minimum_value {
+                if amount_to_send < channel_update.tlc_minimum_value {
                     continue;
                 }
 
                 let expiry_delta = if from == source {
                     0
                 } else {
-                    channel_update.htlc_expiry_delta
+                    channel_update.tlc_expiry_delta
                 };
 
-                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry + expiry_delta;
+                let incoming_htlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
                 if incoming_htlc_expiry > tlc_expiry_limit {
                     continue;
                 }
@@ -768,7 +768,7 @@ where
                     continue;
                 }
                 let agg_weight =
-                    self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
+                    self.edge_weight(amount_to_send, fee, channel_update.tlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -782,7 +782,7 @@ where
                     weight,
                     distance,
                     amount_received: amount_to_send,
-                    incoming_htlc_expiry,
+                    incoming_tlc_expiry: incoming_htlc_expiry,
                     fee_charged: fee,
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),

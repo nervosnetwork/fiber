@@ -389,7 +389,7 @@ impl SendPaymentData {
             .or_else(|| {
                 invoice
                     .as_ref()
-                    .and_then(|i| i.final_htlc_minimum_expiry_delta().copied())
+                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
             })
             .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
         if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA
