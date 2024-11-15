@@ -2981,11 +2981,11 @@ impl ChannelActorState {
             .sum::<u128>()
     }
 
-    pub fn get_created_at_in_microseconds(&self) -> u64 {
+    pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
             .duration_since(UNIX_EPOCH)
             .expect("Duration since unix epoch")
-            .as_micros() as u64
+            .as_millis() as u64
     }
 
     pub fn is_closed(&self) -> bool {

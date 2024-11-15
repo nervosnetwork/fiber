@@ -474,7 +474,7 @@ where
                         remote_balance: state.get_remote_balance(),
                         offered_tlc_balance: state.get_offered_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
-                        created_at: state.get_created_at_in_microseconds(),
+                        created_at: state.get_created_at_in_millis(),
                     })
             })
             .collect();
