@@ -10,6 +10,7 @@ use crate::{
         types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
+    now_timestamp_as_millis_u64,
 };
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{Since, SinceType};
@@ -61,7 +62,10 @@ use crate::{
 };
 
 use super::{
-    config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MIN_TLC_EXPIRY_DELTA, MIN_UDT_OCCUPIED_CAPACITY},
+    config::{
+        DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
+        MIN_UDT_OCCUPIED_CAPACITY,
+    },
     fee::{calculate_shutdown_tx_fee, default_minimal_ckb_amount},
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
@@ -691,6 +695,8 @@ where
         let error_code = match error {
             ProcessingChannelError::PeelingOnionPacketError(_) => TlcErrorCode::InvalidOnionPayload,
             ProcessingChannelError::TlcForwardFeeIsTooLow => TlcErrorCode::FeeInsufficient,
+            ProcessingChannelError::TlcExpirySoon => TlcErrorCode::ExpiryTooSoon,
+            ProcessingChannelError::TlcExpiryTooFar => TlcErrorCode::ExpiryTooFar,
             ProcessingChannelError::FinalInvoiceInvalid(status) => match status {
                 CkbInvoiceStatus::Expired => TlcErrorCode::InvoiceExpired,
                 CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
@@ -701,7 +707,7 @@ where
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
-                TlcErrorCode::FinalIncorrectHtlcAmount
+                TlcErrorCode::FinalIncorrectTlcAmount
             }
             ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
@@ -804,6 +810,7 @@ where
         add_tlc: AddTlc,
     ) -> Result<(TLCId, Option<Vec<u8>>), ProcessingChannelError> {
         state.check_for_tlc_update(Some(add_tlc.amount))?;
+        state.check_tlc_expiry(add_tlc.expiry)?;
 
         // check the onion_packet is valid or not, if not, we should return an error.
         // If there is a next hop, we should send the AddTlc message to the next hop.
@@ -1085,6 +1092,7 @@ where
     ) -> Result<u64, ProcessingChannelError> {
         debug!("handle add tlc command : {:?}", &command);
         state.check_for_tlc_update(Some(command.amount))?;
+        state.check_tlc_expiry(command.expiry)?;
         let tlc = state.create_outbounding_tlc(command);
         state.insert_tlc(tlc.clone())?;
 
@@ -2215,6 +2223,10 @@ pub enum ProcessingChannelError {
     TlcValueInflightExceedLimit,
     #[error("The tlc amount below minimal")]
     TlcAmountIsTooLow,
+    #[error("The tlc expiry soon")]
+    TlcExpirySoon,
+    #[error("The tlc expiry too far")]
+    TlcExpiryTooFar,
 }
 
 bitflags! {
@@ -3997,7 +4009,26 @@ impl ChannelActorState {
         return fee <= remote_available_max_fee;
     }
 
-    pub fn check_for_tlc_update(&self, add_tlc_amount: Option<u128>) -> ProcessingChannelResult {
+    fn check_tlc_expiry(&self, expiry: u64) -> ProcessingChannelResult {
+        let current_time = now_timestamp_as_millis_u64();
+        if current_time >= expiry {
+            debug!(
+                "TLC expiry {} is already passed, current time: {}",
+                expiry, current_time
+            );
+            return Err(ProcessingChannelError::TlcExpirySoon);
+        }
+        if expiry >= current_time + MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            debug!(
+                "TLC expiry {} is too far in the future, current time: {}",
+                expiry, current_time
+            );
+            return Err(ProcessingChannelError::TlcExpiryTooFar);
+        }
+        Ok(())
+    }
+
+    fn check_for_tlc_update(&self, add_tlc_amount: Option<u128>) -> ProcessingChannelResult {
         match self.state {
             ChannelState::ChannelReady() => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}

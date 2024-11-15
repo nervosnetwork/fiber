@@ -1,3 +1,4 @@
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::gen_rand_public_key;
@@ -974,6 +975,66 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
 
     dbg!(&remove_tlc_result);
     assert!(remove_tlc_result.is_err());
+}
+
+#[tokio::test]
+async fn do_test_remove_tlc_with_expiry_error() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, _node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let preimage = [1; 32];
+    let digest = HashAlgorithm::CkbHash.hash(&preimage);
+    let tlc_amount = 1000000000;
+
+    // add tlc command with expiry soon
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: Some(digest.into()),
+        expiry: now_timestamp_as_millis_u64() + 10,
+        preimage: None,
+        onion_packet: vec![],
+        previous_tlc: None,
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+
+    // add tlc command with expiry in the future too long
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: Some(digest.into()),
+        expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 10,
+        preimage: None,
+        onion_packet: vec![],
+        previous_tlc: None,
+    };
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    assert!(add_tlc_result.is_err());
 }
 
 #[tokio::test]
