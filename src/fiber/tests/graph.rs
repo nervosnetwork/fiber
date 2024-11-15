@@ -1,6 +1,7 @@
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::Pubkey;
+use crate::now_timestamp_as_millis_u64;
 use crate::{
     fiber::{
         graph::{ChannelInfo, NetworkGraph, NodeInfo, PathEdge},
@@ -1235,5 +1236,11 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert!(route.is_ok());
     let route = route.unwrap();
     let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
-    assert_eq!(expiries, vec![86400022, 86400011, 86400000, 0]);
+    // we set 11 as tlc expiry delta in the test
+    assert_eq!(expiries.len(), 4);
+    assert_eq!(expiries[0] - expiries[1], 11);
+    assert_eq!(expiries[1] - expiries[2], 11);
+    assert_eq!(expiries[3], 0);
+    let expected_timestamp = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    assert!(expiries[2] <= expected_timestamp);
 }

@@ -9,6 +9,7 @@ use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
+use crate::now_timestamp_as_millis_u64;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
@@ -567,6 +568,8 @@ where
         let mut current_amount = amount;
         let mut current_expiry = 0;
         let mut hops_data = vec![];
+        let current_time = now_timestamp_as_millis_u64();
+
         for i in (0..route.len()).rev() {
             let is_last = i == route.len() - 1;
             let (next_hop, next_channel_outpoint) = if is_last {
@@ -578,7 +581,7 @@ where
                 )
             };
             let (fee, expiry) = if is_last {
-                (0, final_tlc_expiry_delta)
+                (0, current_time + final_tlc_expiry_delta)
             } else {
                 let channel_info = self
                     .get_channel(&route[i + 1].channel_outpoint)

@@ -2213,7 +2213,7 @@ where
                 amount: info.amount,
                 preimage: None,
                 payment_hash: Some(info.payment_hash),
-                expiry: info.expiry.into(),
+                expiry: info.expiry,
                 hash_algorithm: info.tlc_hash_algorithm,
                 onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
                 previous_tlc,
