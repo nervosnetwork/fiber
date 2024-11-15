@@ -6,6 +6,7 @@ use crate::{
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
+    migration::migrate::Migrate,
     watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
 use ckb_jsonrpc_types::JsonBytes;
@@ -13,7 +14,7 @@ use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
 use serde_json;
-use std::{path::Path, sync::Arc};
+use std::{cmp::Ordering, path::Path, sync::Arc};
 use tentacle::secio::PeerId;
 
 #[derive(Clone)]
@@ -23,7 +24,8 @@ pub struct Store {
 
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        let db = Arc::new(DB::open_default(path).expect("Failed to open rocksdb"));
+        //let db = Arc::new(DB::open_default(path).expect("Failed to open rocksdb"));
+        let db = open_or_create_db(path).expect("Failed to open rocksdb");
         Self { db }
     }
 
@@ -57,6 +59,45 @@ impl Store {
             db: Arc::clone(&self.db),
             wb: WriteBatch::default(),
         }
+    }
+}
+
+/// Open or create a rocksdb
+fn open_or_create_db<P: AsRef<Path>>(path: P) -> Result<Arc<DB>, String> {
+    let migrate = Migrate::new(path.as_ref());
+    if !migrate.need_init() {
+        match migrate.check() {
+            Ordering::Greater => {
+                eprintln!(
+                    "The database was created by a higher version fiber executable binary \n\
+                     and cannot be opened by the current binary.\n\
+                     Please download the latest fiber executable binary."
+                );
+                return Err("incompatible database, need to upgrade bin".to_string());
+            }
+            Ordering::Equal => {
+                eprintln!("no need to migrate, everything is OK ...");
+                return Ok(migrate.db());
+            }
+            Ordering::Less => {
+                let path_buf = path.as_ref().to_path_buf();
+                eprintln!(
+                        "For optimal performance, CKB recommends migrating your data into a new format.\n\
+                        If you prefer to stick with the older version, \n\
+                        it's important to note that they may have unfixed vulnerabilities.\n\
+                        Before migrating, we strongly recommend backuping your data directory.\n\
+                        To migrate, run `\"fiber\" migrate -C \"{}\"` and confirm by typing \"YES\".",
+                        path_buf.display()
+                    );
+                return Err("need to migrate".to_string());
+            }
+        }
+    } else {
+        eprintln!("now begin to init db version ...");
+        migrate
+            .init_db_version()
+            .expect("failed to init db version");
+        Ok(migrate.db())
     }
 }
 
