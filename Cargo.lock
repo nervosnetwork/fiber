@@ -1549,7 +1549,6 @@ dependencies = [
  "clap",
  "clap-serde-derive",
  "console",
- "crossbeam-channel",
  "fiber-sphinx",
  "futures",
  "git-version",

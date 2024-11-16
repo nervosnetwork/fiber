@@ -60,7 +60,6 @@ tokio = { version = "1", features = [
     "time",
     "signal",
 ] }
-crossbeam-channel = "0.5.13"
 indicatif = "0.16"
 console = "0.15.8"
 
