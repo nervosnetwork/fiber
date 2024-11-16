@@ -1,4 +1,5 @@
 use molecule::prelude::Entity;
+use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
 use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
@@ -111,18 +112,19 @@ uint_as_hex!(U64Hex, u64);
 uint_as_hex!(U32Hex, u32);
 uint_as_hex!(U16Hex, u16);
 
-pub(crate) mod compact_signature_serde {
-    use musig2::{BinaryEncoding, CompactSignature, SCHNORR_SIGNATURE_SIZE};
-    use serde::{self, Deserialize, Deserializer, Serializer};
+pub struct CompactSignatureAsBytes;
 
-    pub fn serialize<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
+impl SerializeAs<CompactSignature> for CompactSignatureAsBytes {
+    fn serialize_as<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_bytes(&signature.to_bytes())
     }
+}
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<CompactSignature, D::Error>
+impl<'de> DeserializeAs<'de, CompactSignature> for CompactSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<CompactSignature, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -132,6 +134,32 @@ pub(crate) mod compact_signature_serde {
         }
         let mut array = [0u8; SCHNORR_SIGNATURE_SIZE];
         array.copy_from_slice(bytes);
-        Ok(CompactSignature::from_bytes(&array).map_err(serde::de::Error::custom)?)
+        CompactSignature::from_bytes(&array).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct PubNonceAsBytes;
+
+impl SerializeAs<PubNonce> for PubNonceAsBytes {
+    fn serialize_as<S>(nonce: &PubNonce, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&nonce.to_bytes())
+    }
+}
+
+impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PubNonce, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 66 {
+            return Err(serde::de::Error::custom("expected 66 bytes"));
+        }
+        let mut array = [0u8; 66];
+        array.copy_from_slice(bytes);
+        PubNonce::from_bytes(&array).map_err(serde::de::Error::custom)
     }
 }

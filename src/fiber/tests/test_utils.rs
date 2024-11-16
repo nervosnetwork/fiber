@@ -2,8 +2,9 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
+use rand::rngs::OsRng;
 use rand::Rng;
-use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{rand, Message, PublicKey, Secp256k1, SecretKey};
 use std::{
     collections::HashMap,
     env,
@@ -22,6 +23,7 @@ use tokio::{
     time::sleep,
 };
 
+use crate::fiber::types::EcdsaSignature;
 use crate::{
     actors::{RootActor, RootActorMessage},
     ckb::tests::test_utils::{
@@ -147,6 +149,16 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         ..Default::default()
     }
+}
+
+// Mock function to create a dummy EcdsaSignature
+pub fn mock_ecdsa_signature() -> EcdsaSignature {
+    let secp = Secp256k1::new();
+    let mut rng = OsRng::default();
+    let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
+    let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
+    let signature = secp.sign_ecdsa(&message, &secret_key);
+    EcdsaSignature(signature)
 }
 
 pub struct NetworkNode {

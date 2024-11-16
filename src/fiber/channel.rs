@@ -7,6 +7,7 @@ use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
+        serde_utils::PubNonceAsBytes,
         types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
@@ -2082,7 +2083,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<EntityHex>")]
     pub local_shutdown_script: Option<Script>,
 
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub previous_remote_nonce: Option<PubNonce>,
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding
@@ -2119,6 +2122,7 @@ pub struct ShutdownInfo {
 // For ChannelUpdate config, only information on our side are saved here because we have no
 // control to the config on the counterparty side. And they will publish
 // the config to the network via another ChannelUpdate message.
+#[serde_as]
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
     pub enabled: bool,
@@ -2138,6 +2142,8 @@ pub struct PublicChannelInfo {
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
+
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_channel_announcement_nonce: Option<PubNonce>,
 
     pub channel_announcement: Option<ChannelAnnouncement>,

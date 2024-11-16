@@ -1,11 +1,21 @@
+use std::time::SystemTime;
+
 use crate::fiber::channel::AwaitingChannelReadyFlags;
+use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::ChannelBasePublicKeys;
 use crate::fiber::channel::ChannelState;
+use crate::fiber::channel::InMemorySigner;
+use crate::fiber::channel::NegotiatingFundingFlags;
+use crate::fiber::channel::PublicChannelInfo;
 use crate::fiber::channel::SigningCommitmentFlags;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
+use crate::fiber::tests::test_utils::generate_pubkey;
+use crate::fiber::tests::test_utils::mock_ecdsa_signature;
 use crate::fiber::types::ChannelAnnouncement;
 use crate::fiber::types::Hash256;
 use crate::fiber::types::NodeAnnouncement;
@@ -15,16 +25,17 @@ use crate::store::Store;
 use crate::store::CHANNEL_INFO_PREFIX;
 use crate::store::NODE_INFO_PREFIX;
 use crate::watchtower::*;
+use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::Bytes;
 use ckb_types::packed::CellOutput;
 use ckb_types::packed::OutPoint;
 use ckb_types::packed::Script;
 use ckb_types::prelude::*;
+use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
-use secp256k1::Keypair;
-use secp256k1::PublicKey;
-use secp256k1::Secp256k1;
+use musig2::SecNonce;
+use secp256k1::{Keypair, PublicKey, Secp256k1};
 use tempfile::tempdir;
 
 fn gen_rand_public_key() -> PublicKey {
@@ -239,4 +250,96 @@ fn test_channel_state_serialize() {
     let bincode_encoded = bincode::serialize(&flags).unwrap();
     let new_flags: SigningCommitmentFlags = bincode::deserialize(&bincode_encoded).unwrap();
     assert_eq!(flags, new_flags);
+}
+
+fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(salt);
+    hasher.update(data);
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+#[test]
+fn test_channel_actor_state_serialize_ok() {
+    let seed = [0u8; 32];
+    let signer = InMemorySigner::generate_from_seed(&seed);
+
+    let seckey = blake2b_hash_with_salt(
+        signer.musig2_base_nonce.as_ref(),
+        b"channel_announcement".as_slice(),
+    );
+    let sec_nonce = SecNonce::build(seckey).build();
+    let pub_nonce = sec_nonce.public_nonce();
+
+    let state = ChannelActorState {
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        public_channel_info: Some(PublicChannelInfo {
+            enabled: false,
+            tlc_fee_proportional_millionths: Some(123),
+            tlc_max_value: Some(1),
+            tlc_min_value: Some(2),
+            tlc_expiry_delta: Some(3),
+            local_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+            channel_announcement: None,
+            channel_update: None,
+        }),
+        local_pubkey: generate_pubkey().into(),
+        remote_pubkey: generate_pubkey().into(),
+        funding_tx: None,
+        funding_tx_confirmed_at: Some((1.into(), 1)),
+        is_acceptor: true,
+        funding_udt_type_script: Some(Script::default()),
+        to_local_amount: 100,
+        to_remote_amount: 100,
+        commitment_fee_rate: 100,
+        commitment_delay_epoch: 100,
+        funding_fee_rate: 100,
+        id: gen_sha256_hash(),
+        tlc_ids: Default::default(),
+        tlcs: Default::default(),
+        local_shutdown_script: Some(Script::default()),
+        local_channel_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: generate_pubkey().into(),
+            tlc_base_key: generate_pubkey().into(),
+        },
+        signer,
+        remote_channel_public_keys: Some(ChannelBasePublicKeys {
+            funding_pubkey: generate_pubkey().into(),
+            tlc_base_key: generate_pubkey().into(),
+        }),
+        commitment_numbers: Default::default(),
+        remote_shutdown_script: Some(Script::default()),
+        previous_remote_nonce: Some(pub_nonce.clone()),
+        remote_nonce: Some(pub_nonce.clone()),
+        remote_commitment_points: vec![generate_pubkey().into(), generate_pubkey().into()],
+        local_shutdown_info: None,
+        remote_shutdown_info: None,
+        local_reserved_ckb_amount: 100,
+        remote_reserved_ckb_amount: 100,
+        latest_commitment_transaction: None,
+        max_tlc_value_in_flight: 100,
+        max_tlc_number_in_flight: 100,
+        reestablishing: false,
+        created_at: SystemTime::now(),
+    };
+
+    let bincode_encoded = bincode::serialize(&state).unwrap();
+    let _new_state: ChannelActorState = bincode::deserialize(&bincode_encoded).unwrap();
+
+    let store = Store::new(tempdir().unwrap().path().join("store"));
+    assert!(store.get_channel_actor_state(&state.id).is_none());
+    store.insert_channel_actor_state(state.clone());
+    assert!(store.get_channel_actor_state(&state.id).is_some());
+    store.delete_channel_actor_state(&state.id);
+    assert!(store.get_channel_actor_state(&state.id).is_none());
 }
