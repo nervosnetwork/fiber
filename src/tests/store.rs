@@ -172,6 +172,20 @@ fn test_store_nodes() {
 }
 
 #[test]
+fn test_compact_signature() {
+    let revocation_data = RevocationData {
+        commitment_number: 0,
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let bincode_encoded = bincode::serialize(&revocation_data).unwrap();
+    let revocation_data: RevocationData = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(revocation_data, revocation_data);
+}
+
+#[test]
 fn test_store_wacthtower() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("watchtower_store");
@@ -196,6 +210,7 @@ fn test_store_wacthtower() {
         output: CellOutput::default(),
         output_data: Bytes::default(),
     };
+
     store.update_revocation(channel_id, revocation_data.clone());
     assert_eq!(
         store.get_watch_channels(),

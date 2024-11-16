@@ -13,7 +13,6 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
-use serde_json;
 use std::io::Write;
 use std::{
     cmp::Ordering,
@@ -141,30 +140,28 @@ impl Batch {
         match key_value {
             KeyValue::ChannelActorState(id, state) => {
                 let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-                self.put(
-                    key,
-                    serde_json::to_vec(&state).expect("serialize ChannelActorState should be OK"),
-                );
+                let value =
+                    bincode::serialize(&state).expect("serialize ChannelActorState should be OK");
+                self.put(key, value);
             }
             KeyValue::CkbInvoice(id, invoice) => {
                 let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
-                self.put(
-                    key,
-                    serde_json::to_vec(&invoice).expect("serialize CkbInvoice should be OK"),
-                );
+                let value =
+                    bincode::serialize(&invoice).expect("serialize CkbInvoice should be OK");
+                self.put(key, value);
             }
             KeyValue::CkbInvoicePreimage(id, preimage) => {
                 let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&preimage).expect("serialize Hash256 should be OK"),
+                    bincode::serialize(&preimage).expect("serialize Hash256 should be OK"),
                 );
             }
             KeyValue::CkbInvoiceStatus(id, status) => {
                 let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&status).expect("serialize CkbInvoiceStatus should be OK"),
+                    bincode::serialize(&status).expect("serialize CkbInvoiceStatus should be OK"),
                 );
             }
             KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
@@ -176,7 +173,7 @@ impl Batch {
                 .concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&state).expect("serialize ChannelState should be OK"),
+                    bincode::serialize(&state).expect("serialize ChannelState should be OK"),
                 );
             }
             KeyValue::ChannelInfo(channel_id, channel) => {
@@ -206,14 +203,14 @@ impl Batch {
                 key.extend_from_slice(channel_id.as_slice());
                 self.put(
                     key,
-                    serde_json::to_vec(&channel).expect("serialize ChannelInfo should be OK"),
+                    bincode::serialize(&channel).expect("serialize ChannelInfo should be OK"),
                 );
             }
             KeyValue::PaymentSession(payment_hash, payment_session) => {
                 let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&payment_session)
+                    bincode::serialize(&payment_session)
                         .expect("serialize PaymentSession should be OK"),
                 );
             }
@@ -233,21 +230,21 @@ impl Batch {
                 key.extend_from_slice(id.serialize().as_ref());
                 self.put(
                     key,
-                    serde_json::to_vec(&node).expect("serialize NodeInfo should be OK"),
+                    bincode::serialize(&node).expect("serialize NodeInfo should be OK"),
                 );
             }
             KeyValue::WatchtowerChannel(channel_id, channel_data) => {
                 let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&channel_data).expect("serialize ChannelData should be OK"),
+                    bincode::serialize(&channel_data).expect("serialize ChannelData should be OK"),
                 );
             }
             KeyValue::NetworkActorState(peer_id, persistent_network_actor_state) => {
                 let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat();
                 self.put(
                     key,
-                    serde_json::to_vec(&persistent_network_actor_state)
+                    bincode::serialize(&persistent_network_actor_state)
                         .expect("serialize PersistentNetworkActorState should be OK"),
                 );
             }
@@ -325,7 +322,7 @@ impl NetworkActorStateStore for Store {
             .prefix_iterator(key.as_ref())
             .find(|(col_key, _)| col_key.starts_with(&key));
         iter.map(|(_key, value)| {
-            serde_json::from_slice(value.as_ref())
+            bincode::deserialize(value.as_ref())
                 .expect("deserialize PersistentNetworkActorState should be OK")
         })
     }
@@ -344,7 +341,7 @@ impl ChannelActorStateStore for Store {
         key.extend_from_slice(id.as_ref());
 
         self.get(key).map(|v| {
-            serde_json::from_slice(v.as_ref()).expect("deserialize ChannelActorState should be OK")
+            bincode::deserialize(v.as_ref()).expect("deserialize ChannelActorState should be OK")
         })
     }
 
@@ -405,7 +402,7 @@ impl ChannelActorStateStore for Store {
             let channel_id: [u8; 32] = key[key_len - 32..]
                 .try_into()
                 .expect("channel id should be 32 bytes");
-            let state = serde_json::from_slice(value.as_ref())
+            let state = bincode::deserialize(value.as_ref())
                 .expect("deserialize ChannelState should be OK");
             (peer_id, channel_id.into(), state)
         })
@@ -419,9 +416,8 @@ impl InvoiceStore for Store {
         key.extend_from_slice(&[CKB_INVOICE_PREFIX]);
         key.extend_from_slice(id.as_ref());
 
-        self.get(key).map(|v| {
-            serde_json::from_slice(v.as_ref()).expect("deserialize CkbInvoice should be OK")
-        })
+        self.get(key)
+            .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoice should be OK"))
     }
 
     fn insert_invoice(
@@ -453,7 +449,7 @@ impl InvoiceStore for Store {
         key.extend_from_slice(id.as_ref());
 
         self.get(key)
-            .map(|v| serde_json::from_slice(v.as_ref()).expect("deserialize Hash256 should be OK"))
+            .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize Hash256 should be OK"))
     }
 
     fn update_invoice_status(
@@ -477,7 +473,7 @@ impl InvoiceStore for Store {
         key.extend_from_slice(id.as_ref());
 
         self.get(key).map(|v| {
-            serde_json::from_slice(v.as_ref()).expect("deserialize CkbInvoiceStatus should be OK")
+            bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoiceStatus should be OK")
         })
     }
 }
@@ -521,7 +517,7 @@ impl NetworkGraphStateStore for Store {
                         return None;
                     }
                 }
-                let channel: ChannelInfo = serde_json::from_slice(value.as_ref())
+                let channel: ChannelInfo = bincode::deserialize(value.as_ref())
                     .expect("deserialize ChannelInfo should be OK");
                 if !channel.is_explicitly_disabled() {
                     last_key = col_key.to_vec();
@@ -573,7 +569,7 @@ impl NetworkGraphStateStore for Store {
                 }
                 last_key = col_key.to_vec();
                 Some(
-                    serde_json::from_slice(value.as_ref())
+                    bincode::deserialize(value.as_ref())
                         .expect("deserialize NodeInfo should be OK"),
                 )
             })
@@ -598,7 +594,7 @@ impl NetworkGraphStateStore for Store {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
         self.get(prefix).map(|v| {
-            serde_json::from_slice(v.as_ref()).expect("deserialize PaymentSession should be OK")
+            bincode::deserialize(v.as_ref()).expect("deserialize PaymentSession should be OK")
         })
     }
 
@@ -617,7 +613,7 @@ impl WatchtowerStore for Store {
             .prefix_iterator(prefix.as_ref())
             .take_while(|(col_key, _)| col_key.starts_with(&prefix));
         iter.map(|(_key, value)| {
-            serde_json::from_slice(value.as_ref()).expect("deserialize ChannelData should be OK")
+            bincode::deserialize(value.as_ref()).expect("deserialize ChannelData should be OK")
         })
         .collect()
     }
@@ -625,15 +621,13 @@ impl WatchtowerStore for Store {
     fn insert_watch_channel(&self, channel_id: Hash256, funding_tx_lock: Script) {
         let mut batch = self.batch();
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        batch.put(
-            key,
-            serde_json::to_vec(&ChannelData {
-                channel_id,
-                funding_tx_lock,
-                revocation_data: None,
-            })
-            .expect("serialize ChannelData should be OK"),
-        );
+        let value = bincode::serialize(&ChannelData {
+            channel_id,
+            funding_tx_lock,
+            revocation_data: None,
+        })
+        .expect("serialize ChannelData should be OK");
+        batch.put(key, value);
         batch.commit();
     }
 
@@ -645,11 +639,12 @@ impl WatchtowerStore for Store {
     fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
         if let Some(mut channel_data) = self.get(key).map(|v| {
-            serde_json::from_slice::<ChannelData>(v.as_ref())
+            bincode::deserialize::<ChannelData>(v.as_ref())
                 .expect("deserialize ChannelData should be OK")
         }) {
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
+            eprintln!("update_revocation key: {:?}", channel_id);
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }

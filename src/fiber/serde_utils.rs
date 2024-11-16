@@ -110,3 +110,28 @@ uint_as_hex!(U128Hex, u128);
 uint_as_hex!(U64Hex, u64);
 uint_as_hex!(U32Hex, u32);
 uint_as_hex!(U16Hex, u16);
+
+pub(crate) mod compact_signature_serde {
+    use musig2::{BinaryEncoding, CompactSignature, SCHNORR_SIGNATURE_SIZE};
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&signature.to_bytes())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<CompactSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != SCHNORR_SIGNATURE_SIZE {
+            return Err(serde::de::Error::custom("expected 64 bytes"));
+        }
+        let mut array = [0u8; SCHNORR_SIGNATURE_SIZE];
+        array.copy_from_slice(bytes);
+        Ok(CompactSignature::from_bytes(&array).map_err(serde::de::Error::custom)?)
+    }
+}
