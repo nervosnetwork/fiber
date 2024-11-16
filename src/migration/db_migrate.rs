@@ -4,12 +4,12 @@ use rocksdb::{ops::Open, DB};
 use std::{cmp::Ordering, path::Path, sync::Arc};
 
 /// migrate helper
-pub struct Migrate {
+pub struct DbMigrate {
     migrations: Migrations,
     db: Arc<DB>,
 }
 
-impl Migrate {
+impl DbMigrate {
     /// Construct new migrate
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         let mut migrations = Migrations::default();
@@ -17,7 +17,7 @@ impl Migrate {
 
         let db = Arc::new(DB::open_default(path).expect("Failed to open rocksdb"));
 
-        Migrate { migrations, db }
+        DbMigrate { migrations, db }
     }
 
     /// Check if database's version is matched with the executable binary version.

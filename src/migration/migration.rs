@@ -22,12 +22,6 @@ pub struct Migrations {
 }
 
 impl Migrations {
-    pub fn new() -> Self {
-        Migrations {
-            migrations: BTreeMap::new(),
-        }
-    }
-
     pub fn add_migration(&mut self, migration: Arc<dyn Migration>) {
         self.migrations
             .insert(migration.version().to_string(), migration);
@@ -50,7 +44,7 @@ impl Migrations {
                 String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
             }
             None => {
-                return Ordering::Equal;
+                return Ordering::Less;
             }
         };
 
@@ -63,26 +57,6 @@ impl Migrations {
         debug!("Latest database version [{}]", latest_version);
 
         db_version.as_str().cmp(latest_version)
-    }
-
-    /// Check if the migrations will consume a lot of time.
-    pub fn expensive(&self, db: Arc<DB>) -> bool {
-        let db_version = match db
-            .get(MIGRATION_VERSION_KEY)
-            .expect("get the version of database")
-        {
-            Some(version_bytes) => {
-                String::from_utf8(version_bytes.to_vec()).expect("version bytes to utf8")
-            }
-            None => {
-                return false;
-            }
-        };
-
-        let migrations = self.migrations.values();
-        migrations
-            .skip_while(|m| m.version() <= db_version.as_str())
-            .any(|m| m.expensive())
     }
 
     fn run_migrate(&self, mut db: Arc<DB>, v: &str) -> Result<Arc<DB>, Error> {

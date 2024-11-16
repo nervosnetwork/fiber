@@ -1,5 +1,7 @@
 use ckb_chain_spec::ChainSpec;
+use ckb_hash::blake2b_256;
 use ckb_resource::Resource;
+use core::default::Default;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{
@@ -13,15 +15,11 @@ use fnn::tasks::{
 };
 use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
-
-use core::default::Default;
+use ractor::Actor;
+use secp256k1::Secp256k1;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-
-use ckb_hash::blake2b_256;
-use ractor::Actor;
-use secp256k1::Secp256k1;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
 use tracing::{debug, error, info, info_span, trace};
