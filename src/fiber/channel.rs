@@ -2295,11 +2295,6 @@ enum CommitmentSignedFlags {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    rename_all = "SCREAMING_SNAKE_CASE",
-    tag = "state_name",
-    content = "state_flags"
-)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),

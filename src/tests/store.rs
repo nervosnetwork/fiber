@@ -1,3 +1,6 @@
+use crate::fiber::channel::AwaitingChannelReadyFlags;
+use crate::fiber::channel::ChannelState;
+use crate::fiber::channel::SigningCommitmentFlags;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
@@ -223,4 +226,17 @@ fn test_store_wacthtower() {
 
     store.remove_watch_channel(channel_id);
     assert_eq!(store.get_watch_channels(), vec![]);
+}
+
+#[test]
+fn test_channel_state_serialize() {
+    let state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY);
+    let bincode_encoded = bincode::serialize(&state).unwrap();
+    let new_state: ChannelState = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(state, new_state);
+
+    let flags = SigningCommitmentFlags::COMMITMENT_SIGNED_SENT;
+    let bincode_encoded = bincode::serialize(&flags).unwrap();
+    let new_flags: SigningCommitmentFlags = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(flags, new_flags);
 }
