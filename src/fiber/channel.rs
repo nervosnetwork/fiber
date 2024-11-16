@@ -2105,7 +2105,7 @@ pub struct ChannelActorState {
 }
 
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShutdownInfo {
     #[serde_as(as = "EntityHex")]
     pub close_script: Script,
