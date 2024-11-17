@@ -221,9 +221,7 @@ impl Batch {
                     channel_id.as_slice(),
                 );
 
-                let mut key = Vec::with_capacity(37);
-                key.push(CHANNEL_INFO_PREFIX);
-                key.extend_from_slice(channel_id.as_slice());
+                let key = [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat();
                 self.put(
                     key,
                     bincode::serialize(&channel).expect("serialize ChannelInfo should be OK"),
@@ -241,18 +239,15 @@ impl Batch {
                 // Save node announcement timestamp to index, so that we can query nodes by timestamp
                 self.put(
                     [
-                        NODE_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
+                        &[NODE_ANNOUNCEMENT_INDEX_PREFIX],
                         node.timestamp.to_be_bytes().as_slice(),
                     ]
                     .concat(),
                     id.serialize(),
                 );
 
-                let mut key = Vec::with_capacity(34);
-                key.push(NODE_INFO_PREFIX);
-                key.extend_from_slice(id.serialize().as_ref());
                 self.put(
-                    key,
+                    [&[NODE_INFO_PREFIX], id.serialize().as_slice()].concat(),
                     bincode::serialize(&node).expect("serialize NodeInfo should be OK"),
                 );
             }
@@ -289,10 +284,7 @@ impl Batch {
 
 impl NetworkActorStateStore for Store {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
-        let mut key = Vec::with_capacity(33);
-        key.push(PEER_ID_NETWORK_ACTOR_STATE_PREFIX);
-        key.extend_from_slice(id.as_bytes());
-
+        let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
         self.get(key).map(|value| {
             bincode::deserialize(value.as_ref())
                 .expect("deserialize PersistentNetworkActorState should be OK")
@@ -308,10 +300,7 @@ impl NetworkActorStateStore for Store {
 
 impl ChannelActorStateStore for Store {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
-        let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[CHANNEL_ACTOR_STATE_PREFIX]);
-        key.extend_from_slice(id.as_ref());
-
+        let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
         self.get(key).map(|v| {
             bincode::deserialize(v.as_ref()).expect("deserialize ChannelActorState should be OK")
         })
@@ -378,10 +367,7 @@ impl ChannelActorStateStore for Store {
 
 impl InvoiceStore for Store {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
-        let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[CKB_INVOICE_PREFIX]);
-        key.extend_from_slice(id.as_ref());
-
+        let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoice should be OK"))
     }
@@ -411,10 +397,7 @@ impl InvoiceStore for Store {
     }
 
     fn get_invoice_preimage(&self, id: &Hash256) -> Option<Hash256> {
-        let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[CKB_INVOICE_PREIMAGE_PREFIX]);
-        key.extend_from_slice(id.as_ref());
-
+        let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize Hash256 should be OK"))
     }
@@ -425,9 +408,6 @@ impl InvoiceStore for Store {
         status: crate::invoice::CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
         self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
-        let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[CKB_INVOICE_STATUS_PREFIX]);
-        key.extend_from_slice(id.as_ref());
         let mut batch = self.batch();
         batch.put_kv(KeyValue::CkbInvoiceStatus(*id, status));
         batch.commit();
@@ -435,10 +415,7 @@ impl InvoiceStore for Store {
     }
 
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
-        let mut key = Vec::with_capacity(33);
-        key.extend_from_slice(&[CKB_INVOICE_STATUS_PREFIX]);
-        key.extend_from_slice(id.as_ref());
-
+        let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key).map(|v| {
             bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoiceStatus should be OK")
         })
@@ -461,16 +438,11 @@ impl NetworkGraphStateStore for Store {
         let (prefix, skip) = after
             .as_ref()
             .map_or((vec![CHANNEL_INFO_PREFIX], 0), |after| {
-                let mut key = Vec::with_capacity(37);
-                key.extend_from_slice(after.as_bytes());
+                let key = [after.as_bytes().as_ref()].concat();
                 (key, 1)
             });
-        let outpoint_key = outpoint.map(|outpoint| {
-            let mut key = Vec::with_capacity(37);
-            key.extend_from_slice(&[CHANNEL_INFO_PREFIX]);
-            key.extend_from_slice(outpoint.as_slice());
-            key
-        });
+        let outpoint_key =
+            outpoint.map(|outpoint| [&[CHANNEL_INFO_PREFIX], outpoint.as_slice()].concat());
 
         let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
         let mut last_key = Vec::new();
@@ -512,15 +484,15 @@ impl NetworkGraphStateStore for Store {
     ) -> (Vec<NodeInfo>, JsonBytes) {
         let node_prefix = vec![NODE_INFO_PREFIX];
         let (prefix, skip) = after.as_ref().map_or((vec![NODE_INFO_PREFIX], 0), |after| {
-            let mut key = Vec::with_capacity(34);
-            key.extend_from_slice(after.as_bytes());
+            let key = [after.as_bytes().as_ref()].concat();
             (key, 1)
         });
         let node_key = node_id.map(|node_id| {
-            let mut key = Vec::with_capacity(34);
-            key.push(NODE_INFO_PREFIX);
-            key.extend_from_slice(node_id.serialize().as_ref());
-            key
+            [
+                NODE_INFO_PREFIX.to_le_bytes().as_slice(),
+                node_id.serialize().as_ref(),
+            ]
+            .concat()
         });
         let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
         let mut last_key = Vec::new();
