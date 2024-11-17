@@ -1,0 +1,154 @@
+import blockchain;
+import fiber;
+
+array Uint16 [byte; 2];
+
+// A cursor for the broadcast message. Consists of the following data
+// timestamp (8 bytes in big-endian), union id (1 byte), message id (36 bytes)
+// where message ID is defined as 
+// NodeAnnouncement (union ID 0): node_id 33 bytes padding 3 zero bytes
+// ChannelAnnouncement (union ID 1): channel_outpoint, 36 bytes
+// ChannelUpdate (union ID 2): channel_outpoint, 36 bytes
+// All broadcast messages are sorted by Cursor in dictionary order,
+// so whenever we pass a `after_cursor` parameter below, we want data that
+// come after the `after_cursor` in dictionary order, which basically means that we
+// need data after certain timestamp.
+array Cursor [byte; 45];
+
+// BroadcastMessagesFilter is used to instruct peer to broadcast messages to the sender.
+// The sender must only send messages after the cursor specified in `after_cursor`.
+// The sender should also send current broadcast message which are after the cursor immediately.
+table BroadcastMessagesFilter {
+    chain_hash: Byte32,
+    after_cursor: Cursor,
+}
+
+// GetBroadcastMessages is used to batch get broadcast messages from another peer.
+// This is used in the initial sync process of a node. The node should repeatedly send GetBroadcastMessages
+// to peers (with `after_cursor` replaced with the cursor of the latest data) until an empty result is returned.
+// The difference between GetBroadcastMessages and QueryBroadcastMessages is that QueryBroadcastMessages
+// will make some specific queries to some specific channels/nodes, while GetBroadcastMessages only gets
+// messages after a cursor.
+table GetBroadcastMessages {
+    id: Uint64,
+    chain_hash: Byte32,
+    after_cursor: Cursor,
+    count: Uint16,
+}
+
+// NodeAnnouncementQuery is a query sent to another peer to query a NodeAnnouncement message.
+// This query may be sent with other queries.
+struct NodeAnnouncementQuery {
+    node_id: Pubkey,
+    flags: byte,
+}
+
+// ChannelAnnouncementQuery is a query sent to another peer to query a ChannelAnnouncement message.
+// This query may be sent with other queries.
+struct ChannelAnnouncementQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+// ChannelUpdateQuery is a query sent to another peer to query a ChannelUpdate message.
+// This query may be sent with other queries.
+struct ChannelUpdateQuery {
+    channel_outpoint: OutPoint,
+    flags: byte,
+}
+
+// All the query messages.
+union BroadcastMessageQuery {
+    NodeAnnouncementQuery,
+    ChannelAnnouncementQuery,
+    ChannelUpdateQuery,
+}
+
+vector BroadcastMessageQueries <BroadcastMessageQuery>;
+
+// To query some specific messages (e.g. a NodeAnnouncement) from peers.
+// The difference between GetBroadcastMessages and QueryBroadcastMessages is that QueryBroadcastMessages
+// will make some specific queries to some specific channels/nodes, while GetBroadcastMessages only gets
+// messages after a cursor.
+table QueryBroadcastMessages {
+    id: Uint64,
+    queries: BroadcastMessageQueries,
+}
+
+// A NodeAnnouncement is a broadcast message to the network for the node information.
+// An update to the node information can be broadcasted with a NodeAnnouncement with larger timestamp. 
+table NodeAnnouncement {
+    // Signature to this message.
+    signature: EcdsaSignature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/features.rs#L448-L457
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    // Timestamp to the node announcement update, later update should have larger timestamp.
+    timestamp: Uint64,
+    node_id: Pubkey,
+    // Must be a valid utf-8 string of length maximal length 32 bytes.
+    alias: Byte32,
+    // All the reachable addresses.
+    address: BytesVec,
+    // Chain hash
+    chain_hash: Byte32,
+    // Minimal auto accept ckb amount
+    auto_accept_min_ckb_funding_amount: Uint64,
+    // UDT configs
+    udt_cfg_infos: UdtCfgInfos,
+}
+
+// A ChannelAnnouncement is an announcement of a channel to the network.
+// This message must be immutable for any specific channel.
+table ChannelAnnouncement {
+    node1_signature: EcdsaSignature,
+    node2_signature: EcdsaSignature,
+    // Signature signed by the funding transaction output public key.
+    ckb_signature: SchnorrSignature,
+    // Tentatively using 64 bits for features. May change the type later while developing.
+    // https://github.com/lightningdevkit/rust-lightning/blob/8c1b3d1263f6b9247c0c819039ef2027dc4d4588/lightning/src/ln/msgs.rs#L1200-L1200
+    // rust-lightning uses a Vec<u8> here.
+    features: Uint64,
+    chain_hash: Byte32,
+    channel_outpoint: OutPoint,
+    node1_id: Pubkey,
+    node2_id: Pubkey,
+    // The aggregated public key of the funding transaction output.
+    ckb_key: SchnorrXOnlyPubkey,
+    capacity: Uint128,
+    udt_type_script: ScriptOpt,
+}
+
+// A ChannelUpdate is a update to the public channel. Newer channel information may be updated with
+// a ChannelUpdate with a larger timestamp.
+table ChannelUpdate {
+    // Signature of the node that wants to update the channel information.
+    signature: EcdsaSignature,
+    chain_hash: Byte32,
+    channel_outpoint: OutPoint,
+    timestamp: Uint64,
+    message_flags: Uint32,
+    channel_flags: Uint32,
+    tlc_expiry_delta: Uint64,
+    tlc_minimum_value: Uint128,
+    tlc_maximum_value: Uint128,
+    tlc_fee_proportional_millionths: Uint128,
+}
+
+// All the broadcast messages.
+union BroadcastMessage {
+    NodeAnnouncement,
+    ChannelAnnouncement,
+    ChannelUpdate,
+}
+
+vector BroadcastMessages <BroadcastMessage>;
+
+// BroadcastMessagesResult is the response to GetBroadcastMessages, BroadcastMessagesFilter and QueryBroadcastMessages requests.
+// The id here corresponds to the id passed by the peer. This is used to track the progress of certain request.
+// It is recommended to use 0 for messages that doesn't corresponds to previous requests (e.g. BroadcastMessagesFilter results).
+table BroadcastMessagesResult {
+    id: Uint64,
+    messages: BroadcastMessages,
+}
