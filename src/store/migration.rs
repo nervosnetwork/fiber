@@ -1,4 +1,3 @@
-use crate::migration::MIGRATION_VERSION_KEY;
 use crate::Error;
 use console::Term;
 use indicatif::MultiProgress;
@@ -11,6 +10,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, error, info};
+
+pub const MIGRATION_VERSION_KEY: &[u8] = b"db-version";
 
 fn internal_error(reason: String) -> Error {
     Error::DBInternalError(reason)

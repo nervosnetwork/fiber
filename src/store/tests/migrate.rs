@@ -1,6 +1,7 @@
-use crate::migration::db_migrate::DbMigrate;
-use crate::migration::migration::Migration;
-use crate::migration::migration::Migrations;
+use crate::store::db_migrate::DbMigrate;
+use crate::store::migration::DefaultMigration;
+use crate::store::migration::Migration;
+use crate::store::migration::Migrations;
 use crate::Error;
 use indicatif::ProgressBar;
 use rocksdb::DB;
@@ -90,5 +91,9 @@ fn test_run_migration() {
     assert_eq!(migrations.check(db.clone()), Ordering::Less);
     migrations.migrate(db.clone()).unwrap();
     assert_eq!(*run_count.read().unwrap(), 3);
-    assert_eq!(migrations.check(db), Ordering::Equal);
+    assert_eq!(migrations.check(db.clone()), Ordering::Equal);
+
+    let mut migrations = Migrations::default();
+    migrations.add_migration(Arc::new(DefaultMigration::new()));
+    assert_eq!(migrations.check(db), Ordering::Greater);
 }

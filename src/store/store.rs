@@ -1,3 +1,5 @@
+use super::db_migrate::DbMigrate;
+use super::schema::*;
 use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
@@ -6,7 +8,6 @@ use crate::{
         types::{Hash256, Pubkey},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceError, InvoiceStore},
-    migration::db_migrate::DbMigrate,
     watchtower::{ChannelData, RevocationData, WatchtowerStore},
 };
 use ckb_jsonrpc_types::JsonBytes;
@@ -64,6 +65,15 @@ impl Store {
             db: Arc::clone(&self.db),
             wb: WriteBatch::default(),
         }
+    }
+
+    fn prefix_iterator<'a>(
+        &'a self,
+        prefix: &'a [u8],
+    ) -> impl Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a {
+        self.db
+            .prefix_iterator(prefix)
+            .take_while(move |(col_key, _)| col_key.starts_with(prefix))
     }
 
     /// Open or create a rocksdb
@@ -133,6 +143,19 @@ pub fn prompt(msg: &str) -> String {
 pub struct Batch {
     db: Arc<DB>,
     wb: WriteBatch,
+}
+
+enum KeyValue {
+    ChannelActorState(Hash256, ChannelActorState),
+    CkbInvoice(Hash256, CkbInvoice),
+    CkbInvoicePreimage(Hash256, Hash256),
+    CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
+    PeerIdChannelId((PeerId, Hash256), ChannelState),
+    NodeInfo(Pubkey, NodeInfo),
+    ChannelInfo(OutPoint, ChannelInfo),
+    WatchtowerChannel(Hash256, ChannelData),
+    PaymentSession(Hash256, PaymentSession),
+    NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
 impl Batch {
@@ -264,64 +287,13 @@ impl Batch {
     }
 }
 
-///
-/// +--------------+--------------------+-----------------------------+
-/// | KeyPrefix::  | Key::              | Value::                     |
-/// +--------------+--------------------+-----------------------------+
-/// | 0            | Hash256            | ChannelActorState           |
-/// | 16           | PeerId             | PersistentNetworkActorState |
-/// | 32           | Hash256            | CkbInvoice                  |
-/// | 33           | Payment_hash       | CkbInvoice Preimage         |
-/// | 34           | Payment_hash       | CkbInvoice Status           |
-/// | 64           | PeerId | Hash256   | ChannelState                |
-/// | 96           | ChannelId          | ChannelInfo                 |
-/// | 97           | Block | Index      | ChannelId                   |
-/// | 98           | Timestamp          | ChannelId                   |
-/// | 128          | NodeId             | NodeInfo                    |
-/// | 129          | Timestamp          | NodeId                      |
-/// | 160          | PeerId             | MultiAddr                   |
-/// | 192          | Hash256            | PaymentSession              |
-/// | 224          | Hash256            | ChannelData                 |
-/// +--------------+--------------------+-----------------------------+
-///
-
-const CHANNEL_ACTOR_STATE_PREFIX: u8 = 0;
-const PEER_ID_NETWORK_ACTOR_STATE_PREFIX: u8 = 16;
-const CKB_INVOICE_PREFIX: u8 = 32;
-const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
-const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
-const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
-pub(crate) const CHANNEL_INFO_PREFIX: u8 = 96;
-const CHANNEL_ANNOUNCEMENT_INDEX_PREFIX: u8 = 97;
-const CHANNEL_UPDATE_INDEX_PREFIX: u8 = 98;
-pub(crate) const NODE_INFO_PREFIX: u8 = 128;
-const NODE_ANNOUNCEMENT_INDEX_PREFIX: u8 = 129;
-const PAYMENT_SESSION_PREFIX: u8 = 192;
-const WATCHTOWER_CHANNEL_PREFIX: u8 = 224;
-
-enum KeyValue {
-    ChannelActorState(Hash256, ChannelActorState),
-    CkbInvoice(Hash256, CkbInvoice),
-    CkbInvoicePreimage(Hash256, Hash256),
-    CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
-    PeerIdChannelId((PeerId, Hash256), ChannelState),
-    NodeInfo(Pubkey, NodeInfo),
-    ChannelInfo(OutPoint, ChannelInfo),
-    WatchtowerChannel(Hash256, ChannelData),
-    PaymentSession(Hash256, PaymentSession),
-    NetworkActorState(PeerId, PersistentNetworkActorState),
-}
-
 impl NetworkActorStateStore for Store {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
         let mut key = Vec::with_capacity(33);
         key.push(PEER_ID_NETWORK_ACTOR_STATE_PREFIX);
         key.extend_from_slice(id.as_bytes());
-        let iter = self
-            .db
-            .prefix_iterator(key.as_ref())
-            .find(|(col_key, _)| col_key.starts_with(&key));
-        iter.map(|(_key, value)| {
+
+        self.get(key).map(|value| {
             bincode::deserialize(value.as_ref())
                 .expect("deserialize PersistentNetworkActorState should be OK")
         })
@@ -373,10 +345,7 @@ impl ChannelActorStateStore for Store {
 
     fn get_channel_ids_by_peer(&self, peer_id: &tentacle::secio::PeerId) -> Vec<Hash256> {
         let prefix = [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat();
-        let iter = self
-            .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(key, _)| key.starts_with(&prefix));
+        let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, _)| {
             let channel_id: [u8; 32] = key[prefix.len()..]
                 .try_into()
@@ -391,22 +360,19 @@ impl ChannelActorStateStore for Store {
             Some(peer_id) => [&[PEER_ID_CHANNEL_ID_PREFIX], peer_id.as_bytes()].concat(),
             None => vec![PEER_ID_CHANNEL_ID_PREFIX],
         };
-        let iter = self
-            .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(key, _)| key.starts_with(&prefix));
-        iter.map(|(key, value)| {
-            let key_len = key.len();
-            let peer_id = PeerId::from_bytes(key[1..key_len - 32].into())
-                .expect("deserialize peer id should be OK");
-            let channel_id: [u8; 32] = key[key_len - 32..]
-                .try_into()
-                .expect("channel id should be 32 bytes");
-            let state = bincode::deserialize(value.as_ref())
-                .expect("deserialize ChannelState should be OK");
-            (peer_id, channel_id.into(), state)
-        })
-        .collect()
+        self.prefix_iterator(&prefix)
+            .map(|(key, value)| {
+                let key_len = key.len();
+                let peer_id = PeerId::from_bytes(key[1..key_len - 32].into())
+                    .expect("deserialize peer id should be OK");
+                let channel_id: [u8; 32] = key[key_len - 32..]
+                    .try_into()
+                    .expect("channel id should be 32 bytes");
+                let state = bincode::deserialize(value.as_ref())
+                    .expect("deserialize ChannelState should be OK");
+                (peer_id, channel_id.into(), state)
+            })
+            .collect()
     }
 }
 
@@ -425,11 +391,12 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
-        let mut batch = self.batch();
         let hash = invoice.payment_hash();
         if self.get_invoice(hash).is_some() {
             return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
         }
+
+        let mut batch = self.batch();
         if let Some(preimage) = preimage {
             batch.put_kv(KeyValue::CkbInvoicePreimage(*hash, preimage));
         }
@@ -457,7 +424,7 @@ impl InvoiceStore for Store {
         id: &Hash256,
         status: crate::invoice::CkbInvoiceStatus,
     ) -> Result<(), InvoiceError> {
-        let _invoice = self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
+        self.get_invoice(id).ok_or(InvoiceError::InvoiceNotFound)?;
         let mut key = Vec::with_capacity(33);
         key.extend_from_slice(&[CKB_INVOICE_STATUS_PREFIX]);
         key.extend_from_slice(id.as_ref());
@@ -608,14 +575,11 @@ impl NetworkGraphStateStore for Store {
 impl WatchtowerStore for Store {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
-        let iter = self
-            .db
-            .prefix_iterator(prefix.as_ref())
-            .take_while(|(col_key, _)| col_key.starts_with(&prefix));
-        iter.map(|(_key, value)| {
-            bincode::deserialize(value.as_ref()).expect("deserialize ChannelData should be OK")
-        })
-        .collect()
+        self.prefix_iterator(&prefix)
+            .map(|(_key, value)| {
+                bincode::deserialize(value.as_ref()).expect("deserialize ChannelData should be OK")
+            })
+            .collect()
     }
 
     fn insert_watch_channel(&self, channel_id: Hash256, funding_tx_lock: Script) {
@@ -644,7 +608,6 @@ impl WatchtowerStore for Store {
         }) {
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
-            eprintln!("update_revocation key: {:?}", channel_id);
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
