@@ -265,7 +265,7 @@ fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
 }
 
 #[test]
-fn test_channel_actor_state_serialize_ok() {
+fn test_channel_actor_state_store() {
     let seed = [0u8; 32];
     let signer = InMemorySigner::generate_from_seed(&seed);
 
