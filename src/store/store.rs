@@ -4,6 +4,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
+        history::TimedResult,
         network::{NetworkActorStateStore, PersistentNetworkActorState},
         types::{Hash256, Pubkey},
     },
@@ -14,6 +15,7 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
+use secp256k1::PublicKey;
 use std::io::Write;
 use std::{
     cmp::Ordering,
@@ -155,6 +157,7 @@ enum KeyValue {
     ChannelInfo(OutPoint, ChannelInfo),
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
+    PaymentHistoryTimedResult((Pubkey, Pubkey), TimedResult),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -256,6 +259,18 @@ impl Batch {
                 self.put(
                     key,
                     bincode::serialize(&channel_data).expect("serialize ChannelData should be OK"),
+                );
+            }
+            KeyValue::PaymentHistoryTimedResult((from, target), result) => {
+                let key = [
+                    &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
+                    from.serialize().as_slice(),
+                    target.serialize().as_slice(),
+                ]
+                .concat();
+                self.put(
+                    key,
+                    bincode::serialize(&result).expect("serialize TimedResult should be OK"),
                 );
             }
             KeyValue::NetworkActorState(peer_id, persistent_network_actor_state) => {
@@ -542,6 +557,29 @@ impl NetworkGraphStateStore for Store {
         batch.put_kv(KeyValue::PaymentSession(session.payment_hash(), session));
         batch.commit();
     }
+
+    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::PaymentHistoryTimedResult((from, target), result));
+        batch.commit();
+    }
+
+    fn get_payment_history_results(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
+        let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
+        let iter = self.prefix_iterator(&prefix);
+        iter.map(|(key, value)| {
+            let from: Pubkey = PublicKey::from_slice(&key[1..34])
+                .expect("deserialize Pubkey should be OK")
+                .into();
+            let target: Pubkey = PublicKey::from_slice(&key[34..])
+                .expect("deserialize Pubkey should be OK")
+                .into();
+            let result =
+                bincode::deserialize(value.as_ref()).expect("deserialize TimedResult should be OK");
+            (from, target, result)
+        })
+        .collect()
+    }
 }
 
 impl WatchtowerStore for Store {
@@ -555,7 +593,6 @@ impl WatchtowerStore for Store {
     }
 
     fn insert_watch_channel(&self, channel_id: Hash256, funding_tx_lock: Script) {
-        let mut batch = self.batch();
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
         let value = bincode::serialize(&ChannelData {
             channel_id,
@@ -563,6 +600,7 @@ impl WatchtowerStore for Store {
             revocation_data: None,
         })
         .expect("serialize ChannelData should be OK");
+        let mut batch = self.batch();
         batch.put(key, value);
         batch.commit();
     }

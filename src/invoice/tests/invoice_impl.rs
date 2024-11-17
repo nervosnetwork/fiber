@@ -1,7 +1,8 @@
+use crate::fiber::tests::test_utils::*;
 use bech32::ToBase32;
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
-use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, Secp256k1};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
@@ -12,27 +13,6 @@ use crate::{
         Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
     },
 };
-
-fn gen_rand_public_key() -> PublicKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair)
-}
-
-fn gen_rand_private_key() -> SecretKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    SecretKey::from_keypair(&key_pair)
-}
-
-fn gen_rand_keypair() -> (PublicKey, SecretKey) {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    (
-        PublicKey::from_keypair(&key_pair),
-        SecretKey::from_keypair(&key_pair),
-    )
-}
 
 fn mock_invoice() -> CkbInvoice {
     let (public_key, private_key) = gen_rand_keypair();
@@ -286,7 +266,7 @@ fn test_invoice_signature_check() {
         .payment_hash(gen_payment_hash)
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
-        .payee_pub_key(public_key)
+        .payee_pub_key(public_key.into())
         .add_attr(Attribute::FinalHtlcTimeout(5))
         .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
@@ -313,6 +293,26 @@ fn test_invoice_builder_duplicated_attr() {
             "{:?}",
             Attribute::FinalHtlcTimeout(5)
         )))
+    );
+}
+
+#[test]
+fn test_invoice_check_description_length() {
+    let gen_payment_hash = rand_sha256_hash();
+    let private_key = gen_rand_private_key();
+    const MAX_DESCRIPTION_LEN: usize = 639;
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .description("a".repeat(MAX_DESCRIPTION_LEN + 1))
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert!(invoice.is_err());
+    let message = invoice.err().unwrap().to_string();
+    assert_eq!(
+        message,
+        "Description with length of 640 is too long, max length is 639"
     );
 }
 

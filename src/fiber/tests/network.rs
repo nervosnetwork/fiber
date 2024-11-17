@@ -1,9 +1,13 @@
 use super::test_utils::{init_tracing, NetworkNode};
+use crate::fiber::network::SendPaymentData;
+use crate::fiber::tests::test_utils::gen_rand_keypair;
+use crate::fiber::tests::test_utils::generate_pubkey;
+use crate::invoice::InvoiceBuilder;
 use crate::{
     fiber::{
         channel::ShutdownInfo,
         graph::{ChannelInfo, NetworkGraphStateStore},
-        network::{get_chain_hash, NetworkActorStateStore},
+        network::{get_chain_hash, NetworkActorStateStore, SendPaymentCommand},
         tests::test_utils::NetworkNodeConfigBuilder,
         types::{
             ChannelAnnouncement, ChannelUpdate, FiberBroadcastMessage, FiberMessage,
@@ -23,6 +27,7 @@ use ckb_types::{
     packed::OutPoint,
     prelude::{Builder, Entity, Pack},
 };
+use core::time::Duration;
 use musig2::PartialSignature;
 use std::{borrow::Cow, str::FromStr};
 use tentacle::{
@@ -679,4 +684,164 @@ fn test_announcement_message_serialize() {
     let serialized = bincode::serialize(&shutdown_info).unwrap();
     let deserialized: ShutdownInfo = bincode::deserialize(&serialized).unwrap();
     assert_eq!(shutdown_info, deserialized);
+}
+
+#[test]
+fn test_send_payment_validate_payment_hash() {
+    let send_command = SendPaymentCommand {
+        target_pubkey: Some(generate_pubkey()),
+        amount: Some(10000),
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: None,
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("payment_hash is missing"));
+}
+
+#[test]
+fn test_send_payment_validate_amount() {
+    let send_command = SendPaymentCommand {
+        target_pubkey: Some(generate_pubkey()),
+        amount: None,
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: None,
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("amount is missing"));
+}
+
+#[test]
+fn test_send_payment_validate_invoice() {
+    use crate::fiber::tests::test_utils::rand_sha256_hash;
+    use crate::invoice::Attribute;
+    use crate::invoice::Currency;
+    use secp256k1::Secp256k1;
+
+    let gen_payment_hash = rand_sha256_hash();
+    let (public_key, private_key) = gen_rand_keypair();
+
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_hash(gen_payment_hash)
+        .fallback_address("address".to_string())
+        .expiry_time(Duration::from_secs(1024))
+        .payee_pub_key(public_key)
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
+        .add_attr(Attribute::Description("description".to_string()))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
+        .unwrap();
+
+    let invoice_encoded = invoice.to_string();
+    let send_command = SendPaymentCommand {
+        target_pubkey: Some(generate_pubkey()),
+        amount: None,
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("target_pubkey does not match the invoice"));
+
+    let send_command = SendPaymentCommand {
+        target_pubkey: None,
+        amount: Some(10),
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    // keysend is set with invoice, should be error
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("amount does not match the invoice"));
+
+    let send_command = SendPaymentCommand {
+        target_pubkey: None,
+        amount: None,
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: Some(true),
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_err());
+
+    // normal invoice send payment
+    let send_command = SendPaymentCommand {
+        target_pubkey: None,
+        amount: None,
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: Some(invoice_encoded.clone()),
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: None,
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_ok());
+
+    // normal keysend send payment
+    let send_command = SendPaymentCommand {
+        target_pubkey: Some(generate_pubkey()),
+        amount: Some(10),
+        payment_hash: None,
+        final_htlc_expiry_delta: None,
+        invoice: None,
+        timeout: None,
+        max_fee_amount: None,
+        max_parts: None,
+        keysend: Some(true),
+        udt_type_script: None,
+        allow_self_payment: false,
+    };
+
+    let result = SendPaymentData::new(send_command, generate_pubkey().into());
+    assert!(result.is_ok());
 }

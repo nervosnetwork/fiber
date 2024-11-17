@@ -6,7 +6,7 @@ use crate::{
     ckb::FundingError,
     fiber::{
         channel::{ChannelActorMessage, ProcessingChannelError},
-        graph::GraphError,
+        graph::PathFindError,
         types::Hash256,
         NetworkActorMessage,
     },
@@ -38,10 +38,12 @@ pub enum Error {
     FundingError(#[from] FundingError),
     #[error("Send payment error: {0}")]
     SendPaymentError(String),
+    #[error("Send payment first hop error: {0}")]
+    SendPaymentFirstHopError(String),
     #[error("InvalidParameter: {0}")]
     InvalidParameter(String),
     #[error("Network Graph error: {0}")]
-    NetworkGraphError(#[from] GraphError),
+    NetworkGraphError(#[from] PathFindError),
     #[error("Invalid peer message: {0}")]
     InvalidPeerMessage(String),
     #[error("Onion packet error: {0}")]

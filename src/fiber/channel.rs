@@ -480,6 +480,8 @@ where
                 {
                     Ok((added_tlc_id, peeled_packet_bytes)) => {
                         if let Some(forward_packet_bytes) = peeled_packet_bytes {
+                            // `handle_forward_onion_packet` will handle the case where forwarding TLC fails
+                            // `remove_tlc` will be sent to the peer and proper error handling will be done
                             self.handle_forward_onion_packet(
                                 state,
                                 forward_packet_bytes,
@@ -2982,11 +2984,11 @@ impl ChannelActorState {
             .sum::<u128>()
     }
 
-    pub fn get_created_at_in_microseconds(&self) -> u64 {
+    pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
             .duration_since(UNIX_EPOCH)
             .expect("Duration since unix epoch")
-            .as_micros() as u64
+            .as_millis() as u64
     }
 
     pub fn is_closed(&self) -> bool {
@@ -4110,7 +4112,6 @@ impl ChannelActorState {
         );
 
         let verify_ctx = Musig2VerifyContext::from(self);
-
         let signature = aggregate_partial_signatures_for_msg(
             tx.hash().as_slice(),
             verify_ctx,
