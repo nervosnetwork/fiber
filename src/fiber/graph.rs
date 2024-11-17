@@ -1,10 +1,11 @@
+use super::history::{InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
-use super::types::Pubkey;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
+use super::types::{Pubkey, TlcErr};
 use crate::fiber::channel::CHANNEL_DISABLED_FLAG;
 use crate::fiber::fee::calculate_tlc_forward_fee;
-use crate::fiber::path::{NodeHeapElement, ProbabilityEvaluator};
+use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
@@ -12,7 +13,7 @@ use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tentacle::secio::PeerId;
 use thiserror::Error;
 use tracing::log::error;
@@ -150,10 +151,11 @@ pub struct NetworkGraph<S> {
     nodes: HashMap<Pubkey, NodeInfo>,
     store: S,
     chain_hash: Hash256,
+    history: PaymentHistory<S>,
 }
 
 #[derive(Error, Debug)]
-pub enum GraphError {
+pub enum PathFindError {
     #[error("Graph error: {0}")]
     Amount(String),
     #[error("PathFind error: {0}")]
@@ -179,8 +181,9 @@ where
             last_update_timestamp: 0,
             channels: HashMap::new(),
             nodes: HashMap::new(),
-            store,
+            store: store.clone(),
             chain_hash: get_chain_hash(),
+            history: PaymentHistory::new(source, None, store),
         };
         network_graph.load_from_store();
         network_graph
@@ -379,11 +382,11 @@ where
         )
     }
 
-    pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), GraphError> {
+    pub fn process_channel_update(&mut self, update: ChannelUpdate) -> Result<(), PathFindError> {
         debug!("Processing channel update: {:?}", &update);
         let channel_outpoint = &update.channel_outpoint;
         let Some(channel) = self.channels.get_mut(channel_outpoint) else {
-            return Err(GraphError::Other("channel not found".to_string()));
+            return Err(PathFindError::Other("channel not found".to_string()));
         };
         debug!(
             "Found channel {:?} for channel update {:?}",
@@ -442,17 +445,17 @@ where
     pub fn get_node_inbounds(
         &self,
         node_id: Pubkey,
-    ) -> impl Iterator<Item = (Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
+    ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
         self.channels.values().filter_map(move |channel| {
             if let Some(info) = channel.node1_to_node2.as_ref() {
                 if info.enabled && channel.node2() == node_id {
-                    return Some((channel.node1(), channel, info));
+                    return Some((channel.node1(), channel.node2(), channel, info));
                 }
             }
 
             if let Some(info) = channel.node2_to_node1.as_ref() {
                 if info.enabled && channel.node1() == node_id {
-                    return Some((channel.node2(), channel, info));
+                    return Some((channel.node2(), channel.node1(), channel, info));
                 }
             }
             None
@@ -488,18 +491,40 @@ where
         }
     }
 
+    pub(crate) fn record_payment_success(&mut self, mut payment_session: PaymentSession) {
+        let session_route = &payment_session.route.nodes;
+        let mut result = InternalResult::default();
+        result.succeed_range_pairs(session_route, 0, session_route.len() - 1);
+        self.history.apply_internal_result(result);
+        payment_session.set_success_status();
+        self.store.insert_payment_session(payment_session);
+    }
+
+    pub(crate) fn record_payment_fail(
+        &mut self,
+        payment_session: &PaymentSession,
+        tlc_err: TlcErr,
+    ) -> bool {
+        let mut internal_result = InternalResult::default();
+        let nodes = &payment_session.route.nodes;
+        let need_to_retry = internal_result.record_payment_fail(nodes, tlc_err);
+        self.history.apply_internal_result(internal_result);
+        return need_to_retry && payment_session.can_retry();
+    }
+
     #[cfg(test)]
     pub fn reset(&mut self) {
         self.channels.clear();
         self.nodes.clear();
+        self.history.reset();
     }
 
-    /// Returns a list of `PaymentHopData` for all nodes in the route, including the origin and the target node.
+    /// Returns a list of `PaymentHopData` for all nodes in the route,
+    /// including the origin and the target node.
     pub fn build_route(
         &self,
-        payment_data: &SendPaymentData,
-    ) -> Result<Vec<PaymentHopData>, GraphError> {
-        let payment_data = payment_data.clone();
+        payment_data: SendPaymentData,
+    ) -> Result<Vec<PaymentHopData>, PathFindError> {
         let source = self.get_source_pubkey();
         let target = payment_data.target_pubkey;
         let amount = payment_data.amount;
@@ -521,12 +546,12 @@ where
 
         let allow_self_payment = payment_data.allow_self_payment;
         if source == target && !allow_self_payment {
-            return Err(GraphError::PathFind(
+            return Err(PathFindError::PathFind(
                 "source and target are the same and allow_self_payment is not enable".to_string(),
             ));
         }
 
-        let route = self.find_route(
+        let route = self.find_path(
             source,
             target,
             amount,
@@ -538,7 +563,7 @@ where
 
         let mut current_amount = amount;
         let mut current_expiry = 0;
-        let mut onion_infos = vec![];
+        let mut hops_data = vec![];
         for i in (0..route.len()).rev() {
             let is_last = i == route.len() - 1;
             let (next_hop, next_channel_outpoint) = if is_last {
@@ -569,7 +594,7 @@ where
 
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
-            onion_infos.push(PaymentHopData {
+            hops_data.push(PaymentHopData {
                 amount: current_amount,
                 payment_hash,
                 next_hop,
@@ -582,7 +607,7 @@ where
             current_expiry += expiry;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
-        onion_infos.push(PaymentHopData {
+        hops_data.push(PaymentHopData {
             amount: current_amount,
             payment_hash,
             next_hop: Some(route[0].target),
@@ -591,14 +616,24 @@ where
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
             preimage: None,
         });
-        onion_infos.reverse();
-        assert_eq!(onion_infos.len(), route.len() + 1);
-        assert_eq!(onion_infos[route.len()].amount, amount);
-        Ok(onion_infos)
+        hops_data.reverse();
+        assert_eq!(hops_data.len(), route.len() + 1);
+        assert_eq!(hops_data[route.len()].amount, amount);
+        // assert there is no duplicate node in the route
+        assert_eq!(
+            hops_data
+                .iter()
+                .filter_map(|x| x.next_hop)
+                .collect::<HashSet<_>>()
+                .len(),
+            route.len()
+        );
+
+        Ok(hops_data)
     }
 
     // the algorithm works from target-to-source to find the shortest path
-    pub fn find_route(
+    pub fn find_path(
         &self,
         source: Pubkey,
         target: Pubkey,
@@ -606,7 +641,7 @@ where
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
         allow_self: bool,
-    ) -> Result<Vec<PathEdge>, GraphError> {
+    ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
         let route_to_self = source == target;
@@ -624,25 +659,25 @@ where
         let mut last_hop_channels = HashMap::new();
 
         if amount == 0 {
-            return Err(GraphError::Amount(
-                "Amount must be greater than 0".to_string(),
+            return Err(PathFindError::Amount(
+                "amount must be greater than 0".to_string(),
             ));
         }
 
         if source == target && !allow_self {
-            return Err(GraphError::PathFind(
+            return Err(PathFindError::PathFind(
                 "source and target are the same".to_string(),
             ));
         }
 
         let Some(source_node) = self.nodes.get(&source) else {
-            return Err(GraphError::PathFind(format!(
+            return Err(PathFindError::PathFind(format!(
                 "source node not found: {:?}",
                 &source
             )));
         };
         let Some(_target_node) = self.nodes.get(&target) else {
-            return Err(GraphError::PathFind(format!(
+            return Err(PathFindError::PathFind(format!(
                 "target node not found: {:?}",
                 &target
             )));
@@ -663,7 +698,8 @@ where
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
 
-            for (from, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id) {
+            for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
+            {
                 if from == target && !route_to_self {
                     continue;
                 }
@@ -711,9 +747,9 @@ where
                     };
 
                 let probability = cur_hop.probability
-                    * ProbabilityEvaluator::evaluate_probability(
+                    * self.history.eval_probability(
                         from,
-                        cur_hop.node_id,
+                        to,
                         amount_to_send,
                         channel_info.capacity(),
                     );
@@ -748,31 +784,27 @@ where
         }
 
         let mut current = source_node.node_id;
-        loop {
-            if let Some(elem) = distances.get(&current) {
-                let next_hop = elem.next_hop.as_ref().expect("next_hop is none");
-                result.push(PathEdge {
-                    target: next_hop.0,
-                    channel_outpoint: next_hop.1.clone(),
-                });
-                current = next_hop.0;
-            } else {
-                break;
-            }
+        while let Some(elem) = distances.remove(&current) {
+            let (next_pubkey, next_out_point) = elem.next_hop.expect("next_hop is none");
+            result.push(PathEdge {
+                target: next_pubkey,
+                channel_outpoint: next_out_point,
+            });
+            current = next_pubkey;
             if current == target {
                 break;
             }
         }
 
         info!(
-            "get_route: nodes visited: {}, edges expanded: {}, time: {:?}, result: {:?}",
+            "get_route: nodes visited: {}, edges expanded: {}, time: {:?} \nresult: {:?}",
             nodes_visited,
             edges_expanded,
             started_time.elapsed(),
             result
         );
         if result.is_empty() || current != target {
-            return Err(GraphError::PathFind("no path found".to_string()));
+            return Err(PathFindError::PathFind("no path found".to_string()));
         }
         Ok(result)
     }
@@ -784,6 +816,7 @@ where
     }
 
     fn calculate_distance_based_probability(&self, probability: f64, weight: u128) -> u128 {
+        assert!(probability > 0.0);
         // FIXME: set this to configurable parameters
         let weight = weight as f64;
         let time_pref = 0.5_f64;
@@ -812,6 +845,8 @@ pub trait NetworkGraphStateStore {
     fn insert_node(&self, node: NodeInfo);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
+    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult);
+    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -828,6 +863,49 @@ pub enum PaymentSessionStatus {
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionRouteNode {
+    pub pubkey: Pubkey,
+    pub amount: u128,
+    #[serde_as(as = "EntityHex")]
+    pub channel_outpoint: OutPoint,
+}
+
+// The router is a list of nodes that the payment will go through.
+// We store in the payment session and then will use it to track the payment history.
+// The router is a list of nodes that the payment will go through.
+// For example:
+//    A(amount, channel) -> B -> C -> D means A will send `amount` with `channel` to B.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SessionRoute {
+    pub nodes: Vec<SessionRouteNode>,
+}
+
+impl SessionRoute {
+    // Create a new route from the source to the target with the given payment hops.
+    // The payment hops are the hops that the payment will go through.
+    // for a payment route A -> B -> C -> D
+    // the `payment_hops` is [B, C, D], which is a convinent way for onion routing.
+    // here we need to create a session route with source, which is A -> B -> C -> D
+    pub fn new(source: Pubkey, target: Pubkey, payment_hops: &[PaymentHopData]) -> Self {
+        let nodes = std::iter::once(source)
+            .chain(
+                payment_hops
+                    .iter()
+                    .map(|hop| hop.next_hop.clone().unwrap_or(target)),
+            )
+            .zip(payment_hops)
+            .map(|(pubkey, hop)| SessionRouteNode {
+                pubkey,
+                channel_outpoint: hop.channel_outpoint.clone().unwrap_or_default(),
+                amount: hop.amount,
+            })
+            .collect();
+        Self { nodes }
+    }
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaymentSession {
     pub request: SendPaymentData,
     pub retried_times: u32,
@@ -840,6 +918,7 @@ pub struct PaymentSession {
     #[serde_as(as = "Option<EntityHex>")]
     pub first_hop_channel_outpoint: Option<OutPoint>,
     pub first_hop_tlc_id: Option<u64>,
+    pub route: SessionRoute,
 }
 
 impl PaymentSession {
@@ -858,6 +937,7 @@ impl PaymentSession {
             last_updated_at: now,
             first_hop_channel_outpoint: None,
             first_hop_tlc_id: None,
+            route: SessionRoute::default(),
         }
     }
 
@@ -865,7 +945,7 @@ impl PaymentSession {
         self.request.payment_hash
     }
 
-    pub fn set_status(&mut self, status: PaymentSessionStatus) {
+    fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
         self.last_updated_at = std::time::UNIX_EPOCH
             .elapsed()
@@ -873,7 +953,8 @@ impl PaymentSession {
             .as_micros();
     }
 
-    pub fn set_first_hop_info(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+    pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {
+        self.set_status(PaymentSessionStatus::Inflight);
         self.first_hop_channel_outpoint = Some(channel_outpoint);
         self.first_hop_tlc_id = Some(tlc_id);
     }

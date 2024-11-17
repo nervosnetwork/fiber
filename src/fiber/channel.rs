@@ -479,6 +479,8 @@ where
                 {
                     Ok((added_tlc_id, peeled_packet_bytes)) => {
                         if let Some(forward_packet_bytes) = peeled_packet_bytes {
+                            // `handle_forward_onion_packet` will handle the case where forwarding TLC fails
+                            // `remove_tlc` will be sent to the peer and proper error handling will be done
                             self.handle_forward_onion_packet(
                                 state,
                                 forward_packet_bytes,
@@ -4109,7 +4111,6 @@ impl ChannelActorState {
         );
 
         let verify_ctx = Musig2VerifyContext::from(self);
-
         let signature = aggregate_partial_signatures_for_msg(
             tx.hash().as_slice(),
             verify_ctx,
