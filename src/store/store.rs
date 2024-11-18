@@ -16,6 +16,7 @@ use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
 use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
 use secp256k1::PublicKey;
+use serde::Serialize;
 use std::io::Write;
 use std::{
     cmp::Ordering,
@@ -164,130 +165,111 @@ enum KeyValue {
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
-impl Batch {
-    fn put_kv(&mut self, key_value: KeyValue) {
-        match key_value {
-            KeyValue::ChannelActorState(id, state) => {
-                let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-                let value =
-                    bincode::serialize(&state).expect("serialize ChannelActorState should be OK");
-                self.put(key, value);
+pub trait StoreKeyValue {
+    fn key(&self) -> Vec<u8>;
+    fn value(&self) -> Vec<u8>;
+}
+
+fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
+    bincode::serialize(value)
+        .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
+}
+
+impl StoreKeyValue for KeyValue {
+    fn key(&self) -> Vec<u8> {
+        match self {
+            KeyValue::ChannelActorState(id, _) => {
+                [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat()
             }
-            KeyValue::CkbInvoice(id, invoice) => {
-                let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
-                let value =
-                    bincode::serialize(&invoice).expect("serialize CkbInvoice should be OK");
-                self.put(key, value);
+            KeyValue::CkbInvoice(id, _) => [&[CKB_INVOICE_PREFIX], id.as_ref()].concat(),
+            KeyValue::CkbInvoicePreimage(id, _) => {
+                [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat()
             }
-            KeyValue::CkbInvoicePreimage(id, preimage) => {
-                let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
-                self.put(
-                    key,
-                    bincode::serialize(&preimage).expect("serialize Hash256 should be OK"),
-                );
+            KeyValue::CkbInvoiceStatus(id, _) => {
+                [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat()
             }
-            KeyValue::CkbInvoiceStatus(id, status) => {
-                let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
-                self.put(
-                    key,
-                    bincode::serialize(&status).expect("serialize CkbInvoiceStatus should be OK"),
-                );
+            KeyValue::PeerIdChannelId((peer_id, channel_id), _) => [
+                &[PEER_ID_CHANNEL_ID_PREFIX],
+                peer_id.as_bytes(),
+                channel_id.as_ref(),
+            ]
+            .concat(),
+            KeyValue::ChannelInfo(channel_id, _) => {
+                [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat()
             }
-            KeyValue::PeerIdChannelId((peer_id, channel_id), state) => {
-                let key = [
-                    &[PEER_ID_CHANNEL_ID_PREFIX],
-                    peer_id.as_bytes(),
-                    channel_id.as_ref(),
-                ]
-                .concat();
-                self.put(
-                    key,
-                    bincode::serialize(&state).expect("serialize ChannelState should be OK"),
-                );
+            KeyValue::PaymentSession(payment_hash, _) => {
+                [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
-            KeyValue::ChannelTimestampIndex(channel_id, timestamp) => {
-                self.put(
-                    [
-                        CHANNEL_UPDATE_INDEX_PREFIX.to_be_bytes().as_slice(),
-                        timestamp.to_be_bytes().as_slice(),
-                    ]
-                    .concat(),
-                    channel_id.as_slice(),
-                );
+            KeyValue::NodeInfo(id, _) => [&[NODE_INFO_PREFIX], id.serialize().as_slice()].concat(),
+            KeyValue::NodeTimestampIndex(_id, timestamp) => [
+                &[NODE_ANNOUNCEMENT_INDEX_PREFIX],
+                timestamp.to_be_bytes().as_slice(),
+            ]
+            .concat(),
+            KeyValue::WatchtowerChannel(channel_id, _) => {
+                [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat()
             }
+            KeyValue::NetworkActorState(peer_id, _) => {
+                [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat()
+            }
+            KeyValue::ChannelTimestampIndex(_channel_id, timestamp) => [
+                CHANNEL_UPDATE_INDEX_PREFIX.to_be_bytes().as_slice(),
+                timestamp.to_be_bytes().as_slice(),
+            ]
+            .concat(),
             KeyValue::ChannelFundingTxIndex(
-                channel_id,
+                _channel_id,
                 funding_tx_block_number,
                 funding_tx_index,
-            ) => {
-                self.put(
-                    [
-                        CHANNEL_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
-                        funding_tx_block_number.to_be_bytes().as_slice(),
-                        funding_tx_index.to_be_bytes().as_slice(),
-                    ]
-                    .concat(),
-                    channel_id.as_slice(),
-                );
+            ) => [
+                CHANNEL_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
+                funding_tx_block_number.to_be_bytes().as_slice(),
+                funding_tx_index.to_be_bytes().as_slice(),
+            ]
+            .concat(),
+            KeyValue::PaymentHistoryTimedResult((from, target), _) => [
+                &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
+                from.serialize().as_slice(),
+                target.serialize().as_slice(),
+            ]
+            .concat(),
+        }
+    }
+
+    fn value(&self) -> Vec<u8> {
+        match self {
+            KeyValue::ChannelActorState(_, state) => serialize_to_vec(state, "ChannelActorState"),
+            KeyValue::CkbInvoice(_, invoice) => serialize_to_vec(invoice, "CkbInvoice"),
+            KeyValue::CkbInvoicePreimage(_, preimage) => serialize_to_vec(preimage, "Hash256"),
+            KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
+            KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
+            KeyValue::ChannelInfo(_, channel) => serialize_to_vec(channel, "ChannelInfo"),
+            KeyValue::PaymentSession(_, payment_session) => {
+                serialize_to_vec(payment_session, "PaymentSession")
             }
-            KeyValue::ChannelInfo(channel_id, channel) => {
-                self.put(
-                    [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat(),
-                    bincode::serialize(&channel).expect("serialize ChannelInfo should be OK"),
-                );
+            KeyValue::NodeInfo(_, node) => serialize_to_vec(node, "NodeInfo"),
+            KeyValue::NodeTimestampIndex(id, _timestamp) => id.serialize().to_vec(),
+            KeyValue::WatchtowerChannel(_, channel_data) => {
+                serialize_to_vec(channel_data, "ChannelData")
             }
-            KeyValue::PaymentSession(payment_hash, payment_session) => {
-                let key = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
-                self.put(
-                    key,
-                    bincode::serialize(&payment_session)
-                        .expect("serialize PaymentSession should be OK"),
-                );
+            KeyValue::NetworkActorState(_, persistent_network_actor_state) => serialize_to_vec(
+                persistent_network_actor_state,
+                "PersistentNetworkActorState",
+            ),
+            KeyValue::ChannelTimestampIndex(channel_id, _timestamp) => {
+                channel_id.as_slice().to_vec()
             }
-            KeyValue::NodeInfo(id, node) => {
-                self.put(
-                    [&[NODE_INFO_PREFIX], id.serialize().as_slice()].concat(),
-                    bincode::serialize(&node).expect("serialize NodeInfo should be OK"),
-                );
-            }
-            KeyValue::NodeTimestampIndex(id, timestamp) => {
-                self.put(
-                    [
-                        &[NODE_ANNOUNCEMENT_INDEX_PREFIX],
-                        timestamp.to_be_bytes().as_slice(),
-                    ]
-                    .concat(),
-                    id.serialize(),
-                );
-            }
-            KeyValue::WatchtowerChannel(channel_id, channel_data) => {
-                let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-                self.put(
-                    key,
-                    bincode::serialize(&channel_data).expect("serialize ChannelData should be OK"),
-                );
-            }
-            KeyValue::PaymentHistoryTimedResult((from, target), result) => {
-                let key = [
-                    &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
-                    from.serialize().as_slice(),
-                    target.serialize().as_slice(),
-                ]
-                .concat();
-                self.put(
-                    key,
-                    bincode::serialize(&result).expect("serialize TimedResult should be OK"),
-                );
-            }
-            KeyValue::NetworkActorState(peer_id, persistent_network_actor_state) => {
-                let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], peer_id.as_bytes()].concat();
-                self.put(
-                    key,
-                    bincode::serialize(&persistent_network_actor_state)
-                        .expect("serialize PersistentNetworkActorState should be OK"),
-                );
+            KeyValue::ChannelFundingTxIndex(channel_id, _, _) => channel_id.as_slice().to_vec(),
+            KeyValue::PaymentHistoryTimedResult(_, result) => {
+                serialize_to_vec(result, "TimedResult")
             }
         }
+    }
+}
+
+impl Batch {
+    fn put_kv(&mut self, key_value: KeyValue) {
+        self.put(key_value.key(), key_value.value());
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
