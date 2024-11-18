@@ -3,7 +3,7 @@ use ckb_resource::Resource;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{
-    contracts::{get_script_by_contract, init_contracts_context, Contract},
+    contracts::{get_script_by_contract, try_init_contracts_context, Contract},
     CkbChainActor,
 };
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
@@ -100,11 +100,12 @@ pub async fn main() -> Result<(), ExitMessage> {
             })?;
 
             init_chain_hash(genesis_block.hash().into());
-            init_contracts_context(
+            try_init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
-            );
+            )
+            .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
