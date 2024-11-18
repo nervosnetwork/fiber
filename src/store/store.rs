@@ -85,7 +85,7 @@ impl Store {
         if !migrate.need_init() {
             match migrate.check() {
                 Ordering::Greater => {
-                    eprintln!(
+                    error!(
                         "The database was created by a higher version fiber executable binary \n\
                      and cannot be opened by the current binary.\n\
                      Please download the latest fiber executable binary."
@@ -93,7 +93,7 @@ impl Store {
                     return Err("incompatible database, need to upgrade fiber binary".to_string());
                 }
                 Ordering::Equal => {
-                    eprintln!("no need to migrate, everything is OK ...");
+                    info!("no need to migrate, everything is OK ...");
                     return Ok(migrate.db());
                 }
                 Ordering::Less => {
@@ -120,7 +120,7 @@ impl Store {
                 }
             }
         } else {
-            eprintln!("now begin to init db version ...");
+            info!("now begin to init db version ...");
             migrate
                 .init_db_version()
                 .expect("failed to init db version");
@@ -129,7 +129,7 @@ impl Store {
     }
 }
 
-pub fn prompt(msg: &str) -> String {
+fn prompt(msg: &str) -> String {
     let stdout = stdout();
     let mut stdout = stdout.lock();
     let stdin = stdin();
@@ -173,6 +173,14 @@ pub trait StoreKeyValue {
 fn serialize_to_vec<T: ?Sized + Serialize>(value: &T, field_name: &str) -> Vec<u8> {
     bincode::serialize(value)
         .unwrap_or_else(|e| panic!("serialization of {} failed: {}", field_name, e))
+}
+
+fn deserialize_from<'a, T>(slice: &'a [u8], field_name: &str) -> T
+where
+    T: serde::Deserialize<'a>,
+{
+    bincode::deserialize(slice)
+        .unwrap_or_else(|e| panic!("deserialization of {} failed: {}", field_name, e))
 }
 
 impl StoreKeyValue for KeyValue {
@@ -288,10 +296,8 @@ impl Batch {
 impl NetworkActorStateStore for Store {
     fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
         let key = [&[PEER_ID_NETWORK_ACTOR_STATE_PREFIX], id.as_bytes()].concat();
-        self.get(key).map(|value| {
-            bincode::deserialize(value.as_ref())
-                .expect("deserialize PersistentNetworkActorState should be OK")
-        })
+        self.get(key)
+            .map(|value| deserialize_from(value.as_ref(), "PersistentNetworkActorState"))
     }
 
     fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
@@ -304,9 +310,8 @@ impl NetworkActorStateStore for Store {
 impl ChannelActorStateStore for Store {
     fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
         let key = [&[CHANNEL_ACTOR_STATE_PREFIX], id.as_ref()].concat();
-        self.get(key).map(|v| {
-            bincode::deserialize(v.as_ref()).expect("deserialize ChannelActorState should be OK")
-        })
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "ChannelActorState"))
     }
 
     fn insert_channel_actor_state(&self, state: ChannelActorState) {
@@ -360,8 +365,7 @@ impl ChannelActorStateStore for Store {
                 let channel_id: [u8; 32] = key[key_len - 32..]
                     .try_into()
                     .expect("channel id should be 32 bytes");
-                let state = bincode::deserialize(value.as_ref())
-                    .expect("deserialize ChannelState should be OK");
+                let state = deserialize_from(value.as_ref(), "ChannelState");
                 (peer_id, channel_id.into(), state)
             })
             .collect()
@@ -371,8 +375,7 @@ impl ChannelActorStateStore for Store {
 impl InvoiceStore for Store {
     fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
         let key = [&[CKB_INVOICE_PREFIX], id.as_ref()].concat();
-        self.get(key)
-            .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoice should be OK"))
+        self.get(key).map(|v| deserialize_from(&v, "CkbInvoice"))
     }
 
     fn insert_invoice(
@@ -402,7 +405,7 @@ impl InvoiceStore for Store {
     fn get_invoice_preimage(&self, id: &Hash256) -> Option<Hash256> {
         let key = [&[CKB_INVOICE_PREIMAGE_PREFIX], id.as_ref()].concat();
         self.get(key)
-            .map(|v| bincode::deserialize(v.as_ref()).expect("deserialize Hash256 should be OK"))
+            .map(|v| deserialize_from(v.as_ref(), "Hash256"))
     }
 
     fn update_invoice_status(
@@ -419,9 +422,8 @@ impl InvoiceStore for Store {
 
     fn get_invoice_status(&self, id: &Hash256) -> Option<CkbInvoiceStatus> {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
-        self.get(key).map(|v| {
-            bincode::deserialize(v.as_ref()).expect("deserialize CkbInvoiceStatus should be OK")
-        })
+        self.get(key)
+            .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
     }
 }
 
@@ -459,8 +461,7 @@ impl NetworkGraphStateStore for Store {
                         return None;
                     }
                 }
-                let channel: ChannelInfo = bincode::deserialize(value.as_ref())
-                    .expect("deserialize ChannelInfo should be OK");
+                let channel: ChannelInfo = deserialize_from(value.as_ref(), "ChannelInfo");
                 if !channel.is_explicitly_disabled() {
                     last_key = col_key.to_vec();
                     Some(channel)
@@ -510,10 +511,7 @@ impl NetworkGraphStateStore for Store {
                     }
                 }
                 last_key = col_key.to_vec();
-                Some(
-                    bincode::deserialize(value.as_ref())
-                        .expect("deserialize NodeInfo should be OK"),
-                )
+                Some(deserialize_from(value.as_ref(), "NodeInfo"))
             })
             .skip(skip)
             .take(limit)
@@ -548,9 +546,8 @@ impl NetworkGraphStateStore for Store {
 
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
-        self.get(prefix).map(|v| {
-            bincode::deserialize(v.as_ref()).expect("deserialize PaymentSession should be OK")
-        })
+        self.get(prefix)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
@@ -575,8 +572,7 @@ impl NetworkGraphStateStore for Store {
             let target: Pubkey = PublicKey::from_slice(&key[34..])
                 .expect("deserialize Pubkey should be OK")
                 .into();
-            let result =
-                bincode::deserialize(value.as_ref()).expect("deserialize TimedResult should be OK");
+            let result = deserialize_from(value.as_ref(), "TimedResult");
             (from, target, result)
         })
         .collect()
@@ -587,20 +583,20 @@ impl WatchtowerStore for Store {
     fn get_watch_channels(&self) -> Vec<ChannelData> {
         let prefix = vec![WATCHTOWER_CHANNEL_PREFIX];
         self.prefix_iterator(&prefix)
-            .map(|(_key, value)| {
-                bincode::deserialize(value.as_ref()).expect("deserialize ChannelData should be OK")
-            })
+            .map(|(_key, value)| deserialize_from(value.as_ref(), "ChannelData"))
             .collect()
     }
 
     fn insert_watch_channel(&self, channel_id: Hash256, funding_tx_lock: Script) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        let value = bincode::serialize(&ChannelData {
-            channel_id,
-            funding_tx_lock,
-            revocation_data: None,
-        })
-        .expect("serialize ChannelData should be OK");
+        let value = serialize_to_vec(
+            &ChannelData {
+                channel_id,
+                funding_tx_lock,
+                revocation_data: None,
+            },
+            "ChannelData",
+        );
         let mut batch = self.batch();
         batch.put(key, value);
         batch.commit();
@@ -613,10 +609,10 @@ impl WatchtowerStore for Store {
 
     fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        if let Some(mut channel_data) = self.get(key).map(|v| {
-            bincode::deserialize::<ChannelData>(v.as_ref())
-                .expect("deserialize ChannelData should be OK")
-        }) {
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
             channel_data.revocation_data = Some(revocation_data);
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
