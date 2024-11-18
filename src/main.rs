@@ -3,7 +3,7 @@ use ckb_resource::Resource;
 use fnn::actors::RootActor;
 use fnn::cch::CchMessage;
 use fnn::ckb::{
-    contracts::{get_script_by_contract, init_contracts_context, Contract},
+    contracts::{get_script_by_contract, try_init_contracts_context, Contract},
     CkbChainActor,
 };
 use fnn::fiber::{channel::ChannelSubscribers, graph::NetworkGraph, network::init_chain_hash};
@@ -15,6 +15,7 @@ use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
 use fnn::{start_cch, start_network, start_rpc, Config};
 
 use core::default::Default;
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +25,13 @@ use ractor::Actor;
 use secp256k1::Secp256k1;
 use tokio::sync::{mpsc, RwLock};
 use tokio::{select, signal};
-use tracing::{debug, error, info, info_span, trace};
+use tracing::{debug, info, info_span, trace};
 use tracing_subscriber::{field::MakeExt, fmt, fmt::format, EnvFilter};
 
+pub struct ExitMessage(String);
+
 #[tokio::main]
-pub async fn main() {
+pub async fn main() -> Result<(), ExitMessage> {
     // ractor will set "id" for each actor:
     // https://github.com/slawlor/ractor/blob/67d657e4cdcb8884a9ccc9b758704cbb447ac163/ractor/src/actor/mod.rs#L701
     // here we map it with the node prefix
@@ -50,7 +53,8 @@ pub async fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .pretty()
         .fmt_fields(node_formatter)
-        .init();
+        .try_init()
+        .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
     info!("Starting node with git version {}", fnn::get_git_versin());
 
@@ -63,15 +67,25 @@ pub async fn main() {
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
 
-    let store = Store::new(config.fiber.as_ref().expect("Fiber config").store_path());
+    let store = Store::new(
+        config
+            .fiber
+            .as_ref()
+            .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
+            .store_path(),
+    );
     let subscribers = ChannelSubscribers::default();
 
     let (fiber_command_sender, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
-            let ckb_config = config.ckb.expect("ckb service is required for ckb service. \
-            Add ckb service to the services list in the config file and relevant configuration to the ckb section of the config file.");
+            let ckb_config = config.ckb.ok_or_else(|| {
+                ExitMessage(
+                    "service fiber requires service ckb which is not enabled in the config file"
+                        .to_string(),
+                )
+            })?;
             let node_public_key = fiber_config.public_key();
 
             let chain = fiber_config.chain.as_str();
@@ -80,15 +94,18 @@ pub async fn main() {
                 "testnet" => Resource::bundled("specs/testnet.toml".to_string()),
                 path => Resource::file_system(Path::new(&config.base_dir).join(path)),
             })
-            .expect("load chain spec");
-            let genesis_block = chain_spec.build_genesis().expect("build genesis block");
+            .map_err(|err| ExitMessage(format!("failed to load chain spec: {}", err)))?;
+            let genesis_block = chain_spec.build_genesis().map_err(|err| {
+                ExitMessage(format!("failed to build ckb genesis block: {}", err))
+            })?;
 
             init_chain_hash(genesis_block.hash().into());
-            init_contracts_context(
+            try_init_contracts_context(
                 genesis_block,
                 fiber_config.scripts.clone(),
                 ckb_config.udt_whitelist.clone().unwrap_or_default(),
-            );
+            )
+            .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
             let ckb_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
@@ -97,7 +114,7 @@ pub async fn main() {
                 root_actor.get_cell(),
             )
             .await
-            .expect("start ckb actor")
+            .map_err(|err| ExitMessage(format!("failed to start ckb actor: {}", err)))?
             .0;
 
             const CHANNEL_SIZE: usize = 4000;
@@ -108,9 +125,12 @@ pub async fn main() {
                 node_public_key.clone().into(),
             )));
 
-            let secret_key = ckb_config
-                .read_secret_key()
-                .expect("read secret key from ckb config");
+            let secret_key = ckb_config.read_secret_key().map_err(|err| {
+                ExitMessage(format!(
+                    "failed to read the secret key for the ckb signer: {}",
+                    err
+                ))
+            })?;
             let secp = Secp256k1::new();
             let pubkey_hash = blake2b_256(secret_key.public_key(&secp).serialize());
             let default_shutdown_script =
@@ -137,7 +157,7 @@ pub async fn main() {
                 root_actor.get_cell(),
             )
             .await
-            .expect("start watchtower actor")
+            .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
             .0;
 
             // every 60 seconds, check if there are any channels that submitted a commitment transaction
@@ -192,8 +212,10 @@ pub async fn main() {
                         info!("Cross-chain service failed to start and is ignored by the config option ignore_startup_failure: {}", err);
                         None
                     } else {
-                        error!("Cross-chain service failed to start: {}", err);
-                        return;
+                        return ExitMessage::err(format!(
+                            "cross-chain service failed to start: {}",
+                            err
+                        ));
                     }
                 }
                 Ok(actor) => {
@@ -218,33 +240,49 @@ pub async fn main() {
     };
 
     // Start rpc service
-    let rpc_server_handle = match config.rpc {
-        Some(rpc_config) => {
-            if fiber_command_sender.is_none() && cch_actor.is_none() {
-                error!("Rpc service requires ckb and cch service to be started. Exiting.");
-                return;
-            }
-
-            info!("Starting rpc");
+    let rpc_server_handle = match (config.rpc, network_graph) {
+        (Some(rpc_config), Some(network_graph)) => {
             let handle = start_rpc(
                 rpc_config,
                 config.fiber,
                 fiber_command_sender,
                 cch_actor,
                 store,
-                network_graph.expect("RPC requires network graph"),
+                network_graph
             )
             .await;
             Some(handle)
-        }
-        None => None,
+        },
+        (Some(_), None) => return ExitMessage::err(
+            "RPC requires network graph in the fiber service which is not enabled in the config file"
+            .to_string()
+        ),
+        _ => None,
     };
 
-    signal::ctrl_c().await.expect("Failed to listen for event");
+    signal::ctrl_c()
+        .await
+        .map_err(|err| ExitMessage(format!("failed to listen for ctrl-c event: {}", err)))?;
     info!("Received Ctrl-C, shutting down");
     if let Some(handle) = rpc_server_handle {
-        handle.stop().expect("stop rpc server");
+        handle
+            .stop()
+            .map_err(|err| ExitMessage(format!("failed to stop rpc server: {}", err)))?;
         handle.stopped().await;
     }
     cancel_tasks_and_wait_for_completion().await;
+
+    Ok(())
+}
+
+impl Debug for ExitMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Exit because {}", self.0)
+    }
+}
+
+impl ExitMessage {
+    pub fn err(message: String) -> Result<(), ExitMessage> {
+        Err(ExitMessage(message))
+    }
 }

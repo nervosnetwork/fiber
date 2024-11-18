@@ -925,8 +925,8 @@ pub struct PaymentSession {
     pub last_error: Option<String>,
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
-    pub created_at: u128,
-    pub last_updated_at: u128,
+    pub created_at: u64,
+    pub last_updated_at: u64,
     // The channel_outpoint and the tlc_id of the first hop
     #[serde_as(as = "Option<EntityHex>")]
     pub first_hop_channel_outpoint: Option<OutPoint>,
@@ -936,10 +936,7 @@ pub struct PaymentSession {
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
-        let now = std::time::UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_millis();
+        let now = now_timestamp_as_millis_u64();
         Self {
             request,
             retried_times: 0,
@@ -960,10 +957,7 @@ impl PaymentSession {
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = std::time::UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_micros();
+        self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
     pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {

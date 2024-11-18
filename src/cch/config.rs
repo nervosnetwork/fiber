@@ -93,7 +93,7 @@ pub struct CchConfig {
     )]
     pub btc_final_tlc_expiry: u64,
 
-    ///  Tlc expiry time for CKB network in blocks.
+    /// Tlc expiry time for CKB network in blocks.
     #[default(DEFAULT_CKB_FINAL_TLC_EXPIRY_DELTA)]
     #[arg(
         name = "CCH_CKB_FINAL_TLC_EXPIRY_DELTA",
@@ -105,6 +105,7 @@ pub struct CchConfig {
 
     /// Ignore the failure when starting the cch service.
     #[default(false)]
+    #[arg(skip)]
     pub ignore_startup_failure: bool,
 }
 

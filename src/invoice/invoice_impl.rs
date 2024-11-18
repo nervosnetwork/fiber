@@ -26,6 +26,7 @@ use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
 pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
+pub(crate) const MAX_DESCRIPTION_LENGTH: usize = 639;
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -652,7 +653,7 @@ impl InvoiceBuilder {
             rand_sha256_hash()
         };
 
-        self.check_duplicated_attrs()?;
+        self.check_attrs_valid()?;
         let timestamp = std::time::UNIX_EPOCH
             .elapsed()
             .expect("Duration since unix epoch")
@@ -678,7 +679,7 @@ impl InvoiceBuilder {
         Ok(invoice)
     }
 
-    fn check_duplicated_attrs(&self) -> Result<(), InvoiceError> {
+    fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
         // check is there any duplicate attribute key set
         for (i, attr) in self.attrs.iter().enumerate() {
             for other in self.attrs.iter().skip(i + 1) {
@@ -687,6 +688,14 @@ impl InvoiceBuilder {
                 }
             }
         }
+
+        if let Some(len) = self.attrs.iter().find_map(|attr| match attr {
+            Attribute::Description(desc) if desc.len() > MAX_DESCRIPTION_LENGTH => Some(desc.len()),
+            _ => None,
+        }) {
+            return Err(InvoiceError::DescriptionTooLong(len));
+        }
+
         Ok(())
     }
 }
