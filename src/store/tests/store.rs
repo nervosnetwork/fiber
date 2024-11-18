@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use crate::fiber::channel::AwaitingChannelReadyFlags;
 use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
@@ -26,9 +24,8 @@ use crate::fiber::types::Hash256;
 use crate::fiber::types::NodeAnnouncement;
 use crate::fiber::types::Pubkey;
 use crate::invoice::*;
+use crate::store::schema::*;
 use crate::store::Store;
-use crate::store::CHANNEL_INFO_PREFIX;
-use crate::store::NODE_INFO_PREFIX;
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::JsonBytes;
@@ -40,11 +37,9 @@ use ckb_types::prelude::*;
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
-use musig2::CompactSignature;
 use musig2::SecNonce;
-use secp256k1::Keypair;
-use secp256k1::Secp256k1;
-use secp256k1::{Keypair, PublicKey, Secp256k1};
+use secp256k1::{Keypair, Secp256k1};
+use std::time::SystemTime;
 use tempfile::tempdir;
 
 fn mock_node() -> (Pubkey, NodeInfo) {

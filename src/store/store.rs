@@ -154,7 +154,10 @@ enum KeyValue {
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
     NodeInfo(Pubkey, NodeInfo),
+    NodeTimestampIndex(Pubkey, u64),
     ChannelInfo(OutPoint, ChannelInfo),
+    ChannelTimestampIndex(OutPoint, u64),
+    ChannelFundingTxIndex(OutPoint, u64, u32),
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
     PaymentHistoryTimedResult((Pubkey, Pubkey), TimedResult),
@@ -202,31 +205,34 @@ impl Batch {
                     bincode::serialize(&state).expect("serialize ChannelState should be OK"),
                 );
             }
-            KeyValue::ChannelInfo(channel_id, channel) => {
-                // Save channel update timestamp to index, so that we can query channels by timestamp
+            KeyValue::ChannelTimestampIndex(channel_id, timestamp) => {
                 self.put(
                     [
                         CHANNEL_UPDATE_INDEX_PREFIX.to_be_bytes().as_slice(),
-                        channel.timestamp.to_be_bytes().as_slice(),
+                        timestamp.to_be_bytes().as_slice(),
                     ]
                     .concat(),
                     channel_id.as_slice(),
                 );
-
-                // Save channel announcement block numbers to index, so that we can query channels by block number
+            }
+            KeyValue::ChannelFundingTxIndex(
+                channel_id,
+                funding_tx_block_number,
+                funding_tx_index,
+            ) => {
                 self.put(
                     [
                         CHANNEL_ANNOUNCEMENT_INDEX_PREFIX.to_be_bytes().as_slice(),
-                        channel.funding_tx_block_number.to_be_bytes().as_slice(),
-                        channel.funding_tx_index.to_be_bytes().as_slice(),
+                        funding_tx_block_number.to_be_bytes().as_slice(),
+                        funding_tx_index.to_be_bytes().as_slice(),
                     ]
                     .concat(),
                     channel_id.as_slice(),
                 );
-
-                let key = [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat();
+            }
+            KeyValue::ChannelInfo(channel_id, channel) => {
                 self.put(
-                    key,
+                    [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat(),
                     bincode::serialize(&channel).expect("serialize ChannelInfo should be OK"),
                 );
             }
@@ -239,19 +245,19 @@ impl Batch {
                 );
             }
             KeyValue::NodeInfo(id, node) => {
-                // Save node announcement timestamp to index, so that we can query nodes by timestamp
-                self.put(
-                    [
-                        &[NODE_ANNOUNCEMENT_INDEX_PREFIX],
-                        node.timestamp.to_be_bytes().as_slice(),
-                    ]
-                    .concat(),
-                    id.serialize(),
-                );
-
                 self.put(
                     [&[NODE_INFO_PREFIX], id.serialize().as_slice()].concat(),
                     bincode::serialize(&node).expect("serialize NodeInfo should be OK"),
+                );
+            }
+            KeyValue::NodeTimestampIndex(id, timestamp) => {
+                self.put(
+                    [
+                        &[NODE_ANNOUNCEMENT_INDEX_PREFIX],
+                        timestamp.to_be_bytes().as_slice(),
+                    ]
+                    .concat(),
+                    id.serialize(),
                 );
             }
             KeyValue::WatchtowerChannel(channel_id, channel_data) => {
@@ -535,13 +541,26 @@ impl NetworkGraphStateStore for Store {
 
     fn insert_channel(&self, channel: ChannelInfo) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::ChannelInfo(channel.out_point(), channel.clone()));
+        // Save channel update timestamp to index, so that we can query channels by timestamp
+        batch.put_kv(KeyValue::ChannelTimestampIndex(
+            channel.out_point(),
+            channel.timestamp,
+        ));
+        // Save channel announcement block numbers to index, so that we can query channels by block number
+        batch.put_kv(KeyValue::ChannelFundingTxIndex(
+            channel.out_point(),
+            channel.funding_tx_block_number,
+            channel.funding_tx_index,
+        ));
+        batch.put_kv(KeyValue::ChannelInfo(channel.out_point(), channel));
         batch.commit();
     }
 
     fn insert_node(&self, node: NodeInfo) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::NodeInfo(node.node_id, node.clone()));
+        // Save node announcement timestamp to index, so that we can query nodes by timestamp
+        batch.put_kv(KeyValue::NodeTimestampIndex(node.node_id, node.timestamp));
+        batch.put_kv(KeyValue::NodeInfo(node.node_id, node));
         batch.commit();
     }
 
