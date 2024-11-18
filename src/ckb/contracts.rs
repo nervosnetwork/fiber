@@ -7,6 +7,7 @@ use once_cell::sync::OnceCell;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, vec};
+use thiserror::Error;
 use tracing::info;
 
 use crate::fiber::config::FiberScript;
@@ -34,27 +35,42 @@ pub struct ContractsContext {
     pub contracts: ContractsInfo,
 }
 
+#[derive(Debug, Error)]
+pub enum ContractsContextError {
+    #[error("Context already initialized")]
+    ContextAlreadyInitialized,
+
+    #[error("Genesis block transaction #{0} should exist")]
+    GenesisBlockTransactionNotFound(usize),
+
+    #[error("Genesis block transaction #0 output #{0} should exist")]
+    GenesisBlockTransaction0OutputNotFound(usize),
+
+    #[error("Genesis block secp256k1 binary cell type script should exist")]
+    GenesisBlockSecp256k1BinaryCellTypeScriptNotFound,
+}
+
 impl ContractsContext {
-    pub fn new(
+    pub fn try_new(
         genesis_block: BlockView,
         fiber_scripts: Vec<FiberScript>,
         udt_whitelist: UdtCfgInfos,
-    ) -> Self {
+    ) -> Result<Self, ContractsContextError> {
         let mut contract_default_scripts: HashMap<Contract, Script> = HashMap::new();
         let mut script_cell_deps: HashMap<Contract, Vec<CellDep>> = HashMap::new();
 
         let genesis_tx = genesis_block
             .transaction(0)
-            .expect("genesis block transaction #0 should exist");
+            .ok_or(ContractsContextError::GenesisBlockTransactionNotFound(0))?;
 
         // setup secp256k1
         let secp256k1_binary_cell = genesis_tx
             .output(1)
-            .expect("genesis block transaction #0 output #1 should exist");
+            .ok_or(ContractsContextError::GenesisBlockTransaction0OutputNotFound(1))?;
         let secp256k1_binary_cell_type_script = secp256k1_binary_cell
             .type_()
             .to_opt()
-            .expect("secp256k1 binary type script should exist");
+            .ok_or(ContractsContextError::GenesisBlockSecp256k1BinaryCellTypeScriptNotFound)?;
         contract_default_scripts.insert(
             Contract::Secp256k1Lock,
             Script::new_builder()
@@ -65,7 +81,7 @@ impl ContractsContext {
 
         let secp256k1_dep_group_tx_hash = genesis_block
             .transaction(1)
-            .expect("genesis block transaction #1 should exist")
+            .ok_or(ContractsContextError::GenesisBlockTransactionNotFound(1))?
             .hash();
         let secp256k1_dep_group_out_point = OutPoint::new_builder()
             .tx_hash(secp256k1_dep_group_tx_hash)
@@ -119,7 +135,11 @@ impl ContractsContext {
                     let output_data = genesis_tx
                         .outputs_data()
                         .get(index as usize)
-                        .expect("contract output data should exist in the genesis tx")
+                        .ok_or(
+                            ContractsContextError::GenesisBlockTransaction0OutputNotFound(
+                                index as usize,
+                            ),
+                        )?
                         .raw_data();
                     let cell_deps =
                         if matches!(contract, Contract::FundingLock | Contract::CommitmentLock) {
@@ -150,13 +170,13 @@ impl ContractsContext {
             script_cell_deps.insert(name, cell_deps.into_iter().map(CellDep::from).collect());
         }
 
-        Self {
+        Ok(Self {
             contracts: ContractsInfo {
                 contract_default_scripts,
                 script_cell_deps,
                 udt_whitelist,
             },
-        }
+        })
     }
 
     fn get_contracts_map(&self) -> &HashMap<Contract, Script> {
@@ -180,7 +200,7 @@ impl ContractsContext {
     pub(crate) fn get_script(&self, contract: Contract, args: &[u8]) -> Script {
         self.get_contracts_map()
             .get(&contract)
-            .unwrap_or_else(|| panic!("Contract {:?} exists", contract))
+            .unwrap_or_else(|| panic!("Contract {:?} should exist", contract))
             .clone()
             .as_builder()
             .args(args.pack())
@@ -189,14 +209,15 @@ impl ContractsContext {
 
     pub(crate) fn get_udt_info(&self, udt_script: &Script) -> Option<&UdtArgInfo> {
         for udt in &self.get_udt_whitelist().0 {
-            let _type: ScriptHashType = udt_script.hash_type().try_into().expect("valid hash type");
-            if udt.script.code_hash.pack() == udt_script.code_hash()
-                && udt.script.hash_type == _type
-            {
-                let args = format!("0x{:x}", udt_script.args().raw_data());
-                let pattern = Regex::new(&udt.script.args).expect("invalid expression");
-                if pattern.is_match(&args) {
-                    return Some(udt);
+            if let Some(_type) = udt_script.hash_type().try_into().ok() {
+                if udt.script.code_hash.pack() == udt_script.code_hash()
+                    && udt.script.hash_type == _type
+                {
+                    let args = format!("0x{:x}", udt_script.args().raw_data());
+                    let pattern = Regex::new(&udt.script.args).expect("invalid expression");
+                    if pattern.is_match(&args) {
+                        return Some(udt);
+                    }
                 }
             }
         }
@@ -206,18 +227,18 @@ impl ContractsContext {
 
 pub static CONTRACTS_CONTEXT_INSTANCE: OnceCell<ContractsContext> = OnceCell::new();
 
-pub fn init_contracts_context(
+pub fn try_init_contracts_context(
     genesis_block: BlockView,
     fiber_scripts: Vec<FiberScript>,
     udt_whitelist: UdtCfgInfos,
-) {
+) -> Result<(), ContractsContextError> {
     CONTRACTS_CONTEXT_INSTANCE
-        .set(ContractsContext::new(
+        .set(ContractsContext::try_new(
             genesis_block,
             fiber_scripts,
             udt_whitelist,
-        ))
-        .expect("init_contracts_context should only be called once");
+        )?)
+        .map_err(|_| ContractsContextError::ContextAlreadyInitialized)
 }
 
 #[cfg(not(test))]
