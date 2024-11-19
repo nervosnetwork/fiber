@@ -69,7 +69,7 @@ fn mock_channel() -> ChannelInfo {
 fn test_store_invoice() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let preimage = gen_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -102,7 +102,7 @@ fn test_store_invoice() {
 fn test_store_channels() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let mut channels = vec![];
     for _ in 0..10 {
@@ -136,7 +136,7 @@ fn test_store_channels() {
 fn test_store_nodes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let mut nodes = vec![];
     for _ in 0..10 {
@@ -180,7 +180,7 @@ fn test_compact_signature() {
 fn test_store_wacthtower() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("watchtower_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let channel_id = gen_sha256_hash();
     let funding_tx_lock = Script::default();
@@ -313,7 +313,7 @@ fn test_channel_actor_state_store() {
     let bincode_encoded = bincode::serialize(&state).unwrap();
     let _new_state: ChannelActorState = bincode::deserialize(&bincode_encoded).unwrap();
 
-    let store = Store::new(tempdir().unwrap().path().join("store"));
+    let store = Store::new(tempdir().unwrap().path().join("store")).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
     assert!(store.get_channel_actor_state(&state.id).is_some());
@@ -325,7 +325,7 @@ fn test_channel_actor_state_store() {
 fn test_store_payment_session() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("payment_history_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
     let payment_hash = gen_sha256_hash();
     let payment_data = SendPaymentData {
         target_pubkey: gen_rand_public_key(),
@@ -353,7 +353,7 @@ fn test_store_payment_session() {
 fn test_store_payment_history() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("payment_history_store");
-    let mut store = Store::new(path);
+    let mut store = Store::new(path).expect("created store failed");
 
     let pubkey = gen_rand_public_key();
     let target = gen_rand_public_key();

@@ -1,9 +1,9 @@
-use crate::{migration::migration::Migration, Error};
+use crate::{store::migration::Migration, Error};
 use indicatif::ProgressBar;
-use rocksdb::DB;
+use rocksdb::{prelude::*, DB};
 use std::sync::Arc;
 
-const INIT_DB_VERSION: &str = "20351116135521";
+const INIT_DB_VERSION: &str = "20311116135521";
 
 pub struct SampleMigration {
     version: String,

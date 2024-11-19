@@ -33,9 +33,13 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        let db = Self::open_or_create_db(path).expect("Failed to open rocksdb");
-        Self { db }
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let db = Self::open_or_create_db(path, false)?;
+        Ok(Self { db })
+    }
+
+    pub fn run_migrate<P: AsRef<Path>>(path: P) -> Result<(), String> {
+        Self::open_or_create_db(path, true).map(|_| ())
     }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
@@ -80,7 +84,7 @@ impl Store {
     }
 
     /// Open or create a rocksdb
-    fn open_or_create_db<P: AsRef<Path>>(path: P) -> Result<Arc<DB>, String> {
+    fn open_or_create_db<P: AsRef<Path>>(path: P, run_migrate: bool) -> Result<Arc<DB>, String> {
         let migrate = DbMigrate::new(path.as_ref());
         if !migrate.need_init() {
             match migrate.check() {
@@ -97,50 +101,52 @@ impl Store {
                     return Ok(migrate.db());
                 }
                 Ordering::Less => {
-                    let path_buf = path.as_ref().to_path_buf();
-                    let input = prompt(format!("\
-                    \n\
-                    Fiber need to run some database migrations.\n\
-                    \n\
-                    Once the migration started, the data will be no longer compatible with all older version,\n\
-                    so we strongly recommended you to backup the old data {} before migrating.\n\
-                    \n\
-                    If the migration failed, try to delete all data and sync from scratch.\n\
-                    \nIf you want to migrate the data, please input YES, otherwise, the current process will exit.\n\
-                    > ", path_buf.display()).as_str());
+                    if !run_migrate {
+                        return Err("Fiber need to run some database migrations, please run `fnn` with option `--migrate` to start migrations.".to_string());
+                    } else {
+                        let path_buf = path.as_ref().to_path_buf();
+                        let input = Self::prompt(format!("\
+                            Once the migration started, the data will be no longer compatible with all older version,\n\
+                            so we strongly recommended you to backup the old data {} before migrating.\n\
+                            \n\
+                            \nIf you want to migrate the data, please input YES, otherwise, the current process will exit.\n\
+                            > ", path_buf.display()).as_str());
 
-                    if input.trim().to_lowercase() != "yes" {
-                        error!("Migration was declined since the user didn't confirm.");
-                        return Err("need to migrate".to_string());
+                        if input.trim().to_lowercase() != "yes" {
+                            error!("Migration was declined since the user didn't confirm.");
+                            return Err("need to run database migration".to_string());
+                        }
+                        eprintln!("begin to migrate db ...");
+                        let db = migrate.migrate().expect("failed to migrate db");
+                        eprintln!(
+                            "db migrated successfully, now your can restart the fiber node ..."
+                        );
+                        Ok(db)
                     }
-                    info!("now begin to migrate db ...");
-                    let db = migrate.migrate().expect("failed to migrate db");
-                    info!("db migrated successfully ...");
-                    Ok(db)
                 }
             }
         } else {
-            info!("now begin to init db version ...");
+            info!("begin to init db version ...");
             migrate
                 .init_db_version()
                 .expect("failed to init db version");
             Ok(migrate.db())
         }
     }
-}
 
-fn prompt(msg: &str) -> String {
-    let stdout = stdout();
-    let mut stdout = stdout.lock();
-    let stdin = stdin();
+    fn prompt(msg: &str) -> String {
+        let stdout = stdout();
+        let mut stdout = stdout.lock();
+        let stdin = stdin();
 
-    write!(stdout, "{msg}").unwrap();
-    stdout.flush().unwrap();
+        write!(stdout, "{msg}").unwrap();
+        stdout.flush().unwrap();
 
-    let mut input = String::new();
-    let _ = stdin.read_line(&mut input);
+        let mut input = String::new();
+        let _ = stdin.read_line(&mut input);
 
-    input
+        input
+    }
 }
 
 pub struct Batch {

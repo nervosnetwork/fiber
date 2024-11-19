@@ -651,7 +651,7 @@ fn test_history_eval_probability_range() {
 fn test_history_load_store() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("test_history_load_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
     let mut history = PaymentHistory::new(generate_pubkey().into(), None, store.clone());
     let from = generate_pubkey();
     let target = generate_pubkey();

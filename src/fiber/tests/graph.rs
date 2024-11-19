@@ -33,7 +33,7 @@ struct MockNetworkGraph {
 impl MockNetworkGraph {
     pub fn new(node_num: usize) -> Self {
         let temp_path = tempfile::tempdir().unwrap();
-        let store = Store::new(temp_path.path());
+        let store = Store::new(temp_path.path()).expect("create store failed");
         let keypairs = generate_key_pairs(node_num + 1);
         let (secret_key1, public_key1) = keypairs[0];
         let mut graph = NetworkGraph::new(store, public_key1.into());

@@ -14,7 +14,7 @@ impl DbMigrate {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
         let mut migrations = Migrations::default();
         migrations.add_migration(Arc::new(DefaultMigration::new()));
-
+        // add more migrations here
         let db = Arc::new(DB::open_default(path).expect("Failed to open rocksdb"));
 
         DbMigrate { migrations, db }

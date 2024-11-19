@@ -58,20 +58,22 @@ pub async fn main() -> Result<(), ExitMessage> {
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
-    let config = Config::parse();
-    debug!("Parsed config: {:?}", &config);
+    let (config, run_migrate) = Config::parse();
+
+    let store_path = config
+        .fiber
+        .as_ref()
+        .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
+        .store_path();
+    if run_migrate {
+        Store::run_migrate(store_path).map_err(|err| ExitMessage(err.to_string()))?;
+        return Ok(());
+    }
+    let store = Store::new(store_path).map_err(|err| ExitMessage(err.to_string()))?;
 
     let tracker = new_tokio_task_tracker();
     let token = new_tokio_cancellation_token();
     let root_actor = RootActor::start(tracker, token).await;
-
-    let store = Store::new(
-        config
-            .fiber
-            .as_ref()
-            .ok_or_else(|| ExitMessage("fiber config is required but absent".to_string()))?
-            .store_path(),
-    );
     let subscribers = ChannelSubscribers::default();
 
     let (fiber_command_sender, network_graph) = match config.fiber.clone() {
