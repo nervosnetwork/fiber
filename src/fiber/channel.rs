@@ -881,12 +881,7 @@ where
                     .expect("public channel exits")
                     .tlc_fee_proportional_millionths
                     .unwrap_or_default();
-                info!("expecting fee_rate: {}", fee_rate);
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                info!(
-                    "forward_fee: {} expected_fee: {}",
-                    forward_fee, expected_fee
-                );
                 if forward_fee < expected_fee {
                     error!(
                         "too low forward_fee: {}, expected_fee: {}",

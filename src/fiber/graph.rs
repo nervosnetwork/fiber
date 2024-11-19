@@ -404,10 +404,8 @@ where
             &channel, &update
         );
         let update_info = if update.message_flags & 1 == 1 {
-            debug!("now update node1_to_node2: {:?}", &update);
             &mut channel.node1_to_node2
         } else {
-            debug!("now update node2_to_node1: {:?}", &update);
             &mut channel.node2_to_node1
         };
 
@@ -440,7 +438,6 @@ where
             last_update_message: update.clone(),
         });
 
-        info!("now new update_info: {:?}", *update_info);
         self.store.insert_channel(channel.to_owned());
         debug!(
             "Processed channel update: channel {:?}, update {:?}",
@@ -602,10 +599,6 @@ where
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.htlc_expiry_delta;
-                eprintln!(
-                    "fee: {:?}, expiry: {:?}, current_amount: {:?}, fee_rate: {:?}",
-                    fee, expiry, current_amount, fee_rate
-                );
                 (fee, expiry)
             };
 
@@ -729,7 +722,6 @@ where
                     .values()
                     .any(|x| x == &channel_info.out_point())
                 {
-                    eprintln!("here ......");
                     continue;
                 }
 
@@ -740,15 +732,9 @@ where
                 let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128);
                 let amount_to_send = next_hop_received_amount + fee;
 
-                eprintln!("amount_to_send: {:?}", amount_to_send);
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
                     if amount_to_send > amount + max_fee_amount {
-                        eprintln!(
-                            "amount_to_send {} > amount + max_fee_amount {}",
-                            amount_to_send,
-                            amount + max_fee_amount
-                        );
                         continue;
                     }
                 }
@@ -758,13 +744,6 @@ where
                     || (channel_update.htlc_maximum_value != 0
                         && amount_to_send > channel_update.htlc_maximum_value)
                 {
-                    eprintln!(
-                        "now .......amount: {:?} capacity: {:?}, channel_update.htlc_maximum_value: {:?}",
-                        amount_to_send,
-                        channel_info.capacity(),
-                        channel_update.htlc_maximum_value
-
-                    );
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
@@ -786,7 +765,6 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
-                    eprintln!("probability < DEFAULT_MIN_PROBABILITY");
                     continue;
                 }
                 let agg_weight =
@@ -799,8 +777,6 @@ where
                         continue;
                     }
                 }
-                eprintln!("\n\nfind_path from: {:?}, to: {:?}", from, to);
-                eprintln!("add use channel_info: {:?}\n\n", channel_info);
                 let node = NodeHeapElement {
                     node_id: from,
                     weight,
