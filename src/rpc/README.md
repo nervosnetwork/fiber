@@ -306,8 +306,8 @@ Sends a payment to a peer.
 
 * `payment_hash` - Hash256, The payment hash of the payment
 * `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u128, The time the payment was created at
-* `last_updated_at` - u128, The time the payment was last updated at
+* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
 
 
@@ -324,8 +324,8 @@ Retrieves a payment.
 
 * `payment_hash` - Hash256, The payment hash of the payment
 * `status` - PaymentSessionStatus, The status of the payment
-* `created_at` - u128, The time the payment was created at
-* `last_updated_at` - u128, The time the payment was last updated at
+* `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
+* `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
 
 
@@ -532,7 +532,7 @@ The channel data structure
 * `offered_tlc_balance` - u128, The offered balance of the channel
 * `remote_balance` - u128, The remote balance of the channel
 * `received_tlc_balance` - u128, The received balance of the channel
-* `created_at` - u64, The time the channel was created at
+* `created_at` - u64, The time the channel was created at, in milliseconds from UNIX epoch
 
 <a id="#type-removetlcreason"></a>
 ### Type `RemoveTlcReason`

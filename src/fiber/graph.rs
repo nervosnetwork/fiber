@@ -9,6 +9,7 @@ use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
+use crate::now_timestamp;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,16 @@ impl ChannelInfo {
 
     pub fn funding_tx_block_number(&self) -> u64 {
         self.funding_tx_block_number
+    }
+
+    fn get_update_info_with(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
+        if self.node2() == node {
+            self.node1_to_node2.as_ref()
+        } else if self.node1() == node {
+            self.node2_to_node1.as_ref()
+        } else {
+            None
+        }
     }
 }
 
@@ -393,8 +404,10 @@ where
             &channel, &update
         );
         let update_info = if update.message_flags & 1 == 1 {
+            debug!("now update node1_to_node2: {:?}", &update);
             &mut channel.node1_to_node2
         } else {
+            debug!("now update node2_to_node1: {:?}", &update);
             &mut channel.node2_to_node1
         };
 
@@ -427,6 +440,7 @@ where
             last_update_message: update.clone(),
         });
 
+        info!("now new update_info: {:?}", *update_info);
         self.store.insert_channel(channel.to_owned());
         debug!(
             "Processed channel update: channel {:?}, update {:?}",
@@ -449,12 +463,14 @@ where
         self.channels.values().filter_map(move |channel| {
             if let Some(info) = channel.node1_to_node2.as_ref() {
                 if info.enabled && channel.node2() == node_id {
+                    debug!("now use node1_to_node2: {:?}", info);
                     return Some((channel.node1(), channel.node2(), channel, info));
                 }
             }
 
             if let Some(info) = channel.node2_to_node1.as_ref() {
                 if info.enabled && channel.node1() == node_id {
+                    debug!("now use node2_to_node1: {:?}", info);
                     return Some((channel.node2(), channel.node1(), channel, info));
                 }
             }
@@ -578,17 +594,18 @@ where
                 (0, 0)
             } else {
                 let channel_info = self
-                    .get_channel(&route[i + 1].channel_outpoint)
+                    .get_channel(&route[i].channel_outpoint)
                     .expect("channel not found");
-                let channel_update = &if channel_info.node1() == route[i + 1].target {
-                    channel_info.node2_to_node1.as_ref()
-                } else {
-                    channel_info.node1_to_node2.as_ref()
-                }
-                .expect("channel_update is none");
+                let channel_update = channel_info
+                    .get_update_info_with(route[i].target)
+                    .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.htlc_expiry_delta;
+                eprintln!(
+                    "fee: {:?}, expiry: {:?}, current_amount: {:?}, fee_rate: {:?}",
+                    fee, expiry, current_amount, fee_rate
+                );
                 (fee, expiry)
             };
 
@@ -712,6 +729,7 @@ where
                     .values()
                     .any(|x| x == &channel_info.out_point())
                 {
+                    eprintln!("here ......");
                     continue;
                 }
 
@@ -722,9 +740,15 @@ where
                 let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128);
                 let amount_to_send = next_hop_received_amount + fee;
 
+                eprintln!("amount_to_send: {:?}", amount_to_send);
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
                     if amount_to_send > amount + max_fee_amount {
+                        eprintln!(
+                            "amount_to_send {} > amount + max_fee_amount {}",
+                            amount_to_send,
+                            amount + max_fee_amount
+                        );
                         continue;
                     }
                 }
@@ -734,6 +758,13 @@ where
                     || (channel_update.htlc_maximum_value != 0
                         && amount_to_send > channel_update.htlc_maximum_value)
                 {
+                    eprintln!(
+                        "now .......amount: {:?} capacity: {:?}, channel_update.htlc_maximum_value: {:?}",
+                        amount_to_send,
+                        channel_info.capacity(),
+                        channel_update.htlc_maximum_value
+
+                    );
                     continue;
                 }
                 if amount_to_send < channel_update.htlc_minimum_value {
@@ -755,6 +786,7 @@ where
                     );
 
                 if probability < DEFAULT_MIN_PROBABILITY {
+                    eprintln!("probability < DEFAULT_MIN_PROBABILITY");
                     continue;
                 }
                 let agg_weight =
@@ -767,6 +799,8 @@ where
                         continue;
                     }
                 }
+                eprintln!("\n\nfind_path from: {:?}, to: {:?}", from, to);
+                eprintln!("add use channel_info: {:?}\n\n", channel_info);
                 let node = NodeHeapElement {
                     node_id: from,
                     weight,
@@ -912,8 +946,8 @@ pub struct PaymentSession {
     pub last_error: Option<String>,
     pub try_limit: u32,
     pub status: PaymentSessionStatus,
-    pub created_at: u128,
-    pub last_updated_at: u128,
+    pub created_at: u64,
+    pub last_updated_at: u64,
     // The channel_outpoint and the tlc_id of the first hop
     #[serde_as(as = "Option<EntityHex>")]
     pub first_hop_channel_outpoint: Option<OutPoint>,
@@ -923,10 +957,7 @@ pub struct PaymentSession {
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
-        let now = std::time::UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_millis();
+        let now = now_timestamp();
         Self {
             request,
             retried_times: 0,
@@ -947,10 +978,7 @@ impl PaymentSession {
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = std::time::UNIX_EPOCH
-            .elapsed()
-            .expect("Duration since unix epoch")
-            .as_micros();
+        self.last_updated_at = now_timestamp();
     }
 
     pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {

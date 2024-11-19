@@ -881,7 +881,12 @@ where
                     .expect("public channel exits")
                     .tlc_fee_proportional_millionths
                     .unwrap_or_default();
+                info!("expecting fee_rate: {}", fee_rate);
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                info!(
+                    "forward_fee: {} expected_fee: {}",
+                    forward_fee, expected_fee
+                );
                 if forward_fee < expected_fee {
                     error!(
                         "too low forward_fee: {}, expected_fee: {}",
@@ -2983,11 +2988,11 @@ impl ChannelActorState {
             .sum::<u128>()
     }
 
-    pub fn get_created_at_in_microseconds(&self) -> u64 {
+    pub fn get_created_at_in_millis(&self) -> u64 {
         self.created_at
             .duration_since(UNIX_EPOCH)
             .expect("Duration since unix epoch")
-            .as_micros() as u64
+            .as_millis() as u64
     }
 
     pub fn is_closed(&self) -> bool {
