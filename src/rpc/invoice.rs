@@ -30,9 +30,6 @@ pub(crate) struct NewInvoiceParams {
     expiry: Option<u64>,
     /// The fallback address of the invoice.
     fallback_address: Option<String>,
-    /// The final CLTV of the invoice.
-    #[serde_as(as = "Option<U64Hex>")]
-    final_cltv: Option<u64>,
     /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     final_expiry_delta: Option<u64>,

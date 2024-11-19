@@ -420,7 +420,6 @@ Generates a new invoice.
 * `payment_preimage` - Hash256, The payment preimage of the invoice.
 * `expiry` - `Option<u64>`, The expiry time of the invoice.
 * `fallback_address` - `Option<String>`, The fallback address of the invoice.
-* `final_cltv` - `Option<u64>`, The final CLTV of the invoice.
 * `final_expiry_delta` - `Option<u64>`, The final HTLC timeout of the invoice.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the invoice.
 * `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the invoice.
