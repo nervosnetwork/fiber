@@ -533,7 +533,7 @@ pub enum NetworkActorEvent {
     /// block with the given transaction index.
     FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
 
-    /// A funding transaction has been failed.
+    /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
     /// A commitment transaction is signed by us and has sent to the other party.
