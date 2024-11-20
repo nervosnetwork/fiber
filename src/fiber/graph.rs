@@ -532,6 +532,11 @@ where
         self.history.reset();
     }
 
+    #[cfg(test)]
+    pub fn set_source(&mut self, source: Pubkey) {
+        self.source = source;
+    }
+
     /// Returns a list of `PaymentHopData` for all nodes in the route,
     /// including the origin and the target node.
     pub fn build_route(
