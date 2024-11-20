@@ -460,14 +460,12 @@ where
         self.channels.values().filter_map(move |channel| {
             if let Some(info) = channel.node1_to_node2.as_ref() {
                 if info.enabled && channel.node2() == node_id {
-                    debug!("now use node1_to_node2: {:?}", info);
                     return Some((channel.node1(), channel.node2(), channel, info));
                 }
             }
 
             if let Some(info) = channel.node2_to_node1.as_ref() {
                 if info.enabled && channel.node1() == node_id {
-                    debug!("now use node2_to_node1: {:?}", info);
                     return Some((channel.node2(), channel.node1(), channel, info));
                 }
             }
