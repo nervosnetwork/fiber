@@ -1,4 +1,4 @@
-use super::super::FundingError;
+use super::{super::FundingError, FundingExclusion};
 use crate::{ckb::contracts::get_udt_cell_deps, fiber::serde_utils::EntityHex};
 use anyhow::anyhow;
 use ckb_sdk::{
@@ -280,7 +280,7 @@ impl FundingTxBuilder {
         )));
     }
 
-    fn build(self) -> Result<FundingTx, FundingError> {
+    fn build(self, funding_exclusion: &mut FundingExclusion) -> Result<FundingTx, FundingError> {
         // Build ScriptUnlocker
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
@@ -320,6 +320,7 @@ impl FundingTxBuilder {
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
+        funding_exclusion.apply_to_cell_collector(&mut cell_collector)?;
         let tx_dep_provider = DefaultTransactionDependencyProvider::new(&self.context.rpc_url, 10);
 
         let (tx, _) = self.build_unlocked(
@@ -360,13 +361,14 @@ impl FundingTx {
         self,
         request: FundingRequest,
         context: FundingContext,
+        funding_exclusion: &mut FundingExclusion,
     ) -> Result<Self, FundingError> {
         let builder = FundingTxBuilder {
             funding_tx: self,
             request,
             context,
         };
-        builder.build()
+        builder.build(funding_exclusion)
     }
 
     pub fn sign(

@@ -118,7 +118,7 @@ impl Actor for CkbChainActor {
                 let context = state.build_funding_context(&request);
                 if !reply_port.is_closed() {
                     tokio::task::block_in_place(move || {
-                        let result = tx.fulfill(request, context);
+                        let result = tx.fulfill(request, context, &mut state.funding_exclusion);
                         if !reply_port.is_closed() {
                             // ignore error
                             let _ = reply_port.send(result);
