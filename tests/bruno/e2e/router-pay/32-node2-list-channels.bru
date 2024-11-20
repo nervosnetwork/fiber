@@ -1,0 +1,40 @@
+meta {
+  name: get channels from node2
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "list_channels",
+    "params": [
+      {
+        "peer_id": "{{NODE1_PEERID}}"
+      }
+    ]
+  }
+}
+
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 1000));
+  console.log("step 32 list graph channels: ", res.body.result.channels);
+  bru.setVar("CHANNEL_ID_TO_UPDATE", res.body.result.channels[0].channel_id);
+}
