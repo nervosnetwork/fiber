@@ -7,7 +7,10 @@ use ractor::{
 
 use crate::ckb::contracts::{get_script_by_contract, Contract};
 
-use super::{funding::FundingContext, CkbConfig, FundingError, FundingRequest, FundingTx};
+use super::{
+    funding::{FundingContext, FundingExclusion},
+    CkbConfig, FundingError, FundingRequest, FundingTx,
+};
 
 pub struct CkbChainActor {}
 
@@ -16,6 +19,7 @@ pub struct CkbChainState {
     config: CkbConfig,
     secret_key: secp256k1::SecretKey,
     funding_source_lock_script: packed::Script,
+    funding_exclusion: FundingExclusion,
 }
 
 #[derive(Debug, Clone)]
@@ -27,12 +31,19 @@ pub struct TraceTxRequest {
 
 #[derive(Debug)]
 pub enum CkbChainMessage {
+    // Funding management
     Fund(
         FundingTx,
         FundingRequest,
         RpcReplyPort<Result<FundingTx, FundingError>>,
     ),
     Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
+
+    // AddTxs and RemoveTx are used to manage the funding exclusion list.
+    AddTxs(Vec<FundingTx>),
+    RemoveTx(packed::Byte32),
+
+    // Interacts with CKB chain
     SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
     TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
     GetCurrentBlockNumber((), RpcReplyPort<Result<u64, RpcError>>),
@@ -80,6 +91,7 @@ impl Actor for CkbChainActor {
             config,
             secret_key,
             funding_source_lock_script,
+            funding_exclusion: Default::default(),
         })
     }
 
@@ -89,7 +101,9 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::{Fund, GetCurrentBlockNumber, SendTx, Sign, TraceTx};
+        use CkbChainMessage::{
+            AddTxs, Fund, GetCurrentBlockNumber, RemoveTx, SendTx, Sign, TraceTx,
+        };
         match message {
             GetCurrentBlockNumber(_, reply) => {
                 // Have to use block_in_place here, see https://github.com/seanmonstar/reqwest/issues/1017.
@@ -125,6 +139,16 @@ impl Actor for CkbChainActor {
                     });
                 }
             }
+
+            AddTxs(txs) => {
+                for tx in txs {
+                    state.funding_exclusion.insert(tx);
+                }
+            }
+            RemoveTx(tx_hash) => {
+                state.funding_exclusion.remove(&tx_hash);
+            }
+
             SendTx(tx, reply_port) => {
                 let rpc_url = state.config.rpc_url.clone();
                 tokio::task::block_in_place(move || {
