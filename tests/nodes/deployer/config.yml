@@ -4,6 +4,7 @@
 fiber:
   chain: dev.toml
   auto_announce_node: true
+  announce_private_addr: true
 
 rpc:
   listening_addr: 127.0.0.1:41716

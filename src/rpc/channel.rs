@@ -39,7 +39,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "U128Hex")]
     funding_amount: u128,
 
-    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter (default value false).
+    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
     public: Option<bool>,
 
     /// The type script of the UDT to fund the channel with, an optional parameter.
@@ -406,7 +406,7 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
-                    public: params.public.unwrap_or(false),
+                    public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     commitment_delay_epoch: params
                         .commitment_delay_epoch

@@ -154,10 +154,11 @@ struct ChannelInfo {
     node1: Pubkey,
     /// The node ID of the second node.
     node2: Pubkey,
-    /// The last updated timestamp of the channel.
+    /// The last updated timestamp of the channel, milliseconds since UNIX epoch.
     #[serde_as(as = "Option<U64Hex>")]
     last_updated_timestamp: Option<u64>,
-    /// The created timestamp of the channel.
+    /// The created timestamp of the channel, milliseconds since UNIX epoch.
+    #[serde_as(as = "U64Hex")]
     created_timestamp: u64,
     #[serde_as(as = "Option<U64Hex>")]
     /// The fee rate from node 1 to node 2.

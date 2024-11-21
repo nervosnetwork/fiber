@@ -113,6 +113,16 @@ impl ChannelInfo {
     pub fn funding_tx_block_number(&self) -> u64 {
         self.funding_tx_block_number
     }
+
+    fn get_update_info_with(&self, node: Pubkey) -> Option<&ChannelUpdateInfo> {
+        if self.node2() == node {
+            self.node1_to_node2.as_ref()
+        } else if self.node1() == node {
+            self.node2_to_node1.as_ref()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -195,8 +205,7 @@ where
     }
 
     pub(crate) fn load_from_store(&mut self) {
-        let channels = self.store.get_channels(None);
-        for channel in channels.iter() {
+        for channel in self.store.get_channels(None).iter() {
             if self.best_height < channel.funding_tx_block_number() {
                 self.best_height = channel.funding_tx_block_number();
             }
@@ -520,6 +529,11 @@ where
         self.history.reset();
     }
 
+    #[cfg(test)]
+    pub fn set_source(&mut self, source: Pubkey) {
+        self.source = source;
+    }
+
     /// Returns a list of `PaymentHopData` for all nodes in the route,
     /// including the origin and the target node.
     pub fn build_route(
@@ -584,14 +598,11 @@ where
                 (0, current_time + final_tlc_expiry_delta)
             } else {
                 let channel_info = self
-                    .get_channel(&route[i + 1].channel_outpoint)
+                    .get_channel(&route[i].channel_outpoint)
                     .expect("channel not found");
-                let channel_update = &if channel_info.node1() == route[i + 1].target {
-                    channel_info.node2_to_node1.as_ref()
-                } else {
-                    channel_info.node1_to_node2.as_ref()
-                }
-                .expect("channel_update is none");
+                let channel_update = channel_info
+                    .get_update_info_with(route[i].target)
+                    .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
                 let expiry = channel_update.tlc_expiry_delta;

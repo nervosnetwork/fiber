@@ -87,6 +87,14 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_listening_addr: Option<bool>,
 
+    /// whether to announce private address, this should be set to false unless you are running a private network or testing [default: false]
+    #[arg(
+        name = "FIBER_ANNOUNCE_PRIVATE_ADDR",
+        long = "fiber-announce-private-addr",
+        env
+    )]
+    pub(crate) announce_private_addr: Option<bool>,
+
     /// addresses to be announced to fiber network (separated by `,`)
     #[arg(name = "FIBER_ANNOUNCED_ADDRS", long = "fiber-announced-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_addrs: Vec<String>,

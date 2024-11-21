@@ -148,7 +148,7 @@ Attempts to open a channel with a peer.
 
 * `peer_id` - PeerId, The peer ID to open a channel with.
 * `funding_amount` - u128, The amount of CKB or UDT to fund the channel with.
-* `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter (default value false).
+* `public` - `Option<bool>`, Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
 * `funding_udt_type_script` - `Option<Script>`, The type script of the UDT to fund the channel with, an optional parameter.
 * `shutdown_script` - `Option<Script>`, The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
 * `commitment_delay_epoch` - `Option<EpochNumberWithFraction>`, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
@@ -621,8 +621,8 @@ The Channel information.
 * `funding_tx_index` - u32, The index of the funding transaction.
 * `node1` - Pubkey, The node ID of the first node.
 * `node2` - Pubkey, The node ID of the second node.
-* `last_updated_timestamp` - `Option<u64>`, The last updated timestamp of the channel.
-* `created_timestamp` - u64, The created timestamp of the channel.
+* `last_updated_timestamp` - `Option<u64>`, The last updated timestamp of the channel, milliseconds since UNIX epoch.
+* `created_timestamp` - u64, The created timestamp of the channel, milliseconds since UNIX epoch.
 * `node1_to_node2_fee_rate` - `Option<u64>`, The fee rate from node 1 to node 2.
 * `node2_to_node1_fee_rate` - `Option<u64>`, The fee rate from node 2 to node 1.
 * `capacity` - u128, The capacity of the channel.
