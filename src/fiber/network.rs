@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
 use tentacle::multiaddr::{MultiAddr, Protocol};
-use tentacle::utils::extract_peer_id;
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -1882,22 +1882,27 @@ where
                     Some(ref signature)
                         if signature.verify(&node_announcement.node_id, &message) =>
                     {
-                        debug!(
-                            "Node announcement message verified: {:?}",
-                            &node_announcement
-                        );
+                        let mut node_announcement = node_announcement.clone();
+                        if !state.announce_private_addr {
+                            node_announcement.addresses.retain(|addr| {
+                                multiaddr_to_socketaddr(addr)
+                                    .map(|socket_addr| is_reachable(socket_addr.ip()))
+                                    .unwrap_or_default()
+                            });
+                        }
+                        if !node_announcement.addresses.is_empty() {
+                            // Add the node to the network graph.
+                            self.network_graph
+                                .write()
+                                .await
+                                .process_node_announcement(node_announcement.clone());
 
-                        // Add the node to the network graph.
-                        self.network_graph
-                            .write()
-                            .await
-                            .process_node_announcement(node_announcement.clone());
-
-                        let peer_id = node_announcement.peer_id();
-                        state.save_announced_peer_addresses(
-                            peer_id,
-                            node_announcement.addresses.clone(),
-                        );
+                            let peer_id = node_announcement.peer_id();
+                            state.save_announced_peer_addresses(
+                                peer_id,
+                                node_announcement.addresses,
+                            );
+                        }
                         Ok(())
                     }
                     _ => {
@@ -2672,6 +2677,8 @@ pub struct NetworkActorState<S> {
     tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
+    // Whether to announce private address to the network.
+    announce_private_addr: bool,
     // A hashset to store the list of all broadcasted messages.
     // This is used to avoid re-broadcasting the same message over and over again
     // TODO: some more intelligent way to manage broadcasting.
@@ -3993,6 +4000,15 @@ where
             multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
             announced_addrs.push(multiaddr);
         }
+
+        if !config.announce_private_addr.unwrap_or_default() {
+            announced_addrs.retain(|addr| {
+                multiaddr_to_socketaddr(addr)
+                    .map(|socket_addr| is_reachable(socket_addr.ip()))
+                    .unwrap_or_default()
+            });
+        }
+
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
             &listening_addr, &my_peer_id, &announced_addrs
@@ -4071,6 +4087,7 @@ where
             tlc_min_value: config.tlc_min_value(),
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
+            announce_private_addr: config.announce_private_addr.unwrap_or_default(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
             next_request_id: Default::default(),
