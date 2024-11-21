@@ -4,6 +4,9 @@ use crate::store::migration::Migration;
 use crate::store::migration::Migrations;
 use crate::Error;
 use indicatif::ProgressBar;
+use rocksdb::ops::Open;
+use rocksdb::DBCompressionType;
+use rocksdb::Options;
 use rocksdb::DB;
 use std::cmp::Ordering;
 use std::sync::{Arc, RwLock};
@@ -16,9 +19,18 @@ fn gen_path() -> std::path::PathBuf {
     tmp_dir.as_ref().to_path_buf()
 }
 
+fn gen_migrate() -> DbMigrate {
+    let path = gen_path();
+    let mut options = Options::default();
+    options.create_if_missing(true);
+    options.set_compression_type(DBCompressionType::Lz4);
+    let db = Arc::new(DB::open(&options, path).unwrap());
+    DbMigrate::new(db)
+}
+
 #[test]
 fn test_default_migration() {
-    let migrate = DbMigrate::new(gen_path());
+    let migrate = gen_migrate();
     assert!(migrate.need_init());
     assert_eq!(migrate.check(), Ordering::Less);
     migrate.init_db_version().unwrap();
@@ -65,7 +77,7 @@ fn test_run_migration() {
         }
     }
 
-    let migrate = DbMigrate::new(gen_path());
+    let migrate = gen_migrate();
     migrate.init_db_version().unwrap();
     let db = migrate.db();
 

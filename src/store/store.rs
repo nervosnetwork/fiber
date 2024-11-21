@@ -14,7 +14,7 @@ use crate::{
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use rocksdb::{prelude::*, DBIterator, Direction, IteratorMode, WriteBatch, DB};
+use rocksdb::{prelude::*, DBCompressionType, DBIterator, Direction, IteratorMode, WriteBatch, DB};
 use secp256k1::PublicKey;
 use serde::Serialize;
 use std::io::Write;
@@ -34,12 +34,24 @@ pub struct Store {
 
 impl Store {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let db = Self::open_or_create_db(path, false)?;
+        let db = Self::open_db(path.as_ref())?;
+        let db = Self::start_migrate(path, db, false)?;
         Ok(Self { db })
     }
 
     pub fn run_migrate<P: AsRef<Path>>(path: P) -> Result<(), String> {
-        Self::open_or_create_db(path, true).map(|_| ())
+        let db = Self::open_db(path.as_ref())?;
+        Self::start_migrate(path, db, true)?;
+        Ok(())
+    }
+
+    fn open_db(path: &Path) -> Result<Arc<DB>, String> {
+        // add more migrations here
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        options.set_compression_type(DBCompressionType::Lz4);
+        let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
+        Ok(db)
     }
 
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<Vec<u8>> {
@@ -84,8 +96,12 @@ impl Store {
     }
 
     /// Open or create a rocksdb
-    fn open_or_create_db<P: AsRef<Path>>(path: P, run_migrate: bool) -> Result<Arc<DB>, String> {
-        let migrate = DbMigrate::new(path.as_ref());
+    fn start_migrate<P: AsRef<Path>>(
+        path: P,
+        db: Arc<DB>,
+        run_migrate: bool,
+    ) -> Result<Arc<DB>, String> {
+        let migrate = DbMigrate::new(db);
         if !migrate.need_init() {
             match migrate.check() {
                 Ordering::Greater => {
