@@ -529,7 +529,8 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -567,7 +568,8 @@ fn test_graph_build_router_fee_rate_optimize() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -576,6 +578,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         preimage: None,
         allow_self_payment: false,
     });
+    eprintln!("route: {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -597,7 +600,8 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
