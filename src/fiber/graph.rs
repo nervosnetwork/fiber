@@ -205,8 +205,7 @@ where
     }
 
     pub(crate) fn load_from_store(&mut self) {
-        let channels = self.store.get_channels(None);
-        for channel in channels.iter() {
+        for channel in self.store.get_channels(None).iter() {
             if self.best_height < channel.funding_tx_block_number() {
                 self.best_height = channel.funding_tx_block_number();
             }
