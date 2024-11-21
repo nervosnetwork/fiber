@@ -398,6 +398,7 @@ where
                 }
                 self.try_to_forward_pending_tlc(state).await;
                 self.try_to_settle_down_tlc(state);
+                self.try_to_send_remove_tlcs(state).await;
                 Ok(())
             }
             FiberChannelMessage::TxSignatures(tx_signatures) => {
@@ -506,14 +507,13 @@ where
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
-                let tlc_details = state.remove_tlc_with_reason(
-                    TLCId::Offered(remove_tlc.tlc_id),
-                    &remove_tlc.reason,
-                )?;
+                let remove_reason = remove_tlc.reason.clone();
+                let tlc_details = state
+                    .remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_reason)?;
                 if let (
                     Some(ref udt_type_script),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-                ) = (state.funding_udt_type_script.clone(), &remove_tlc.reason)
+                ) = (state.funding_udt_type_script.clone(), &remove_reason)
                 {
                     let mut tlc = tlc_details.tlc.clone();
                     tlc.payment_preimage = Some(*payment_preimage);
@@ -525,39 +525,14 @@ where
                             script: udt_type_script.clone(),
                         });
                 }
-                if let Some((previous_channel_id, previous_tlc)) = tlc_details.tlc.previous_tlc {
-                    assert!(previous_tlc.is_received());
-                    info!(
-                        "begin to remove tlc from previous channel: {:?}",
-                        &previous_tlc
-                    );
-                    assert!(previous_channel_id != state.get_id());
-                    let (send, recv) = oneshot::channel::<Result<(), String>>();
-                    let port = RpcReplyPort::from(send);
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id: previous_channel_id,
-                                command: ChannelCommand::RemoveTlc(
-                                    RemoveTlcCommand {
-                                        id: previous_tlc.into(),
-                                        reason: remove_tlc.reason.clone(),
-                                    },
-                                    port,
-                                ),
-                            }),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let res = recv.await.expect("remove tlc replied");
-                    info!("remove tlc from previous channel: {:?}", &res);
-                } else {
+                if tlc_details.tlc.previous_tlc.is_none() {
                     // only the original sender of the TLC should send `TlcRemoveReceived` event
                     // because only the original sender cares about the TLC event to settle the payment
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::TlcRemoveReceived(
                                 tlc_details.tlc.payment_hash,
-                                remove_tlc,
+                                remove_reason,
                             ),
                         ))
                         .expect("myself alive");
@@ -723,10 +698,48 @@ where
     async fn try_to_forward_pending_tlc(&self, state: &mut ChannelActorState) {
         let tlc_infos = state.get_tlcs_for_forwarding();
         for info in tlc_infos {
+            assert!(info.tlc.is_received());
             let onion_packet = info.tlc.onion_packet;
             let _ = self
                 .handle_forward_onion_packet(state, onion_packet, info.tlc.id.into())
                 .await;
+        }
+    }
+
+    async fn try_to_send_remove_tlcs(&self, state: &mut ChannelActorState) {
+        let tlc_infos = state.get_tlcs_for_sending_remove_tlcs();
+        for tlc_info in tlc_infos {
+            assert!(tlc_info.is_offered());
+            let remove_reason = tlc_info.removed_at.expect("expect remove_at").1;
+            if let Some((previous_channel_id, previous_tlc)) = tlc_info.tlc.previous_tlc {
+                assert!(previous_tlc.is_received());
+                info!(
+                    "begin to remove tlc from previous channel: {:?}",
+                    &previous_tlc
+                );
+                assert!(previous_channel_id != state.get_id());
+                let (send, recv) = oneshot::channel::<Result<(), String>>();
+                let port = RpcReplyPort::from(send);
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                            channel_id: previous_channel_id,
+                            command: ChannelCommand::RemoveTlc(
+                                RemoveTlcCommand {
+                                    id: previous_tlc.into(),
+                                    reason: remove_reason.clone(),
+                                },
+                                port,
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                let res = recv.await.expect("remove tlc replied");
+                info!("remove tlc from previous channel: {:?}", &res);
+            } else {
+                unreachable!("remove tlc without previous tlc");
+            }
+            state.set_offered_tlc_removed(tlc_info.tlc.id.into());
         }
     }
 
@@ -3276,7 +3289,7 @@ impl ChannelActorState {
                 tlc.is_received()
                     && tlc.creation_confirmed_at.is_some()
                     && tlc.removed_at.is_none()
-                    && tlc.tlc.onion_packet.len() == 0
+                    && tlc.tlc.onion_packet.is_empty()
             })
             .cloned()
             .collect()
@@ -3290,8 +3303,22 @@ impl ChannelActorState {
                     && tlc.creation_confirmed_at.is_some()
                     && tlc.removed_at.is_none()
                     && tlc.tlc.previous_tlc.is_none()
-                    && !tlc.forwarded
-                    && tlc.tlc.onion_packet.len() > 0
+                    && tlc.relay_status == TlcRelayStatus::WaitingForward
+                    && !tlc.tlc.onion_packet.is_empty()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn get_tlcs_for_sending_remove_tlcs(&self) -> Vec<DetailedTLCInfo> {
+        self.tlcs
+            .values()
+            .filter(|tlc| {
+                tlc.is_offered()
+                    && tlc.creation_confirmed_at.is_some()
+                    && tlc.removed_at.is_some()
+                    && tlc.tlc.previous_tlc.is_some()
+                    && tlc.relay_status == TlcRelayStatus::WaitingRemove
             })
             .cloned()
             .collect()
@@ -3496,7 +3523,13 @@ impl ChannelActorState {
 
     pub fn set_received_tlc_forwarded(&mut self, tlc_id: u64) {
         if let Some(tlc) = self.tlcs.get_mut(&TLCId::Received(tlc_id)) {
-            tlc.forwarded = true;
+            tlc.relay_status = TlcRelayStatus::WaitingRemove;
+        }
+    }
+
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64) {
+        if let Some(tlc) = self.tlcs.get_mut(&TLCId::Offered(tlc_id)) {
+            tlc.relay_status = TlcRelayStatus::Removed;
         }
     }
 
@@ -3567,13 +3600,27 @@ impl ChannelActorState {
             self.to_local_amount,
             self.to_remote_amount
         );
+
+        let relay_status = if !tlc.onion_packet.is_empty() {
+            if tlc.is_received() {
+                TlcRelayStatus::WaitingForward
+            } else {
+                if tlc.previous_tlc.is_none() {
+                    TlcRelayStatus::NoForward
+                } else {
+                    TlcRelayStatus::WaitingRemove
+                }
+            }
+        } else {
+            TlcRelayStatus::NoForward
+        };
         let detailed_tlc = DetailedTLCInfo {
             tlc: tlc.clone(),
             created_at: self.get_current_commitment_numbers(),
             creation_confirmed_at: None,
             removed_at: None,
             removal_confirmed_at: None,
-            forwarded: false,
+            relay_status,
         };
         self.tlcs.insert(tlc.id, detailed_tlc.clone());
         if tlc.is_offered() {
@@ -5715,6 +5762,13 @@ pub struct TLC {
     /// Note: this is the onion_packet need to be forwarded to the next hop when current TLC is a middle hop.
     pub onion_packet: Vec<u8>,
     /// The previous tlc id if this tlc is a part of a multi-tlc payment.
+    /// Note: this is used to track the tlc chain for a multi-tlc payment,
+    ///       we need to know previous when removing tlc backwardly.
+    ///
+    /// Node A ---------> Node B ------------> Node C ----------> Node D
+    ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
+    ///                ^^^^                 ^^^^
+    ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
 }
 
@@ -5756,6 +5810,14 @@ impl TLC {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum TlcRelayStatus {
+    NoForward,
+    WaitingForward,
+    WaitingRemove,
+    Removed,
+}
+
 /// A tlc output in a commitment transaction, including both the tlc output
 /// and the commitment_number that it first appeared (will appear) in the
 /// commitment transaction.
@@ -5781,8 +5843,8 @@ pub struct DetailedTLCInfo {
     // The initial commitment number of the party (the offerer) that
     // has confirmed the removal of this tlc.
     removal_confirmed_at: Option<CommitmentNumbers>,
-    // whether this tlc is forwarded to next hop
-    forwarded: bool,
+    // indicates the status of the tlc relaying.
+    relay_status: TlcRelayStatus,
 }
 
 impl DetailedTLCInfo {

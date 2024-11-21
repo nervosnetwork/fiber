@@ -63,8 +63,8 @@ use super::types::{
     FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
     NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, PaymentHopData, Privkey, Pubkey,
     QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
-    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
-    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlcReason, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -558,7 +558,7 @@ pub enum NetworkActorEvent {
     GraphSyncerExited(PeerId, GraphSyncerExitStatus),
 
     // A tlc remove message is received. (payment_hash, remove_tlc)
-    TlcRemoveReceived(Hash256, RemoveTlc),
+    TlcRemoveReceived(Hash256, RemoveTlcReason),
 
     /// Network service events to be sent to outside observers.
     /// These events may be both present at `NetworkActorEvent` and
@@ -1255,9 +1255,9 @@ where
                 }
                 state.maybe_finish_sync();
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
+            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(state, payment_hash, remove_tlc.reason)
+                self.on_remove_tlc_event(state, payment_hash, remove_tlc_reason)
                     .await;
             }
         }

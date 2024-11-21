@@ -334,7 +334,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     let payment_hash = res.payment_hash;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
@@ -342,6 +342,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     let res = call!(node_a.network_actor, message)
         .expect("node_a alive")
         .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
 }
