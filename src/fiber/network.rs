@@ -288,9 +288,9 @@ pub struct SendPaymentCommand {
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The htlc expiry delta that should be used to set the timelock for the final hop
+    // the TLC expiry delta that should be used to set the timelock for the final hop
     pub final_tlc_expiry_delta: Option<u64>,
-    // The htlc expiry for whole payment, in milliseconds
+    // the TLC expiry for whole payment, in milliseconds
     pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
