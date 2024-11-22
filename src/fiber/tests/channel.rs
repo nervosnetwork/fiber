@@ -1136,7 +1136,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
     assert!(open_channel_result
         .err()
         .unwrap()
-        .contains("The funding amount should be less than 18446744073709551615"));
+        .contains("The funding amount (21267647932558653966460912964485513215) should be less than 18446744073709551615"));
 }
 
 #[tokio::test]
@@ -1667,4 +1667,39 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_open_channel_with_large_size_shutdown_script() {
+    init_tracing();
+    let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                funding_amount: (81 + 1) * 100000000 - 1,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_max_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+
+    assert!(open_channel_result
+        .err()
+        .unwrap()
+        .contains("The funding amount (8199999999) should be greater than or equal to 8200000000"));
 }

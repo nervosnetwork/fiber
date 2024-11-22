@@ -46,14 +46,15 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelState, ChannelSubscribers, OpenChannelParameter, ProcessingChannelError,
-    ProcessingChannelResult, PublicChannelInfo, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE,
+    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
+    OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
+    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::AnnouncedNodeName;
-use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
+use super::fee::calculate_commitment_tx_fee;
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
@@ -1117,12 +1118,6 @@ where
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
-                    state.check_accept_channel_ckb_parameters(
-                        local_reserved_ckb_amount,
-                        remote_reserved_ckb_amount,
-                        funding_fee_rate,
-                        &udt_funding_script,
-                    )?;
                     if let Some(channel) = state.channels.remove(&old) {
                         debug!("Channel accepted: {:?} -> {:?}", old, new);
                         state.channels.insert(new, channel);
@@ -3003,9 +2998,14 @@ where
                 ));
             }
         }
+        let shutdown_script =
+            shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
         // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
-        let (_funding_amount, _reserved_ckb_amount) =
-            self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
+        let (_funding_amount, _reserved_ckb_amount) = get_funding_and_reserved_amount(
+            funding_amount,
+            &shutdown_script,
+            &funding_udt_type_script,
+        )?;
 
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -3028,8 +3028,7 @@ where
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
-                shutdown_script: shutdown_script
-                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
+                shutdown_script,
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 commitment_delay_epoch,
@@ -3072,8 +3071,11 @@ where
                     &peer_id
                 )))?;
 
-        let (funding_amount, reserved_ckb_amount) = self.get_funding_and_reserved_amount(
+        let shutdown_script =
+            shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
+        let (funding_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
             funding_amount,
+            &shutdown_script,
             &open_channel.funding_udt_type_script,
         )?;
 
@@ -3106,8 +3108,7 @@ where
                 )),
                 seed,
                 open_channel,
-                shutdown_script: shutdown_script
-                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
+                shutdown_script,
                 channel_id_sender: Some(tx),
             }),
             network.clone().get_cell(),
@@ -3204,75 +3205,24 @@ where
         self.peer_pubkey_map.get(peer_id).cloned()
     }
 
-    fn get_funding_and_reserved_amount(
-        &self,
-        funding_amount: u128,
-        udt_type_script: &Option<Script>,
-    ) -> Result<(u128, u64), ProcessingChannelError> {
-        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if udt_type_script.is_none() {
-            if funding_amount < reserved_ckb_amount.into() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The funding amount should be greater than the reserved amount: {}",
-                    reserved_ckb_amount
-                )));
-            }
-            if funding_amount >= u64::MAX as u128 {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The funding amount should be less than {:?}",
-                    u64::MAX
-                )));
-            }
-        }
-        let funding_amount = if udt_type_script.is_some() {
-            funding_amount
-        } else {
-            funding_amount - reserved_ckb_amount as u128
-        };
-        Ok((funding_amount, reserved_ckb_amount))
-    }
-
-    fn check_accept_channel_ckb_parameters(
-        &self,
-        remote_reserved_ckb_amount: u64,
-        local_reserved_ckb_amount: u64,
-        funding_fee_rate: u64,
-        udt_type_script: &Option<Script>,
-    ) -> crate::Result<()> {
-        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if remote_reserved_ckb_amount < reserved_ckb_amount
-            || local_reserved_ckb_amount < reserved_ckb_amount
-        {
-            return Err(Error::InvalidParameter(format!(
-                "Reserved CKB amount is less than the minimal amount: {}",
-                reserved_ckb_amount
-            )));
-        }
-
-        if funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(Error::InvalidParameter(format!(
-                "Funding fee rate is less than {}",
-                DEFAULT_FEE_RATE
-            )));
-        }
-        Ok(())
-    }
-
-    fn check_open_ckb_parameters(
+    // TODO: this fn is duplicated with ChannelActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
+    fn check_open_channel_parameters(
         &self,
         open_channel: &OpenChannel,
     ) -> Result<(), ProcessingChannelError> {
-        let reserved_ckb_amount = open_channel.reserved_ckb_amount;
         let udt_type_script = &open_channel.funding_udt_type_script;
 
-        let minimal_reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if reserved_ckb_amount < minimal_reserved_ckb_amount {
+        // reserved_ckb_amount
+        let occupied_capacity =
+            occupied_capacity(&open_channel.shutdown_script, udt_type_script)?.as_u64();
+        if open_channel.reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Remote reserved CKB amount {} is less than the minimal amount: {}",
-                reserved_ckb_amount, minimal_reserved_ckb_amount,
+                "Reserved CKB amount {} is less than {}",
+                open_channel.reserved_ckb_amount, occupied_capacity,
             )));
         }
 
+        // funding_fee_rate
         if open_channel.funding_fee_rate < DEFAULT_FEE_RATE {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Funding fee rate is less than {}",
@@ -3280,28 +3230,54 @@ where
             )));
         }
 
+        // commitment_fee_rate
         if open_channel.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Commitment fee rate is less than {}",
                 DEFAULT_COMMITMENT_FEE_RATE,
             )));
         }
-
-        let commitment_fee = calculate_commitment_tx_fee(
-            open_channel.commitment_fee_rate,
-            &open_channel.funding_udt_type_script,
-        );
-
-        let expected_minimal_reserved_ckb_amount = commitment_fee * 2;
-        debug!(
-            "expected_minimal_reserved_ckb_amount: {}, reserved_ckb_amount: {}",
-            expected_minimal_reserved_ckb_amount, reserved_ckb_amount
-        );
-        if reserved_ckb_amount < expected_minimal_reserved_ckb_amount {
+        let commitment_fee =
+            calculate_commitment_tx_fee(open_channel.commitment_fee_rate, udt_type_script);
+        let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
+        if commitment_fee * 2 > reserved_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee rate is: {}, expect more CKB amount as reserved ckb amount expected to larger than {}, \
-                or you can set a lower commitment fee rate",
-                open_channel.commitment_fee_rate, expected_minimal_reserved_ckb_amount
+                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, open_channel.commitment_fee_rate, reserved_fee
+            )));
+        }
+
+        // commitment_delay_epoch
+        let epoch =
+            EpochNumberWithFraction::from_full_value_unchecked(open_channel.commitment_delay_epoch);
+        if !epoch.is_well_formed() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is not a valid value",
+                open_channel.commitment_delay_epoch,
+            )));
+        }
+
+        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch < min {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is less than the minimal value {}",
+                epoch, min
+            )));
+        }
+
+        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch > max {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is greater than the maximal value {}",
+                epoch, max
+            )));
+        }
+
+        // max_tlc_number_in_flight
+        if open_channel.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Max TLC number in flight {} is greater than the system maximal value {}",
+                open_channel.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
             )));
         }
 
@@ -3690,7 +3666,7 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        self.check_open_ckb_parameters(&open_channel)?;
+        self.check_open_channel_parameters(&open_channel)?;
 
         if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
             if !check_udt_script(udt_type_script) {

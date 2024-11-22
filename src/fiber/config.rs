@@ -12,7 +12,7 @@ use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
 pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
 pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
 
@@ -24,10 +24,6 @@ pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 /// to make sure he can build a valid shutdown transaction and pay proper fee.
 pub const DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT: u64 =
     MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
-
-/// 143 CKB for minimal UDT amount
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
-    MIN_UDT_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
 /// 162 CKB to open a channel which maybe automatically acceptted.
 /// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity, 1 CKB for shutdown fee
