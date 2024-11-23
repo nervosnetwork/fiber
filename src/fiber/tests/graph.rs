@@ -538,6 +538,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -577,6 +578,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     eprintln!("route: {:?}", route);
     assert!(route.is_ok());
@@ -609,6 +611,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -733,6 +736,7 @@ fn test_graph_build_route_three_nodes() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -772,6 +776,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -799,6 +804,7 @@ fn test_graph_build_route_below_min_htlc_value() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -845,6 +851,7 @@ fn test_graph_mark_failed_channel() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 
@@ -866,6 +873,7 @@ fn test_graph_mark_failed_channel() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 }
@@ -873,8 +881,8 @@ fn test_graph_mark_failed_channel() {
 #[test]
 fn test_graph_session_router() {
     let mut network = MockNetworkGraph::new(5);
-    network.add_edge(0, 2, Some(500), Some(2));
-    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(0, 2, Some(500), Some(50000));
+    network.add_edge(2, 3, Some(500), Some(20000));
     network.add_edge(3, 4, Some(500), Some(2));
 
     let node0 = network.keys[0];
@@ -897,11 +905,14 @@ fn test_graph_session_router() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
     let route = route.unwrap();
     let session_route = SessionRoute::new(node0.into(), node4.into(), &route);
+    let fee = session_route.fee();
+    assert_eq!(fee, 8);
     let session_route_keys: Vec<_> = session_route.nodes.iter().map(|x| x.pubkey).collect();
     assert_eq!(
         session_route_keys,
@@ -934,6 +945,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
@@ -953,6 +965,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
@@ -974,6 +987,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 
@@ -992,6 +1006,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -1019,6 +1034,7 @@ fn test_graph_payment_self_default_is_false() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1052,6 +1068,7 @@ fn test_graph_payment_pay_single_path() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1083,6 +1100,7 @@ fn test_graph_payment_pay_self_with_one_node() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1136,6 +1154,7 @@ fn test_graph_build_route_with_double_edge_node() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1188,6 +1207,7 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1220,6 +1240,7 @@ fn test_graph_payment_pay_self_will_ok() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
@@ -1277,6 +1298,7 @@ fn test_graph_build_route_with_path_limits() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1326,6 +1348,7 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
@@ -1354,6 +1377,7 @@ fn test_graph_payment_expiry_is_in_right_order() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());

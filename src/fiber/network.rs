@@ -139,6 +139,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    pub fee: u128,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -305,6 +306,8 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // dry_run only used for checking, default is false
+    pub dry_run: bool,
 }
 
 #[serde_as]
@@ -324,6 +327,7 @@ pub struct SendPaymentData {
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
     pub allow_self_payment: bool,
+    pub dry_run: bool,
 }
 
 impl SendPaymentData {
@@ -456,6 +460,7 @@ impl SendPaymentData {
             udt_type_script,
             preimage,
             allow_self_payment: command.allow_self_payment,
+            dry_run: command.dry_run,
         })
     }
 }
@@ -2482,6 +2487,18 @@ where
             Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
         })?;
 
+        // for dry run, we only build the route and return the hops info,
+        // will not store the payment session and send the onion packet
+        if payment_data.dry_run {
+            let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
+            let hops = self
+                .build_payment_route(&mut payment_session, &payment_data)
+                .await?;
+            payment_session.route =
+                SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
+            return Ok(payment_session.into());
+        }
+
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
             // we only allow retrying payment session with status failed
@@ -2494,7 +2511,7 @@ where
             }
         }
 
-        let payment_session = PaymentSession::new(payment_data.clone(), 5);
+        let payment_session = PaymentSession::new(payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
         let session = self.try_payment_session(state, payment_session).await?;
         return Ok(session.into());

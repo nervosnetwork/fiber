@@ -231,6 +231,7 @@ fn test_store_payment_session() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());

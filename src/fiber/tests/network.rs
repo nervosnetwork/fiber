@@ -666,6 +666,7 @@ fn test_send_payment_validate_payment_hash() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -689,6 +690,7 @@ fn test_send_payment_validate_amount() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -734,6 +736,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -755,6 +758,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     // keysend is set with invoice, should be error
@@ -777,6 +781,7 @@ fn test_send_payment_validate_invoice() {
         keysend: Some(true),
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -796,6 +801,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -815,6 +821,7 @@ fn test_send_payment_validate_invoice() {
         keysend: Some(true),
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -834,6 +841,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -868,6 +876,7 @@ fn test_send_payment_validate_invoice() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
@@ -892,6 +901,7 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         keysend: None,
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
 
     let result = SendPaymentData::new(send_command);
