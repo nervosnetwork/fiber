@@ -270,6 +270,8 @@ pub struct GetPaymentCommandResult {
     pub last_updated_at: u64,
     /// The error message if the payment failed
     pub failed_error: Option<String>,
+    /// fee paid for the payment
+    pub fee: u64,
 }
 
 #[serde_as]
@@ -312,6 +314,11 @@ pub(crate) struct SendPaymentCommandParams {
 
     /// allow self payment, default is false
     allow_self_payment: Option<bool>,
+
+    /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+    /// it's useful for the sender to double check the payment before sending it to the network,
+    /// default is false
+    dry_run: Option<bool>,
 }
 
 /// RPC module for channel management.
@@ -626,6 +633,7 @@ where
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
             ))
@@ -636,6 +644,7 @@ where
             created_at: response.created_at,
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
+            fee: response.fee,
         })
     }
 
@@ -655,6 +664,7 @@ where
             last_updated_at: response.last_updated_at,
             created_at: response.created_at,
             failed_error: response.failed_error,
+            fee: response.fee,
         })
     }
 }
