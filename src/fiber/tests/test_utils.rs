@@ -1,4 +1,4 @@
-use crate::fiber::history::TimedResult;
+use crate::fiber::history::{Direction, TimedResult};
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use crate::{
@@ -22,6 +22,7 @@ use crate::{
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
+use lnd_grpc_tonic_client::lnrpc::channel_point;
 use ractor::{Actor, ActorRef};
 use rand::Rng;
 use secp256k1::Keypair;
@@ -510,7 +511,7 @@ pub struct MemoryStore {
     payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
     invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
     invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
-    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, Pubkey), TimedResult>>>,
+    payment_hisotry: Arc<RwLock<HashMap<(OutPoint, Direction), TimedResult>>>,
 }
 
 impl NetworkActorStateStore for MemoryStore {
@@ -601,14 +602,19 @@ impl NetworkGraphStateStore for MemoryStore {
             .insert(session.payment_hash(), session);
     }
 
-    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+    fn insert_payment_history_result(
+        &mut self,
+        channel_point: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
         self.payment_hisotry
             .write()
             .unwrap()
-            .insert((from, target), result);
+            .insert((channel_point, direction), result);
     }
 
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
+    fn get_payment_history_result(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
         self.payment_hisotry
             .read()
             .unwrap()

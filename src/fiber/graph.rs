@@ -1,4 +1,5 @@
-use super::history::{InternalResult, PaymentHistory, TimedResult};
+use super::channel::ChannelActorStateStore;
+use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::{ChannelAnnouncement, ChannelUpdate, Hash256, NodeAnnouncement};
@@ -183,7 +184,7 @@ pub struct PathEdge {
 
 impl<S> NetworkGraph<S>
 where
-    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
@@ -762,6 +763,7 @@ where
                     * self.history.eval_probability(
                         from,
                         to,
+                        channel_info.out_point(),
                         amount_to_send,
                         channel_info.capacity(),
                     );
@@ -857,8 +859,13 @@ pub trait NetworkGraphStateStore {
     fn insert_node(&self, node: NodeInfo);
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
-    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult);
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)>;
+    fn insert_payment_history_result(
+        &mut self,
+        channel_outpoint: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    );
+    fn get_payment_history_result(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

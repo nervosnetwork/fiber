@@ -4,6 +4,7 @@ use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::gen_rand_public_key;
@@ -17,6 +18,7 @@ use crate::store::Store;
 use crate::store::CHANNEL_INFO_PREFIX;
 use crate::store::NODE_INFO_PREFIX;
 use crate::watchtower::*;
+use bitcoin::psbt::Output;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::Bytes;
 use ckb_types::packed::CellOutput;
@@ -244,21 +246,21 @@ fn test_store_payment_history() {
     let path = dir.path().join("payment_history_store");
     let mut store = Store::new(path);
 
-    let pubkey = gen_rand_public_key();
-    let target = gen_rand_public_key();
     let result = TimedResult {
         fail_amount: 1,
         fail_time: 2,
         success_time: 3,
         success_amount: 4,
     };
-    store.insert_payment_history_result(pubkey.into(), target.clone(), result.clone());
+    let channel_outpoint = OutPoint::default();
+    let direction = Direction::Forward;
+    store.insert_payment_history_result(channel_outpoint.clone(), direction, result.clone());
     assert_eq!(
         store.get_payment_history_result(),
-        vec![(pubkey.into(), target.clone(), result)]
+        vec![(channel_outpoint.clone(), direction, result)]
     );
 
-    fn sort_results(results: &mut Vec<(Pubkey, Pubkey, TimedResult)>) {
+    fn sort_results(results: &mut Vec<(OutPoint, Direction, TimedResult)>) {
         results.sort_by(|a, b| match a.0.cmp(&b.0) {
             Ordering::Equal => a.1.cmp(&b.1),
             other => other,
@@ -272,32 +274,37 @@ fn test_store_payment_history() {
         success_time: 4,
         success_amount: 5,
     };
-    store.insert_payment_history_result(pubkey.into(), target_2.clone(), result_2.clone());
+    let direction_2 = Direction::Backward;
+    store.insert_payment_history_result(channel_outpoint.clone(), direction_2, result_2.clone());
     let mut r1 = store.get_payment_history_result();
     sort_results(&mut r1);
-    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
-        (pubkey.into(), target, result),
-        (pubkey.into(), target_2, result_2),
+    let mut r2: Vec<(OutPoint, Direction, TimedResult)> = vec![
+        (channel_outpoint.clone(), direction, result),
+        (channel_outpoint.clone(), direction_2, result_2),
     ];
     sort_results(&mut r2);
     assert_eq!(r1, r2);
 
-    let pubkey_3 = gen_rand_public_key();
-    let target_3 = gen_rand_public_key();
+    let outpoint_3 = OutPoint::new_builder()
+        .tx_hash(gen_sha256_hash().into())
+        .index(1u32.pack())
+        .build();
+    let direction_3 = Direction::Forward;
     let result_3 = TimedResult {
         fail_amount: 3,
         fail_time: 4,
         success_time: 5,
         success_amount: 6,
     };
-    store.insert_payment_history_result(pubkey_3.into(), target_3.clone(), result_3.clone());
+
+    store.insert_payment_history_result(outpoint_3.clone(), direction_3, result_3.clone());
     let mut r1 = store.get_payment_history_result();
     sort_results(&mut r1);
 
-    let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
-        (pubkey.into(), target, result),
-        (pubkey.into(), target_2, result_2),
-        (pubkey_3.into(), target_3, result_3),
+    let mut r2: Vec<(OutPoint, Direction, TimedResult)> = vec![
+        (channel_outpoint.clone(), direction, result),
+        (channel_outpoint.clone(), direction_2, result_2),
+        (outpoint_3, direction_3, result_3),
     ];
     sort_results(&mut r2);
     assert_eq!(r1, r2);
