@@ -323,6 +323,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                dry_run: false,
             },
             rpc_reply,
         ))
@@ -378,6 +379,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
                 keysend: Some(true),
                 udt_type_script: None,
                 allow_self_payment: false,
+                dry_run: false,
             },
             rpc_reply,
         ))
@@ -421,6 +423,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                dry_run: false,
             },
             rpc_reply,
         ))
@@ -478,6 +481,7 @@ async fn test_network_send_payment_target_not_found() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                dry_run: false,
             },
             rpc_reply,
         ))
@@ -516,6 +520,7 @@ async fn test_network_send_payment_amount_is_too_large() {
                 keysend: None,
                 udt_type_script: None,
                 allow_self_payment: false,
+                dry_run: false,
             },
             rpc_reply,
         ))
