@@ -335,7 +335,12 @@ impl FundingTxBuilder {
         let mut funding_tx = self.funding_tx;
         let tx_builder = tx.as_advanced_builder();
         debug!("final tx_builder: {:?}", tx_builder);
+        let old_tx_hash_opt = funding_tx.tx.as_ref().map(|tx| tx.hash());
         funding_tx.update_for_self(tx)?;
+        if let Some(tx_hash) = old_tx_hash_opt {
+            funding_exclusion.remove(&tx_hash);
+        }
+        funding_exclusion.insert(funding_tx.clone());
         Ok(funding_tx)
     }
 }
