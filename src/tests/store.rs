@@ -18,7 +18,6 @@ use crate::store::Store;
 use crate::store::CHANNEL_INFO_PREFIX;
 use crate::store::NODE_INFO_PREFIX;
 use crate::watchtower::*;
-use bitcoin::psbt::Output;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::Bytes;
 use ckb_types::packed::CellOutput;
@@ -267,7 +266,6 @@ fn test_store_payment_history() {
         });
     }
 
-    let target_2 = gen_rand_public_key();
     let result_2 = TimedResult {
         fail_amount: 2,
         fail_time: 3,

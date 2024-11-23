@@ -406,7 +406,7 @@ where
         &self,
         from: Pubkey,
         target: Pubkey,
-        channel: OutPoint,
+        channel: &OutPoint,
         amount: u128,
         capacity: u128,
     ) -> f64 {
@@ -417,7 +417,7 @@ where
         } else {
             Direction::Backward
         };
-        if let Some(result) = self.get_result(&channel, direction) {
+        if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
                 fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);
             }

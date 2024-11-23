@@ -22,7 +22,6 @@ use crate::{
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
-use lnd_grpc_tonic_client::lnrpc::channel_point;
 use ractor::{Actor, ActorRef};
 use rand::Rng;
 use secp256k1::Keypair;

@@ -763,7 +763,7 @@ where
                     * self.history.eval_probability(
                         from,
                         to,
-                        channel_info.out_point(),
+                        &channel_info.out_point(),
                         amount_to_send,
                         channel_info.capacity(),
                     );
