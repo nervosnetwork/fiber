@@ -914,6 +914,13 @@ impl SessionRoute {
             .collect();
         Self { nodes }
     }
+
+    pub fn fee(&self) -> u128 {
+        let first_amount = self.nodes.first().map_or(0, |s| s.amount);
+        let last_amount = self.nodes.last().map_or(0, |s| s.amount);
+        assert!(first_amount >= last_amount);
+        first_amount - last_amount
+    }
 }
 
 #[serde_as]
@@ -978,16 +985,22 @@ impl PaymentSession {
     pub fn can_retry(&self) -> bool {
         self.retried_times < self.try_limit
     }
+
+    pub fn fee(&self) -> u128 {
+        self.route.fee()
+    }
 }
 
 impl From<PaymentSession> for SendPaymentResponse {
     fn from(session: PaymentSession) -> Self {
+        let fee = session.fee();
         Self {
             payment_hash: session.request.payment_hash,
             status: session.status,
             failed_error: session.last_error,
             created_at: session.created_at,
             last_updated_at: session.last_updated_at,
+            fee,
         }
     }
 }
