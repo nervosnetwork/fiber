@@ -637,6 +637,134 @@ async fn test_network_send_payment_with_dry_run() {
 }
 
 #[tokio::test]
+async fn test_network_send_payment_dry_run_can_still_query() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let payment_hash = gen_sha256_hash();
+    let node_b_pubkey = node_b.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(payment_hash),
+                final_htlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+
+    // sleep for a while to make sure the payment session is created
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(payment_hash),
+                final_htlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: true,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("{:?}", res);
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, _new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+    // Wait for the channel announcement to be broadcasted
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let payment_hash = gen_sha256_hash();
+    let node_b_pubkey = node_b.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(payment_hash),
+                final_htlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: true,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+
+    // make sure we can send the same payment after dry run query
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(10000),
+                payment_hash: Some(payment_hash),
+                final_htlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    eprintln!("{:?}", res);
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
 async fn test_stash_broadcast_messages() {
     init_tracing();
 
