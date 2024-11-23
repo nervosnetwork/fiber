@@ -271,7 +271,7 @@ pub struct GetPaymentCommandResult {
     /// The error message if the payment failed
     pub failed_error: Option<String>,
     /// fee paid for the payment
-    pub fee: u64,
+    pub fee: u128,
 }
 
 #[serde_as]

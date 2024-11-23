@@ -312,7 +312,7 @@ Sends a payment to a peer.
 * `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
-* `fee` - u64, fee paid for the payment
+* `fee` - u128, fee paid for the payment
 
 
 <a id="channel-get_payment"></a>
@@ -331,7 +331,7 @@ Retrieves a payment.
 * `created_at` - u64, The time the payment was created at, in milliseconds from UNIX epoch
 * `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
-* `fee` - u64, fee paid for the payment
+* `fee` - u128, fee paid for the payment
 
 
 <a id="graph"></a>

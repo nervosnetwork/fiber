@@ -915,11 +915,11 @@ impl SessionRoute {
         Self { nodes }
     }
 
-    pub fn fee(&self) -> u64 {
+    pub fn fee(&self) -> u128 {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
         let last_amount = self.nodes.last().map_or(0, |s| s.amount);
         assert!(first_amount >= last_amount);
-        first_amount as u64 - last_amount as u64
+        first_amount - last_amount
     }
 }
 
@@ -986,7 +986,7 @@ impl PaymentSession {
         self.retried_times < self.try_limit
     }
 
-    pub fn fee(&self) -> u64 {
+    pub fn fee(&self) -> u128 {
         self.route.fee()
     }
 }

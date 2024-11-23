@@ -138,7 +138,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
-    pub fee: u64,
+    pub fee: u128,
 }
 
 /// What kind of local information should be broadcasted to the network.

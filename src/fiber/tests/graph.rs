@@ -796,8 +796,8 @@ fn test_graph_mark_failed_channel() {
 #[test]
 fn test_graph_session_router() {
     let mut network = MockNetworkGraph::new(5);
-    network.add_edge(0, 2, Some(500), Some(2));
-    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(0, 2, Some(500), Some(50000));
+    network.add_edge(2, 3, Some(500), Some(20000));
     network.add_edge(3, 4, Some(500), Some(2));
 
     let node0 = network.keys[0];
@@ -825,6 +825,8 @@ fn test_graph_session_router() {
 
     let route = route.unwrap();
     let session_route = SessionRoute::new(node0.into(), node4.into(), &route);
+    let fee = session_route.fee();
+    assert_eq!(fee, 8);
     let session_route_keys: Vec<_> = session_route.nodes.iter().map(|x| x.pubkey).collect();
     assert_eq!(
         session_route_keys,
