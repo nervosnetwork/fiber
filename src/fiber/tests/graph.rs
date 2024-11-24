@@ -1026,7 +1026,6 @@ fn test_graph_payment_pay_self_with_one_node() {
     let payment_data = payment_data.unwrap();
 
     let route = network.graph.build_route(payment_data);
-    eprintln!("final result {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[1].next_hop, Some(node0.into()));
