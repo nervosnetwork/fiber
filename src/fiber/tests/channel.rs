@@ -679,6 +679,63 @@ async fn test_send_payment_with_3_nodes() {
 }
 
 #[tokio::test]
+async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (node_a, _node_b, node_c, _, _) = create_3_nodes_with_established_channel(
+        (100000000000, 100000000000),
+        (100000000000, 100000000000),
+        true,
+    )
+    .await;
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000 + 5),
+                payment_hash: Some(gen_sha256_hash()), // this payment hash is not from node_c
+                final_htlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    assert!(res.fee > 0);
+
+    // sleep for 2 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Failed);
+    assert_eq!(
+        res.failed_error,
+        Some("IncorrectOrUnknownPaymentDetails".to_string())
+    );
+}
+
+#[tokio::test]
 async fn test_stash_broadcast_messages() {
     init_tracing();
 
