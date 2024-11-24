@@ -2052,8 +2052,8 @@ pub struct ChannelActorState {
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub local_shutdown_script: Option<Script>,
+    #[serde_as(as = "EntityHex")]
+    pub local_shutdown_script: Script,
 
     pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
@@ -2768,7 +2768,7 @@ impl ChannelActorState {
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
-            local_shutdown_script: Some(local_shutdown_script),
+            local_shutdown_script: local_shutdown_script,
             local_channel_public_keys: local_base_pubkeys,
             signer,
             remote_channel_public_keys: Some(remote_pubkeys),
@@ -2839,7 +2839,7 @@ impl ChannelActorState {
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
-            local_shutdown_script: Some(shutdown_script),
+            local_shutdown_script: shutdown_script,
             remote_shutdown_script: None,
             local_shutdown_info: None,
             remote_shutdown_info: None,
@@ -2857,11 +2857,8 @@ impl ChannelActorState {
         let udt_type_script = &self.funding_udt_type_script;
 
         // reserved_ckb_amount
-        let occupied_capacity = occupied_capacity(
-            &self.local_shutdown_script.clone().unwrap(),
-            udt_type_script,
-        )?
-        .as_u64();
+        let occupied_capacity =
+            occupied_capacity(&self.local_shutdown_script, udt_type_script)?.as_u64();
         if self.local_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
@@ -2933,11 +2930,8 @@ impl ChannelActorState {
         let udt_type_script = &self.funding_udt_type_script;
 
         // reserved_ckb_amount
-        let occupied_capacity = occupied_capacity(
-            &self.remote_shutdown_script.clone().unwrap(),
-            udt_type_script,
-        )?
-        .as_u64();
+        let occupied_capacity =
+            occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
         if self.remote_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Reserved CKB amount {} is less than {}",
@@ -3694,10 +3688,7 @@ impl ChannelActorState {
     }
 
     pub fn get_local_shutdown_script(&self) -> Script {
-        self.local_shutdown_script
-            .as_ref()
-            .expect("local_shutdown_script should be set in current state")
-            .clone()
+        self.local_shutdown_script.clone()
     }
 
     pub fn get_remote_shutdown_script(&self) -> Script {
@@ -4240,12 +4231,8 @@ impl ChannelActorState {
                     shutdown_tx_size(
                         &self.funding_udt_type_script,
                         (
-                            self.local_shutdown_script
-                                .clone()
-                                .expect("local shutdown script exists"),
-                            self.remote_shutdown_script
-                                .clone()
-                                .expect("remote shutdown script exists")
+                            self.get_local_shutdown_script(),
+                            self.get_remote_shutdown_script()
                         )
                     )
                 );
