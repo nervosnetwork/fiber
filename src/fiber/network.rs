@@ -3745,6 +3745,7 @@ where
         );
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
+            // TODO: remove tx from exclusion list
             debug!("Funding transaction broadcast result: {:?}", &result);
             let message = match result {
                 Ok(TraceTxResponse {
@@ -3858,6 +3859,11 @@ where
             )),
         )
         .await;
+
+        // Cleanup exculsion list
+        self.chain_actor
+            .send_message(CkbChainMessage::RemoveTx(outpoint.tx_hash()))
+            .expect(ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW);
     }
 
     async fn on_commitment_transaction_confirmed(&mut self, tx_hash: Hash256, channel_id: Hash256) {
