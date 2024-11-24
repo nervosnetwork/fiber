@@ -1,8 +1,8 @@
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::tests::test_utils::gen_rand_public_key;
-use crate::fiber::tests::test_utils::gen_sha256_hash;
-
+use crate::fiber::tests::test_utils::{
+    gen_rand_public_key, gen_sha256_hash, NetworkNodeConfigBuilder,
+};
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -11,7 +11,7 @@ use crate::{
             ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
             ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
-        config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
+        config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         graph::NetworkGraphStateStore,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
@@ -138,7 +138,7 @@ async fn test_open_and_accept_channel() {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT as u128,
+                funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
                 shutdown_script: None,
             },
             rpc_reply,
@@ -1670,10 +1670,25 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
 }
 
 #[tokio::test]
+#[should_panic(expected = "Waiting for event timeout")]
 async fn test_open_channel_with_large_size_shutdown_script() {
-    init_tracing();
-    let [node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+            .fiber_config_updater(|config| {
+                // enable auto accept channel with default value
+                config.auto_accept_channel_ckb_funding_amount = Some(6200000000);
+                config.open_channel_auto_accept_min_ckb_funding_amount = Some(16200000000);
+            })
+            .build()
+    })
+    .await;
 
+    let mut node_a = nodes.pop().unwrap();
+    let mut node_b = nodes.pop().unwrap();
+
+    // test open channel with large size shutdown script
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
             OpenChannelCommand {
@@ -1702,4 +1717,58 @@ async fn test_open_channel_with_large_size_shutdown_script() {
         .err()
         .unwrap()
         .contains("The funding amount (8199999999) should be greater than or equal to 8200000000"));
+
+    // test auto accept channel with large size shutdown script
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                funding_amount: (81 + 1 + 90) * 100000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_max_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(channel_id, &open_channel_result.channel_id);
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // should panic
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_b.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
 }

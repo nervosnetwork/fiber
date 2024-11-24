@@ -1669,7 +1669,7 @@ where
                     commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
                 let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
 
-                let (funding_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
+                let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
                     funding_amount,
                     &shutdown_script,
                     &funding_udt_type_script,
@@ -1680,7 +1680,7 @@ where
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
-                    funding_amount,
+                    to_local_amount,
                     reserved_ckb_amount,
                     commitment_fee_rate,
                     commitment_delay_epoch
@@ -2337,31 +2337,28 @@ pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) 
 }
 
 pub(crate) fn get_funding_and_reserved_amount(
-    funding_amount: u128,
+    total_amount: u128,
     shutdown_script: &Script,
     udt_type_script: &Option<Script>,
 ) -> Result<(u128, u64), ProcessingChannelError> {
     let reserved_capacity = reserved_capacity(shutdown_script, udt_type_script)?.as_u64();
     if udt_type_script.is_none() {
-        if funding_amount < reserved_capacity as u128 {
+        if total_amount < reserved_capacity as u128 {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "The funding amount ({}) should be greater than or equal to {}",
-                funding_amount, reserved_capacity
+                total_amount, reserved_capacity
             )));
         }
-        if funding_amount >= u64::MAX as u128 {
+        if total_amount >= u64::MAX as u128 {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "The funding amount ({}) should be less than {}",
-                funding_amount,
+                total_amount,
                 u64::MAX
             )));
         }
-        Ok((
-            funding_amount - reserved_capacity as u128,
-            reserved_capacity,
-        ))
+        Ok((total_amount - reserved_capacity as u128, reserved_capacity))
     } else {
-        Ok((funding_amount, reserved_capacity))
+        Ok((total_amount, reserved_capacity))
     }
 }
 
@@ -2799,7 +2796,7 @@ impl ChannelActorState {
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
-        value: u128,
+        to_local_amount: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         commitment_delay_epoch: u64,
@@ -2821,7 +2818,7 @@ impl ChannelActorState {
             funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
-            to_local_amount: value,
+            to_local_amount,
             to_remote_amount: 0,
             commitment_fee_rate,
             commitment_delay_epoch,

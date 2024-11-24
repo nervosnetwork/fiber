@@ -665,8 +665,8 @@ where
                             is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
                         } else {
                             state.auto_accept_channel_ckb_funding_amount > 0
-                                && open_channel.all_ckb_amount()
-                                    >= state.open_channel_auto_accept_min_ckb_funding_amount
+                                && open_channel.funding_amount
+                                    >= state.open_channel_auto_accept_min_ckb_funding_amount as u128
                         };
                         if auto_accept {
                             let accept_channel = AcceptChannelCommand {
@@ -3000,12 +3000,6 @@ where
         }
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
-        // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
-        let (_funding_amount, _reserved_ckb_amount) = get_funding_and_reserved_amount(
-            funding_amount,
-            &shutdown_script,
-            &funding_udt_type_script,
-        )?;
 
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();

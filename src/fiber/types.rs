@@ -566,14 +566,6 @@ pub struct OpenChannel {
 }
 
 impl OpenChannel {
-    pub fn all_ckb_amount(&self) -> u64 {
-        if self.funding_udt_type_script.is_none() {
-            self.funding_amount as u64 + self.reserved_ckb_amount
-        } else {
-            self.reserved_ckb_amount
-        }
-    }
-
     pub fn is_public(&self) -> bool {
         self.channel_flags.contains(ChannelFlags::PUBLIC)
     }
