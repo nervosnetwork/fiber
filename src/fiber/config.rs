@@ -103,7 +103,7 @@ pub struct FiberConfig {
     #[arg(name = "FIBER_SCRIPTS", long = "fiber-scripts", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub scripts: Vec<FiberScript>,
 
-    /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 10000000000 shannons]
+    /// minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]
     #[arg(
         name = "FIBER_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
         long = "fiber-open-channel-auto-accept-min-ckb-funding-amount",

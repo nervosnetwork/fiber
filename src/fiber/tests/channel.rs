@@ -1670,23 +1670,8 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "Waiting for event timeout")]
-async fn test_open_channel_with_large_size_shutdown_script() {
-    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
-        NetworkNodeConfigBuilder::new()
-            .node_name(Some(format!("node-{}", i)))
-            .base_dir_prefix(&format!("fnn-test-node-{}-", i))
-            .fiber_config_updater(|config| {
-                // enable auto accept channel with default value
-                config.auto_accept_channel_ckb_funding_amount = Some(6200000000);
-                config.open_channel_auto_accept_min_ckb_funding_amount = Some(16200000000);
-            })
-            .build()
-    })
-    .await;
-
-    let mut node_a = nodes.pop().unwrap();
-    let mut node_b = nodes.pop().unwrap();
+async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
     // test open channel with large size shutdown script
     let message = |rpc_reply| {
@@ -1717,6 +1702,26 @@ async fn test_open_channel_with_large_size_shutdown_script() {
         .err()
         .unwrap()
         .contains("The funding amount (8199999999) should be greater than or equal to 8200000000"));
+}
+
+#[tokio::test]
+#[should_panic(expected = "Waiting for event timeout")]
+async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+            .fiber_config_updater(|config| {
+                // enable auto accept channel with default value
+                config.auto_accept_channel_ckb_funding_amount = Some(6200000000);
+                config.open_channel_auto_accept_min_ckb_funding_amount = Some(16200000000);
+            })
+            .build()
+    })
+    .await;
+
+    let mut node_a = nodes.pop().unwrap();
+    let mut node_b = nodes.pop().unwrap();
 
     // test auto accept channel with large size shutdown script
     let message = |rpc_reply| {
@@ -1757,7 +1762,7 @@ async fn test_open_channel_with_large_size_shutdown_script() {
         })
         .await;
 
-    // should panic
+    // should fail
     node_a
         .expect_event(|event| match event {
             NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
@@ -1771,4 +1776,36 @@ async fn test_open_channel_with_large_size_shutdown_script() {
             _ => false,
         })
         .await;
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (_node_a, node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args(vec![0u8; 21].pack()).build(),
+                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    let shutdown_channel_result = call!(node_b.network_actor, message).expect("node_b alive");
+    assert!(shutdown_channel_result
+        .err()
+        .unwrap()
+        .contains("Local balance is not enough to pay the fee"));
 }
