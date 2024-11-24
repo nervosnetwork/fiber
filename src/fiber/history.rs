@@ -58,6 +58,14 @@ fn current_time() -> u128 {
         .as_millis()
 }
 
+pub(crate) fn output_direction(node1: Pubkey, node2: Pubkey) -> (Direction, Direction) {
+    if node1 < node2 {
+        (Direction::Forward, Direction::Backward)
+    } else {
+        (Direction::Backward, Direction::Forward)
+    }
+}
+
 impl InternalResult {
     pub fn add(
         &mut self,
@@ -73,11 +81,7 @@ impl InternalResult {
             time,
             amount,
         };
-        let direction = if node_1 < node_2 {
-            Direction::Forward
-        } else {
-            Direction::Backward
-        };
+        let (direction, _) = output_direction(node_1, node_2);
         self.pairs.insert((channel, direction), pair);
     }
 
@@ -412,11 +416,7 @@ where
     ) -> f64 {
         let mut success_amount = 0;
         let mut fail_amount = capacity;
-        let direction = if from < target {
-            Direction::Forward
-        } else {
-            Direction::Backward
-        };
+        let (direction, _) = output_direction(from, target);
         if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
                 fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);

@@ -1,9 +1,9 @@
 use crate::fiber::graph::SessionRouteNode;
+use crate::fiber::history::output_direction;
 use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
-use crate::fiber::types::Pubkey;
 use crate::store::Store;
 use ckb_types::packed::OutPoint;
 use molecule::prelude::Entity;
@@ -22,14 +22,6 @@ impl Round for f64 {
 fn gen_rand_outpoint() -> OutPoint {
     let rand_slice = (0..36).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     OutPoint::from_slice(&rand_slice).unwrap()
-}
-
-fn output_direction(node1: Pubkey, node2: Pubkey) -> (Direction, Direction) {
-    if node1 < node2 {
-        (Direction::Forward, Direction::Backward)
-    } else {
-        (Direction::Backward, Direction::Forward)
-    }
 }
 
 #[test]
