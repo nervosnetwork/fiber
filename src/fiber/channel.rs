@@ -55,7 +55,6 @@ use crate::{
         FundingRequest,
     },
     fiber::{
-        config::MIN_OCCUPIED_CAPACITY,
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::{emit_service_event, sign_network_message},
         types::{AnnouncementSignatures, Shutdown},
@@ -64,7 +63,7 @@ use crate::{
 };
 
 use super::{
-    config::{DEFAULT_MIN_SHUTDOWN_FEE, MIN_UDT_OCCUPIED_CAPACITY},
+    config::DEFAULT_MIN_SHUTDOWN_FEE,
     fee::calculate_shutdown_tx_fee,
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
@@ -2970,15 +2969,16 @@ impl ChannelActorState {
             (self.get_remote_shutdown_script(), close_script.clone()),
         );
 
+        let occupied_capacity =
+            occupied_capacity(close_script, &self.funding_udt_type_script)?.as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
+            (self.to_local_amount as u64 + self.local_reserved_ckb_amount)
+                .saturating_sub(occupied_capacity)
         } else {
-            self.local_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+            self.local_reserved_ckb_amount
+                .saturating_sub(occupied_capacity)
         };
-        debug!(
-            "verify_shutdown_fee fee: {} available_max_fee: {}",
-            fee, available_max_fee,
-        );
+
         if fee > available_max_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Local balance is not enough to pay the fee, expect fee {} <= available_max_fee {}",
@@ -4005,10 +4005,19 @@ impl ChannelActorState {
                 self.get_local_shutdown_script(),
             ),
         );
+        let occupied_capacity = match occupied_capacity(
+            &self.get_remote_shutdown_script(),
+            &self.funding_udt_type_script,
+        ) {
+            Ok(capacity) => capacity.as_u64(),
+            Err(_) => return false,
+        };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
+            (self.to_remote_amount as u64 + self.remote_reserved_ckb_amount)
+                .saturating_sub(occupied_capacity)
         } else {
-            self.remote_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+            self.remote_reserved_ckb_amount
+                .saturating_sub(occupied_capacity)
         };
         return fee <= remote_available_max_fee;
     }
