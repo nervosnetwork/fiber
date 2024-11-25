@@ -36,7 +36,7 @@ pub fn get_node_prefix() -> &'static str {
     INSTANCE.get_or_init(|| std::env::var("LOG_PREFIX").unwrap_or_else(|_| "".to_string()))
 }
 
-pub fn now_timestamp() -> u64 {
+pub fn now_timestamp_as_millis_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Duration since unix epoch")

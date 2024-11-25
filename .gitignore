@@ -11,3 +11,4 @@
 tests/nodes/.ports
 /coverage-report
 /*.info
+.vscode

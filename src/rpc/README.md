@@ -293,7 +293,8 @@ Sends a payment to a peer.
 * `target_pubkey` - `Option<Pubkey>`, the identifier of the payment target
 * `amount` - `Option<u128>`, the amount of the payment
 * `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
-* `final_htlc_expiry_delta` - `Option<u64>`, the htlc expiry delta should be used to set the timelock for the final hop
+* `final_tlc_expiry_delta` - `Option<u64>`, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
+* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds
 * `invoice` - `Option<String>`, the encoded invoice to send to the recipient
 * `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay
@@ -424,7 +425,6 @@ Generates a new invoice.
 * `payment_preimage` - Hash256, The payment preimage of the invoice.
 * `expiry` - `Option<u64>`, The expiry time of the invoice.
 * `fallback_address` - `Option<String>`, The fallback address of the invoice.
-* `final_cltv` - `Option<u64>`, The final CLTV of the invoice.
 * `final_expiry_delta` - `Option<u64>`, The final HTLC timeout of the invoice.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the invoice.
 * `hash_algorithm` - `Option<HashAlgorithm>`, The hash algorithm of the invoice.

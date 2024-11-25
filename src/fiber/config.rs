@@ -11,32 +11,28 @@ use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
-pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
-pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
-pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 
-/// 62 CKB minimal channel amount, at any time a partner should keep at least
-/// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,
-/// to make sure he can build a valid shutdown transaction and pay proper fee.
-pub const DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT: u64 =
+const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
+
+/// Default ckb funding amount when auto accepting an open channel request.
+pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
     MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
-/// 143 CKB for minimal UDT amount
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
-    MIN_UDT_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
-
-/// 162 CKB to open a channel which maybe automatically acceptted.
-/// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity, 1 CKB for shutdown fee
-/// The other party may auto accept the channel if the amount is greater than this.
-pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
-    DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+/// Default minimum ckb funding amount for auto accepting an open channel request.
+pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * CKB_SHANNONS;
 
 /// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
 pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
+
+/// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+
+/// The maximum expiry delta for a payment, in milliseconds. 2 days
+pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 2 * 24 * 60 * 60 * 1000; // 2 days
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
@@ -113,12 +109,12 @@ pub struct FiberConfig {
     #[arg(name = "FIBER_SCRIPTS", long = "fiber-scripts", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub scripts: Vec<FiberScript>,
 
-    /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
+    /// minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]
     #[arg(
         name = "FIBER_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
         long = "fiber-open-channel-auto-accept-min-ckb-funding-amount",
         env,
-        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 16200000000 shannons]"
+        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]"
     )]
     pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
     /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
@@ -318,12 +314,12 @@ impl FiberConfig {
 
     pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
         self.open_channel_auto_accept_min_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT)
+            .unwrap_or(DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT)
     }
 
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+            .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
     pub fn tlc_expiry_delta(&self) -> u64 {

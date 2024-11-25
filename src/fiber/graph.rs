@@ -10,7 +10,7 @@ use crate::fiber::path::NodeHeapElement;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
-use crate::now_timestamp;
+use crate::now_timestamp_as_millis_u64;
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use serde::{Deserialize, Serialize};
@@ -136,11 +136,11 @@ pub struct ChannelUpdateInfo {
     /// Whether the channel can be currently used for payments (in this one direction).
     pub enabled: bool,
     /// The difference in htlc expiry values that you must have when routing through this channel (in milliseconds).
-    pub htlc_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
-    pub htlc_minimum_value: u128,
+    pub tlc_minimum_value: u128,
     /// The maximum value which may be relayed to the next hop via the channel.
-    pub htlc_maximum_value: u128,
+    pub tlc_maximum_value: u128,
     pub fee_rate: u64,
     /// Most recent update for the channel received from the network
     /// Mostly redundant with the data we store in fields explicitly.
@@ -431,9 +431,9 @@ where
                 .expect("Duration since unix epoch")
                 .as_millis() as u64,
             enabled: !disabled,
-            htlc_expiry_delta: update.tlc_expiry_delta,
-            htlc_minimum_value: update.tlc_minimum_value,
-            htlc_maximum_value: update.tlc_maximum_value,
+            tlc_expiry_delta: update.tlc_expiry_delta,
+            tlc_minimum_value: update.tlc_minimum_value,
+            tlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
             last_update_message: update.clone(),
         });
@@ -547,6 +547,7 @@ where
         let preimage = payment_data.preimage;
         let payment_hash = payment_data.payment_hash;
         let udt_type_script = payment_data.udt_type_script;
+        let final_tlc_expiry_delta = payment_data.final_tlc_expiry_delta;
         let invoice = payment_data
             .invoice
             .map(|x| x.parse::<CkbInvoice>().expect("parse CKB invoice"));
@@ -563,7 +564,7 @@ where
         let allow_self_payment = payment_data.allow_self_payment;
         if source == target && !allow_self_payment {
             return Err(PathFindError::PathFind(
-                "source and target are the same and allow_self_payment is not enable".to_string(),
+                "allow_self_payment is not enable, can not pay to self".to_string(),
             ));
         }
 
@@ -573,6 +574,8 @@ where
             amount,
             payment_data.max_fee_amount,
             udt_type_script,
+            final_tlc_expiry_delta,
+            payment_data.tlc_expiry_limit,
             allow_self_payment,
         )?;
         assert!(!route.is_empty());
@@ -580,6 +583,8 @@ where
         let mut current_amount = amount;
         let mut current_expiry = 0;
         let mut hops_data = vec![];
+        let current_time = now_timestamp_as_millis_u64();
+
         for i in (0..route.len()).rev() {
             let is_last = i == route.len() - 1;
             let (next_hop, next_channel_outpoint) = if is_last {
@@ -591,7 +596,7 @@ where
                 )
             };
             let (fee, expiry) = if is_last {
-                (0, 0)
+                (0, current_time + final_tlc_expiry_delta)
             } else {
                 let channel_info = self
                     .get_channel(&route[i].channel_outpoint)
@@ -601,7 +606,7 @@ where
                     .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
                 let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
-                let expiry = channel_update.htlc_expiry_delta;
+                let expiry = channel_update.tlc_expiry_delta;
                 (fee, expiry)
             };
 
@@ -616,8 +621,8 @@ where
                 channel_outpoint: next_channel_outpoint,
                 preimage: if is_last { preimage } else { None },
             });
-            current_amount += fee;
             current_expiry += expiry;
+            current_amount += fee;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
@@ -653,6 +658,8 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
+        fianl_tlc_expiry_delta: u64,
+        tlc_expiry_limit: u64,
         allow_self: bool,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
@@ -679,7 +686,7 @@ where
 
         if source == target && !allow_self {
             return Err(PathFindError::PathFind(
-                "source and target are the same".to_string(),
+                "allow_self_payment is not enable, can not pay self".to_string(),
             ));
         }
 
@@ -705,7 +712,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_htlc_expiry: 0,
+            incoming_tlc_expiry: fianl_tlc_expiry_delta,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -742,22 +749,27 @@ where
                     }
                 }
                 // check to make sure the current hop can send the amount
-                // if `htlc_maximum_value` equals 0, it means there is no limit
+                // if `tlc_maximum_value` equals 0, it means there is no limit
                 if amount_to_send > channel_info.capacity()
-                    || (channel_update.htlc_maximum_value != 0
-                        && amount_to_send > channel_update.htlc_maximum_value)
+                    || (channel_update.tlc_maximum_value != 0
+                        && amount_to_send > channel_update.tlc_maximum_value)
                 {
                     continue;
                 }
-                if amount_to_send < channel_update.htlc_minimum_value {
+                if amount_to_send < channel_update.tlc_minimum_value {
                     continue;
                 }
-                let incoming_htlc_expiry = cur_hop.incoming_htlc_expiry
-                    + if from == source {
-                        0
-                    } else {
-                        channel_update.htlc_expiry_delta
-                    };
+
+                let expiry_delta = if from == source {
+                    0
+                } else {
+                    channel_update.tlc_expiry_delta
+                };
+
+                let incoming_htlc_expiry = cur_hop.incoming_tlc_expiry + expiry_delta;
+                if incoming_htlc_expiry > tlc_expiry_limit {
+                    continue;
+                }
 
                 let probability = cur_hop.probability
                     * self.history.eval_probability(
@@ -772,7 +784,7 @@ where
                     continue;
                 }
                 let agg_weight =
-                    self.edge_weight(amount_to_send, fee, channel_update.htlc_expiry_delta);
+                    self.edge_weight(amount_to_send, fee, channel_update.tlc_expiry_delta);
                 let weight = cur_hop.weight + agg_weight;
                 let distance = self.calculate_distance_based_probability(probability, weight);
 
@@ -786,7 +798,7 @@ where
                     weight,
                     distance,
                     amount_received: amount_to_send,
-                    incoming_htlc_expiry,
+                    incoming_tlc_expiry: incoming_htlc_expiry,
                     fee_charged: fee,
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point())),
@@ -949,7 +961,7 @@ pub struct PaymentSession {
 
 impl PaymentSession {
     pub fn new(request: SendPaymentData, try_limit: u32) -> Self {
-        let now = now_timestamp();
+        let now = now_timestamp_as_millis_u64();
         Self {
             request,
             retried_times: 0,
@@ -970,7 +982,7 @@ impl PaymentSession {
 
     fn set_status(&mut self, status: PaymentSessionStatus) {
         self.status = status;
-        self.last_updated_at = now_timestamp();
+        self.last_updated_at = now_timestamp_as_millis_u64();
     }
 
     pub fn set_inflight_status(&mut self, channel_outpoint: OutPoint, tlc_id: u64) {

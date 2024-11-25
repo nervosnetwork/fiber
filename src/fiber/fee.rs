@@ -1,5 +1,4 @@
 use super::channel::FUNDING_CELL_WITNESS_LEN;
-use super::config::{DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, DEFAULT_UDT_MINIMAL_CKB_AMOUNT};
 use crate::ckb::contracts::{get_cell_deps, get_script_by_contract, Contract};
 use ckb_types::core::TransactionBuilder;
 use ckb_types::packed::{Bytes, Script};
@@ -11,14 +10,6 @@ use ckb_types::{
 };
 use molecule::prelude::Entity;
 use tracing::debug;
-
-pub(crate) fn default_minimal_ckb_amount(is_udt: bool) -> u64 {
-    if is_udt {
-        DEFAULT_UDT_MINIMAL_CKB_AMOUNT
-    } else {
-        DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT
-    }
-}
 
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     // when there is pending htlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.

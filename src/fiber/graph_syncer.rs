@@ -7,6 +7,8 @@ use tracing::{debug, error};
 
 use anyhow::anyhow;
 
+use crate::now_timestamp_as_millis_u64;
+
 use super::{
     network::GraphSyncerExitStatus, NetworkActorCommand, NetworkActorEvent, NetworkActorMessage,
     ASSUME_NETWORK_ACTOR_ALIVE,
@@ -56,7 +58,7 @@ impl GraphSyncer {
         ending_height: u64,
         starting_time: u64,
     ) -> Self {
-        let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64;
+        let now = now_timestamp_as_millis_u64();
         Self {
             network,
             peer_id,

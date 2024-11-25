@@ -1,5 +1,7 @@
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::Pubkey;
+use crate::now_timestamp_as_millis_u64;
 use crate::{
     fiber::{
         graph::{ChannelInfo, NetworkGraph, NodeInfo, PathEdge},
@@ -137,7 +139,7 @@ impl MockNetworkGraph {
             version: 0,
             message_flags: if node_a_is_node1 { 1 } else { 0 },
             channel_flags: 0,
-            tlc_expiry_delta: 144,
+            tlc_expiry_delta: 11,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
             tlc_maximum_value: max_htlc_value.unwrap_or(10000),
             tlc_minimum_value: min_htlc_value.unwrap_or(0),
@@ -151,7 +153,7 @@ impl MockNetworkGraph {
                 version: 0,
                 message_flags: if node_a_is_node1 { 0 } else { 1 },
                 channel_flags: 0,
-                tlc_expiry_delta: 144,
+                tlc_expiry_delta: 22,
                 tlc_fee_proportional_millionths: fee_rate,
                 tlc_maximum_value: max_htlc_value.unwrap_or(10000),
                 tlc_minimum_value: min_htlc_value.unwrap_or(0),
@@ -210,8 +212,16 @@ impl MockNetworkGraph {
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
-        self.graph
-            .find_path(source, target, amount, Some(max_fee), None, false)
+        self.graph.find_path(
+            source,
+            target,
+            amount,
+            Some(max_fee),
+            None,
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+        )
     }
 
     pub fn find_path_udt(
@@ -230,6 +240,8 @@ impl MockNetworkGraph {
             amount,
             Some(max_fee),
             Some(udt_type_script),
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
         )
     }
@@ -517,7 +529,8 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -556,7 +569,8 @@ fn test_graph_build_router_fee_rate_optimize() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -566,6 +580,7 @@ fn test_graph_build_router_fee_rate_optimize() {
         allow_self_payment: false,
         dry_run: false,
     });
+    eprintln!("route: {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
@@ -587,7 +602,8 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
         amount: 1000,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: None,
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -606,7 +622,7 @@ fn test_graph_build_router_no_fee_with_direct_pay() {
 #[test]
 fn test_graph_find_path_err() {
     let mut network = MockNetworkGraph::new(6);
-    let (node1, _node5) = (network.keys[1], network.keys[5]);
+    let node1 = network.keys[1];
 
     network.add_edge(1, 2, Some(1000), Some(4));
     let route = network.find_path(1, 1, 100, 1000);
@@ -619,6 +635,8 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
     );
     assert!(route.is_err());
@@ -629,6 +647,68 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_find_path_node_order() {
+    let mut network = MockNetworkGraph::new(6);
+    let node1 = network.keys[1];
+    let node2 = network.keys[2];
+    let node3 = network.keys[3];
+
+    network.add_edge(1, 2, Some(1000), Some(4));
+    network.add_edge(2, 3, Some(1000), Some(4));
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node3.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_ok());
+    // check the order of nodes in router is node1 -> node2 -> node3
+    let route = route.unwrap();
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].target, node2.into());
+    assert_eq!(route[1].target, node3.into());
+}
+
+#[test]
+fn test_graph_build_route_with_expiry_limit() {
+    let mut network = MockNetworkGraph::new(6);
+    let (node1, node2) = (network.keys[1], network.keys[2]);
+
+    network.add_edge(1, 2, Some(1000), Some(4));
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_ok());
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        100,
         false,
     );
     assert!(route.is_err());
@@ -647,7 +727,8 @@ fn test_graph_build_route_three_nodes() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -686,7 +767,8 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         amount: 100, // Exceeds max_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -713,7 +795,8 @@ fn test_graph_build_route_below_min_htlc_value() {
         amount: 10, // Below min_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -759,7 +842,8 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -780,7 +864,8 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -811,7 +896,8 @@ fn test_graph_session_router() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -850,7 +936,8 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -868,7 +955,9 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -888,7 +977,9 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -906,7 +997,8 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -933,7 +1025,8 @@ fn test_graph_payment_self_default_is_false() {
         target_pubkey: Some(node0.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -943,26 +1036,13 @@ fn test_graph_payment_self_default_is_false() {
         allow_self_payment: false,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
-    let error = payment_data.unwrap_err().to_string();
-    assert!(error.contains("can not pay self"));
+    let payment_data = SendPaymentData::new(command);
+    assert!(payment_data.is_ok());
 
-    let route = network.graph.build_route(SendPaymentData {
-        target_pubkey: node0.into(),
-        amount: 100,
-        payment_hash: Hash256::default(),
-        invoice: None,
-        final_htlc_expiry_delta: Some(100),
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-        dry_run: false,
-    });
+    let route = network.graph.build_route(payment_data.unwrap());
     assert!(route.is_err());
+    let message = route.unwrap_err().to_string();
+    assert!(message.contains("allow_self_payment is not enable, can not pay to self"));
 }
 
 #[test]
@@ -974,13 +1054,13 @@ fn test_graph_payment_pay_single_path() {
     network.add_edge(4, 5, Some(500), Some(2));
     network.add_edge(5, 6, Some(500), Some(2));
 
-    let node0 = network.keys[0];
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[6].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -990,7 +1070,7 @@ fn test_graph_payment_pay_single_path() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
@@ -1011,7 +1091,8 @@ fn test_graph_payment_pay_self_with_one_node() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1021,12 +1102,11 @@ fn test_graph_payment_pay_self_with_one_node() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
     let route = network.graph.build_route(payment_data);
-    eprintln!("final result {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route[1].next_hop, Some(node0.into()));
@@ -1059,14 +1139,13 @@ fn test_graph_build_route_with_double_edge_node() {
         Some(200),
     );
 
-    let node0 = network.keys[0];
-
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1076,7 +1155,7 @@ fn test_graph_build_route_with_double_edge_node() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
 }
@@ -1118,7 +1197,8 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1128,7 +1208,7 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1145,14 +1225,13 @@ fn test_graph_payment_pay_self_will_ok() {
     network.add_edge(4, 5, Some(500), Some(2));
     network.add_edge(5, 6, Some(500), Some(2));
 
-    let node0 = network.keys[0];
-
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1162,7 +1241,7 @@ fn test_graph_payment_pay_self_will_ok() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
@@ -1202,7 +1281,6 @@ fn test_graph_build_route_with_path_limits() {
         );
     }
 
-    let node0 = network.keys[0];
     let node99 = network.keys[99];
 
     // node0 is the source node
@@ -1210,7 +1288,8 @@ fn test_graph_build_route_with_path_limits() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(10000000),
@@ -1220,7 +1299,7 @@ fn test_graph_build_route_with_path_limits() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1252,7 +1331,6 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         );
     }
 
-    let node0 = network.keys[0];
     let node99 = network.keys[99];
 
     // node0 is the source node
@@ -1260,7 +1338,8 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1270,7 +1349,47 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         allow_self_payment: true,
         dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_payment_expiry_is_in_right_order() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 1, Some(500), Some(2));
+    network.add_edge(1, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+
+    let node3 = network.keys[3];
+
+    let command = SendPaymentCommand {
+        target_pubkey: Some(node3.into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: false,
+        dry_run: false,
+    };
+    let payment_data = SendPaymentData::new(command);
+    assert!(payment_data.is_ok());
+
+    let route = network.graph.build_route(payment_data.unwrap());
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
+    // we set 11 as tlc expiry delta in the test
+    assert_eq!(expiries.len(), 4);
+    assert_eq!(expiries[0] - expiries[1], 11);
+    assert_eq!(expiries[1] - expiries[2], 11);
+    assert_eq!(expiries[3], 0);
+    let expected_timestamp = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    assert!(expiries[2] <= expected_timestamp);
 }

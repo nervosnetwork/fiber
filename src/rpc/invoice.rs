@@ -1,3 +1,4 @@
+use crate::fiber::config::MIN_TLC_EXPIRY_DELTA;
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::{U128Hex, U64Hex};
 use crate::fiber::types::{Hash256, Privkey};
@@ -29,9 +30,6 @@ pub(crate) struct NewInvoiceParams {
     expiry: Option<u64>,
     /// The fallback address of the invoice.
     fallback_address: Option<String>,
-    /// The final CLTV of the invoice.
-    #[serde_as(as = "Option<U64Hex>")]
-    final_cltv: Option<u64>,
     /// The final HTLC timeout of the invoice.
     #[serde_as(as = "Option<U64Hex>")]
     final_expiry_delta: Option<u64>,
@@ -180,6 +178,16 @@ where
             invoice_builder = invoice_builder.fallback_address(fallback_address);
         };
         if let Some(final_expiry_delta) = params.final_expiry_delta {
+            if final_expiry_delta < MIN_TLC_EXPIRY_DELTA {
+                return Err(ErrorObjectOwned::owned(
+                    CALL_EXECUTION_FAILED_CODE,
+                    format!(
+                        "final_expiry_delta must be greater than or equal to {}",
+                        MIN_TLC_EXPIRY_DELTA
+                    ),
+                    Some(params),
+                ));
+            }
             invoice_builder = invoice_builder.final_expiry_delta(final_expiry_delta);
         };
         if let Some(udt_type_script) = &params.udt_type_script {
