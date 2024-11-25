@@ -2109,3 +2109,74 @@ async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
         .unwrap()
         .contains("Local balance is not enough to pay the fee"));
 }
+
+#[tokio::test]
+async fn test_shutdown_channel_with_different_size_shutdown_script() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args(vec![0u8; 19].pack()).build(),
+                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("successfully shutdown channel");
+
+    let node_a_shutdown_tx_hash = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+                println!(
+                    "Shutdown tx ({:?}) from {:?} for channel {:?} received",
+                    &tx_hash, &peer_id, channel_id
+                );
+                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                Some(tx_hash.clone())
+            }
+            _ => None,
+        })
+        .await;
+
+    let node_b_shutdown_tx_hash = node_b
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelClosed(peer_id, channel_id, tx_hash) => {
+                println!(
+                    "Shutdown tx ({:?}) from {:?} for channel {:?} received",
+                    &tx_hash, &peer_id, channel_id
+                );
+                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                Some(tx_hash.clone())
+            }
+            _ => None,
+        })
+        .await;
+
+    assert_eq!(node_a_shutdown_tx_hash, node_b_shutdown_tx_hash);
+
+    assert_eq!(
+        node_a.trace_tx_hash(node_a_shutdown_tx_hash.clone()).await,
+        Status::Committed
+    );
+    assert_eq!(
+        node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
+        Status::Committed
+    );
+}
