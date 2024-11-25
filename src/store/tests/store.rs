@@ -355,10 +355,7 @@ fn test_store_payment_session() {
 
 #[test]
 fn test_store_payment_history() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("payment_history_store");
-    let mut store = Store::new(path).expect("created store failed");
-
+    let mut store = generate_store();
     let pubkey = gen_rand_public_key();
     let target = gen_rand_public_key();
     let result = TimedResult {
