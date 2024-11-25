@@ -1,5 +1,4 @@
 use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
-use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::{U128Hex, U32Hex, U64Hex};
@@ -225,7 +224,7 @@ where
 #[async_trait]
 impl<S> GraphRpcServer for GraphRpcServerImpl<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     async fn graph_nodes(
         &self,
