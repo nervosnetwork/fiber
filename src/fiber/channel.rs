@@ -488,7 +488,6 @@ where
                     assert!(tlc_count == state.tlcs.len());
                     let error_detail = self.get_tlc_detail_error(state, &e).await;
                     if state.get_received_tlc(tlc_id).is_none() {
-                        eprintln!("Sending RemoveTlc message to peer due to error: {:?}", e);
                         self.network
                             .send_message(NetworkActorMessage::new_command(
                                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -715,7 +714,6 @@ where
 
     async fn try_to_send_remove_tlcs(&self, state: &mut ChannelActorState) {
         let tlc_infos = state.get_tlcs_for_sending_remove_tlcs();
-        eprintln!("try to send remove tlcs: {:?}", tlc_infos);
         for tlc_info in tlc_infos {
             assert!(tlc_info.is_offered());
             let remove_reason = tlc_info.removed_at.expect("expect remove_at").1;
@@ -3355,6 +3353,7 @@ impl ChannelActorState {
             .values()
             .filter(|tlc| {
                 tlc.is_offered()
+                    && tlc.creation_confirmed_at.is_some()
                     && tlc.removed_at.is_some()
                     && tlc.tlc.previous_tlc.is_some()
                     && tlc.relay_status == TlcRelayStatus::WaitingRemove

@@ -3,14 +3,13 @@
 // we only use direct channel probability now.
 
 use super::{
-    channel::ChannelActorStateStore,
     graph::{NetworkGraphStateStore, SessionRouteNode},
     types::{Pubkey, TlcErr},
 };
 use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
 use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,14 +47,8 @@ pub(crate) struct InternalPairResult {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InternalResult {
     pub pairs: HashMap<(OutPoint, Direction), InternalPairResult>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     pub fail_node: Option<Pubkey>,
-}
-
-fn current_time() -> u128 {
-    std::time::UNIX_EPOCH
-        .elapsed()
-        .expect("unix epoch")
-        .as_millis()
 }
 
 pub(crate) fn output_direction(node1: Pubkey, node2: Pubkey) -> (Direction, Direction) {
@@ -76,13 +69,24 @@ impl InternalResult {
         amount: u128,
         success: bool,
     ) {
-        let pair = InternalPairResult {
-            success,
-            time,
-            amount,
-        };
         let (direction, _) = output_direction(node_1, node_2);
-        self.pairs.insert((channel, direction), pair);
+        self.add_node_channel_map(node_1, channel.clone());
+        self.add_node_channel_map(node_2, channel.clone());
+        self.pairs.insert(
+            (channel, direction),
+            InternalPairResult {
+                success,
+                time,
+                amount,
+            },
+        );
+    }
+
+    fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
     }
 
     pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey, channel: OutPoint) {
@@ -294,7 +298,7 @@ impl InternalResult {
 #[derive(Debug, Clone)]
 pub(crate) struct PaymentHistory<S> {
     pub inner: HashMap<(OutPoint, Direction), TimedResult>,
-    pub failed_nodes: HashMap<Pubkey, u128>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u64,
     pub bimodal_scale_msat: f64,
@@ -307,13 +311,13 @@ pub(crate) struct PaymentHistory<S> {
 
 impl<S> PaymentHistory<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u64>, store: S) -> Self {
         let mut s = PaymentHistory {
             source,
             inner: HashMap::new(),
-            failed_nodes: HashMap::new(),
+            nodes_to_channel_map: HashMap::new(),
             min_fail_relax_interval: min_fail_relax_interval
                 .unwrap_or(DEFAULT_MIN_FAIL_RELAX_INTERVAL),
             bimodal_scale_msat: DEFAULT_BIMODAL_SCALE_SHANNONS,
@@ -326,6 +330,7 @@ where
     #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         self.inner.clear();
+        self.nodes_to_channel_map.clear();
     }
 
     pub(crate) fn add_result(
@@ -343,10 +348,21 @@ where
             .insert_payment_history_result(channel, direction, result);
     }
 
+    fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
+    }
+
     pub(crate) fn load_from_store(&mut self) {
         let results = self.store.get_payment_history_result();
         for (channel, direction, result) in results.into_iter() {
             self.inner.insert((channel, direction), result);
+        }
+        for channel in self.store.get_channels(None).iter() {
+            self.add_node_channel_map(channel.node1(), channel.out_point());
+            self.add_node_channel_map(channel.node2(), channel.out_point());
         }
     }
 
@@ -395,7 +411,11 @@ where
     }
 
     pub(crate) fn apply_internal_result(&mut self, result: InternalResult) {
-        let InternalResult { pairs, fail_node } = result;
+        let InternalResult {
+            pairs,
+            fail_node,
+            nodes_to_channel_map,
+        } = result;
         for ((channel, direction), pair_result) in pairs.into_iter() {
             self.apply_pair_result(
                 channel,
@@ -405,8 +425,32 @@ where
                 pair_result.time,
             );
         }
+        for (node, channels) in nodes_to_channel_map.into_iter() {
+            self.nodes_to_channel_map
+                .entry(node)
+                .or_default()
+                .extend(channels);
+        }
         if let Some(fail_node) = fail_node {
-            self.failed_nodes.insert(fail_node, current_time());
+            let channels = self
+                .nodes_to_channel_map
+                .get(&fail_node)
+                .expect("channels not found");
+            let pairs: Vec<(OutPoint, Direction)> = self
+                .inner
+                .iter()
+                .flat_map(|((outpoint, direction), _)| {
+                    if channels.contains(outpoint) {
+                        Some((outpoint.clone(), *direction))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for (channel, direction) in pairs.into_iter() {
+                self.apply_pair_result(channel, direction, 0, false, now_timestamp_as_millis_u64());
+            }
         }
     }
 

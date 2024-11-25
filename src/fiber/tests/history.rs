@@ -435,6 +435,149 @@ fn test_history_apply_internal_result_fail_node() {
 }
 
 #[test]
+fn test_history_fail_node_with_multiple_channels() {
+    let mut internal_result = InternalResult::default();
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let node1 = generate_pubkey();
+    let node2 = generate_pubkey();
+    let node3 = generate_pubkey();
+    let channel_outpoint1 = gen_rand_outpoint();
+    let channel_outpoint2 = gen_rand_outpoint();
+    let channel_outpoint3 = gen_rand_outpoint();
+    let channel_outpoint4 = gen_rand_outpoint();
+
+    let route1 = vec![
+        SessionRouteNode {
+            pubkey: node1,
+            amount: 10,
+            channel_outpoint: channel_outpoint1.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node2,
+            amount: 5,
+            channel_outpoint: channel_outpoint2.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node3,
+            amount: 3,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let route2 = vec![
+        SessionRouteNode {
+            pubkey: node1,
+            amount: 10,
+            channel_outpoint: channel_outpoint3.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node2,
+            amount: 5,
+            channel_outpoint: channel_outpoint4.clone(),
+        },
+        SessionRouteNode {
+            pubkey: node3,
+            amount: 3,
+            channel_outpoint: OutPoint::default(),
+        },
+    ];
+
+    let (direction1, rev_direction1) = output_direction(node1, node2);
+    let (direction2, rev_direction2) = output_direction(node2, node3);
+
+    internal_result.succeed_range_pairs(&route1, 0, 2);
+    history.apply_internal_result(internal_result.clone());
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint1, direction1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            fail_time: 0,
+            success_amount: 10,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint2, direction2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            fail_time: 0,
+            success_amount: 5,
+            ..
+        })
+    ));
+
+    internal_result.fail_node(&route2, 1);
+    assert_eq!(internal_result.pairs.len(), 6);
+    history.apply_internal_result(internal_result);
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint1, direction1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint2, direction2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint1, rev_direction1),
+        None,
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint2, rev_direction2),
+        None,
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint3, direction1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint4, direction2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint3, rev_direction1),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        history.get_result(&channel_outpoint4, rev_direction2),
+        Some(&TimedResult {
+            fail_amount: 0,
+            success_amount: 0,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn test_history_interal_success_fail() {
     let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
     let from = generate_pubkey();

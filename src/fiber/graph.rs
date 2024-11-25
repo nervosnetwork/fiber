@@ -1,4 +1,3 @@
-use super::channel::ChannelActorStateStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
@@ -184,7 +183,7 @@ pub struct PathEdge {
 
 impl<S> NetworkGraph<S>
 where
-    S: ChannelActorStateStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
