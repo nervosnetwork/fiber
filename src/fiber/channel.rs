@@ -4301,6 +4301,14 @@ impl ChannelActorState {
                 .local_shutdown_info
                 .as_mut()
                 .expect("local shudown info exists");
+            let remote_shutdown_info = self
+                .remote_shutdown_info
+                .as_ref()
+                .expect("remote shudown info exists");
+            let shutdown_scripts = (
+                local_shutdown_info.close_script.clone(),
+                remote_shutdown_info.close_script.clone(),
+            );
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
@@ -4322,12 +4330,7 @@ impl ChannelActorState {
                 }
             };
 
-            if let Some(remote_shutdown_signature) = self
-                .remote_shutdown_info
-                .as_ref()
-                .expect("remote shutdown info exists")
-                .signature
-            {
+            if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
                         [local_shutdown_signature, remote_shutdown_signature],
@@ -4335,13 +4338,7 @@ impl ChannelActorState {
                     )?;
                 assert_eq!(
                     tx.data().serialized_size_in_block(),
-                    shutdown_tx_size(
-                        &self.funding_udt_type_script,
-                        (
-                            self.get_local_shutdown_script(),
-                            self.get_remote_shutdown_script()
-                        )
-                    )
+                    shutdown_tx_size(&self.funding_udt_type_script, shutdown_scripts)
                 );
 
                 self.update_state(ChannelState::Closed(CloseFlags::COOPERATIVE));
