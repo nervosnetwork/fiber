@@ -1,6 +1,4 @@
-use crate::fiber::history::TimedResult;
 use crate::fiber::types::Pubkey;
-use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -8,32 +6,25 @@ use crate::{
         get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
     },
     ckb::CkbChainMessage,
-    fiber::channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-    fiber::graph::NetworkGraphStateStore,
-    fiber::graph::PaymentSession,
-    fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo},
+    fiber::graph::NetworkGraph,
     fiber::network::{
         NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
-        NetworkActorStateStore, PersistentNetworkActorState,
     },
     fiber::types::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
-use ckb_jsonrpc_types::JsonBytes;
-use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{Actor, ActorRef};
 use rand::Rng;
 use secp256k1::Keypair;
 use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
 use std::{
-    collections::HashMap,
     env,
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir as OldTempDir;
@@ -498,226 +489,6 @@ impl NetworkNode {
         tx_hash: Byte32,
     ) -> Result<TransactionView, anyhow::Error> {
         get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct MemoryStore {
-    network_actor_sate_map: Arc<RwLock<HashMap<PeerId, PersistentNetworkActorState>>>,
-    channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
-    channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
-    nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
-    payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
-    invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
-    invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
-    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, Pubkey), TimedResult>>>,
-}
-
-impl NetworkActorStateStore for MemoryStore {
-    fn get_network_actor_state(&self, id: &PeerId) -> Option<PersistentNetworkActorState> {
-        self.network_actor_sate_map.read().unwrap().get(id).cloned()
-    }
-
-    fn insert_network_actor_state(&self, id: &PeerId, state: PersistentNetworkActorState) {
-        self.network_actor_sate_map
-            .write()
-            .unwrap()
-            .insert(id.clone(), state);
-    }
-}
-
-impl NetworkGraphStateStore for MemoryStore {
-    fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo> {
-        if let Some(outpoint) = outpoint {
-            let mut res = vec![];
-
-            if let Some(channel) = self.channels_map.read().unwrap().get(&outpoint) {
-                res.push(channel.clone());
-            }
-            res
-        } else {
-            self.channels_map
-                .read()
-                .unwrap()
-                .values()
-                .cloned()
-                .collect()
-        }
-    }
-
-    fn insert_channel(&self, channel: ChannelInfo) {
-        self.channels_map
-            .write()
-            .unwrap()
-            .insert(channel.out_point(), channel);
-    }
-
-    fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
-        if let Some(node_id) = node_id {
-            let mut res = vec![];
-
-            if let Some(node) = self.nodes_map.read().unwrap().get(&node_id) {
-                res.push(node.clone());
-            }
-            res
-        } else {
-            self.nodes_map.read().unwrap().values().cloned().collect()
-        }
-    }
-
-    fn get_nodes_with_params(
-        &self,
-        _limit: usize,
-        _after: Option<JsonBytes>,
-        _node_id: Option<Pubkey>,
-    ) -> (Vec<NodeInfo>, JsonBytes) {
-        unimplemented!("currently not used in mock store");
-    }
-
-    fn get_channels_with_params(
-        &self,
-        _limit: usize,
-        _after: Option<JsonBytes>,
-        _ooutpoint: Option<OutPoint>,
-    ) -> (Vec<ChannelInfo>, JsonBytes) {
-        unimplemented!("currently not used in mock store");
-    }
-
-    fn insert_node(&self, node: NodeInfo) {
-        self.nodes_map
-            .write()
-            .unwrap()
-            .insert(node.node_id.clone(), node);
-    }
-
-    fn get_payment_session(&self, id: Hash256) -> Option<PaymentSession> {
-        self.payment_sessions.read().unwrap().get(&id).cloned()
-    }
-
-    fn insert_payment_session(&self, session: PaymentSession) {
-        self.payment_sessions
-            .write()
-            .unwrap()
-            .insert(session.payment_hash(), session);
-    }
-
-    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
-        self.payment_hisotry
-            .write()
-            .unwrap()
-            .insert((from, target), result);
-    }
-
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
-        self.payment_hisotry
-            .read()
-            .unwrap()
-            .iter()
-            .map(|((from, target), result)| (from.clone(), target.clone(), result.clone()))
-            .collect()
-    }
-}
-
-impl ChannelActorStateStore for MemoryStore {
-    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
-        self.channel_actor_state_map
-            .read()
-            .unwrap()
-            .get(id)
-            .cloned()
-    }
-
-    fn insert_channel_actor_state(&self, state: ChannelActorState) {
-        self.channel_actor_state_map
-            .write()
-            .unwrap()
-            .insert(state.id, state);
-    }
-
-    fn delete_channel_actor_state(&self, id: &Hash256) {
-        self.channel_actor_state_map.write().unwrap().remove(id);
-    }
-
-    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
-        self.channel_actor_state_map
-            .read()
-            .unwrap()
-            .values()
-            .filter_map(|state| {
-                if peer_id == &state.get_remote_peer_id() {
-                    Some(state.id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
-        let map = self.channel_actor_state_map.read().unwrap();
-        let values = map.values();
-        match peer_id {
-            Some(peer_id) => values
-                .filter_map(|state| {
-                    if peer_id == state.get_remote_peer_id() {
-                        Some((state.get_remote_peer_id(), state.id, state.state.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            None => values
-                .map(|state| {
-                    (
-                        state.get_remote_peer_id(),
-                        state.id.clone(),
-                        state.state.clone(),
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
-impl InvoiceStore for MemoryStore {
-    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
-        self.invoice_store.read().unwrap().get(id).cloned()
-    }
-
-    fn insert_invoice(
-        &self,
-        invoice: CkbInvoice,
-        preimage: Option<Hash256>,
-    ) -> Result<(), InvoiceError> {
-        let id = invoice.payment_hash();
-        if let Some(preimage) = preimage {
-            self.invoice_hash_to_preimage
-                .write()
-                .unwrap()
-                .insert(*id, preimage);
-        }
-        self.invoice_store.write().unwrap().insert(*id, invoice);
-        Ok(())
-    }
-
-    fn get_invoice_preimage(&self, hash: &Hash256) -> Option<Hash256> {
-        self.invoice_hash_to_preimage
-            .read()
-            .unwrap()
-            .get(hash)
-            .cloned()
-    }
-
-    fn get_invoice_status(&self, _id: &Hash256) -> Option<crate::invoice::CkbInvoiceStatus> {
-        unimplemented!()
-    }
-
-    fn update_invoice_status(
-        &self,
-        _id: &Hash256,
-        _status: crate::invoice::CkbInvoiceStatus,
-    ) -> Result<(), InvoiceError> {
-        unimplemented!()
     }
 }
 
