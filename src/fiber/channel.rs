@@ -15,7 +15,10 @@ use crate::{
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{Since, SinceType};
 use ckb_types::{
-    core::{EpochNumberWithFraction, FeeRate, TransactionBuilder, TransactionView},
+    core::{
+        Capacity, CapacityError, EpochNumberWithFraction, FeeRate, TransactionBuilder,
+        TransactionView,
+    },
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
@@ -53,7 +56,6 @@ use crate::{
         FundingRequest,
     },
     fiber::{
-        config::{DEFAULT_UDT_MINIMAL_CKB_AMOUNT, MIN_OCCUPIED_CAPACITY},
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
         network::{emit_service_event, sign_network_message},
         types::{AnnouncementSignatures, Shutdown},
@@ -62,11 +64,9 @@ use crate::{
 };
 
 use super::{
-    config::{
-        DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA,
-        MIN_UDT_OCCUPIED_CAPACITY,
-    },
-    fee::{calculate_shutdown_tx_fee, default_minimal_ckb_amount},
+    config::DEFAULT_MIN_SHUTDOWN_FEE,
+    config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
+    fee::calculate_shutdown_tx_fee,
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
     network::FiberMessageWithPeerId,
@@ -400,7 +400,9 @@ where
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
+                self.try_to_forward_pending_tlc(state).await;
                 self.try_to_settle_down_tlc(state);
+                self.try_to_send_remove_tlcs(state).await;
                 Ok(())
             }
             FiberChannelMessage::TxSignatures(tx_signatures) => {
@@ -471,72 +473,51 @@ where
                 let flags = flags | AwaitingChannelReadyFlags::THEIR_CHANNEL_READY;
                 state.update_state(ChannelState::AwaitingChannelReady(flags));
                 state.maybe_channel_is_ready(&self.network).await;
-
                 Ok(())
             }
             FiberChannelMessage::AddTlc(add_tlc) => {
                 let tlc_id = add_tlc.tlc_id;
                 let tlc_count = state.tlcs.len();
-                match self
-                    .handle_add_tlc_peer_message(state, add_tlc.clone())
-                    .await
-                {
-                    Ok((added_tlc_id, peeled_packet_bytes)) => {
-                        if let Some(forward_packet_bytes) = peeled_packet_bytes {
-                            // `handle_forward_onion_packet` will handle the case where forwarding TLC fails
-                            // `remove_tlc` will be sent to the peer and proper error handling will be done
-                            self.handle_forward_onion_packet(
-                                state,
-                                forward_packet_bytes,
-                                added_tlc_id.into(),
-                            )
-                            .await?;
-                        }
-                        Ok(())
+                if let Err(e) = self.handle_add_tlc_peer_message(state, add_tlc).await {
+                    // we assume that TLC was not inserted into our state,
+                    // so we can safely send RemoveTlc message to the peer
+                    // note this new add_tlc may be trying to add a duplicate tlc,
+                    // so we use tlc count to make sure no new tlc was added
+                    // and only send RemoveTlc message to peer if the TLC is not in our state
+                    error!("Error handling AddTlc message: {:?}", e);
+                    assert!(tlc_count == state.tlcs.len());
+                    let error_detail = self.get_tlc_detail_error(state, &e).await;
+                    if state.get_received_tlc(tlc_id).is_none() {
+                        self.network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                                    state.get_remote_peer_id(),
+                                    FiberMessage::remove_tlc(RemoveTlc {
+                                        channel_id: state.get_id(),
+                                        tlc_id,
+                                        reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                            error_detail,
+                                        )),
+                                    }),
+                                )),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
-                    Err(e) => {
-                        // we assume that TLC was not inserted into our state,
-                        // so we can safely send RemoveTlc message to the peer
-                        // note this new add_tlc may be trying to add a duplicate tlc,
-                        // so we use tlc count to make sure no new tlc was added
-                        // and only send RemoveTlc message to peer if the TLC is not in our state
-                        error!("Error handling AddTlc message: {:?}", e);
-                        assert!(tlc_count == state.tlcs.len());
-                        let error_detail = self.get_tlc_detail_error(state, &e).await;
-                        if state.get_received_tlc(tlc_id).is_none() {
-                            self.network
-                                .send_message(NetworkActorMessage::new_command(
-                                    NetworkActorCommand::SendFiberMessage(
-                                        FiberMessageWithPeerId::new(
-                                            state.get_remote_peer_id(),
-                                            FiberMessage::remove_tlc(RemoveTlc {
-                                                channel_id: state.get_id(),
-                                                tlc_id,
-                                                reason: RemoveTlcReason::RemoveTlcFail(
-                                                    TlcErrPacket::new(error_detail),
-                                                ),
-                                            }),
-                                        ),
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        }
-                        Err(e)
-                    }
+                    return Err(e);
                 }
+                Ok(())
             }
             FiberChannelMessage::RemoveTlc(remove_tlc) => {
                 state.check_for_tlc_update(None)?;
                 let channel_id = state.get_id();
 
-                let tlc_details = state.remove_tlc_with_reason(
-                    TLCId::Offered(remove_tlc.tlc_id),
-                    &remove_tlc.reason,
-                )?;
+                let remove_reason = remove_tlc.reason.clone();
+                let tlc_details = state
+                    .remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_reason)?;
                 if let (
                     Some(ref udt_type_script),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
-                ) = (state.funding_udt_type_script.clone(), &remove_tlc.reason)
+                ) = (state.funding_udt_type_script.clone(), &remove_reason)
                 {
                     let mut tlc = tlc_details.tlc.clone();
                     tlc.payment_preimage = Some(*payment_preimage);
@@ -548,39 +529,14 @@ where
                             script: udt_type_script.clone(),
                         });
                 }
-                if let Some((previous_channel_id, previous_tlc)) = tlc_details.tlc.previous_tlc {
-                    assert!(previous_tlc.is_received());
-                    info!(
-                        "begin to remove tlc from previous channel: {:?}",
-                        &previous_tlc
-                    );
-                    assert!(previous_channel_id != state.get_id());
-                    let (send, recv) = oneshot::channel::<Result<(), String>>();
-                    let port = RpcReplyPort::from(send);
-                    self.network
-                        .send_message(NetworkActorMessage::new_command(
-                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id: previous_channel_id,
-                                command: ChannelCommand::RemoveTlc(
-                                    RemoveTlcCommand {
-                                        id: previous_tlc.into(),
-                                        reason: remove_tlc.reason.clone(),
-                                    },
-                                    port,
-                                ),
-                            }),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let res = recv.await.expect("remove tlc replied");
-                    info!("remove tlc from previous channel: {:?}", &res);
-                } else {
+                if tlc_details.tlc.previous_tlc.is_none() {
                     // only the original sender of the TLC should send `TlcRemoveReceived` event
                     // because only the original sender cares about the TLC event to settle the payment
                     self.network
                         .send_message(NetworkActorMessage::new_event(
                             NetworkActorEvent::TlcRemoveReceived(
                                 tlc_details.tlc.payment_hash,
-                                remove_tlc,
+                                remove_reason,
                             ),
                         ))
                         .expect("myself alive");
@@ -745,6 +701,54 @@ where
         )
     }
 
+    async fn try_to_forward_pending_tlc(&self, state: &mut ChannelActorState) {
+        let tlc_infos = state.get_tlcs_for_forwarding();
+        for info in tlc_infos {
+            assert!(info.tlc.is_received());
+            let onion_packet = info.tlc.onion_packet;
+            let _ = self
+                .handle_forward_onion_packet(state, onion_packet, info.tlc.id.into())
+                .await;
+        }
+    }
+
+    async fn try_to_send_remove_tlcs(&self, state: &mut ChannelActorState) {
+        let tlc_infos = state.get_tlcs_for_sending_remove_tlcs();
+        for tlc_info in tlc_infos {
+            assert!(tlc_info.is_offered());
+            let remove_reason = tlc_info.removed_at.expect("expect remove_at").1;
+            if let Some((previous_channel_id, previous_tlc)) = tlc_info.tlc.previous_tlc {
+                assert!(previous_tlc.is_received());
+                info!(
+                    "begin to remove tlc from previous channel: {:?}",
+                    &previous_tlc
+                );
+                assert!(previous_channel_id != state.get_id());
+                let (send, recv) = oneshot::channel::<Result<(), String>>();
+                let port = RpcReplyPort::from(send);
+                self.network
+                    .send_message(NetworkActorMessage::new_command(
+                        NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                            channel_id: previous_channel_id,
+                            command: ChannelCommand::RemoveTlc(
+                                RemoveTlcCommand {
+                                    id: previous_tlc.into(),
+                                    reason: remove_reason.clone(),
+                                },
+                                port,
+                            ),
+                        }),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                let res = recv.await.expect("remove tlc replied");
+                info!("remove tlc from previous channel: {:?}", &res);
+            } else {
+                unreachable!("remove tlc without previous tlc");
+            }
+            state.set_offered_tlc_removed(tlc_info.tlc.id.into());
+        }
+    }
+
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState) {
         let tlcs = state.get_tlcs_for_settle_down();
         let mut update_invoice_payment_hash = false;
@@ -808,7 +812,7 @@ where
         &self,
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
-    ) -> Result<(TLCId, Option<Vec<u8>>), ProcessingChannelError> {
+    ) -> Result<(), ProcessingChannelError> {
         state.check_for_tlc_update(Some(add_tlc.amount))?;
         state.check_tlc_expiry(add_tlc.expiry)?;
 
@@ -899,7 +903,8 @@ where
             }
         }
 
-        let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage)?;
+        let tlc =
+            state.create_inbounding_tlc(add_tlc.clone(), preimage, peeled_packet_bytes.clone())?;
         state.insert_tlc(tlc.clone())?;
         if let Some(payment_hash) = update_invoice_payment_hash {
             self.store
@@ -921,7 +926,7 @@ where
         // The peer may falsely believe that we have already processed this message,
         // while we have crashed. We need a way to make sure that the peer will resend
         // this message, and our processing of this message is idempotent.
-        Ok((tlc.id, peeled_packet_bytes))
+        Ok(())
     }
 
     async fn handle_forward_onion_packet(
@@ -965,6 +970,7 @@ where
                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             let _ = recv.await.expect("RemoveTlc command replied");
         }
+        state.set_received_tlc_forwarded(added_tlc_id);
         Ok(())
     }
 
@@ -1507,27 +1513,6 @@ where
         Ok(())
     }
 
-    fn get_funding_and_reserved_amount(
-        &self,
-        funding_amount: u128,
-        udt_type_script: &Option<Script>,
-    ) -> Result<(u128, u64), ProcessingChannelError> {
-        match udt_type_script {
-            Some(_) => Ok((funding_amount, DEFAULT_UDT_MINIMAL_CKB_AMOUNT)),
-            _ => {
-                let reserved_ckb_amount = DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT;
-                if funding_amount < reserved_ckb_amount.into() {
-                    return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "The value of the channel should be greater than the reserved amount: {}",
-                        reserved_ckb_amount
-                    )));
-                }
-                let funding_amount = funding_amount - reserved_ckb_amount as u128;
-                Ok((funding_amount, reserved_ckb_amount))
-            }
-        }
-    }
-
     fn get_invoice_status(&self, invoice: &CkbInvoice) -> CkbInvoiceStatus {
         match self
             .store
@@ -1633,15 +1618,7 @@ where
                     *max_tlc_value_in_flight,
                     *max_tlc_number_in_flight,
                 );
-
-                state.check_ckb_params(vec![
-                    "local_reserved_ckb_amount",
-                    "remote_reserved_ckb_amount",
-                    "commitment_fee_rate",
-                    "commitment_delay_epoch",
-                    "funding_fee_rate",
-                    "max_tlc_number_in_flight",
-                ])?;
+                state.check_accept_channel_parameters()?;
 
                 let commitment_number = INITIAL_COMMITMENT_NUMBER;
 
@@ -1710,15 +1687,18 @@ where
                     commitment_fee_rate.unwrap_or(DEFAULT_COMMITMENT_FEE_RATE);
                 let funding_fee_rate = funding_fee_rate.unwrap_or(DEFAULT_FEE_RATE);
 
-                let (funding_amount, reserved_ckb_amount) =
-                    self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
+                let (to_local_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
+                    funding_amount,
+                    &shutdown_script,
+                    &funding_udt_type_script,
+                )?;
 
                 let mut channel = ChannelActorState::new_outbound_channel(
                     public_channel_info,
                     &seed,
                     self.get_local_pubkey(),
                     self.get_remote_pubkey(),
-                    funding_amount,
+                    to_local_amount,
                     reserved_ckb_amount,
                     commitment_fee_rate,
                     commitment_delay_epoch
@@ -1735,13 +1715,7 @@ where
                     max_tlc_number_in_flight.unwrap_or(DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT),
                 );
 
-                channel.check_ckb_params(vec![
-                    "commitment_fee_rate",
-                    "commitment_delay_epoch",
-                    "funding_fee_rate",
-                    "local_reserved_ckb_amount",
-                    "max_tlc_number_in_flight",
-                ])?;
+                channel.check_open_channel_parameters()?;
 
                 let channel_flags = if public {
                     ChannelFlags::PUBLIC
@@ -2095,8 +2069,8 @@ pub struct ChannelActorState {
     // The remote and local lock script for close channel, they are setup during the channel establishment.
     #[serde_as(as = "Option<EntityHex>")]
     pub remote_shutdown_script: Option<Script>,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub local_shutdown_script: Option<Script>,
+    #[serde_as(as = "EntityHex")]
+    pub local_shutdown_script: Script,
 
     pub previous_remote_nonce: Option<PubNonce>,
     pub remote_nonce: Option<PubNonce>,
@@ -2199,6 +2173,8 @@ pub enum ProcessingChannelError {
     RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
+    #[error("Capacity error: {0}")]
+    CapacityError(#[from] CapacityError),
     #[error("Failed to spawn actor: {0}")]
     SpawnErr(#[from] SpawnErr),
     #[error("Musig2 VerifyError: {0}")]
@@ -2380,6 +2356,57 @@ pub fn get_commitment_secret(commitment_seed: &[u8; 32], commitment_number: u64)
 
 pub fn get_commitment_point(commitment_seed: &[u8; 32], commitment_number: u64) -> Pubkey {
     Privkey::from(&get_commitment_secret(commitment_seed, commitment_number)).pubkey()
+}
+
+pub(crate) fn get_funding_and_reserved_amount(
+    total_amount: u128,
+    shutdown_script: &Script,
+    udt_type_script: &Option<Script>,
+) -> Result<(u128, u64), ProcessingChannelError> {
+    let reserved_capacity = reserved_capacity(shutdown_script, udt_type_script)?.as_u64();
+    if udt_type_script.is_none() {
+        if total_amount < reserved_capacity as u128 {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The funding amount ({}) should be greater than or equal to {}",
+                total_amount, reserved_capacity
+            )));
+        }
+        if total_amount >= u64::MAX as u128 {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "The funding amount ({}) should be less than {}",
+                total_amount,
+                u64::MAX
+            )));
+        }
+        Ok((total_amount - reserved_capacity as u128, reserved_capacity))
+    } else {
+        Ok((total_amount, reserved_capacity))
+    }
+}
+
+pub(crate) fn reserved_capacity(
+    shutdown_script: &Script,
+    udt_type_script: &Option<Script>,
+) -> Result<Capacity, CapacityError> {
+    occupied_capacity(shutdown_script, udt_type_script)?
+        .safe_add(Capacity::shannons(DEFAULT_MIN_SHUTDOWN_FEE))
+}
+
+pub(crate) fn occupied_capacity(
+    shutdown_script: &Script,
+    udt_type_script: &Option<Script>,
+) -> Result<Capacity, CapacityError> {
+    let cell_output = CellOutput::new_builder()
+        .lock(shutdown_script.clone())
+        .type_(udt_type_script.clone().pack())
+        .build();
+
+    if udt_type_script.is_some() {
+        // 16 bytes for udt data
+        cell_output.occupied_capacity(Capacity::bytes(16)?)
+    } else {
+        cell_output.occupied_capacity(Capacity::bytes(0)?)
+    }
 }
 
 impl From<&ChannelActorState> for Musig2SignContext {
@@ -2759,7 +2786,7 @@ impl ChannelActorState {
             id: channel_id,
             tlc_ids: Default::default(),
             tlcs: Default::default(),
-            local_shutdown_script: Some(local_shutdown_script),
+            local_shutdown_script: local_shutdown_script,
             local_channel_public_keys: local_base_pubkeys,
             signer,
             remote_channel_public_keys: Some(remote_pubkeys),
@@ -2791,7 +2818,7 @@ impl ChannelActorState {
         seed: &[u8],
         local_pubkey: Pubkey,
         remote_pubkey: Pubkey,
-        value: u128,
+        to_local_amount: u128,
         local_reserved_ckb_amount: u64,
         commitment_fee_rate: u64,
         commitment_delay_epoch: u64,
@@ -2813,7 +2840,7 @@ impl ChannelActorState {
             funding_tx_confirmed_at: None,
             funding_udt_type_script,
             is_acceptor: false,
-            to_local_amount: value,
+            to_local_amount,
             to_remote_amount: 0,
             commitment_fee_rate,
             commitment_delay_epoch,
@@ -2830,7 +2857,7 @@ impl ChannelActorState {
             remote_nonce: None,
             commitment_numbers: Default::default(),
             remote_commitment_points: vec![],
-            local_shutdown_script: Some(shutdown_script),
+            local_shutdown_script: shutdown_script,
             remote_shutdown_script: None,
             local_shutdown_info: None,
             remote_shutdown_info: None,
@@ -2843,105 +2870,103 @@ impl ChannelActorState {
         }
     }
 
-    fn check_reserved_ckb_amount(
-        &self,
-        field: &'static str,
-        reserved_ckb_amount: u64,
-    ) -> ProcessingChannelResult {
-        let minimal_reserved_amount =
-            default_minimal_ckb_amount(self.funding_udt_type_script.is_some());
-        if reserved_ckb_amount < minimal_reserved_amount {
+    // TODO: this fn is duplicated with NetworkActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
+    fn check_open_channel_parameters(&self) -> ProcessingChannelResult {
+        let udt_type_script = &self.funding_udt_type_script;
+
+        // reserved_ckb_amount
+        let occupied_capacity =
+            occupied_capacity(&self.local_shutdown_script, udt_type_script)?.as_u64();
+        if self.local_reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "The {} should be greater than {}",
-                field, minimal_reserved_amount
+                "Reserved CKB amount {} is less than {}",
+                self.local_reserved_ckb_amount, occupied_capacity,
             )));
         }
+
+        // funding_fee_rate
+        if self.funding_fee_rate < DEFAULT_FEE_RATE {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Funding fee rate is less than {}",
+                DEFAULT_FEE_RATE,
+            )));
+        }
+
+        // commitment_fee_rate
+        if self.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee rate is less than {}",
+                DEFAULT_COMMITMENT_FEE_RATE,
+            )));
+        }
+        let commitment_fee = calculate_commitment_tx_fee(self.commitment_fee_rate, udt_type_script);
+        let reserved_fee = self.local_reserved_ckb_amount - occupied_capacity;
+        if commitment_fee * 2 > reserved_fee {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, self.commitment_fee_rate, reserved_fee
+            )));
+        }
+
+        // commitment_delay_epoch
+        let epoch = EpochNumberWithFraction::from_full_value_unchecked(self.commitment_delay_epoch);
+        if !epoch.is_well_formed() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is not a valid value",
+                self.commitment_delay_epoch,
+            )));
+        }
+
+        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch < min {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is less than the minimal value {}",
+                epoch, min
+            )));
+        }
+
+        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch > max {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is greater than the maximal value {}",
+                epoch, max
+            )));
+        }
+
+        // max_tlc_number_in_flight
+        if self.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Max TLC number in flight {} is greater than the system maximal value {}",
+                self.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
+            )));
+        }
+
         Ok(())
     }
 
-    fn check_ckb_params(&self, check_fields: Vec<&'static str>) -> ProcessingChannelResult {
-        for field in check_fields {
-            match field {
-                "local_reserved_ckb_amount" => {
-                    return self.check_reserved_ckb_amount(field, self.local_reserved_ckb_amount);
-                }
-                "remote_reserved_ckb_amount" => {
-                    return self.check_reserved_ckb_amount(field, self.remote_reserved_ckb_amount);
-                }
-                "funding_fee_rate" => {
-                    if self.funding_fee_rate < DEFAULT_FEE_RATE {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Funding fee rate is less than {}",
-                            DEFAULT_FEE_RATE,
-                        )));
-                    }
-                }
-                "commitment_fee_rate" => {
-                    if self.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Commitment fee rate is less than {}",
-                            DEFAULT_COMMITMENT_FEE_RATE,
-                        )));
-                    }
+    fn check_accept_channel_parameters(&self) -> Result<(), ProcessingChannelError> {
+        let udt_type_script = &self.funding_udt_type_script;
 
-                    let commitment_fee = calculate_commitment_tx_fee(
-                        self.commitment_fee_rate,
-                        &self.funding_udt_type_script,
-                    );
-
-                    let expected_minimal_reserved_ckb_amount = commitment_fee * 2;
-                    debug!(
-                        "expected_minimal_reserved_ckb_amount: {}, reserved_ckb_amount: {}",
-                        expected_minimal_reserved_ckb_amount, self.local_reserved_ckb_amount
-                    );
-                    if self.local_reserved_ckb_amount < expected_minimal_reserved_ckb_amount {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                        "Commitment fee rate is: {}, expect more CKB amount as reserved ckb amount expected to larger than {}, \
-                        or you can set a lower commitment fee rate",
-                        self.commitment_fee_rate, expected_minimal_reserved_ckb_amount
-                    )));
-                    }
-                }
-                "commitment_delay_epoch" => {
-                    let epoch = EpochNumberWithFraction::from_full_value_unchecked(
-                        self.commitment_delay_epoch,
-                    );
-                    if !epoch.is_well_formed() {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Commitment delay epoch {} is not a valid value",
-                            self.commitment_delay_epoch,
-                        )));
-                    }
-
-                    let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
-                    if epoch < min {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Commitment delay epoch {} is less than the minimal value {}",
-                            epoch, min
-                        )));
-                    }
-
-                    let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
-                    if epoch > max {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "Commitment delay epoch {} is greater than the maximal value {}",
-                            epoch, max
-                        )));
-                    }
-                }
-                "max_tlc_number_in_flight" => {
-                    if self.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
-                        return Err(ProcessingChannelError::InvalidParameter(format!(
-                            "max_tlc_number_in_flight can not exceed {}",
-                            SYS_MAX_TLC_NUMBER_IN_FLIGHT,
-                        )));
-                    }
-                }
-                _ => {
-                    unimplemented!("Check field {} is not implemented", field);
-                }
-            }
+        // reserved_ckb_amount
+        let occupied_capacity =
+            occupied_capacity(&self.get_remote_shutdown_script(), udt_type_script)?.as_u64();
+        if self.remote_reserved_ckb_amount < occupied_capacity {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Reserved CKB amount {} is less than {}",
+                self.remote_reserved_ckb_amount, occupied_capacity,
+            )));
         }
+
+        // commitment_fee_rate
+        let commitment_fee = calculate_commitment_tx_fee(self.commitment_fee_rate, udt_type_script);
+        let reserved_fee = self.remote_reserved_ckb_amount - occupied_capacity;
+        if commitment_fee * 2 > reserved_fee {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, self.commitment_fee_rate, reserved_fee
+            )));
+        }
+
         Ok(())
     }
 
@@ -2963,15 +2988,16 @@ impl ChannelActorState {
             (self.get_remote_shutdown_script(), close_script.clone()),
         );
 
+        let occupied_capacity =
+            occupied_capacity(close_script, &self.funding_udt_type_script)?.as_u64();
         let available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_local_amount as u64 + self.local_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
+            (self.to_local_amount as u64 + self.local_reserved_ckb_amount)
+                .saturating_sub(occupied_capacity)
         } else {
-            self.local_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+            self.local_reserved_ckb_amount
+                .saturating_sub(occupied_capacity)
         };
-        debug!(
-            "verify_shutdown_fee fee: {} available_max_fee: {}",
-            fee, available_max_fee,
-        );
+
         if fee > available_max_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Local balance is not enough to pay the fee, expect fee {} <= available_max_fee {}",
@@ -3298,7 +3324,39 @@ impl ChannelActorState {
         self.tlcs
             .values()
             .filter(|tlc| {
-                !tlc.is_offered() && tlc.creation_confirmed_at.is_some() && tlc.removed_at.is_none()
+                tlc.is_received()
+                    && tlc.creation_confirmed_at.is_some()
+                    && tlc.removed_at.is_none()
+                    && tlc.tlc.onion_packet.is_empty()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn get_tlcs_for_forwarding(&self) -> Vec<DetailedTLCInfo> {
+        self.tlcs
+            .values()
+            .filter(|tlc| {
+                tlc.is_received()
+                    && tlc.creation_confirmed_at.is_some()
+                    && tlc.removed_at.is_none()
+                    && tlc.tlc.previous_tlc.is_none()
+                    && tlc.relay_status == TlcRelayStatus::WaitingForward
+                    && !tlc.tlc.onion_packet.is_empty()
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn get_tlcs_for_sending_remove_tlcs(&self) -> Vec<DetailedTLCInfo> {
+        self.tlcs
+            .values()
+            .filter(|tlc| {
+                tlc.is_offered()
+                    && tlc.creation_confirmed_at.is_some()
+                    && tlc.removed_at.is_some()
+                    && tlc.tlc.previous_tlc.is_some()
+                    && tlc.relay_status == TlcRelayStatus::WaitingRemove
             })
             .cloned()
             .collect()
@@ -3501,6 +3559,18 @@ impl ChannelActorState {
         self.tlcs.get(&TLCId::Received(tlc_id))
     }
 
+    pub fn set_received_tlc_forwarded(&mut self, tlc_id: u64) {
+        if let Some(tlc) = self.tlcs.get_mut(&TLCId::Received(tlc_id)) {
+            tlc.relay_status = TlcRelayStatus::WaitingRemove;
+        }
+    }
+
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64) {
+        if let Some(tlc) = self.tlcs.get_mut(&TLCId::Offered(tlc_id)) {
+            tlc.relay_status = TlcRelayStatus::Removed;
+        }
+    }
+
     pub fn insert_tlc(&mut self, tlc: TLC) -> Result<DetailedTLCInfo, ProcessingChannelError> {
         let payment_hash = tlc.payment_hash;
         if let Some(tlc) = self
@@ -3568,12 +3638,27 @@ impl ChannelActorState {
             self.to_local_amount,
             self.to_remote_amount
         );
+
+        let relay_status = if !tlc.onion_packet.is_empty() {
+            if tlc.is_received() {
+                TlcRelayStatus::WaitingForward
+            } else {
+                if tlc.previous_tlc.is_none() {
+                    TlcRelayStatus::NoForward
+                } else {
+                    TlcRelayStatus::WaitingRemove
+                }
+            }
+        } else {
+            TlcRelayStatus::NoForward
+        };
         let detailed_tlc = DetailedTLCInfo {
             tlc: tlc.clone(),
             created_at: self.get_current_commitment_numbers(),
             creation_confirmed_at: None,
             removed_at: None,
             removal_confirmed_at: None,
+            relay_status,
         };
         self.tlcs.insert(tlc.id, detailed_tlc.clone());
         if tlc.is_offered() {
@@ -3681,10 +3766,7 @@ impl ChannelActorState {
     }
 
     pub fn get_local_shutdown_script(&self) -> Script {
-        self.local_shutdown_script
-            .as_ref()
-            .expect("local_shutdown_script should be set in current state")
-            .clone()
+        self.local_shutdown_script.clone()
     }
 
     pub fn get_remote_shutdown_script(&self) -> Script {
@@ -4001,10 +4083,19 @@ impl ChannelActorState {
                 self.get_local_shutdown_script(),
             ),
         );
+        let occupied_capacity = match occupied_capacity(
+            &self.get_remote_shutdown_script(),
+            &self.funding_udt_type_script,
+        ) {
+            Ok(capacity) => capacity.as_u64(),
+            Err(_) => return false,
+        };
         let remote_available_max_fee = if self.funding_udt_type_script.is_none() {
-            self.to_remote_amount as u64 + self.remote_reserved_ckb_amount - MIN_OCCUPIED_CAPACITY
+            (self.to_remote_amount as u64 + self.remote_reserved_ckb_amount)
+                .saturating_sub(occupied_capacity)
         } else {
-            self.remote_reserved_ckb_amount - MIN_UDT_OCCUPIED_CAPACITY
+            self.remote_reserved_ckb_amount
+                .saturating_sub(occupied_capacity)
         };
         return fee <= remote_available_max_fee;
     }
@@ -4102,6 +4193,7 @@ impl ChannelActorState {
         &self,
         message: AddTlc,
         payment_preimage: Option<Hash256>,
+        onion_packet: Option<Vec<u8>>,
     ) -> Result<TLC, ProcessingChannelError> {
         if self.get_received_tlc(message.tlc_id).is_some() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -4123,7 +4215,7 @@ impl ChannelActorState {
             expiry: message.expiry,
             payment_preimage,
             hash_algorithm: message.hash_algorithm,
-            onion_packet: message.onion_packet,
+            onion_packet: onion_packet.unwrap_or_default(),
             previous_tlc: None,
         })
     }
@@ -4246,12 +4338,8 @@ impl ChannelActorState {
                     shutdown_tx_size(
                         &self.funding_udt_type_script,
                         (
-                            self.local_shutdown_script
-                                .clone()
-                                .expect("local shutdown script exists"),
-                            self.remote_shutdown_script
-                                .clone()
-                                .expect("remote shutdown script exists")
+                            self.get_local_shutdown_script(),
+                            self.get_remote_shutdown_script()
                         )
                     )
                 );
@@ -4288,11 +4376,6 @@ impl ChannelActorState {
             )));
         }
 
-        self.check_reserved_ckb_amount(
-            "remote_reserved_ckb_amount",
-            accept_channel.reserved_ckb_amount,
-        )?;
-
         self.update_state(ChannelState::NegotiatingFunding(
             NegotiatingFundingFlags::INIT_SENT,
         ));
@@ -4308,6 +4391,7 @@ impl ChannelActorState {
             accept_channel.second_per_commitment_point,
         ];
         self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
+        self.check_accept_channel_parameters()?;
 
         match accept_channel.channel_announcement_nonce {
             Some(ref nonce) if self.is_public() => {
@@ -5730,8 +5814,16 @@ pub struct TLC {
     /// Which hash algorithm is applied on the preimage
     pub hash_algorithm: HashAlgorithm,
     /// The onion packet which encodes the routing information for the payment.
+    /// Note: this is the onion_packet need to be forwarded to the next hop when current TLC is a middle hop.
     pub onion_packet: Vec<u8>,
     /// The previous tlc id if this tlc is a part of a multi-tlc payment.
+    /// Note: this is used to track the tlc chain for a multi-tlc payment,
+    ///       we need to know previous when removing tlc backwardly.
+    ///
+    /// Node A ---------> Node B ------------> Node C ----------> Node D
+    ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
+    ///                ^^^^                 ^^^^
+    ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
 }
 
@@ -5773,6 +5865,14 @@ impl TLC {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum TlcRelayStatus {
+    NoForward,
+    WaitingForward,
+    WaitingRemove,
+    Removed,
+}
+
 /// A tlc output in a commitment transaction, including both the tlc output
 /// and the commitment_number that it first appeared (will appear) in the
 /// commitment transaction.
@@ -5798,11 +5898,17 @@ pub struct DetailedTLCInfo {
     // The initial commitment number of the party (the offerer) that
     // has confirmed the removal of this tlc.
     removal_confirmed_at: Option<CommitmentNumbers>,
+    // indicates the status of the tlc relaying.
+    relay_status: TlcRelayStatus,
 }
 
 impl DetailedTLCInfo {
     fn is_offered(&self) -> bool {
         self.tlc.is_offered()
+    }
+
+    fn is_received(&self) -> bool {
+        self.tlc.is_received()
     }
 
     fn get_commitment_numbers(&self, local: bool) -> CommitmentNumbers {

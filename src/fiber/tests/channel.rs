@@ -1,9 +1,9 @@
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::SendPaymentCommand;
-use crate::fiber::tests::test_utils::gen_rand_public_key;
-use crate::fiber::tests::test_utils::gen_sha256_hash;
-
+use crate::fiber::tests::test_utils::{
+    gen_rand_public_key, gen_sha256_hash, NetworkNodeConfigBuilder,
+};
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -12,7 +12,7 @@ use crate::{
             ChannelCommand, ChannelCommandWithId, InMemorySigner, RemoveTlcCommand,
             ShutdownCommand, DEFAULT_COMMITMENT_FEE_RATE,
         },
-        config::DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT,
+        config::DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT,
         graph::NetworkGraphStateStore,
         hash_algorithm::HashAlgorithm,
         network::{AcceptChannelCommand, OpenChannelCommand},
@@ -139,7 +139,7 @@ async fn test_open_and_accept_channel() {
         NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
             AcceptChannelCommand {
                 temp_channel_id: open_channel_result.channel_id,
-                funding_amount: DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT as u128,
+                funding_amount: DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT as u128,
                 shutdown_script: None,
             },
             rpc_reply,
@@ -336,7 +336,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     let payment_hash = res.payment_hash;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
@@ -344,6 +344,8 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     let res = call!(node_a.network_actor, message)
         .expect("node_a alive")
         .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
 
@@ -1434,7 +1436,7 @@ async fn test_open_channel_with_invalid_ckb_amount_range() {
     assert!(open_channel_result
         .err()
         .unwrap()
-        .contains("The funding amount should be less than 18446744073709551615"));
+        .contains("The funding amount (21267647932558653966460912964485513215) should be less than 18446744073709551615"));
 }
 
 #[tokio::test]
@@ -1965,4 +1967,145 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_version_2() {
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
+    let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    // test open channel with large size shutdown script
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                funding_amount: (81 + 1) * 100000000 - 1,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_max_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_channel_result = call!(node_a.network_actor, message).expect("node_a alive");
+
+    assert!(open_channel_result
+        .err()
+        .unwrap()
+        .contains("The funding amount (8199999999) should be greater than or equal to 8200000000"));
+}
+
+#[tokio::test]
+#[should_panic(expected = "Waiting for event timeout")]
+async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
+    let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
+        NetworkNodeConfigBuilder::new()
+            .node_name(Some(format!("node-{}", i)))
+            .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+            .fiber_config_updater(|config| {
+                // enable auto accept channel with default value
+                config.auto_accept_channel_ckb_funding_amount = Some(6200000000);
+                config.open_channel_auto_accept_min_ckb_funding_amount = Some(16200000000);
+            })
+            .build()
+    })
+    .await;
+
+    let mut node_a = nodes.pop().unwrap();
+    let mut node_b = nodes.pop().unwrap();
+
+    // test auto accept channel with large size shutdown script
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public: false,
+                shutdown_script: Some(Script::new_builder().args(vec![0u8; 40].pack()).build()),
+                funding_amount: (81 + 1 + 90) * 100000000,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: None,
+                tlc_min_value: None,
+                tlc_max_value: None,
+                tlc_fee_proportional_millionths: None,
+                max_tlc_number_in_flight: None,
+                max_tlc_value_in_flight: None,
+            },
+            rpc_reply,
+        ))
+    };
+
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", channel_id, peer_id);
+                assert_eq!(channel_id, &open_channel_result.channel_id);
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    // should fail
+    node_a
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_b.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_with_large_size_shutdown_script_should_fail() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (_node_a, node_b, new_channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args(vec![0u8; 21].pack()).build(),
+                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    let shutdown_channel_result = call!(node_b.network_actor, message).expect("node_b alive");
+    assert!(shutdown_channel_result
+        .err()
+        .unwrap()
+        .contains("Local balance is not enough to pay the fee"));
 }
