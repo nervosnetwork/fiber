@@ -287,9 +287,13 @@ pub(crate) struct SendPaymentCommandParams {
     /// the hash to use within the payment's HTLC
     payment_hash: Option<Hash256>,
 
-    /// the htlc expiry delta should be used to set the timelock for the final hop
+    /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
-    final_htlc_expiry_delta: Option<u64>,
+    final_tlc_expiry_delta: Option<u64>,
+
+    /// the TLC expiry limit for the whole payment, in milliseconds
+    #[serde_as(as = "Option<U64Hex>")]
+    tlc_expiry_limit: Option<u64>,
 
     /// the encoded invoice to send to the recipient
     invoice: Option<String>,
@@ -625,7 +629,8 @@ where
                     target_pubkey: params.target_pubkey,
                     amount: params.amount,
                     payment_hash: params.payment_hash,
-                    final_htlc_expiry_delta: params.final_htlc_expiry_delta,
+                    final_tlc_expiry_delta: params.final_tlc_expiry_delta,
+                    tlc_expiry_limit: params.tlc_expiry_limit,
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,

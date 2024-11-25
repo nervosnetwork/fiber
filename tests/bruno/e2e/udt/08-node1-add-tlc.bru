@@ -25,7 +25,7 @@ body:json {
         "channel_id": "{{N1N2_CHANNEL_ID}}",
         "amount": "{{payment_amount}}",
         "payment_hash": "{{payment_hash}}",
-        "expiry": "0x20000000000"
+        "expiry": "{{expiry}}"
       }
     ]
   }
@@ -37,8 +37,8 @@ assert {
 }
 
 script:pre-request {
-  console.log("sending node1 AddTlc:", bru.getVar("payment_hash"));
-  console.log("amount: ", bru.getVar("payment_amount"));
+  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
+  bru.setVar("expiry", expiry);
 }
 
 script:post-response {

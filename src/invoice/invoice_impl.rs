@@ -310,7 +310,7 @@ impl CkbInvoice {
     attr_getter!(expiry_time, ExpiryTime, Duration);
     attr_getter!(description, Description, String);
     attr_getter!(
-        final_htlc_minimum_expiry_delta,
+        final_tlc_minimum_expiry_delta,
         FinalHtlcMinimumExpiryDelta,
         u64
     );

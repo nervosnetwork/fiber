@@ -25,7 +25,7 @@ body:json {
         "channel_id": "{{CHANNEL_ID}}",
         "amount": "0x5f5e100",
         "payment_hash": "0x266cec97cbede2cfbce73666f08deed9560bdf7841a7a5a51b3a3f09da249e21",
-        "expiry": "0x20000000000"
+        "expiry": "{{expiry}}"
       }
     ]
   }
@@ -34,6 +34,11 @@ body:json {
 assert {
   res.body.error: isUndefined
   res.body.result.tlc_id: isDefined
+}
+
+script:pre-request {
+  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
+  bru.setVar("expiry", expiry);
 }
 
 script:post-response {

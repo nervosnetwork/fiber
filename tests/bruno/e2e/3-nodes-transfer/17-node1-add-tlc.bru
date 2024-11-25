@@ -25,7 +25,7 @@ body:json {
         "channel_id": "{{N1N2_CHANNEL_ID}}",
         "amount": "{{payment_amount}}",
         "payment_hash": "{{payment_hash}}",
-        "expiry": "0x20000000000"
+        "expiry": "{{expiry}}"
       }
     ]
   }
@@ -37,6 +37,9 @@ assert {
 }
 
 script:pre-request {
+  let expiry = "0x" + (Date.now() + 1000 * 60 * 60 * 24).toString(16);
+  bru.setVar("expiry", expiry);
+
   let hash_algorithm = bru.getEnvVar("HASH_ALGORITHM");
   if (hash_algorithm !== null) {
     let body = req.getBody();

@@ -53,7 +53,7 @@ use super::channel::{
     ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
     MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::AnnouncedNodeName;
+use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
@@ -75,6 +75,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -289,8 +290,10 @@ pub struct SendPaymentCommand {
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The htlc expiry delta that should be used to set the timelock for the final hop
-    pub final_htlc_expiry_delta: Option<u64>,
+    // the TLC expiry delta that should be used to set the timelock for the final hop
+    pub final_tlc_expiry_delta: Option<u64>,
+    // the TLC expiry for whole payment, in milliseconds
+    pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -315,7 +318,8 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_htlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: u64,
+    pub tlc_expiry_limit: u64,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -328,7 +332,7 @@ pub struct SendPaymentData {
 }
 
 impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand, source: Pubkey) -> Result<SendPaymentData, String> {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -368,10 +372,6 @@ impl SendPaymentData {
             "target_pubkey",
         )?;
 
-        if !command.allow_self_payment && target == source {
-            return Err("allow_self_payment is not enable, can not pay self".to_string());
-        }
-
         let amount = validate_field(
             command.amount,
             invoice.as_ref().and_then(|i| i.amount()),
@@ -387,6 +387,38 @@ impl SendPaymentData {
             Err(e) if e == "udt_type_script is missing" => None,
             Err(e) => return Err(e),
         };
+
+        // check htlc expiry delta and limit are both valid if it is set
+        let final_tlc_expiry_delta = command
+            .final_tlc_expiry_delta
+            .or_else(|| {
+                invoice
+                    .as_ref()
+                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            })
+            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA
+            || final_tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT
+        {
+            return Err(format!(
+                "invalid final_tlc_expiry_delta, expect between {} and {}",
+                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        let tlc_expiry_limit = command
+            .tlc_expiry_limit
+            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
+
+        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
+            return Err("tlc_expiry_limit is too small".to_string());
+        }
+        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return Err(format!(
+                "tlc_expiry_limit is too large, expect it to less than {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
 
         let keysend = command.keysend.unwrap_or(false);
         let (payment_hash, preimage) = if !keysend {
@@ -420,7 +452,8 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
+            final_tlc_expiry_delta,
+            tlc_expiry_limit,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,
@@ -2185,7 +2218,7 @@ where
                 amount: info.amount,
                 preimage: None,
                 payment_hash: Some(info.payment_hash),
-                expiry: info.expiry.into(),
+                expiry: info.expiry,
                 hash_algorithm: info.tlc_hash_algorithm,
                 onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
                 previous_tlc,
@@ -2444,11 +2477,10 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
-        let payment_data = SendPaymentData::new(payment_request.clone(), state.get_public_key())
-            .map_err(|e| {
-                error!("Failed to validate payment request: {:?}", e);
-                Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-            })?;
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
 
         // for dry run, we only build the route and return the hops info,
         // will not store the payment session and send the onion packet
@@ -3015,6 +3047,14 @@ where
                 ));
             }
         }
+
+        if let Some(_delta) = tlc_expiry_delta.filter(|&d| d < MIN_TLC_EXPIRY_DELTA) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "TLC expiry delta is too small, expect larger than {}",
+                MIN_TLC_EXPIRY_DELTA
+            )));
+        }
+
         let shutdown_script =
             shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
 

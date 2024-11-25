@@ -1293,16 +1293,15 @@ pub enum TlcErrorCode {
     UnknownNextPeer = PERM | 10,
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
-    // TODO: htlc expiry check
-    IncorrectHtlcExpiry = UPDATE | 13,
-    ExpiryTooSoon = UPDATE | 14,
+    IncorrectTlcExpiry = UPDATE | 13,
+    ExpiryTooSoon = PERM | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
     InvoiceExpired = PERM | 16,
     InvoiceCancelled = PERM | 17,
     FinalIncorrectExpiryDelta = 18,
-    FinalIncorrectHtlcAmount = 19,
+    FinalIncorrectTlcAmount = 19,
     ChannelDisabled = UPDATE | 20,
-    ExpiryTooFar = 21,
+    ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
     MppTimeout = 23,
     InvalidOnionBlinding = BADONION | PERM | 24,
@@ -1329,9 +1328,11 @@ impl TlcErrorCode {
         match self {
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
             | TlcErrorCode::FinalIncorrectExpiryDelta
-            | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::FinalIncorrectTlcAmount
             | TlcErrorCode::InvoiceExpired
             | TlcErrorCode::InvoiceCancelled
+            | TlcErrorCode::ExpiryTooFar
+            | TlcErrorCode::ExpiryTooSoon
             | TlcErrorCode::MppTimeout => true,
             _ => false,
         }

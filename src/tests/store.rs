@@ -1,4 +1,6 @@
 use crate::fiber::config::AnnouncedNodeName;
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::ChannelInfo;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::NodeInfo;
@@ -220,7 +222,8 @@ fn test_store_payment_session() {
         amount: 100,
         payment_hash,
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,

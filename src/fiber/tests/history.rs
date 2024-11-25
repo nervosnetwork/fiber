@@ -4,6 +4,7 @@ use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
 use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
 use crate::fiber::types::Pubkey;
+use crate::now_timestamp_as_millis_u64;
 use crate::store::Store;
 use ckb_types::packed::OutPoint;
 use tempfile::tempdir;
@@ -424,7 +425,7 @@ fn test_history_probability() {
     let prob = history.eval_probability(from, target.clone(), 10, 100);
     assert_eq!(prob, 1.0);
 
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let result = TimedResult {
         success_time: now,
         success_amount: 5,
@@ -534,7 +535,7 @@ fn test_history_small_fail_amount_probability() {
     let result = TimedResult {
         success_time: 3,
         success_amount: 50000000,
-        fail_time: std::time::UNIX_EPOCH.elapsed().unwrap().as_millis(),
+        fail_time: now_timestamp_as_millis_u64(),
         fail_amount: 10,
     };
     history.add_result(from, target, result);
@@ -553,7 +554,7 @@ fn test_history_channel_probability_range() {
     let prob = history.eval_probability(from, target.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let result = TimedResult {
         success_time: now,
         success_amount: 10000000,
@@ -590,7 +591,7 @@ fn test_history_eval_probability_range() {
     let prob = history.eval_probability(from, target.clone(), 50000000, 100000000);
     assert_eq!(prob, 1.0);
 
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let result = TimedResult {
         success_time: now,
         success_amount: 10000000,
@@ -614,7 +615,7 @@ fn test_history_eval_probability_range() {
     }
 
     history.reset();
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let result = TimedResult {
         success_time: now,
         success_amount: 10000000,
@@ -630,7 +631,7 @@ fn test_history_eval_probability_range() {
     }
 
     prev_prob = 0.0;
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     for time in (60 * 1000..DEFAULT_BIMODAL_DECAY_TIME * 2).step_by(1 * 60 * 60 * 1000) {
         history.reset();
         let result = TimedResult {
@@ -689,19 +690,19 @@ fn test_history_can_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
     let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let res = history.can_send(100, now);
     assert_eq!(res, 100);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 / 3;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME / 3;
     let res = history.can_send(100, before);
     assert_eq!(res, 71);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME;
     let res = history.can_send(100, before);
     assert_eq!(res, 36);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 * 3;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME * 3;
     let res = history.can_send(100, before);
     assert_eq!(res, 4);
 }
@@ -711,19 +712,19 @@ fn test_history_can_not_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
     let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
-    let now = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+    let now = now_timestamp_as_millis_u64();
     let res = history.cannot_send(90, now, 100);
     assert_eq!(res, 90);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 / 3;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME / 3;
     let res = history.cannot_send(90, before, 100);
     assert_eq!(res, 93);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME;
     let res = history.cannot_send(90, before, 100);
     assert_eq!(res, 97);
 
-    let before = now - DEFAULT_BIMODAL_DECAY_TIME as u128 * 3;
+    let before = now - DEFAULT_BIMODAL_DECAY_TIME * 3;
     let res = history.cannot_send(90, before, 100);
     assert_eq!(res, 100);
 }
