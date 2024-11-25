@@ -1,5 +1,7 @@
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{PathFindError, SessionRoute};
 use crate::fiber::types::Pubkey;
+use crate::now_timestamp_as_millis_u64;
 use crate::{
     fiber::{
         graph::{ChannelInfo, NetworkGraph, NodeInfo, PathEdge},
@@ -70,6 +72,10 @@ impl MockNetworkGraph {
         }
     }
 
+    fn set_source(&mut self, source: PublicKey) {
+        self.graph.set_source(source.into());
+    }
+
     pub fn mark_node_failed(&mut self, node: usize) {
         self.graph.mark_node_failed(self.keys[node].into());
     }
@@ -97,16 +103,22 @@ impl MockNetworkGraph {
     ) {
         let public_key1 = self.keys[node_a];
         let public_key2 = self.keys[node_b];
+        let node_a_is_node1 = public_key1 < public_key2;
         let idx = self.edges.len() + 1;
         let channel_outpoint = OutPoint::from_slice(&[idx as u8; 36]).unwrap();
         self.edges.push((node_a, node_b, channel_outpoint.clone()));
+        let (node_a_key, node_b_key) = if node_a_is_node1 {
+            (public_key1, public_key2)
+        } else {
+            (public_key2, public_key1)
+        };
         let channel_info = ChannelInfo {
             funding_tx_block_number: 0,
             funding_tx_index: 0,
             announcement_msg: ChannelAnnouncement {
                 chain_hash: get_chain_hash(),
-                node1_id: public_key1.into(),
-                node2_id: public_key2.into(),
+                node1_id: node_a_key.into(),
+                node2_id: node_b_key.into(),
                 channel_outpoint: channel_outpoint.clone(),
                 node1_signature: None,
                 node2_signature: None,
@@ -120,14 +132,14 @@ impl MockNetworkGraph {
             node1_to_node2: None,
             node2_to_node1: None,
         };
-        self.graph.add_channel(channel_info);
+        self.graph.add_channel(channel_info.clone());
         let channel_update = ChannelUpdate {
             signature: None,
             chain_hash: get_chain_hash(),
             version: 0,
-            message_flags: 1,
+            message_flags: if node_a_is_node1 { 1 } else { 0 },
             channel_flags: 0,
-            tlc_expiry_delta: 144,
+            tlc_expiry_delta: 11,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
             tlc_maximum_value: max_htlc_value.unwrap_or(10000),
             tlc_minimum_value: min_htlc_value.unwrap_or(0),
@@ -139,14 +151,15 @@ impl MockNetworkGraph {
                 signature: None,
                 chain_hash: get_chain_hash(),
                 version: 0,
-                message_flags: 0,
+                message_flags: if node_a_is_node1 { 0 } else { 1 },
                 channel_flags: 0,
-                tlc_expiry_delta: 144,
+                tlc_expiry_delta: 22,
                 tlc_fee_proportional_millionths: fee_rate,
                 tlc_maximum_value: max_htlc_value.unwrap_or(10000),
                 tlc_minimum_value: min_htlc_value.unwrap_or(0),
                 channel_outpoint: channel_outpoint.clone(),
             };
+            eprintln!("add rev channel_update: {:?}", channel_update);
             self.graph.process_channel_update(channel_update).unwrap();
         }
     }
@@ -190,7 +203,7 @@ impl MockNetworkGraph {
         );
     }
 
-    pub fn find_route(
+    pub fn find_path(
         &self,
         source: usize,
         target: usize,
@@ -199,11 +212,19 @@ impl MockNetworkGraph {
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let source = self.keys[source].into();
         let target = self.keys[target].into();
-        self.graph
-            .find_path(source, target, amount, Some(max_fee), None, false)
+        self.graph.find_path(
+            source,
+            target,
+            amount,
+            Some(max_fee),
+            None,
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+            false,
+        )
     }
 
-    pub fn find_route_udt(
+    pub fn find_path_udt(
         &self,
         source: usize,
         target: usize,
@@ -219,6 +240,8 @@ impl MockNetworkGraph {
             amount,
             Some(max_fee),
             Some(udt_type_script),
+            DEFAULT_TLC_EXPIRY_DELTA,
+            MAX_PAYMENT_TLC_EXPIRY_LIMIT,
             false,
         )
     }
@@ -287,18 +310,18 @@ fn test_graph_find_path_basic() {
     network.add_edge(1, 2, Some(1), Some(2));
     let node2 = network.keys[2];
 
-    let route = network.find_route(1, 2, 100, 1000);
+    let route = network.find_path(1, 2, 100, 1000);
     assert!(route.is_err());
 
     network.add_edge(1, 2, Some(120), Some(2));
-    let route = network.find_route(1, 2, 100, 1000);
+    let route = network.find_path(1, 2, 100, 1000);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 1);
     assert_eq!(route[0].target, node2.into());
     assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 
-    let route = network.find_route(1, 3, 10, 100);
+    let route = network.find_path(1, 3, 10, 100);
     assert!(route.is_err());
 }
 
@@ -311,7 +334,7 @@ fn test_graph_find_path_three_nodes() {
     let node3 = network.keys[3];
 
     // Test route from node 1 to node 3
-    let route = network.find_route(1, 3, 100, 1000);
+    let route = network.find_path(1, 3, 100, 1000);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 2);
@@ -321,7 +344,7 @@ fn test_graph_find_path_three_nodes() {
     assert_eq!(route[1].channel_outpoint, network.edges[1].2);
 
     // Test route from node 1 to node 2
-    let route = network.find_route(1, 2, 100, 1000);
+    let route = network.find_path(1, 2, 100, 1000);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 1);
@@ -329,7 +352,7 @@ fn test_graph_find_path_three_nodes() {
     assert_eq!(route[0].channel_outpoint, network.edges[0].2);
 
     // Test route from node 2 to node 3
-    let route = network.find_route(2, 3, 100, 1000);
+    let route = network.find_path(2, 3, 100, 1000);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 1);
@@ -337,7 +360,7 @@ fn test_graph_find_path_three_nodes() {
     assert_eq!(route[0].channel_outpoint, network.edges[1].2);
 
     // Test route from node 3 to node 1 (should fail)
-    let route = network.find_route(3, 1, 100, 1000);
+    let route = network.find_path(3, 1, 100, 1000);
     assert!(route.is_err());
 }
 
@@ -351,7 +374,7 @@ fn test_graph_find_path_fee() {
     network.add_edge(1, 3, Some(1000), Some(20000));
     network.add_edge(3, 4, Some(1000), Some(10000));
 
-    let route = network.find_route(1, 4, 100, 1000);
+    let route = network.find_path(1, 4, 100, 1000);
 
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -371,7 +394,7 @@ fn test_graph_find_path_direct_linear() {
     network.add_edge(3, 4, Some(1000), Some(2));
     network.add_edge(4, 5, Some(1000), Some(1));
 
-    let route = network.find_route(1, 5, 100, 1000);
+    let route = network.find_path(1, 5, 100, 1000);
 
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -391,14 +414,14 @@ fn test_graph_find_path_cycle() {
     network.add_edge(2, 3, Some(1000), Some(3));
     network.add_edge(3, 1, Some(1000), Some(2));
 
-    let route = network.find_route(1, 3, 100, 1000);
+    let route = network.find_path(1, 3, 100, 1000);
 
     assert!(route.is_ok());
 
     network.add_edge(3, 4, Some(1000), Some(2));
     network.add_edge(4, 5, Some(1000), Some(1));
 
-    let route = network.find_route(1, 5, 100, 1000);
+    let route = network.find_path(1, 5, 100, 1000);
     assert!(route.is_ok());
 }
 
@@ -414,7 +437,7 @@ fn test_graph_find_path_cycle_in_middle() {
 
     network.add_edge(4, 5, Some(1000), Some(1));
 
-    let route = network.find_route(1, 5, 100, 1000);
+    let route = network.find_path(1, 5, 100, 1000);
     assert!(route.is_ok());
 }
 
@@ -426,12 +449,12 @@ fn test_graph_find_path_loop_exit() {
     network.add_edge(2, 3, Some(1000), Some(3));
     network.add_edge(3, 2, Some(1000), Some(2));
 
-    let route = network.find_route(1, 3, 100, 1000);
+    let route = network.find_path(1, 3, 100, 1000);
     assert!(route.is_err());
 
     // now add a path from node1 to node2, so that node1 can reach node3
     network.add_edge(1, 2, Some(1000), Some(4));
-    let route = network.find_route(1, 3, 100, 1000);
+    let route = network.find_path(1, 3, 100, 1000);
     assert!(route.is_ok());
 }
 
@@ -444,7 +467,7 @@ fn test_graph_find_path_amount_failed() {
     network.add_edge(3, 4, Some(1000), Some(4));
     network.add_edge(4, 5, Some(1000), Some(1));
 
-    let route = network.find_route(1, 5, 1000, 10);
+    let route = network.find_path(1, 5, 1000, 10);
     assert!(route.is_err());
 }
 
@@ -465,19 +488,15 @@ fn test_graph_find_optimal_path() {
     network.add_edge(1, 6, Some(500), Some(10000));
     network.add_edge(6, 5, Some(500), Some(10000));
 
-    let route = network.find_route(1, 5, 1000, 1000);
-    assert!(route.is_ok());
-    let route = route.unwrap();
-
     // Check that the algorithm chose the longer path with lower fees
+    let route = network.find_path(1, 5, 1000, 1000).unwrap();
     assert_eq!(route.len(), 4);
-    assert_eq!(route[0].channel_outpoint, network.edges[1].2);
-    assert_eq!(route[1].channel_outpoint, network.edges[2].2);
-    assert_eq!(route[2].channel_outpoint, network.edges[3].2);
-    assert_eq!(route[3].channel_outpoint, network.edges[4].2);
+    for (i, edge_index) in (1..=4).enumerate() {
+        assert_eq!(route[i].channel_outpoint, network.edges[edge_index].2);
+    }
 
     // Test with a smaller amount that allows using the direct path
-    let small_route = network.find_route(1, 5, 100, 100);
+    let small_route = network.find_path(1, 5, 100, 100);
     assert!(small_route.is_ok());
     let small_route = small_route.unwrap();
 
@@ -488,12 +507,125 @@ fn test_graph_find_optimal_path() {
 }
 
 #[test]
+fn test_graph_build_router_is_ok_with_fee_rate() {
+    let mut network = MockNetworkGraph::new(6);
+
+    // Direct path with high fee
+    network.add_edge(1, 5, Some(2000), Some(50000));
+
+    // Longer path with lower total fee
+    network.add_edge(1, 2, Some(2000), Some(10000));
+    // this node has a very low fee rate
+    network.add_edge(2, 3, Some(2000), Some(1));
+    network.add_edge(3, 4, Some(2000), Some(10000));
+    network.add_edge(4, 5, Some(2000), Some(10000));
+
+    // check the fee rate
+    let source = network.keys[1];
+    network.set_source(source);
+    let node5 = network.keys[5];
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node5.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        dry_run: false,
+    });
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, vec![1022, 1011, 1010, 1000, 1000]);
+}
+
+#[test]
+fn test_graph_build_router_fee_rate_optimize() {
+    let mut network = MockNetworkGraph::new(10);
+
+    // Direct path with low total fee rate
+    network.add_edge(1, 6, Some(2000), Some(50000));
+    network.add_edge(6, 5, Some(2000), Some(50000));
+
+    // Longer path with lower total fee
+    network.add_edge(1, 2, Some(2000), Some(10000));
+    network.add_edge(2, 3, Some(2000), Some(20000));
+    network.add_edge(3, 4, Some(2000), Some(30000));
+    network.add_edge(4, 5, Some(2000), Some(40000));
+
+    // check the fee rate
+    let source = network.keys[1];
+    network.set_source(source);
+    let node5 = network.keys[5];
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node5.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        dry_run: false,
+    });
+    eprintln!("route: {:?}", route);
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, vec![1050, 1000, 1000]);
+}
+
+#[test]
+fn test_graph_build_router_no_fee_with_direct_pay() {
+    let mut network = MockNetworkGraph::new(10);
+
+    network.add_edge(1, 5, Some(2000), Some(50000));
+
+    // check the fee rate
+    let source = network.keys[1];
+    network.set_source(source);
+    let node5 = network.keys[5];
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node5.into(),
+        amount: 1000,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: None,
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        dry_run: false,
+    });
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
+    assert_eq!(amounts, vec![1000, 1000]);
+}
+
+#[test]
 fn test_graph_find_path_err() {
     let mut network = MockNetworkGraph::new(6);
-    let (node1, _node5) = (network.keys[1], network.keys[5]);
+    let node1 = network.keys[1];
 
     network.add_edge(1, 2, Some(1000), Some(4));
-    let route = network.find_route(1, 1, 100, 1000);
+    let route = network.find_path(1, 1, 100, 1000);
     assert!(route.is_err());
 
     let no_exits_public_key = network.keys[0];
@@ -503,6 +635,8 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         false,
     );
     assert!(route.is_err());
@@ -513,6 +647,68 @@ fn test_graph_find_path_err() {
         100,
         Some(1000),
         None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_find_path_node_order() {
+    let mut network = MockNetworkGraph::new(6);
+    let node1 = network.keys[1];
+    let node2 = network.keys[2];
+    let node3 = network.keys[3];
+
+    network.add_edge(1, 2, Some(1000), Some(4));
+    network.add_edge(2, 3, Some(1000), Some(4));
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node3.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_ok());
+    // check the order of nodes in router is node1 -> node2 -> node3
+    let route = route.unwrap();
+    assert_eq!(route.len(), 2);
+    assert_eq!(route[0].target, node2.into());
+    assert_eq!(route[1].target, node3.into());
+}
+
+#[test]
+fn test_graph_build_route_with_expiry_limit() {
+    let mut network = MockNetworkGraph::new(6);
+    let (node1, node2) = (network.keys[1], network.keys[2]);
+
+    network.add_edge(1, 2, Some(1000), Some(4));
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        false,
+    );
+    assert!(route.is_ok());
+
+    let route = network.graph.find_path(
+        node1.into(),
+        node2.into(),
+        100,
+        Some(1000),
+        None,
+        DEFAULT_TLC_EXPIRY_DELTA,
+        100,
         false,
     );
     assert!(route.is_err());
@@ -521,9 +717,8 @@ fn test_graph_find_path_err() {
 #[test]
 fn test_graph_build_route_three_nodes() {
     let mut network = MockNetworkGraph::new(3);
-    network.add_edge(0, 2, Some(500), Some(2));
+    network.add_edge(0, 2, Some(500), Some(200000));
     network.add_edge(2, 3, Some(500), Some(2));
-    let _node0 = network.keys[0];
     let node2 = network.keys[2];
     let node3 = network.keys[3];
     // Test build route from node1 to node3
@@ -532,7 +727,8 @@ fn test_graph_build_route_three_nodes() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -540,6 +736,7 @@ fn test_graph_build_route_three_nodes() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -551,7 +748,7 @@ fn test_graph_build_route_three_nodes() {
     assert_eq!(route[1].next_hop, Some(node3.into()));
     assert_eq!(route[2].next_hop, None);
 
-    assert_eq!(route[0].amount, 101);
+    assert_eq!(route[0].amount, 120);
     assert_eq!(route[1].amount, 100);
     assert_eq!(route[2].amount, 100);
 }
@@ -570,7 +767,8 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         amount: 100, // Exceeds max_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -578,6 +776,7 @@ fn test_graph_build_route_exceed_max_htlc_value() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -596,7 +795,8 @@ fn test_graph_build_route_below_min_htlc_value() {
         amount: 10, // Below min_htlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -604,6 +804,7 @@ fn test_graph_build_route_below_min_htlc_value() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -615,7 +816,7 @@ fn test_graph_find_path_udt() {
     network.add_edge_udt(1, 2, Some(1000), Some(1), udt_type_script.clone());
     let node2 = network.keys[2];
 
-    let route = network.find_route_udt(1, 2, 100, 1000, udt_type_script.clone());
+    let route = network.find_path_udt(1, 2, 100, 1000, udt_type_script.clone());
     assert!(route.is_ok());
 
     let route = route.unwrap();
@@ -623,7 +824,7 @@ fn test_graph_find_path_udt() {
     assert_eq!(route[0].target, node2.into());
     assert_eq!(route[0].channel_outpoint, network.edges[0].2);
 
-    let route = network.find_route(1, 3, 10, 100);
+    let route = network.find_path(1, 3, 10, 100);
     assert!(route.is_err());
 }
 
@@ -641,7 +842,8 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -649,6 +851,7 @@ fn test_graph_mark_failed_channel() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 
@@ -661,7 +864,8 @@ fn test_graph_mark_failed_channel() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -669,6 +873,7 @@ fn test_graph_mark_failed_channel() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 }
@@ -676,8 +881,8 @@ fn test_graph_mark_failed_channel() {
 #[test]
 fn test_graph_session_router() {
     let mut network = MockNetworkGraph::new(5);
-    network.add_edge(0, 2, Some(500), Some(2));
-    network.add_edge(2, 3, Some(500), Some(2));
+    network.add_edge(0, 2, Some(500), Some(50000));
+    network.add_edge(2, 3, Some(500), Some(20000));
     network.add_edge(3, 4, Some(500), Some(2));
 
     let node0 = network.keys[0];
@@ -691,7 +896,8 @@ fn test_graph_session_router() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -699,11 +905,14 @@ fn test_graph_session_router() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
     let route = route.unwrap();
     let session_route = SessionRoute::new(node0.into(), node4.into(), &route);
+    let fee = session_route.fee();
+    assert_eq!(fee, 8);
     let session_route_keys: Vec<_> = session_route.nodes.iter().map(|x| x.pubkey).collect();
     assert_eq!(
         session_route_keys,
@@ -727,7 +936,8 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -735,6 +945,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
@@ -744,7 +955,9 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -752,6 +965,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_ok());
 
@@ -763,7 +977,9 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -771,6 +987,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 
@@ -780,7 +997,8 @@ fn test_graph_mark_failed_node() {
         amount: 100,
         payment_hash: Hash256::default(),
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -788,6 +1006,7 @@ fn test_graph_mark_failed_node() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     });
     assert!(route.is_err());
 }
@@ -806,7 +1025,8 @@ fn test_graph_payment_self_default_is_false() {
         target_pubkey: Some(node0.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -814,26 +1034,15 @@ fn test_graph_payment_self_default_is_false() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: false,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
-    let error = payment_data.unwrap_err().to_string();
-    assert!(error.contains("can not pay self"));
+    let payment_data = SendPaymentData::new(command);
+    assert!(payment_data.is_ok());
 
-    let route = network.graph.build_route(SendPaymentData {
-        target_pubkey: node0.into(),
-        amount: 100,
-        payment_hash: Hash256::default(),
-        invoice: None,
-        final_htlc_expiry_delta: Some(100),
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-    });
+    let route = network.graph.build_route(payment_data.unwrap());
     assert!(route.is_err());
+    let message = route.unwrap_err().to_string();
+    assert!(message.contains("allow_self_payment is not enable, can not pay to self"));
 }
 
 #[test]
@@ -845,13 +1054,13 @@ fn test_graph_payment_pay_single_path() {
     network.add_edge(4, 5, Some(500), Some(2));
     network.add_edge(5, 6, Some(500), Some(2));
 
-    let node0 = network.keys[0];
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[6].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -859,8 +1068,9 @@ fn test_graph_payment_pay_single_path() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
@@ -881,7 +1091,8 @@ fn test_graph_payment_pay_self_with_one_node() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -889,8 +1100,9 @@ fn test_graph_payment_pay_self_with_one_node() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
@@ -927,14 +1139,13 @@ fn test_graph_build_route_with_double_edge_node() {
         Some(200),
     );
 
-    let node0 = network.keys[0];
-
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -942,8 +1153,9 @@ fn test_graph_build_route_with_double_edge_node() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
 }
@@ -985,7 +1197,8 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -993,8 +1206,9 @@ fn test_graph_build_route_with_other_node_maybe_better() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1011,14 +1225,13 @@ fn test_graph_payment_pay_self_will_ok() {
     network.add_edge(4, 5, Some(500), Some(2));
     network.add_edge(5, 6, Some(500), Some(2));
 
-    let node0 = network.keys[0];
-
     // node0 is the source node
     let command = SendPaymentCommand {
         target_pubkey: Some(network.keys[0].into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1026,8 +1239,9 @@ fn test_graph_payment_pay_self_will_ok() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into());
+    let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
     let payment_data = payment_data.unwrap();
 
@@ -1052,20 +1266,21 @@ fn test_graph_payment_pay_self_will_ok() {
 fn test_graph_build_route_with_path_limits() {
     let mut network = MockNetworkGraph::new(100);
     // Add edges with min_htlc_value set to 50
+    let mut fee_rate = 100000;
     for i in 0..99 {
+        fee_rate -= 1000;
         network.add_edge_with_config(
             i,
             i + 1,
-            Some(500),
-            Some(500),
+            Some(5000000),
+            Some(fee_rate),
             Some(50),
-            None,
+            Some(10000000),
             None,
             Some(100),
         );
     }
 
-    let node0 = network.keys[0];
     let node99 = network.keys[99];
 
     // node0 is the source node
@@ -1073,21 +1288,30 @@ fn test_graph_build_route_with_path_limits() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
-        max_fee_amount: Some(1000),
+        max_fee_amount: Some(10000000),
         max_parts: None,
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 100);
     assert_eq!(route[98].next_hop, Some(node99.into()));
+
+    // make sure the fee is decreasing
+    let mut fees = vec![];
+    for i in 0..98 {
+        fees.push(route[i].amount - route[i + 1].amount);
+    }
+    assert!(fees.windows(2).all(|x| x[0] >= x[1]));
 }
 
 #[test]
@@ -1107,7 +1331,6 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         );
     }
 
-    let node0 = network.keys[0];
     let node99 = network.keys[99];
 
     // node0 is the source node
@@ -1115,7 +1338,8 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         target_pubkey: Some(node99.into()),
         amount: Some(100),
         payment_hash: Some(Hash256::default()),
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
         invoice: None,
         timeout: Some(10),
         max_fee_amount: Some(1000),
@@ -1123,8 +1347,49 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
         keysend: Some(false),
         udt_type_script: None,
         allow_self_payment: true,
+        dry_run: false,
     };
-    let payment_data = SendPaymentData::new(command, node0.into()).unwrap();
+    let payment_data = SendPaymentData::new(command).unwrap();
     let route = network.graph.build_route(payment_data);
     assert!(route.is_err());
+}
+
+#[test]
+fn test_graph_payment_expiry_is_in_right_order() {
+    let mut network = MockNetworkGraph::new(5);
+    network.add_edge(0, 1, Some(500), Some(2));
+    network.add_edge(1, 2, Some(500), Some(2));
+    network.add_edge(2, 3, Some(500), Some(2));
+
+    let node3 = network.keys[3];
+
+    let command = SendPaymentCommand {
+        target_pubkey: Some(node3.into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_tlc_expiry_delta: None,
+        tlc_expiry_limit: None,
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: false,
+        dry_run: false,
+    };
+    let payment_data = SendPaymentData::new(command);
+    assert!(payment_data.is_ok());
+
+    let route = network.graph.build_route(payment_data.unwrap());
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
+    // we set 11 as tlc expiry delta in the test
+    assert_eq!(expiries.len(), 4);
+    assert_eq!(expiries[0] - expiries[1], 11);
+    assert_eq!(expiries[1] - expiries[2], 11);
+    assert_eq!(expiries[3], 0);
+    let expected_timestamp = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
+    assert!(expiries[2] <= expected_timestamp);
 }

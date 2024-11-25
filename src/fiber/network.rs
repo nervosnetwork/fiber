@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::u64;
 use tentacle::multiaddr::{MultiAddr, Protocol};
-use tentacle::utils::extract_peer_id;
+use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
     async_trait,
     builder::{MetaBuilder, ServiceBuilder},
@@ -46,14 +46,15 @@ use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 use super::channel::{
-    AcceptChannelParameter, ChannelActor, ChannelActorMessage, ChannelActorStateStore,
-    ChannelCommand, ChannelCommandWithId, ChannelEvent, ChannelInitializationParameter,
-    ChannelState, ChannelSubscribers, OpenChannelParameter, ProcessingChannelError,
-    ProcessingChannelResult, PublicChannelInfo, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
-    DEFAULT_FEE_RATE,
+    get_funding_and_reserved_amount, occupied_capacity, AcceptChannelParameter, ChannelActor,
+    ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+    ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
+    OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
+    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
-use super::config::AnnouncedNodeName;
-use super::fee::{calculate_commitment_tx_fee, default_minimal_ckb_amount};
+use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
+use super::fee::calculate_commitment_tx_fee;
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::graph_syncer::{GraphSyncer, GraphSyncerMessage};
 use super::key::blake2b_hash_with_salt;
@@ -63,8 +64,8 @@ use super::types::{
     FiberQueryInformation, GetBroadcastMessages, GetBroadcastMessagesResult, Hash256,
     NodeAnnouncement, NodeAnnouncementQuery, OpenChannel, PaymentHopData, Privkey, Pubkey,
     QueryBroadcastMessagesWithinTimeRange, QueryBroadcastMessagesWithinTimeRangeResult,
-    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlc, RemoveTlcReason,
-    TlcErr, TlcErrData, TlcErrPacket, TlcErrorCode,
+    QueryChannelsWithinBlockRange, QueryChannelsWithinBlockRangeResult, RemoveTlcReason, TlcErr,
+    TlcErrData, TlcErrPacket, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -74,6 +75,7 @@ use crate::ckb::{CkbChainMessage, FundingRequest, FundingTx, TraceTxRequest, Tra
 use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
+use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
 use crate::fiber::graph::{ChannelInfo, PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -138,6 +140,7 @@ pub struct SendPaymentResponse {
     pub created_at: u64,
     pub last_updated_at: u64,
     pub failed_error: Option<String>,
+    pub fee: u128,
 }
 
 /// What kind of local information should be broadcasted to the network.
@@ -287,8 +290,10 @@ pub struct SendPaymentCommand {
     pub payment_hash: Option<Hash256>,
     // the encoded invoice to send to the recipient
     pub invoice: Option<String>,
-    // The htlc expiry delta that should be used to set the timelock for the final hop
-    pub final_htlc_expiry_delta: Option<u64>,
+    // the TLC expiry delta that should be used to set the timelock for the final hop
+    pub final_tlc_expiry_delta: Option<u64>,
+    // the TLC expiry for whole payment, in milliseconds
+    pub tlc_expiry_limit: Option<u64>,
     // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     pub timeout: Option<u64>,
     // the maximum fee amounts in shannons that the sender is willing to pay, default is 1000 shannons CKB.
@@ -302,6 +307,8 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // dry_run only used for checking, default is false
+    pub dry_run: bool,
 }
 
 #[serde_as]
@@ -311,7 +318,8 @@ pub struct SendPaymentData {
     pub amount: u128,
     pub payment_hash: Hash256,
     pub invoice: Option<String>,
-    pub final_htlc_expiry_delta: Option<u64>,
+    pub final_tlc_expiry_delta: u64,
+    pub tlc_expiry_limit: u64,
     pub timeout: Option<u64>,
     pub max_fee_amount: Option<u128>,
     pub max_parts: Option<u64>,
@@ -320,10 +328,11 @@ pub struct SendPaymentData {
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
     pub allow_self_payment: bool,
+    pub dry_run: bool,
 }
 
 impl SendPaymentData {
-    pub fn new(command: SendPaymentCommand, source: Pubkey) -> Result<SendPaymentData, String> {
+    pub fn new(command: SendPaymentCommand) -> Result<SendPaymentData, String> {
         let invoice = command
             .invoice
             .as_ref()
@@ -363,10 +372,6 @@ impl SendPaymentData {
             "target_pubkey",
         )?;
 
-        if !command.allow_self_payment && target == source {
-            return Err("allow_self_payment is not enable, can not pay self".to_string());
-        }
-
         let amount = validate_field(
             command.amount,
             invoice.as_ref().and_then(|i| i.amount()),
@@ -382,6 +387,38 @@ impl SendPaymentData {
             Err(e) if e == "udt_type_script is missing" => None,
             Err(e) => return Err(e),
         };
+
+        // check htlc expiry delta and limit are both valid if it is set
+        let final_tlc_expiry_delta = command
+            .final_tlc_expiry_delta
+            .or_else(|| {
+                invoice
+                    .as_ref()
+                    .and_then(|i| i.final_tlc_minimum_expiry_delta().copied())
+            })
+            .unwrap_or(DEFAULT_TLC_EXPIRY_DELTA);
+        if final_tlc_expiry_delta < MIN_TLC_EXPIRY_DELTA
+            || final_tlc_expiry_delta > MAX_PAYMENT_TLC_EXPIRY_LIMIT
+        {
+            return Err(format!(
+                "invalid final_tlc_expiry_delta, expect between {} and {}",
+                MIN_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
+
+        let tlc_expiry_limit = command
+            .tlc_expiry_limit
+            .unwrap_or(MAX_PAYMENT_TLC_EXPIRY_LIMIT);
+
+        if tlc_expiry_limit < final_tlc_expiry_delta || tlc_expiry_limit < MIN_TLC_EXPIRY_DELTA {
+            return Err("tlc_expiry_limit is too small".to_string());
+        }
+        if tlc_expiry_limit > MAX_PAYMENT_TLC_EXPIRY_LIMIT {
+            return Err(format!(
+                "tlc_expiry_limit is too large, expect it to less than {}",
+                MAX_PAYMENT_TLC_EXPIRY_LIMIT
+            ));
+        }
 
         let keysend = command.keysend.unwrap_or(false);
         let (payment_hash, preimage) = if !keysend {
@@ -415,7 +452,8 @@ impl SendPaymentData {
             amount,
             payment_hash,
             invoice: command.invoice,
-            final_htlc_expiry_delta: command.final_htlc_expiry_delta,
+            final_tlc_expiry_delta,
+            tlc_expiry_limit,
             timeout: command.timeout,
             max_fee_amount: command.max_fee_amount,
             max_parts: command.max_parts,
@@ -423,6 +461,7 @@ impl SendPaymentData {
             udt_type_script,
             preimage,
             allow_self_payment: command.allow_self_payment,
+            dry_run: command.dry_run,
         })
     }
 }
@@ -533,7 +572,7 @@ pub enum NetworkActorEvent {
     /// block with the given transaction index.
     FundingTransactionConfirmed(OutPoint, BlockNumber, u32),
 
-    /// A funding transaction has been confirmed.
+    /// A funding transaction has failed.
     FundingTransactionFailed(OutPoint),
 
     /// A commitment transaction is signed by us and has sent to the other party.
@@ -558,7 +597,7 @@ pub enum NetworkActorEvent {
     GraphSyncerExited(PeerId, GraphSyncerExitStatus),
 
     // A tlc remove message is received. (payment_hash, remove_tlc)
-    TlcRemoveReceived(Hash256, RemoveTlc),
+    TlcRemoveReceived(Hash256, RemoveTlcReason),
 
     /// Network service events to be sent to outside observers.
     /// These events may be both present at `NetworkActorEvent` and
@@ -664,8 +703,8 @@ where
                             is_udt_type_auto_accept(udt_type_script, open_channel.funding_amount)
                         } else {
                             state.auto_accept_channel_ckb_funding_amount > 0
-                                && open_channel.all_ckb_amount()
-                                    >= state.open_channel_auto_accept_min_ckb_funding_amount
+                                && open_channel.funding_amount
+                                    >= state.open_channel_auto_accept_min_ckb_funding_amount as u128
                         };
                         if auto_accept {
                             let accept_channel = AcceptChannelCommand {
@@ -1117,12 +1156,6 @@ where
             ) => {
                 assert_ne!(new, old, "new and old channel id must be different");
                 if let Some(session) = state.get_peer_session(&peer_id) {
-                    state.check_accept_channel_ckb_parameters(
-                        local_reserved_ckb_amount,
-                        remote_reserved_ckb_amount,
-                        funding_fee_rate,
-                        &udt_funding_script,
-                    )?;
                     if let Some(channel) = state.channels.remove(&old) {
                         debug!("Channel accepted: {:?} -> {:?}", old, new);
                         state.channels.insert(new, channel);
@@ -1255,9 +1288,9 @@ where
                 }
                 state.maybe_finish_sync();
             }
-            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc) => {
+            NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(state, payment_hash, remove_tlc.reason)
+                self.on_remove_tlc_event(state, payment_hash, remove_tlc_reason)
                     .await;
             }
         }
@@ -1882,22 +1915,27 @@ where
                     Some(ref signature)
                         if signature.verify(&node_announcement.node_id, &message) =>
                     {
-                        debug!(
-                            "Node announcement message verified: {:?}",
-                            &node_announcement
-                        );
+                        let mut node_announcement = node_announcement.clone();
+                        if !state.announce_private_addr {
+                            node_announcement.addresses.retain(|addr| {
+                                multiaddr_to_socketaddr(addr)
+                                    .map(|socket_addr| is_reachable(socket_addr.ip()))
+                                    .unwrap_or_default()
+                            });
+                        }
+                        if !node_announcement.addresses.is_empty() {
+                            // Add the node to the network graph.
+                            self.network_graph
+                                .write()
+                                .await
+                                .process_node_announcement(node_announcement.clone());
 
-                        // Add the node to the network graph.
-                        self.network_graph
-                            .write()
-                            .await
-                            .process_node_announcement(node_announcement.clone());
-
-                        let peer_id = node_announcement.peer_id();
-                        state.save_announced_peer_addresses(
-                            peer_id,
-                            node_announcement.addresses.clone(),
-                        );
+                            let peer_id = node_announcement.peer_id();
+                            state.save_announced_peer_addresses(
+                                peer_id,
+                                node_announcement.addresses,
+                            );
+                        }
                         Ok(())
                     }
                     _ => {
@@ -2180,7 +2218,7 @@ where
                 amount: info.amount,
                 preimage: None,
                 payment_hash: Some(info.payment_hash),
-                expiry: info.expiry.into(),
+                expiry: info.expiry,
                 hash_algorithm: info.tlc_hash_algorithm,
                 onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
                 previous_tlc,
@@ -2439,11 +2477,22 @@ where
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
-        let payment_data = SendPaymentData::new(payment_request.clone(), state.get_public_key())
-            .map_err(|e| {
-                error!("Failed to validate payment request: {:?}", e);
-                Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
-            })?;
+        let payment_data = SendPaymentData::new(payment_request.clone()).map_err(|e| {
+            error!("Failed to validate payment request: {:?}", e);
+            Error::InvalidParameter(format!("Failed to validate payment request: {:?}", e))
+        })?;
+
+        // for dry run, we only build the route and return the hops info,
+        // will not store the payment session and send the onion packet
+        if payment_data.dry_run {
+            let mut payment_session = PaymentSession::new(payment_data.clone(), 0);
+            let hops = self
+                .build_payment_route(&mut payment_session, &payment_data)
+                .await?;
+            payment_session.route =
+                SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
+            return Ok(payment_session.into());
+        }
 
         // initialize the payment session in db and begin the payment process lifecycle
         if let Some(payment_session) = self.store.get_payment_session(payment_data.payment_hash) {
@@ -2457,7 +2506,7 @@ where
             }
         }
 
-        let payment_session = PaymentSession::new(payment_data.clone(), 5);
+        let payment_session = PaymentSession::new(payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
         let session = self.try_payment_session(state, payment_session).await?;
         return Ok(session.into());
@@ -2672,6 +2721,8 @@ pub struct NetworkActorState<S> {
     tlc_max_value: u128,
     // The default tlc fee proportional millionths to be used when auto accepting a channel.
     tlc_fee_proportional_millionths: u128,
+    // Whether to announce private address to the network.
+    announce_private_addr: bool,
     // A hashset to store the list of all broadcasted messages.
     // This is used to avoid re-broadcasting the same message over and over again
     // TODO: some more intelligent way to manage broadcasting.
@@ -2996,9 +3047,16 @@ where
                 ));
             }
         }
-        // NOTE: here we only check the amount is valid, we will also check more in the `pre_start` from channel creation
-        let (_funding_amount, _reserved_ckb_amount) =
-            self.get_funding_and_reserved_amount(funding_amount, &funding_udt_type_script)?;
+
+        if let Some(_delta) = tlc_expiry_delta.filter(|&d| d < MIN_TLC_EXPIRY_DELTA) {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "TLC expiry delta is too small, expect larger than {}",
+                MIN_TLC_EXPIRY_DELTA
+            )));
+        }
+
+        let shutdown_script =
+            shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
 
         let seed = self.generate_channel_seed();
         let (tx, rx) = oneshot::channel::<Hash256>();
@@ -3021,8 +3079,7 @@ where
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
-                shutdown_script: shutdown_script
-                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
+                shutdown_script,
                 channel_id_sender: tx,
                 commitment_fee_rate,
                 commitment_delay_epoch,
@@ -3065,8 +3122,11 @@ where
                     &peer_id
                 )))?;
 
-        let (funding_amount, reserved_ckb_amount) = self.get_funding_and_reserved_amount(
+        let shutdown_script =
+            shutdown_script.unwrap_or_else(|| self.default_shutdown_script.clone());
+        let (funding_amount, reserved_ckb_amount) = get_funding_and_reserved_amount(
             funding_amount,
+            &shutdown_script,
             &open_channel.funding_udt_type_script,
         )?;
 
@@ -3099,8 +3159,7 @@ where
                 )),
                 seed,
                 open_channel,
-                shutdown_script: shutdown_script
-                    .unwrap_or_else(|| self.default_shutdown_script.clone()),
+                shutdown_script,
                 channel_id_sender: Some(tx),
             }),
             network.clone().get_cell(),
@@ -3197,75 +3256,24 @@ where
         self.peer_pubkey_map.get(peer_id).cloned()
     }
 
-    fn get_funding_and_reserved_amount(
-        &self,
-        funding_amount: u128,
-        udt_type_script: &Option<Script>,
-    ) -> Result<(u128, u64), ProcessingChannelError> {
-        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if udt_type_script.is_none() {
-            if funding_amount < reserved_ckb_amount.into() {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The funding amount should be greater than the reserved amount: {}",
-                    reserved_ckb_amount
-                )));
-            }
-            if funding_amount >= u64::MAX as u128 {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "The funding amount should be less than {:?}",
-                    u64::MAX
-                )));
-            }
-        }
-        let funding_amount = if udt_type_script.is_some() {
-            funding_amount
-        } else {
-            funding_amount - reserved_ckb_amount as u128
-        };
-        Ok((funding_amount, reserved_ckb_amount))
-    }
-
-    fn check_accept_channel_ckb_parameters(
-        &self,
-        remote_reserved_ckb_amount: u64,
-        local_reserved_ckb_amount: u64,
-        funding_fee_rate: u64,
-        udt_type_script: &Option<Script>,
-    ) -> crate::Result<()> {
-        let reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if remote_reserved_ckb_amount < reserved_ckb_amount
-            || local_reserved_ckb_amount < reserved_ckb_amount
-        {
-            return Err(Error::InvalidParameter(format!(
-                "Reserved CKB amount is less than the minimal amount: {}",
-                reserved_ckb_amount
-            )));
-        }
-
-        if funding_fee_rate < DEFAULT_FEE_RATE {
-            return Err(Error::InvalidParameter(format!(
-                "Funding fee rate is less than {}",
-                DEFAULT_FEE_RATE
-            )));
-        }
-        Ok(())
-    }
-
-    fn check_open_ckb_parameters(
+    // TODO: this fn is duplicated with ChannelActorState::check_open_channel_parameters, but is not easy to refactor, just keep it for now.
+    fn check_open_channel_parameters(
         &self,
         open_channel: &OpenChannel,
     ) -> Result<(), ProcessingChannelError> {
-        let reserved_ckb_amount = open_channel.reserved_ckb_amount;
         let udt_type_script = &open_channel.funding_udt_type_script;
 
-        let minimal_reserved_ckb_amount = default_minimal_ckb_amount(udt_type_script.is_some());
-        if reserved_ckb_amount < minimal_reserved_ckb_amount {
+        // reserved_ckb_amount
+        let occupied_capacity =
+            occupied_capacity(&open_channel.shutdown_script, udt_type_script)?.as_u64();
+        if open_channel.reserved_ckb_amount < occupied_capacity {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Remote reserved CKB amount {} is less than the minimal amount: {}",
-                reserved_ckb_amount, minimal_reserved_ckb_amount,
+                "Reserved CKB amount {} is less than {}",
+                open_channel.reserved_ckb_amount, occupied_capacity,
             )));
         }
 
+        // funding_fee_rate
         if open_channel.funding_fee_rate < DEFAULT_FEE_RATE {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Funding fee rate is less than {}",
@@ -3273,28 +3281,54 @@ where
             )));
         }
 
+        // commitment_fee_rate
         if open_channel.commitment_fee_rate < DEFAULT_COMMITMENT_FEE_RATE {
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Commitment fee rate is less than {}",
                 DEFAULT_COMMITMENT_FEE_RATE,
             )));
         }
-
-        let commitment_fee = calculate_commitment_tx_fee(
-            open_channel.commitment_fee_rate,
-            &open_channel.funding_udt_type_script,
-        );
-
-        let expected_minimal_reserved_ckb_amount = commitment_fee * 2;
-        debug!(
-            "expected_minimal_reserved_ckb_amount: {}, reserved_ckb_amount: {}",
-            expected_minimal_reserved_ckb_amount, reserved_ckb_amount
-        );
-        if reserved_ckb_amount < expected_minimal_reserved_ckb_amount {
+        let commitment_fee =
+            calculate_commitment_tx_fee(open_channel.commitment_fee_rate, udt_type_script);
+        let reserved_fee = open_channel.reserved_ckb_amount - occupied_capacity;
+        if commitment_fee * 2 > reserved_fee {
             return Err(ProcessingChannelError::InvalidParameter(format!(
-                "Commitment fee rate is: {}, expect more CKB amount as reserved ckb amount expected to larger than {}, \
-                or you can set a lower commitment fee rate",
-                open_channel.commitment_fee_rate, expected_minimal_reserved_ckb_amount
+                "Commitment fee {} which caculated by commitment fee rate {} is larger than half of reserved fee {}",
+                commitment_fee, open_channel.commitment_fee_rate, reserved_fee
+            )));
+        }
+
+        // commitment_delay_epoch
+        let epoch =
+            EpochNumberWithFraction::from_full_value_unchecked(open_channel.commitment_delay_epoch);
+        if !epoch.is_well_formed() {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is not a valid value",
+                open_channel.commitment_delay_epoch,
+            )));
+        }
+
+        let min = EpochNumberWithFraction::new(MIN_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch < min {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is less than the minimal value {}",
+                epoch, min
+            )));
+        }
+
+        let max = EpochNumberWithFraction::new(MAX_COMMITMENT_DELAY_EPOCHS, 0, 1);
+        if epoch > max {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Commitment delay epoch {} is greater than the maximal value {}",
+                epoch, max
+            )));
+        }
+
+        // max_tlc_number_in_flight
+        if open_channel.max_tlc_number_in_flight > SYS_MAX_TLC_NUMBER_IN_FLIGHT {
+            return Err(ProcessingChannelError::InvalidParameter(format!(
+                "Max TLC number in flight {} is greater than the system maximal value {}",
+                open_channel.max_tlc_number_in_flight, SYS_MAX_TLC_NUMBER_IN_FLIGHT
             )));
         }
 
@@ -3683,7 +3717,7 @@ where
         peer_id: PeerId,
         open_channel: OpenChannel,
     ) -> ProcessingChannelResult {
-        self.check_open_ckb_parameters(&open_channel)?;
+        self.check_open_channel_parameters(&open_channel)?;
 
         if let Some(udt_type_script) = &open_channel.funding_udt_type_script {
             if !check_udt_script(udt_type_script) {
@@ -3993,6 +4027,15 @@ where
             multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
             announced_addrs.push(multiaddr);
         }
+
+        if !config.announce_private_addr.unwrap_or_default() {
+            announced_addrs.retain(|addr| {
+                multiaddr_to_socketaddr(addr)
+                    .map(|socket_addr| is_reachable(socket_addr.ip()))
+                    .unwrap_or_default()
+            });
+        }
+
         info!(
             "Started listening tentacle on {:?}, peer id {:?}, announced addresses {:?}",
             &listening_addr, &my_peer_id, &announced_addrs
@@ -4071,6 +4114,7 @@ where
             tlc_min_value: config.tlc_min_value(),
             tlc_max_value: config.tlc_max_value(),
             tlc_fee_proportional_millionths: config.tlc_fee_proportional_millionths(),
+            announce_private_addr: config.announce_private_addr.unwrap_or_default(),
             broadcasted_messages: Default::default(),
             channel_subscribers,
             next_request_id: Default::default(),

@@ -22,7 +22,7 @@ use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
-use crate::now_timestamp;
+use crate::now_timestamp_as_millis_u64;
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
@@ -592,7 +592,8 @@ impl CchActor {
                                 payment_hash: Some(
                                     Hash256::from_str(&order.payment_hash).expect("parse Hash256"),
                                 ),
-                                expiry: now_timestamp() + self.config.ckb_final_tlc_expiry_delta,
+                                expiry: now_timestamp_as_millis_u64()
+                                    + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
                                 onion_packet: vec![],
                                 previous_tlc: None,

@@ -1,0 +1,43 @@
+meta {
+  name: get channels from node2
+  type: http
+  seq: 32
+}
+
+post {
+  url: {{NODE2_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": 42,
+    "jsonrpc": "2.0",
+    "method": "update_channel",
+    "params": [
+      {
+        "channel_id": "{{CHANNEL_ID_TO_UPDATE}}",
+        "tlc_fee_proportional_millionths": "0x2710"
+      }
+    ]
+  }
+}
+
+script:pre-request {
+  await new Promise(r => setTimeout(r, 3000));
+}
+
+assert {
+  res.status: eq 200
+}
+
+script:post-response {
+  await new Promise(r => setTimeout(r, 2000));
+  console.log("step 33 list channels: ", res.body.result);
+}

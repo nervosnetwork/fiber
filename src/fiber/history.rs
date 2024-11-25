@@ -6,32 +6,32 @@ use super::{
     graph::{NetworkGraphStateStore, SessionRouteNode},
     types::{Pubkey, TlcErr},
 };
-use crate::fiber::types::TlcErrorCode;
+use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimedResult {
-    pub fail_time: u128,
+    pub fail_time: u64,
     pub fail_amount: u128,
-    pub success_time: u128,
+    pub success_time: u64,
     pub success_amount: u128,
 }
 
-const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
+const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 
 // FIXME: this is a magic number from lnd, it's used to scale the amount to calculate the probability
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
-pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u128 = 6 * 60 * 60 * 1000; // 6 hours
+pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
 pub(crate) type PairTimedResult = HashMap<Pubkey, TimedResult>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct InternalPairResult {
     pub(crate) success: bool,
-    pub(crate) time: u128,
+    pub(crate) time: u64,
     pub(crate) amount: u128,
 }
 
@@ -41,15 +41,8 @@ pub(crate) struct InternalResult {
     pub fail_node: Option<Pubkey>,
 }
 
-fn current_time() -> u128 {
-    std::time::UNIX_EPOCH
-        .elapsed()
-        .expect("unix epoch")
-        .as_millis()
-}
-
 impl InternalResult {
-    pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u128, amount: u128, success: bool) {
+    pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u64, amount: u128, success: bool) {
         let pair = InternalPairResult {
             success,
             time,
@@ -59,12 +52,12 @@ impl InternalResult {
     }
 
     pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey) {
-        self.add(from, target, current_time(), 0, false);
-        self.add(target, from, current_time(), 0, false)
+        self.add(from, target, now_timestamp_as_millis_u64(), 0, false);
+        self.add(target, from, now_timestamp_as_millis_u64(), 0, false)
     }
 
     pub fn add_fail_pair_balanced(&mut self, from: Pubkey, target: Pubkey, amount: u128) {
-        self.add(from, target, current_time(), amount, false);
+        self.add(from, target, now_timestamp_as_millis_u64(), amount, false);
     }
 
     pub fn fail_node(&mut self, nodes: &[SessionRouteNode], index: usize) {
@@ -99,7 +92,7 @@ impl InternalResult {
             self.add(
                 nodes[i].pubkey,
                 nodes[i + 1].pubkey,
-                current_time(),
+                now_timestamp_as_millis_u64(),
                 nodes[i].amount,
                 true,
             );
@@ -158,8 +151,7 @@ impl InternalResult {
             }
         } else if index == len - 1 {
             match error_code {
-                TlcErrorCode::FinalIncorrectExpiryDelta
-                | TlcErrorCode::FinalIncorrectHtlcAmount => {
+                TlcErrorCode::FinalIncorrectExpiryDelta | TlcErrorCode::FinalIncorrectTlcAmount => {
                     if len == 2 {
                         need_to_retry = false;
                         self.fail_node(nodes, len - 1);
@@ -204,7 +196,7 @@ impl InternalResult {
                 TlcErrorCode::PermanentChannelFailure => {
                     self.fail_pair(nodes, index);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectHtlcExpiry => {
+                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
                         self.fail_node(nodes, 1);
@@ -239,7 +231,7 @@ impl InternalResult {
 pub(crate) struct PaymentHistory<S> {
     pub inner: HashMap<Pubkey, PairTimedResult>,
     // The minimum interval between two failed payments in milliseconds
-    pub min_fail_relax_interval: u128,
+    pub min_fail_relax_interval: u64,
     pub bimodal_scale_msat: f64,
     // this filed is used to check whether from is the source Node
     // will be used after enabling the direct channel related logic
@@ -252,7 +244,7 @@ impl<S> PaymentHistory<S>
 where
     S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u128>, store: S) -> Self {
+    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u64>, store: S) -> Self {
         let mut s = PaymentHistory {
             source,
             inner: HashMap::new(),
@@ -293,7 +285,7 @@ where
         target: Pubkey,
         amount: u128,
         success: bool,
-        time: u128,
+        time: u64,
     ) {
         let min_fail_relax_interval = self.min_fail_relax_interval;
         let result = if let Some(current) = self.get_mut_result(&from, &target) {
@@ -354,7 +346,7 @@ where
                 })
                 .collect();
             for (from, target) in pairs {
-                self.apply_pair_result(from, target, 0, false, current_time());
+                self.apply_pair_result(from, target, 0, false, now_timestamp_as_millis_u64());
             }
         }
     }
@@ -398,14 +390,14 @@ where
 
     // The factor approaches 0 for success_time a long time in the past,
     // is 1 when the success_time is now.
-    fn time_factor(&self, time: u128) -> f64 {
-        let time_ago = (current_time() - time).max(0);
+    fn time_factor(&self, time: u64) -> f64 {
+        let time_ago = (now_timestamp_as_millis_u64() - time).max(0);
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         let factor = exponent.exp();
         factor
     }
 
-    pub(crate) fn cannot_send(&self, fail_amount: u128, time: u128, capacity: u128) -> u128 {
+    pub(crate) fn cannot_send(&self, fail_amount: u128, time: u64, capacity: u128) -> u128 {
         let mut fail_amount = fail_amount;
 
         if fail_amount > capacity {
@@ -417,7 +409,7 @@ where
         cannot_send
     }
 
-    pub(crate) fn can_send(&self, amount: u128, time: u128) -> u128 {
+    pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
         let factor = self.time_factor(time);
         let can_send = (amount as f64 * factor) as u128;
         can_send
@@ -434,7 +426,7 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(&from, &target) {
             if result.fail_time != 0 {
-                let time_ago = (current_time() - result.fail_time).min(0);
+                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).min(0);
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }

@@ -1,0 +1,48 @@
+meta {
+  name: Node1 send get_payment for query status
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{NODE1_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_payment",
+    "params": [
+      {
+        "payment_hash": "{{payment_hash}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+}
+
+script:pre-request {
+  // sleep for a while
+  await new Promise(r => setTimeout(r, 2000));
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 500));
+  console.log("get result: ", res.body.result);
+  if (res.body.result.status != "Success") {
+    throw new Error("Assertion failed: payment session status expected to be Success");
+  }
+
+}

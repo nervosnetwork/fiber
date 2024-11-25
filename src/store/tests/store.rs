@@ -1,5 +1,7 @@
 use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
+use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
+use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::*;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
@@ -284,7 +286,7 @@ fn test_channel_actor_state_store() {
         id: gen_sha256_hash(),
         tlc_ids: Default::default(),
         tlcs: Default::default(),
-        local_shutdown_script: Some(Script::default()),
+        local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
             funding_pubkey: generate_pubkey().into(),
             tlc_base_key: generate_pubkey().into(),
@@ -332,7 +334,8 @@ fn test_store_payment_session() {
         amount: 100,
         payment_hash,
         invoice: None,
-        final_htlc_expiry_delta: Some(100),
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
         timeout: Some(10),
         max_fee_amount: Some(1000),
         max_parts: None,
@@ -340,6 +343,7 @@ fn test_store_payment_session() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        dry_run: false,
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);
     store.insert_payment_session(payment_session.clone());
