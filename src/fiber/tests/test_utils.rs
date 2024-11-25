@@ -1,6 +1,7 @@
 use crate::fiber::history::TimedResult;
 use crate::fiber::types::Pubkey;
 use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
+use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
     ckb::tests::test_utils::{
@@ -153,11 +154,17 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
     }
 }
 
+pub fn generate_store() -> Store {
+    let temp_dir = TempDir::new("fnn-test");
+    let store = Store::new(temp_dir.as_ref());
+    store
+}
+
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: MemoryStore,
+    pub store: Store,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
@@ -176,7 +183,7 @@ impl NetworkNode {
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
-    store: MemoryStore,
+    store: Store,
     fiber_config: FiberConfig,
 }
 
@@ -189,7 +196,6 @@ impl NetworkNodeConfig {
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
-    store: Option<MemoryStore>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
@@ -200,7 +206,6 @@ impl NetworkNodeConfigBuilder {
         Self {
             base_dir: None,
             node_name: None,
-            store: None,
             fiber_config_updater: None,
         }
     }
@@ -219,11 +224,6 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
-    pub fn store(mut self, store: MemoryStore) -> Self {
-        self.store = Some(store);
-        self
-    }
-
     pub fn fiber_config_updater(
         mut self,
         updater: impl FnOnce(&mut FiberConfig) + 'static,
@@ -238,7 +238,7 @@ impl NetworkNodeConfigBuilder {
             .clone()
             .unwrap_or_else(|| Arc::new(TempDir::new("fnn-test")));
         let node_name = self.node_name.clone();
-        let store = self.store.clone().unwrap_or_default();
+        let store = generate_store();
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,

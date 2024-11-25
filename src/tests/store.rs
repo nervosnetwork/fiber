@@ -10,6 +10,7 @@ use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::gen_rand_public_key;
 use crate::fiber::tests::test_utils::gen_sha256_hash;
+use crate::fiber::tests::test_utils::generate_store;
 use crate::fiber::types::ChannelAnnouncement;
 use crate::fiber::types::Hash256;
 use crate::fiber::types::NodeAnnouncement;
@@ -243,10 +244,7 @@ fn test_store_payment_session() {
 
 #[test]
 fn test_store_payment_history() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("payment_history_store");
-    let mut store = Store::new(path);
-
+    let mut store = generate_store();
     let pubkey = gen_rand_public_key();
     let target = gen_rand_public_key();
     let result = TimedResult {

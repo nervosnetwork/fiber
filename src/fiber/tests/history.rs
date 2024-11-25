@@ -2,7 +2,7 @@ use crate::fiber::graph::SessionRouteNode;
 use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
-use crate::fiber::tests::test_utils::{generate_pubkey, MemoryStore};
+use crate::fiber::tests::test_utils::{generate_pubkey, generate_store};
 use crate::fiber::types::Pubkey;
 use crate::now_timestamp_as_millis_u64;
 use crate::store::Store;
@@ -21,7 +21,7 @@ impl Round for f64 {
 
 #[test]
 fn test_history() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let from: Pubkey = generate_pubkey().into();
     let target: Pubkey = generate_pubkey().into();
 
@@ -48,7 +48,7 @@ fn test_history() {
 
 #[test]
 fn test_history_apply_channel_result() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -78,7 +78,7 @@ fn test_history_apply_channel_result() {
 
 #[test]
 fn test_history_internal_result() {
-    //let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    //let mut history = PaymentHistory::new(generate_pubkey().into(), None,generate_store());
 
     let mut internal_result = InternalResult::default();
     let from = generate_pubkey();
@@ -222,7 +222,7 @@ fn test_history_internal_result_fail_range_pair() {
     assert_eq!(res.amount, 0);
     assert_eq!(res.success, false);
 
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     history.apply_internal_result(internal_result);
 
     assert!(matches!(
@@ -269,7 +269,7 @@ fn test_history_internal_result_fail_range_pair() {
 #[test]
 fn test_history_apply_internal_result_fail_node() {
     let mut internal_result = InternalResult::default();
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let node1 = generate_pubkey();
     let node2 = generate_pubkey();
     let node3 = generate_pubkey();
@@ -358,7 +358,7 @@ fn test_history_apply_internal_result_fail_node() {
 
 #[test]
 fn test_history_interal_success_fail() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -418,7 +418,7 @@ fn test_history_interal_success_fail() {
 
 #[test]
 fn test_history_probability() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -496,7 +496,7 @@ fn test_history_probability() {
 
 #[test]
 fn test_history_direct_probability() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -525,7 +525,7 @@ fn test_history_direct_probability() {
 
 #[test]
 fn test_history_small_fail_amount_probability() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -547,7 +547,7 @@ fn test_history_small_fail_amount_probability() {
 
 #[test]
 fn test_history_channel_probability_range() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -584,7 +584,7 @@ fn test_history_channel_probability_range() {
 
 #[test]
 fn test_history_eval_probability_range() {
-    let mut history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let mut history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let target = generate_pubkey();
     let from: Pubkey = generate_pubkey().into();
 
@@ -689,7 +689,7 @@ fn test_history_load_store() {
 fn test_history_can_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
-    let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let now = now_timestamp_as_millis_u64();
     let res = history.can_send(100, now);
     assert_eq!(res, 100);
@@ -711,7 +711,7 @@ fn test_history_can_send_with_time() {
 fn test_history_can_not_send_with_time() {
     use crate::fiber::history::DEFAULT_BIMODAL_DECAY_TIME;
 
-    let history = PaymentHistory::new(generate_pubkey().into(), None, MemoryStore::default());
+    let history = PaymentHistory::new(generate_pubkey().into(), None, generate_store());
     let now = now_timestamp_as_millis_u64();
     let res = history.cannot_send(90, now, 100);
     assert_eq!(res, 90);
