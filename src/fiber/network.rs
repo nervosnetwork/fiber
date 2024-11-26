@@ -491,7 +491,6 @@ impl NetworkActorMessage {
 
 #[derive(Debug)]
 pub enum NetworkServiceEvent {
-    ServiceEvent(ServiceEvent),
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
     NetworkStopped(PeerId),
     PeerConnected(PeerId, Multiaddr),
@@ -4232,12 +4231,6 @@ impl Handle {
         let _ = self.actor.send_message(message);
     }
 
-    fn emit_event(&self, event: NetworkServiceEvent) {
-        self.send_actor_message(NetworkActorMessage::Event(
-            NetworkActorEvent::NetworkServiceEvent(event),
-        ));
-    }
-
     fn create_meta(self, id: ProtocolId) -> ProtocolMeta {
         MetaBuilder::new()
             .id(id)
@@ -4320,7 +4313,7 @@ impl ServiceHandle for Handle {
         // ServiceError::ProtocolError => ban peer
     }
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        self.emit_event(NetworkServiceEvent::ServiceEvent(event));
+        trace!("Service event: {:?}", event);
     }
 }
 
