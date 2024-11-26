@@ -491,7 +491,6 @@ impl NetworkActorMessage {
 
 #[derive(Debug)]
 pub enum NetworkServiceEvent {
-    ServiceError(ServiceError),
     ServiceEvent(ServiceEvent),
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
     NetworkStopped(PeerId),
@@ -1107,16 +1106,6 @@ where
         debug!("Handling event: {:?}", event);
         match event {
             NetworkActorEvent::NetworkServiceEvent(e) => {
-                match &e {
-                    NetworkServiceEvent::ServiceError(ServiceError::DialerError {
-                        address,
-                        error,
-                    }) => {
-                        error!("Dialer error: {:?} -> {:?}", address, error);
-                        state.maybe_tell_syncer_peer_disconnected_multiaddr(address)
-                    }
-                    _ => {}
-                }
                 self.on_service_event(e).await;
             }
             NetworkActorEvent::PeerConnected(id, pubkey, session) => {
@@ -3581,19 +3570,6 @@ where
         }
     }
 
-    fn maybe_tell_syncer_peer_disconnected_multiaddr(&self, multiaddr: &Multiaddr) {
-        if let NetworkSyncStatus::Running(ref state) = self.sync_status {
-            if let Some(peer_id) = state
-                .pinned_syncing_peers
-                .iter()
-                .find(|(_p, a)| a == multiaddr)
-                .map(|x| &x.0)
-            {
-                self.maybe_tell_syncer_peer_disconnected(peer_id);
-            }
-        }
-    }
-
     fn maybe_finish_sync(&mut self) {
         if let NetworkSyncStatus::Running(state) = &self.sync_status {
             // TODO: It is better to sync with a few more peers to make sure we have the latest data.
@@ -4338,7 +4314,10 @@ impl ServiceProtocol for Handle {
 #[async_trait]
 impl ServiceHandle for Handle {
     async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        self.emit_event(NetworkServiceEvent::ServiceError(error));
+        trace!("Service error: {:?}", error);
+        // TODO
+        // ServiceError::DialerError => remove address from peer store
+        // ServiceError::ProtocolError => ban peer
     }
     async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
         self.emit_event(NetworkServiceEvent::ServiceEvent(event));
