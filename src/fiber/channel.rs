@@ -57,7 +57,7 @@ use crate::{
     },
     fiber::{
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
-        network::{emit_service_event, sign_network_message},
+        network::sign_network_message,
         types::{AnnouncementSignatures, Shutdown},
     },
     NetworkServiceEvent,
@@ -388,13 +388,11 @@ where
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
                         // Notify outside observers.
                         self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::NetworkServiceEvent(
-                                    NetworkServiceEvent::CommitmentSignaturePending(
-                                        state.get_remote_peer_id(),
-                                        state.get_id(),
-                                        state.get_current_commitment_number(false),
-                                    ),
+                            .send_message(NetworkActorMessage::new_notification(
+                                NetworkServiceEvent::CommitmentSignaturePending(
+                                    state.get_remote_peer_id(),
+                                    state.get_id(),
+                                    state.get_current_commitment_number(false),
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -1067,13 +1065,13 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::LocalCommitmentSigned(
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::LocalCommitmentSigned(
                     state.get_remote_peer_id(),
                     state.get_id(),
                     version,
                     commitment_tx,
-                )),
+                ),
             ))
             .expect("myself alive");
 
@@ -4499,13 +4497,11 @@ impl ChannelActorState {
                 if flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) {
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::CommitmentSignaturePending(
-                                    self.get_remote_peer_id(),
-                                    self.get_id(),
-                                    self.get_current_commitment_number(false),
-                                ),
+                        .send_message(NetworkActorMessage::new_notification(
+                            NetworkServiceEvent::CommitmentSignaturePending(
+                                self.get_remote_peer_id(),
+                                self.get_id(),
+                                self.get_current_commitment_number(false),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4592,14 +4588,12 @@ impl ChannelActorState {
 
         // Notify outside observers.
         network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::NetworkServiceEvent(
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        self.get_remote_peer_id(),
-                        self.get_id(),
-                        num,
-                        tx.clone(),
-                    ),
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RemoteCommitmentSigned(
+                    self.get_remote_peer_id(),
+                    self.get_id(),
+                    num,
+                    tx.clone(),
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4916,18 +4910,20 @@ impl ChannelActorState {
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        emit_service_event(
-            network,
-            NetworkServiceEvent::RevokeAndAckReceived(
-                self.get_remote_peer_id(),
-                self.get_id(),
-                commitment_number,
-                x_only_aggregated_pubkey,
-                aggregate_signature,
-                output,
-                output_data,
-            ),
-        );
+        network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RevokeAndAckReceived(
+                    self.get_remote_peer_id(),
+                    self.get_id(),
+                    commitment_number,
+                    x_only_aggregated_pubkey,
+                    aggregate_signature,
+                    output,
+                    output_data,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
         Ok(())
     }
 
