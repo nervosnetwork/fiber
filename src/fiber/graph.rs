@@ -876,7 +876,7 @@ pub trait NetworkGraphStateStore {
         direction: Direction,
         result: TimedResult,
     );
-    fn get_payment_history_result(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
+    fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

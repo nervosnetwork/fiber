@@ -7,6 +7,7 @@ use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
+        serde_utils::PubNonceAsBytes,
         types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
@@ -57,7 +58,7 @@ use crate::{
     },
     fiber::{
         fee::{calculate_commitment_tx_fee, shutdown_tx_size},
-        network::{emit_service_event, sign_network_message},
+        network::sign_network_message,
         types::{AnnouncementSignatures, Shutdown},
     },
     NetworkServiceEvent,
@@ -388,13 +389,11 @@ where
                         debug!("CommitmentSigned message received, but we haven't sent our commitment_signed message yet");
                         // Notify outside observers.
                         self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::NetworkServiceEvent(
-                                    NetworkServiceEvent::CommitmentSignaturePending(
-                                        state.get_remote_peer_id(),
-                                        state.get_id(),
-                                        state.get_current_commitment_number(false),
-                                    ),
+                            .send_message(NetworkActorMessage::new_notification(
+                                NetworkServiceEvent::CommitmentSignaturePending(
+                                    state.get_remote_peer_id(),
+                                    state.get_id(),
+                                    state.get_current_commitment_number(false),
                                 ),
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -1067,13 +1066,13 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         self.network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::NetworkServiceEvent(NetworkServiceEvent::LocalCommitmentSigned(
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::LocalCommitmentSigned(
                     state.get_remote_peer_id(),
                     state.get_id(),
                     version,
                     commitment_tx,
-                )),
+                ),
             ))
             .expect("myself alive");
 
@@ -2072,7 +2071,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "EntityHex")]
     pub local_shutdown_script: Script,
 
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub previous_remote_nonce: Option<PubNonce>,
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_nonce: Option<PubNonce>,
 
     // The latest commitment transaction we're holding
@@ -2095,7 +2096,7 @@ pub struct ChannelActorState {
 }
 
 #[serde_as]
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
 pub struct ShutdownInfo {
     #[serde_as(as = "EntityHex")]
     pub close_script: Script,
@@ -2109,6 +2110,7 @@ pub struct ShutdownInfo {
 // For ChannelUpdate config, only information on our side are saved here because we have no
 // control to the config on the counterparty side. And they will publish
 // the config to the network via another ChannelUpdate message.
+#[serde_as]
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct PublicChannelInfo {
     pub enabled: bool,
@@ -2128,6 +2130,8 @@ pub struct PublicChannelInfo {
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
+
+    #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub remote_channel_announcement_nonce: Option<PubNonce>,
 
     pub channel_announcement: Option<ChannelAnnouncement>,
@@ -2291,11 +2295,6 @@ enum CommitmentSignedFlags {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    rename_all = "SCREAMING_SNAKE_CASE",
-    tag = "state_name",
-    content = "state_flags"
-)]
 pub enum ChannelState {
     /// We are negotiating the parameters required for the channel prior to funding it.
     NegotiatingFunding(NegotiatingFundingFlags),
@@ -4301,6 +4300,14 @@ impl ChannelActorState {
                 .local_shutdown_info
                 .as_mut()
                 .expect("local shudown info exists");
+            let remote_shutdown_info = self
+                .remote_shutdown_info
+                .as_ref()
+                .expect("remote shudown info exists");
+            let shutdown_scripts = (
+                local_shutdown_info.close_script.clone(),
+                remote_shutdown_info.close_script.clone(),
+            );
             let local_shutdown_signature = match local_shutdown_info.signature {
                 Some(signature) => signature,
                 None => {
@@ -4322,12 +4329,7 @@ impl ChannelActorState {
                 }
             };
 
-            if let Some(remote_shutdown_signature) = self
-                .remote_shutdown_info
-                .as_ref()
-                .expect("remote shutdown info exists")
-                .signature
-            {
+            if let Some(remote_shutdown_signature) = remote_shutdown_info.signature {
                 let tx: TransactionView = self
                     .aggregate_partial_signatures_to_consume_funding_cell(
                         [local_shutdown_signature, remote_shutdown_signature],
@@ -4335,13 +4337,7 @@ impl ChannelActorState {
                     )?;
                 assert_eq!(
                     tx.data().serialized_size_in_block(),
-                    shutdown_tx_size(
-                        &self.funding_udt_type_script,
-                        (
-                            self.get_local_shutdown_script(),
-                            self.get_remote_shutdown_script()
-                        )
-                    )
+                    shutdown_tx_size(&self.funding_udt_type_script, shutdown_scripts)
                 );
 
                 self.update_state(ChannelState::Closed(CloseFlags::COOPERATIVE));
@@ -4499,13 +4495,11 @@ impl ChannelActorState {
                 if flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) {
                     // Notify outside observers.
                     network
-                        .send_message(NetworkActorMessage::new_event(
-                            NetworkActorEvent::NetworkServiceEvent(
-                                NetworkServiceEvent::CommitmentSignaturePending(
-                                    self.get_remote_peer_id(),
-                                    self.get_id(),
-                                    self.get_current_commitment_number(false),
-                                ),
+                        .send_message(NetworkActorMessage::new_notification(
+                            NetworkServiceEvent::CommitmentSignaturePending(
+                                self.get_remote_peer_id(),
+                                self.get_id(),
+                                self.get_current_commitment_number(false),
                             ),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4592,14 +4586,12 @@ impl ChannelActorState {
 
         // Notify outside observers.
         network
-            .send_message(NetworkActorMessage::new_event(
-                NetworkActorEvent::NetworkServiceEvent(
-                    NetworkServiceEvent::RemoteCommitmentSigned(
-                        self.get_remote_peer_id(),
-                        self.get_id(),
-                        num,
-                        tx.clone(),
-                    ),
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RemoteCommitmentSigned(
+                    self.get_remote_peer_id(),
+                    self.get_id(),
+                    num,
+                    tx.clone(),
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
@@ -4916,18 +4908,20 @@ impl ChannelActorState {
         self.update_state_on_raa_msg(true);
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        emit_service_event(
-            network,
-            NetworkServiceEvent::RevokeAndAckReceived(
-                self.get_remote_peer_id(),
-                self.get_id(),
-                commitment_number,
-                x_only_aggregated_pubkey,
-                aggregate_signature,
-                output,
-                output_data,
-            ),
-        );
+        network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::RevokeAndAckReceived(
+                    self.get_remote_peer_id(),
+                    self.get_id(),
+                    commitment_number,
+                    x_only_aggregated_pubkey,
+                    aggregate_signature,
+                    output,
+                    output_data,
+                ),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
         Ok(())
     }
 

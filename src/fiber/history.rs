@@ -356,7 +356,7 @@ where
     }
 
     pub(crate) fn load_from_store(&mut self) {
-        let results = self.store.get_payment_history_result();
+        let results = self.store.get_payment_history_results();
         for (channel, direction, result) in results.into_iter() {
             self.inner.insert((channel, direction), result);
         }

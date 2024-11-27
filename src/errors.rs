@@ -48,6 +48,8 @@ pub enum Error {
     InvalidPeerMessage(String),
     #[error("Onion packet error: {0}")]
     InvalidOnionPacket(crate::fiber::types::Error),
+    #[error("Database error: {0}")]
+    DBInternalError(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
