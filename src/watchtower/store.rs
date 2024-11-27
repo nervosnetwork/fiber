@@ -3,7 +3,7 @@ use musig2::CompactSignature;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
-use crate::fiber::{serde_utils::EntityHex, types::Hash256};
+use crate::fiber::{serde_utils::CompactSignatureAsBytes, serde_utils::EntityHex, types::Hash256};
 
 pub trait WatchtowerStore {
     /// Get the channels that are currently being watched by the watchtower
@@ -32,6 +32,7 @@ pub struct ChannelData {
 pub struct RevocationData {
     pub commitment_number: u64,
     pub x_only_aggregated_pubkey: [u8; 32],
+    #[serde_as(as = "CompactSignatureAsBytes")]
     pub aggregated_signature: CompactSignature,
     #[serde_as(as = "EntityHex")]
     pub output: CellOutput,

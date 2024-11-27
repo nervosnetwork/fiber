@@ -1,35 +1,26 @@
+use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
-use crate::fiber::graph::ChannelInfo;
-use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::graph::NodeInfo;
-use crate::fiber::graph::PaymentSession;
-use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::graph::*;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
-use crate::fiber::tests::test_utils::gen_rand_public_key;
-use crate::fiber::tests::test_utils::gen_sha256_hash;
-use crate::fiber::tests::test_utils::generate_store;
-use crate::fiber::types::ChannelAnnouncement;
-use crate::fiber::types::Hash256;
-use crate::fiber::types::NodeAnnouncement;
-use crate::fiber::types::Pubkey;
+use crate::fiber::tests::test_utils::*;
+use crate::fiber::types::*;
 use crate::invoice::*;
+use crate::store::schema::*;
 use crate::store::Store;
-use crate::store::CHANNEL_INFO_PREFIX;
-use crate::store::NODE_INFO_PREFIX;
 use crate::watchtower::*;
+use ckb_hash::new_blake2b;
 use ckb_jsonrpc_types::JsonBytes;
-use ckb_types::packed::Bytes;
-use ckb_types::packed::CellOutput;
-use ckb_types::packed::OutPoint;
-use ckb_types::packed::Script;
+use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use core::cmp::Ordering;
+use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
-use secp256k1::Keypair;
-use secp256k1::Secp256k1;
+use musig2::SecNonce;
+use secp256k1::{Keypair, Secp256k1};
+use std::time::SystemTime;
 use tempfile::tempdir;
 
 fn mock_node() -> (Pubkey, NodeInfo) {
@@ -80,7 +71,7 @@ fn mock_channel() -> ChannelInfo {
 fn test_store_invoice() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let preimage = gen_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
@@ -113,7 +104,7 @@ fn test_store_invoice() {
 fn test_store_channels() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let mut channels = vec![];
     for _ in 0..10 {
@@ -147,7 +138,7 @@ fn test_store_channels() {
 fn test_store_nodes() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("invoice_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let mut nodes = vec![];
     for _ in 0..10 {
@@ -174,10 +165,24 @@ fn test_store_nodes() {
 }
 
 #[test]
+fn test_compact_signature() {
+    let revocation_data = RevocationData {
+        commitment_number: 0,
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        output: CellOutput::default(),
+        output_data: Bytes::default(),
+    };
+    let bincode_encoded = bincode::serialize(&revocation_data).unwrap();
+    let revocation_data: RevocationData = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(revocation_data, revocation_data);
+}
+
+#[test]
 fn test_store_wacthtower() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("watchtower_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
 
     let channel_id = gen_sha256_hash();
     let funding_tx_lock = Script::default();
@@ -198,6 +203,7 @@ fn test_store_wacthtower() {
         output: CellOutput::default(),
         output_data: Bytes::default(),
     };
+
     store.update_revocation(channel_id, revocation_data.clone());
     assert_eq!(
         store.get_watch_channels(),
@@ -213,10 +219,115 @@ fn test_store_wacthtower() {
 }
 
 #[test]
+fn test_channel_state_serialize() {
+    let state = ChannelState::AwaitingChannelReady(AwaitingChannelReadyFlags::CHANNEL_READY);
+    let bincode_encoded = bincode::serialize(&state).unwrap();
+    let new_state: ChannelState = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(state, new_state);
+
+    let flags = SigningCommitmentFlags::COMMITMENT_SIGNED_SENT;
+    let bincode_encoded = bincode::serialize(&flags).unwrap();
+    let new_flags: SigningCommitmentFlags = bincode::deserialize(&bincode_encoded).unwrap();
+    assert_eq!(flags, new_flags);
+}
+
+fn blake2b_hash_with_salt(data: &[u8], salt: &[u8]) -> [u8; 32] {
+    let mut hasher = new_blake2b();
+    hasher.update(salt);
+    hasher.update(data);
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+    result
+}
+
+#[test]
+fn test_channel_actor_state_store() {
+    let seed = [0u8; 32];
+    let signer = InMemorySigner::generate_from_seed(&seed);
+
+    let seckey = blake2b_hash_with_salt(
+        signer.musig2_base_nonce.as_ref(),
+        b"channel_announcement".as_slice(),
+    );
+    let sec_nonce = SecNonce::build(seckey).build();
+    let pub_nonce = sec_nonce.public_nonce();
+
+    let state = ChannelActorState {
+        state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
+        public_channel_info: Some(PublicChannelInfo {
+            enabled: false,
+            tlc_fee_proportional_millionths: Some(123),
+            tlc_max_value: Some(1),
+            tlc_min_value: Some(2),
+            tlc_expiry_delta: Some(3),
+            local_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_signature: Some((
+                mock_ecdsa_signature(),
+                MaybeScalar::two(),
+            )),
+            remote_channel_announcement_nonce: Some(pub_nonce.clone()),
+            channel_announcement: None,
+            channel_update: None,
+        }),
+        local_pubkey: generate_pubkey().into(),
+        remote_pubkey: generate_pubkey().into(),
+        funding_tx: None,
+        funding_tx_confirmed_at: Some((1.into(), 1)),
+        is_acceptor: true,
+        funding_udt_type_script: Some(Script::default()),
+        to_local_amount: 100,
+        to_remote_amount: 100,
+        commitment_fee_rate: 100,
+        commitment_delay_epoch: 100,
+        funding_fee_rate: 100,
+        id: gen_sha256_hash(),
+        tlc_ids: Default::default(),
+        tlcs: Default::default(),
+        local_shutdown_script: Script::default(),
+        local_channel_public_keys: ChannelBasePublicKeys {
+            funding_pubkey: generate_pubkey().into(),
+            tlc_base_key: generate_pubkey().into(),
+        },
+        signer,
+        remote_channel_public_keys: Some(ChannelBasePublicKeys {
+            funding_pubkey: generate_pubkey().into(),
+            tlc_base_key: generate_pubkey().into(),
+        }),
+        commitment_numbers: Default::default(),
+        remote_shutdown_script: Some(Script::default()),
+        previous_remote_nonce: Some(pub_nonce.clone()),
+        remote_nonce: Some(pub_nonce.clone()),
+        remote_commitment_points: vec![generate_pubkey().into(), generate_pubkey().into()],
+        local_shutdown_info: None,
+        remote_shutdown_info: None,
+        local_reserved_ckb_amount: 100,
+        remote_reserved_ckb_amount: 100,
+        latest_commitment_transaction: None,
+        max_tlc_value_in_flight: 100,
+        max_tlc_number_in_flight: 100,
+        reestablishing: false,
+        created_at: SystemTime::now(),
+    };
+
+    let bincode_encoded = bincode::serialize(&state).unwrap();
+    let _new_state: ChannelActorState = bincode::deserialize(&bincode_encoded).unwrap();
+
+    let store = Store::new(tempdir().unwrap().path().join("store")).expect("create store failed");
+    assert!(store.get_channel_actor_state(&state.id).is_none());
+    store.insert_channel_actor_state(state.clone());
+    assert!(store.get_channel_actor_state(&state.id).is_some());
+    store.delete_channel_actor_state(&state.id);
+    assert!(store.get_channel_actor_state(&state.id).is_none());
+}
+
+#[test]
 fn test_store_payment_session() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("payment_history_store");
-    let store = Store::new(path);
+    let store = Store::new(path).expect("created store failed");
     let payment_hash = gen_sha256_hash();
     let payment_data = SendPaymentData {
         target_pubkey: gen_rand_public_key(),
@@ -255,7 +366,7 @@ fn test_store_payment_history() {
     };
     store.insert_payment_history_result(pubkey.into(), target.clone(), result.clone());
     assert_eq!(
-        store.get_payment_history_result(),
+        store.get_payment_history_results(),
         vec![(pubkey.into(), target.clone(), result)]
     );
 
@@ -274,7 +385,7 @@ fn test_store_payment_history() {
         success_amount: 5,
     };
     store.insert_payment_history_result(pubkey.into(), target_2.clone(), result_2.clone());
-    let mut r1 = store.get_payment_history_result();
+    let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
     let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![
         (pubkey.into(), target, result),
@@ -292,7 +403,7 @@ fn test_store_payment_history() {
         success_amount: 6,
     };
     store.insert_payment_history_result(pubkey_3.into(), target_3.clone(), result_3.clone());
-    let mut r1 = store.get_payment_history_result();
+    let mut r1 = store.get_payment_history_results();
     sort_results(&mut r1);
 
     let mut r2: Vec<(Pubkey, Pubkey, TimedResult)> = vec![

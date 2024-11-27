@@ -7,6 +7,7 @@ use crate::fiber::tests::test_utils::rand_sha256_hash;
 use crate::invoice::InvoiceBuilder;
 use crate::{
     fiber::{
+        channel::ShutdownInfo,
         graph::{ChannelInfo, NetworkGraphStateStore},
         network::{get_chain_hash, NetworkActorStateStore, SendPaymentCommand},
         tests::test_utils::NetworkNodeConfigBuilder,
@@ -29,6 +30,7 @@ use ckb_types::{
     prelude::{Builder, Entity, Pack},
 };
 use core::time::Duration;
+use musig2::PartialSignature;
 use std::{borrow::Cow, str::FromStr};
 use tentacle::{
     multiaddr::{MultiAddr, Protocol},
@@ -648,6 +650,42 @@ async fn test_saving_and_connecting_to_node() {
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == node1_id),
     )
     .await;
+}
+
+#[test]
+fn test_announcement_message_serialize() {
+    let capacity = 42;
+    let priv_key: Privkey = get_test_priv_key();
+    let pubkey = priv_key.x_only_pub_key().serialize();
+    let pubkey_hash = &blake2b_256(pubkey.as_slice())[0..20];
+    let tx = TransactionView::new_advanced_builder()
+        .output(
+            CellOutput::new_builder()
+                .capacity(capacity.pack())
+                .lock(ScriptBuilder::default().args(pubkey_hash.pack()).build())
+                .build(),
+        )
+        .output_data(vec![0u8; 8].pack())
+        .build();
+    let outpoint = tx.output_pts()[0].clone();
+    let mut channel_announcement =
+        create_fake_channel_announcement_mesage(priv_key, capacity, outpoint);
+
+    channel_announcement.udt_type_script = Some(ScriptBuilder::default().build());
+
+    eprintln!("channel_announcement: {:#?}", channel_announcement);
+    let serialized = bincode::serialize(&channel_announcement).unwrap();
+    let deserialized: ChannelAnnouncement = bincode::deserialize(&serialized).unwrap();
+    assert_eq!(channel_announcement, deserialized);
+
+    let shutdown_info = ShutdownInfo {
+        close_script: ScriptBuilder::default().build(),
+        fee_rate: 100 as u64,
+        signature: Some(PartialSignature::max()),
+    };
+    let serialized = bincode::serialize(&shutdown_info).unwrap();
+    let deserialized: ShutdownInfo = bincode::deserialize(&serialized).unwrap();
+    assert_eq!(shutdown_info, deserialized);
 }
 
 #[test]

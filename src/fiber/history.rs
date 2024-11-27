@@ -273,7 +273,7 @@ where
     }
 
     pub(crate) fn load_from_store(&mut self) {
-        let results = self.store.get_payment_history_result();
+        let results = self.store.get_payment_history_results();
         for (from, target, result) in results.into_iter() {
             self.inner.entry(from).or_default().insert(target, result);
         }

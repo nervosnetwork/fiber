@@ -85,6 +85,14 @@ struct Args {
     /// config for ckb
     #[command(flatten)]
     pub ckb: <CkbConfig as ClapSerde>::Opt,
+
+    /// option to run database migration
+    #[arg(
+        short = 'm',
+        long = "migrate",
+        help = "run database migration, default: false"
+    )]
+    pub migrate: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,7 +127,7 @@ pub(crate) fn print_help_and_exit(code: i32) {
 }
 
 impl Config {
-    pub fn parse() -> Self {
+    pub fn parse() -> (Self, bool) {
         // Parse whole args with clap
         let mut args = Args::parse();
 
@@ -193,12 +201,16 @@ impl Config {
         let cch = services.contains(&Service::CCH).then_some(cch);
         let rpc = services.contains(&Service::RPC).then_some(rpc);
         let ckb = services.contains(&Service::CkbChain).then_some(ckb);
-        Self {
-            fiber,
-            cch,
-            rpc,
-            ckb,
-            base_dir,
-        }
+
+        (
+            Self {
+                fiber,
+                cch,
+                rpc,
+                ckb,
+                base_dir,
+            },
+            args.migrate,
+        )
     }
 }

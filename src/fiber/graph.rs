@@ -870,7 +870,7 @@ pub trait NetworkGraphStateStore {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession>;
     fn insert_payment_session(&self, session: PaymentSession);
     fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult);
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)>;
+    fn get_payment_history_results(&self) -> Vec<(Pubkey, Pubkey, TimedResult)>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

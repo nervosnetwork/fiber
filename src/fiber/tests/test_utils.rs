@@ -1,4 +1,28 @@
+use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
+use ckb_types::{core::TransactionView, packed::Byte32};
+use ractor::{Actor, ActorRef};
+use rand::rngs::OsRng;
+use rand::Rng;
+use secp256k1::Keypair;
+use secp256k1::{rand, Message, PublicKey, Secp256k1, SecretKey};
+use std::{
+    env,
+    ffi::OsStr,
+    mem::ManuallyDrop,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+use tempfile::TempDir as OldTempDir;
+use tentacle::{multiaddr::MultiAddr, secio::PeerId};
+use tokio::sync::RwLock as TokioRwLock;
+use tokio::{
+    select,
+    sync::{mpsc, OnceCell},
+    time::sleep,
+};
+
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -14,28 +38,7 @@ use crate::{
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
-use ckb_types::{core::TransactionView, packed::Byte32};
-use ractor::{Actor, ActorRef};
-use rand::Rng;
-use secp256k1::Keypair;
-use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
-use std::{
-    env,
-    ffi::OsStr,
-    mem::ManuallyDrop,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
-use tempfile::TempDir as OldTempDir;
 use tentacle::secio::SecioKeyPair;
-use tentacle::{multiaddr::MultiAddr, secio::PeerId};
-use tokio::sync::RwLock as TokioRwLock;
-use tokio::{
-    select,
-    sync::{mpsc, OnceCell},
-    time::sleep,
-};
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -145,10 +148,20 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
     }
 }
 
+// Mock function to create a dummy EcdsaSignature
+pub fn mock_ecdsa_signature() -> EcdsaSignature {
+    let secp = Secp256k1::new();
+    let mut rng = OsRng::default();
+    let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
+    let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
+    let signature = secp.sign_ecdsa(&message, &secret_key);
+    EcdsaSignature(signature)
+}
+
 pub fn generate_store() -> Store {
     let temp_dir = TempDir::new("fnn-test");
     let store = Store::new(temp_dir.as_ref());
-    store
+    store.expect("create store")
 }
 
 pub struct NetworkNode {
