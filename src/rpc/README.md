@@ -44,6 +44,7 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
 
     * [Type `Channel`](#type-channel)
     * [Type `ChannelInfo`](#type-channelinfo)
+    * [Type `ChannelState`](#type-channelstate)
     * [Type `NodeInfo`](#type-nodeinfo)
     * [Type `RemoveTlcReason`](#type-removetlcreason)
     * [Type `UdtArgInfo`](#type-udtarginfo)
@@ -518,6 +519,27 @@ Disconnect from a peer.
 
 ## RPC Types
 
+
+<a id="#type-channelstate"></a>
+### Type `ChannelState`
+
+The state of a channel
+
+
+#### Enum with values of
+
+* `NegotiatingFunding` - NegotiatingFundingFlags, We are negotiating the parameters required for the channel prior to funding it.
+* `CollaboratingFundingTx` - CollaboratingFundingTxFlags, We're collaborating with the other party on the funding transaction.
+* `SigningCommitment` - SigningCommitmentFlags, We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+* `AwaitingTxSignatures` - AwaitingTxSignaturesFlags, We've received and sent `commitment_signed` and are now waiting for both
+ party to collaborate on creating a valid funding transaction.
+* `AwaitingChannelReady` - AwaitingChannelReadyFlags, We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+ funding transaction to confirm.
+* `ChannelReady` - , Both we and our counterparty consider the funding transaction confirmed and the channel is
+ now operational.
+* `ShuttingDown` - ShuttingDownFlags, We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+ is about to drop us, but we store this anyway.
+* `Closed` - CloseFlags, This channel is closed.
 
 <a id="#type-channel"></a>
 ### Type `Channel`

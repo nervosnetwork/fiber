@@ -1,7 +1,10 @@
 use crate::fiber::{
     channel::{
-        AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
-        RemoveTlcCommand, ShutdownCommand, UpdateCommand,
+        AddTlcCommand, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+        ChannelState as RawChannelState, CloseFlags, CollaboratingFundingTxFlags,
+        NegotiatingFundingFlags, RemoveTlcCommand, ShutdownCommand, ShuttingDownFlags,
+        SigningCommitmentFlags, UpdateCommand,
     },
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
@@ -127,6 +130,59 @@ pub(crate) struct ListChannelsParams {
 pub(crate) struct ListChannelsResult {
     /// The list of channels
     channels: Vec<Channel>,
+}
+
+/// The state of a channel
+// `ChannelState` is a copy of `ChannelState` with `#[serde(...)]` attributes for compatibility
+// `bincode` does not support deserialize_identifier
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "SCREAMING_SNAKE_CASE",
+    tag = "state_name",
+    content = "state_flags"
+)]
+pub enum ChannelState {
+    /// We are negotiating the parameters required for the channel prior to funding it.
+    NegotiatingFunding(NegotiatingFundingFlags),
+    /// We're collaborating with the other party on the funding transaction.
+    CollaboratingFundingTx(CollaboratingFundingTxFlags),
+    /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+    SigningCommitment(SigningCommitmentFlags),
+    /// We've received and sent `commitment_signed` and are now waiting for both
+    /// party to collaborate on creating a valid funding transaction.
+    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
+    /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+    /// funding transaction to confirm.
+    AwaitingChannelReady(AwaitingChannelReadyFlags),
+    /// Both we and our counterparty consider the funding transaction confirmed and the channel is
+    /// now operational.
+    ChannelReady(),
+    /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+    /// is about to drop us, but we store this anyway.
+    ShuttingDown(ShuttingDownFlags),
+    /// This channel is closed.
+    Closed(CloseFlags),
+}
+
+impl From<RawChannelState> for ChannelState {
+    fn from(state: RawChannelState) -> Self {
+        match state {
+            RawChannelState::NegotiatingFunding(flags) => ChannelState::NegotiatingFunding(flags),
+            RawChannelState::CollaboratingFundingTx(flags) => {
+                ChannelState::CollaboratingFundingTx(flags)
+            }
+            RawChannelState::SigningCommitment(flags) => ChannelState::SigningCommitment(flags),
+            RawChannelState::AwaitingTxSignatures(flags) => {
+                ChannelState::AwaitingTxSignatures(flags)
+            }
+            RawChannelState::AwaitingChannelReady(flags) => {
+                ChannelState::AwaitingChannelReady(flags)
+            }
+            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
+            RawChannelState::Closed(flags) => ChannelState::Closed(flags),
+        }
+    }
 }
 
 /// The channel data structure
@@ -480,7 +536,7 @@ where
                             .funding_udt_type_script
                             .clone()
                             .map(Into::into),
-                        state: state.state,
+                        state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
                         offered_tlc_balance: state.get_offered_tlc_balance(),
