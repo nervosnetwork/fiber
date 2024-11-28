@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export SHELLOPTS
-export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug
+export RUST_BACKTRACE=full RUST_LOG=info,fnn=debug,fnn::cch::actor::tracker=off
 
 should_remove_old_state="${REMOVE_OLD_STATE:-}"
 should_clean_fiber_state="${REMOVE_OLD_FIBER:-}"

@@ -645,6 +645,12 @@ impl LndPaymentsTracker {
     }
 
     async fn run(self) {
+        tracing::debug!(
+            target: "fnn::cch::actor::tracker::lnd_payments",
+            "will connect {}",
+            self.lnd_connection.uri
+        );
+
         // TODO: clean up expired orders
         loop {
             select! {
@@ -655,6 +661,7 @@ impl LndPaymentsTracker {
                         }
                         Err(err) => {
                             tracing::error!(
+                                target: "fnn::cch::actor::tracker::lnd_payments",
                                 "Error tracking LND payments, retry 15 seconds later: {:?}",
                                 err
                             );
@@ -679,10 +686,6 @@ impl LndPaymentsTracker {
     }
 
     async fn run_inner(&self) -> Result<()> {
-        tracing::debug!(
-            "[LndPaymentsTracker] will connect {}",
-            self.lnd_connection.uri
-        );
         let mut client = self.lnd_connection.create_router_client().await?;
         let mut stream = client
             .track_payments(routerrpc::TrackPaymentsRequest {
@@ -709,7 +712,7 @@ impl LndPaymentsTracker {
     }
 
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
-        tracing::debug!("[LndPaymentsTracker] payment: {:?}", payment);
+        tracing::debug!(target: "fnn::cch::actor::tracker::lnd_payments", "payment: {:?}", payment);
         let event = CchMessage::SettleSendBTCOrder(SettleSendBTCOrderEvent {
             payment_hash: format!("0x{}", payment.payment_hash),
             preimage: (!payment.payment_preimage.is_empty())
@@ -750,6 +753,11 @@ impl LndInvoiceTracker {
     }
 
     async fn run(self) {
+        tracing::debug!(
+            target: "fnn::cch::actor::tracker::lnd_invoice",
+            "will connect {}",
+            self.lnd_connection.uri
+        );
         loop {
             select! {
                 result = self.run_inner() => {
@@ -759,6 +767,7 @@ impl LndInvoiceTracker {
                         }
                         Err(err) => {
                             tracing::error!(
+                                target: "fnn::cch::actor::tracker::lnd_invoice",
                                 "Error tracking LND invoices, retry 15 seconds later: {:?}",
                                 err
                             );
@@ -783,10 +792,6 @@ impl LndInvoiceTracker {
     }
 
     async fn run_inner(&self) -> Result<()> {
-        tracing::debug!(
-            "[LndInvoiceTracker] will connect {}",
-            self.lnd_connection.uri
-        );
         let mut client = self.lnd_connection.create_invoices_client().await?;
         // TODO: clean up expired orders
         let mut stream = client
