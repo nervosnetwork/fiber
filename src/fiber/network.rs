@@ -11,6 +11,7 @@ use ractor::{
     RactorErr, RpcReplyPort, SupervisionEvent,
 };
 use rand::Rng;
+use secp256k1::ecdh::SharedSecret;
 use secp256k1::{Message, Secp256k1};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
@@ -212,6 +213,8 @@ pub enum NetworkActorCommand {
         Hash256,            // payment_hash
         RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
     ),
+    // Get shared secret via Diffie-Hellman key exchange
+    GetSharedSecret(Pubkey, RpcReplyPort<[u8; 32]>),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // A ChannelAnnouncement is ready to broadcast, we need to
@@ -1403,6 +1406,11 @@ where
                     .map_err(|err| err.to_string());
 
                 let _ = reply.send(response);
+            }
+            NetworkActorCommand::GetSharedSecret(public_key, reply) => {
+                let shared_secret =
+                    SharedSecret::new(&public_key.0, &state.private_key.0).secret_bytes();
+                let _ = reply.send(shared_secret);
             }
 
             NetworkActorCommand::UpdateChannelFunding(channel_id, transaction, request) => {
