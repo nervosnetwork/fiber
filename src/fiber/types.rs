@@ -1,6 +1,3 @@
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
-use crate::ckb::contracts::get_udt_whitelist;
-
 use super::channel::ChannelFlags;
 use super::config::AnnouncedNodeName;
 use super::gen::fiber::{
@@ -10,6 +7,8 @@ use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::get_chain_hash;
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
+use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
+use crate::ckb::contracts::get_udt_whitelist;
 use anyhow::anyhow;
 use ckb_types::{
     core::FeeRate,

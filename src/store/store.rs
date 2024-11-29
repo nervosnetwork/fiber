@@ -4,7 +4,7 @@ use crate::{
     fiber::{
         channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
         graph::{ChannelInfo, NetworkGraphStateStore, NodeInfo, PaymentSession},
-        history::TimedResult,
+        history::{Direction, TimedResult},
         network::{NetworkActorStateStore, PersistentNetworkActorState},
         types::{Hash256, Pubkey},
     },
@@ -14,8 +14,10 @@ use crate::{
 use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::{OutPoint, Script};
 use ckb_types::prelude::Entity;
-use rocksdb::{prelude::*, DBCompressionType, DBIterator, Direction, IteratorMode, WriteBatch, DB};
-use secp256k1::PublicKey;
+use rocksdb::{
+    prelude::*, DBCompressionType, DBIterator, Direction as DbDirection, IteratorMode, WriteBatch,
+    DB,
+};
 use serde::Serialize;
 use std::io::Write;
 use std::{
@@ -183,7 +185,7 @@ enum KeyValue {
     ChannelFundingTxIndex(OutPoint, u64, u32),
     WatchtowerChannel(Hash256, ChannelData),
     PaymentSession(Hash256, PaymentSession),
-    PaymentHistoryTimedResult((Pubkey, Pubkey), TimedResult),
+    PaymentHistoryTimedResult((OutPoint, Direction), TimedResult),
     NetworkActorState(PeerId, PersistentNetworkActorState),
 }
 
@@ -257,10 +259,10 @@ impl StoreKeyValue for KeyValue {
                 funding_tx_index.to_be_bytes().as_slice(),
             ]
             .concat(),
-            KeyValue::PaymentHistoryTimedResult((from, target), _) => [
+            KeyValue::PaymentHistoryTimedResult((channel_outpoint, direction), _) => [
                 &[PAYMENT_HISTORY_TIMED_RESULT_PREFIX],
-                from.serialize().as_slice(),
-                target.serialize().as_slice(),
+                channel_outpoint.as_slice(),
+                serialize_to_vec(direction, "Direction").as_slice(),
             ]
             .concat(),
         }
@@ -471,7 +473,7 @@ impl NetworkGraphStateStore for Store {
         let outpoint_key =
             outpoint.map(|outpoint| [&[CHANNEL_INFO_PREFIX], outpoint.as_slice()].concat());
 
-        let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
+        let mode = IteratorMode::From(prefix.as_ref(), DbDirection::Forward);
         let mut last_key = Vec::new();
         let channels: Vec<_> = self
             .db
@@ -520,7 +522,7 @@ impl NetworkGraphStateStore for Store {
             ]
             .concat()
         });
-        let mode = IteratorMode::From(prefix.as_ref(), Direction::Forward);
+        let mode = IteratorMode::From(prefix.as_ref(), DbDirection::Forward);
         let mut last_key = Vec::new();
         let nodes: Vec<_> = self
             .db
@@ -578,24 +580,30 @@ impl NetworkGraphStateStore for Store {
         batch.commit();
     }
 
-    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+    fn insert_payment_history_result(
+        &mut self,
+        channel_outpoint: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
         let mut batch = self.batch();
-        batch.put_kv(KeyValue::PaymentHistoryTimedResult((from, target), result));
+        batch.put_kv(KeyValue::PaymentHistoryTimedResult(
+            (channel_outpoint, direction),
+            result,
+        ));
         batch.commit();
     }
 
-    fn get_payment_history_results(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
+    fn get_payment_history_results(&self) -> Vec<(OutPoint, Direction, TimedResult)> {
         let prefix = vec![PAYMENT_HISTORY_TIMED_RESULT_PREFIX];
         let iter = self.prefix_iterator(&prefix);
         iter.map(|(key, value)| {
-            let from: Pubkey = PublicKey::from_slice(&key[1..34])
-                .expect("deserialize Pubkey should be OK")
+            let channel_outpoint: OutPoint = OutPoint::from_slice(&key[1..=36])
+                .expect("deserialize OutPoint should be OK")
                 .into();
-            let target: Pubkey = PublicKey::from_slice(&key[34..])
-                .expect("deserialize Pubkey should be OK")
-                .into();
+            let direction: Direction = deserialize_from(&key[37..], "Direction");
             let result = deserialize_from(value.as_ref(), "TimedResult");
-            (from, target, result)
+            (channel_outpoint, direction, result)
         })
         .collect()
     }

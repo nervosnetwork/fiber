@@ -637,6 +637,121 @@ async fn test_network_send_payment_with_dry_run() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_3_nodes() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (node_a, _node_b, node_c, _, _) = create_3_nodes_with_established_channel(
+        (100000000000, 100000000000),
+        (100000000000, 100000000000),
+        true,
+    )
+    .await;
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000 + 5),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    assert!(res.fee > 0);
+
+    // sleep for 2 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.failed_error, None);
+}
+
+#[tokio::test]
+async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
+    init_tracing();
+
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (node_a, _node_b, node_c, _, _) = create_3_nodes_with_established_channel(
+        (100000000000, 100000000000),
+        (100000000000, 100000000000),
+        true,
+    )
+    .await;
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000 + 5),
+                payment_hash: Some(gen_sha256_hash()), // this payment hash is not from node_c
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    assert!(res.fee > 0);
+
+    // sleep for 2 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    // FIXME: this should be failed after fixing the HTLC forwarding and removing issues
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    // assert_eq!(
+    //     res.failed_error,
+    //     Some("IncorrectOrUnknownPaymentDetails".to_string())
+    // );
+}
+
+#[tokio::test]
 async fn test_network_send_payment_dry_run_can_still_query() {
     init_tracing();
 
@@ -1073,6 +1188,7 @@ async fn establish_channel_between_nodes(
         .get_tx_from_hash(funding_tx_outpoint.tx_hash())
         .await
         .expect("tx found");
+
     (new_channel_id, funding_tx)
 }
 
@@ -1093,6 +1209,39 @@ async fn create_nodes_with_established_channel(
     .await;
 
     (node_a, node_b, channel_id)
+}
+
+async fn create_3_nodes_with_established_channel(
+    (channel_1_amount_a, channel_1_amount_b): (u128, u128),
+    (channel_2_amount_b, channel_2_amount_c): (u128, u128),
+    public: bool,
+) -> (NetworkNode, NetworkNode, NetworkNode, Hash256, Hash256) {
+    let [mut node_a, mut node_b, mut node_c] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (channel_id_ab, funding_tx_ab) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        channel_1_amount_a,
+        channel_1_amount_b,
+        public,
+    )
+    .await;
+
+    let res = node_c.submit_tx(funding_tx_ab).await;
+    assert_eq!(res, Status::Committed);
+
+    let (channel_id_bc, funding_tx_bc) = establish_channel_between_nodes(
+        &mut node_b,
+        &mut node_c,
+        channel_2_amount_b,
+        channel_2_amount_c,
+        public,
+    )
+    .await;
+
+    let res = node_a.submit_tx(funding_tx_bc).await;
+    assert_eq!(res, Status::Committed);
+    (node_a, node_b, node_c, channel_id_ab, channel_id_bc)
 }
 
 async fn do_test_remove_tlc_with_wrong_hash_algorithm(

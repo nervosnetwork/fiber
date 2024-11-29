@@ -7,8 +7,9 @@ use super::{
     types::{Pubkey, TlcErr},
 };
 use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
+use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +27,15 @@ const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
 pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
-pub(crate) type PairTimedResult = HashMap<Pubkey, TimedResult>;
+
+// The direction of the channel,
+// Forward means from node_a to node_b
+// Backward means from node_b to node_a
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    Forward,
+    Backward,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct InternalPairResult {
@@ -37,27 +46,83 @@ pub(crate) struct InternalPairResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InternalResult {
-    pub pairs: HashMap<(Pubkey, Pubkey), InternalPairResult>,
+    pub pairs: HashMap<(OutPoint, Direction), InternalPairResult>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     pub fail_node: Option<Pubkey>,
 }
 
+pub(crate) fn output_direction(node1: Pubkey, node2: Pubkey) -> (Direction, Direction) {
+    if node1 < node2 {
+        (Direction::Forward, Direction::Backward)
+    } else {
+        (Direction::Backward, Direction::Forward)
+    }
+}
+
 impl InternalResult {
-    pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u64, amount: u128, success: bool) {
-        let pair = InternalPairResult {
-            success,
-            time,
+    pub fn add(
+        &mut self,
+        node_1: Pubkey,
+        node_2: Pubkey,
+        channel: OutPoint,
+        time: u64,
+        amount: u128,
+        success: bool,
+    ) {
+        let (direction, _) = output_direction(node_1, node_2);
+        self.add_node_channel_map(node_1, channel.clone());
+        self.add_node_channel_map(node_2, channel.clone());
+        self.pairs.insert(
+            (channel, direction),
+            InternalPairResult {
+                success,
+                time,
+                amount,
+            },
+        );
+    }
+
+    fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
+    }
+
+    pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey, channel: OutPoint) {
+        self.add(
+            from,
+            target,
+            channel.clone(),
+            now_timestamp_as_millis_u64(),
+            0,
+            false,
+        );
+        self.add(
+            target,
+            from,
+            channel,
+            now_timestamp_as_millis_u64(),
+            0,
+            false,
+        )
+    }
+
+    pub fn add_fail_pair_balanced(
+        &mut self,
+        from: Pubkey,
+        target: Pubkey,
+        channel: OutPoint,
+        amount: u128,
+    ) {
+        self.add(
+            from,
+            target,
+            channel,
+            now_timestamp_as_millis_u64(),
             amount,
-        };
-        self.pairs.insert((from, target), pair);
-    }
-
-    pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey) {
-        self.add(from, target, now_timestamp_as_millis_u64(), 0, false);
-        self.add(target, from, now_timestamp_as_millis_u64(), 0, false)
-    }
-
-    pub fn add_fail_pair_balanced(&mut self, from: Pubkey, target: Pubkey, amount: u128) {
-        self.add(from, target, now_timestamp_as_millis_u64(), amount, false);
+            false,
+        );
     }
 
     pub fn fail_node(&mut self, nodes: &[SessionRouteNode], index: usize) {
@@ -74,7 +139,8 @@ impl InternalResult {
         if index > 0 {
             let a = route[index - 1].pubkey;
             let b = route[index].pubkey;
-            self.add_fail_pair(a, b);
+            let channel = route[index - 1].channel_outpoint.clone();
+            self.add_fail_pair(a, b, channel);
         }
     }
 
@@ -83,7 +149,8 @@ impl InternalResult {
             let a = nodes[index - 1].pubkey;
             let b = nodes[index].pubkey;
             let amount = nodes[index].amount;
-            self.add_fail_pair_balanced(a, b, amount);
+            let channel = nodes[index - 1].channel_outpoint.clone();
+            self.add_fail_pair_balanced(a, b, channel, amount);
         }
     }
 
@@ -92,6 +159,7 @@ impl InternalResult {
             self.add(
                 nodes[i].pubkey,
                 nodes[i + 1].pubkey,
+                nodes[i].channel_outpoint.clone(),
                 now_timestamp_as_millis_u64(),
                 nodes[i].amount,
                 true,
@@ -229,7 +297,8 @@ impl InternalResult {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PaymentHistory<S> {
-    pub inner: HashMap<Pubkey, PairTimedResult>,
+    pub inner: HashMap<(OutPoint, Direction), TimedResult>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     // The minimum interval between two failed payments in milliseconds
     pub min_fail_relax_interval: u64,
     pub bimodal_scale_msat: f64,
@@ -248,6 +317,7 @@ where
         let mut s = PaymentHistory {
             source,
             inner: HashMap::new(),
+            nodes_to_channel_map: HashMap::new(),
             min_fail_relax_interval: min_fail_relax_interval
                 .unwrap_or(DEFAULT_MIN_FAIL_RELAX_INTERVAL),
             bimodal_scale_msat: DEFAULT_BIMODAL_SCALE_SHANNONS,
@@ -260,35 +330,52 @@ where
     #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         self.inner.clear();
+        self.nodes_to_channel_map.clear();
     }
 
-    pub(crate) fn add_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
-        self.inner.entry(from).or_default().insert(target, result);
-        self.save_result(from, target, result);
+    pub(crate) fn add_result(
+        &mut self,
+        channel: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
+        self.inner.insert((channel.clone(), direction), result);
+        self.save_result(channel, direction, result);
     }
 
-    fn save_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+    fn save_result(&mut self, channel: OutPoint, direction: Direction, result: TimedResult) {
         self.store
-            .insert_payment_history_result(from, target, result);
+            .insert_payment_history_result(channel, direction, result);
+    }
+
+    fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
     }
 
     pub(crate) fn load_from_store(&mut self) {
         let results = self.store.get_payment_history_results();
-        for (from, target, result) in results.into_iter() {
-            self.inner.entry(from).or_default().insert(target, result);
+        for (channel, direction, result) in results.into_iter() {
+            self.inner.insert((channel, direction), result);
+        }
+        for channel in self.store.get_channels(None).iter() {
+            self.add_node_channel_map(channel.node1(), channel.out_point());
+            self.add_node_channel_map(channel.node2(), channel.out_point());
         }
     }
 
     pub(crate) fn apply_pair_result(
         &mut self,
-        from: Pubkey,
-        target: Pubkey,
+        channel: OutPoint,
+        direction: Direction,
         amount: u128,
         success: bool,
         time: u64,
     ) {
         let min_fail_relax_interval = self.min_fail_relax_interval;
-        let result = if let Some(current) = self.get_mut_result(&from, &target) {
+        let result = if let Some(current) = self.get_mut_result(channel.clone(), direction) {
             if success {
                 current.success_time = time;
                 if amount > current.success_amount {
@@ -320,59 +407,81 @@ where
                 success_amount: if success { amount } else { 0 },
             }
         };
-        self.add_result(from, target, result);
+        self.add_result(channel, direction, result);
     }
 
     pub(crate) fn apply_internal_result(&mut self, result: InternalResult) {
-        let InternalResult { pairs, fail_node } = result;
-        for ((from, target), pair_result) in pairs.into_iter() {
+        let InternalResult {
+            pairs,
+            fail_node,
+            nodes_to_channel_map,
+        } = result;
+        for ((channel, direction), pair_result) in pairs.into_iter() {
             self.apply_pair_result(
-                from,
-                target,
+                channel,
+                direction,
                 pair_result.amount,
                 pair_result.success,
                 pair_result.time,
             );
         }
+        for (node, channels) in nodes_to_channel_map.into_iter() {
+            self.nodes_to_channel_map
+                .entry(node)
+                .or_default()
+                .extend(channels);
+        }
         if let Some(fail_node) = fail_node {
-            let pairs: Vec<(Pubkey, Pubkey)> = self
+            let channels = self
+                .nodes_to_channel_map
+                .get(&fail_node)
+                .expect("channels not found");
+            let pairs: Vec<(OutPoint, Direction)> = self
                 .inner
                 .iter()
-                .flat_map(|(from, targets)| {
-                    targets.keys().filter_map(move |target| {
-                        (*from == fail_node || *target == fail_node)
-                            .then_some((from.clone(), target.clone()))
-                    })
+                .flat_map(|((outpoint, direction), _)| {
+                    if channels.contains(outpoint) {
+                        Some((outpoint.clone(), *direction))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
-            for (from, target) in pairs {
-                self.apply_pair_result(from, target, 0, false, now_timestamp_as_millis_u64());
+
+            for (channel, direction) in pairs.into_iter() {
+                self.apply_pair_result(channel, direction, 0, false, now_timestamp_as_millis_u64());
             }
         }
     }
 
-    pub(crate) fn get_result(&self, from: &Pubkey, target: &Pubkey) -> Option<&TimedResult> {
-        self.inner.get(from).and_then(|h| h.get(target))
+    pub(crate) fn get_result(
+        &self,
+        channel: &OutPoint,
+        direction: Direction,
+    ) -> Option<&TimedResult> {
+        self.inner.get(&(channel.clone(), direction))
     }
 
     pub(crate) fn get_mut_result(
         &mut self,
-        from: &Pubkey,
-        target: &Pubkey,
+        channel: OutPoint,
+        direction: Direction,
     ) -> Option<&mut TimedResult> {
-        self.inner.get_mut(from).and_then(|h| h.get_mut(target))
+        self.inner.get_mut(&(channel, direction))
     }
 
     pub(crate) fn eval_probability(
         &self,
         from: Pubkey,
         target: Pubkey,
+        channel: &OutPoint,
         amount: u128,
         capacity: u128,
     ) -> f64 {
         let mut success_amount = 0;
         let mut fail_amount = capacity;
-        if let Some(result) = self.get_result(&from, &target) {
+        let (direction, _) = output_direction(from, target);
+        if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
                 fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);
             }
@@ -422,9 +531,9 @@ where
     // FIXME: reconsider this after we already got the accurate balance of direct channels
     //        related issue: https://github.com/nervosnetwork/fiber/issues/257
     #[allow(dead_code)]
-    pub(crate) fn get_direct_probability(&self, from: &Pubkey, target: &Pubkey) -> f64 {
+    pub(crate) fn get_direct_probability(&self, channel: &OutPoint, direction: Direction) -> f64 {
         let mut prob = 1.0;
-        if let Some(result) = self.get_result(&from, &target) {
+        if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
                 let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).min(0);
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
