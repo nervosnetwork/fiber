@@ -776,7 +776,7 @@ where
                         info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
                     }
                     CkbInvoiceStatus::Paid => {
-                        unreachable!("Paid invoice shold not be paid again");
+                        unreachable!("Paid invoice should not be paid again");
                     }
                     _ => {
                         update_invoice_payment_hash = true;
