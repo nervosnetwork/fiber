@@ -739,7 +739,7 @@ where
                         RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(error_code)));
                 }
                 CkbInvoiceStatus::Paid => {
-                    unreachable!("Paid invoice shold not be paid again");
+                    unreachable!("Paid invoice should not be paid again");
                 }
                 _ => {
                     self.store
