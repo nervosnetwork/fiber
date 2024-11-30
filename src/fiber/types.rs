@@ -1038,7 +1038,7 @@ pub struct AddTlc {
     pub payment_hash: Hash256,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
-    pub onion_packet: Vec<u8>,
+    pub onion_packet: Option<PaymentOnionPacket>,
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {
@@ -1050,7 +1050,13 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .payment_hash(add_tlc.payment_hash.into())
             .expiry(add_tlc.expiry.pack())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
-            .onion_packet(add_tlc.onion_packet.pack())
+            .onion_packet(
+                add_tlc
+                    .onion_packet
+                    .map(|p| p.into_bytes())
+                    .unwrap_or_default()
+                    .pack(),
+            )
             .build()
     }
 }
@@ -1059,13 +1065,16 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     type Error = Error;
 
     fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
+        let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
+        let onion_packet =
+            (onion_packet_bytes.len() > 0).then(|| PaymentOnionPacket::new(onion_packet_bytes));
         Ok(AddTlc {
+            onion_packet,
             channel_id: add_tlc.channel_id().into(),
             tlc_id: add_tlc.tlc_id().unpack(),
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
             expiry: add_tlc.expiry().unpack(),
-            onion_packet: add_tlc.onion_packet().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()
                 .try_into()
@@ -2964,15 +2973,15 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PaymentHopData {
-    pub payment_hash: Hash256,
-    // this is only specified in the last hop in the keysend mode
-    pub preimage: Option<Hash256>,
-    pub tlc_hash_algorithm: HashAlgorithm,
     pub amount: u128,
     pub expiry: u64,
-    pub next_hop: Option<Pubkey>,
+    pub payment_hash: Hash256,
+    // this is only specified in the last hop in the keysend mode
+    pub payment_preimage: Option<Hash256>,
+    pub hash_algorithm: HashAlgorithm,
     #[serde_as(as = "Option<EntityHex>")]
     pub channel_outpoint: Option<OutPoint>,
+    pub next_hop: Option<Pubkey>,
 }
 
 /// Trait for hop data
@@ -3004,14 +3013,14 @@ impl HopData for PaymentHopData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnionPacket<T> {
     _phantom: PhantomData<T>,
     // The encrypted packet
-    pub data: Vec<u8>,
+    data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeeledOnionPacket<T> {
     // The decrypted hop data for the current hop
     pub current: T,
@@ -3028,6 +3037,14 @@ impl<T> OnionPacket<T> {
             _phantom: PhantomData,
             data,
         }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
     }
 }
 

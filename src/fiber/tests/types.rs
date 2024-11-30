@@ -35,7 +35,7 @@ fn test_add_tlc_serialization() {
         payment_hash: [42; 32].into(),
         expiry: 42,
         hash_algorithm: HashAlgorithm::Sha256,
-        onion_packet: vec![],
+        onion_packet: None,
     };
     let add_tlc_mol: molecule_fiber::AddTlc = add_tlc.clone().into();
     let add_tlc2 = add_tlc_mol.try_into().expect("decode");
@@ -56,8 +56,8 @@ fn test_peeled_onion_packet() {
             expiry: 3,
             next_hop: Some(keys[1].pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: HashAlgorithm::Sha256,
-            preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
         },
         PaymentHopData {
             payment_hash,
@@ -65,8 +65,8 @@ fn test_peeled_onion_packet() {
             expiry: 6,
             next_hop: Some(keys[2].pubkey().into()),
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: HashAlgorithm::Sha256,
-            preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
         },
         PaymentHopData {
             payment_hash,
@@ -74,8 +74,8 @@ fn test_peeled_onion_packet() {
             expiry: 9,
             next_hop: None,
             channel_outpoint: Some(OutPointBuilder::default().build().into()),
-            tlc_hash_algorithm: HashAlgorithm::Sha256,
-            preimage: None,
+            hash_algorithm: HashAlgorithm::Sha256,
+            payment_preimage: None,
         },
     ];
     let packet = PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)

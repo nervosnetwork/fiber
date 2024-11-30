@@ -1008,7 +1008,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         payment_hash: Some(digest.into()),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
-                        onion_packet: vec![],
+                        peeled_onion_packet: None,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1270,7 +1270,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: Some(digest.into()),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
-                        onion_packet: vec![],
+                        peeled_onion_packet: None,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1319,7 +1319,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: Some(digest.into()),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
-                        onion_packet: vec![],
+                        peeled_onion_packet: None,
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1377,7 +1377,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: Some(digest.into()),
         expiry: now_timestamp_as_millis_u64() + 10,
         preimage: None,
-        onion_packet: vec![],
+        peeled_onion_packet: None,
         previous_tlc: None,
     };
 
@@ -1400,7 +1400,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: Some(digest.into()),
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 10,
         preimage: None,
-        onion_packet: vec![],
+        peeled_onion_packet: None,
         previous_tlc: None,
     };
 
@@ -1453,7 +1453,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         payment_hash: Some(digest.into()),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         preimage: None,
-                        onion_packet: vec![],
+                        peeled_onion_packet: None,
                         previous_tlc: None,
                     },
                     rpc_reply,
