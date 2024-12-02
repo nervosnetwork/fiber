@@ -615,10 +615,10 @@ where
                 amount: current_amount,
                 payment_hash,
                 next_hop,
-                tlc_hash_algorithm: hash_algorithm,
+                hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
                 channel_outpoint: next_channel_outpoint,
-                preimage: if is_last { preimage } else { None },
+                payment_preimage: if is_last { preimage } else { None },
             });
             current_expiry += expiry;
             current_amount += fee;
@@ -628,10 +628,10 @@ where
             amount: current_amount,
             payment_hash,
             next_hop: Some(route[0].target),
-            tlc_hash_algorithm: hash_algorithm,
+            hash_algorithm: hash_algorithm,
             expiry: current_expiry,
             channel_outpoint: Some(route[0].channel_outpoint.clone()),
-            preimage: None,
+            payment_preimage: None,
         });
         hops_data.reverse();
         assert_eq!(hops_data.len(), route.len() + 1);

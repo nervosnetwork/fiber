@@ -576,7 +576,7 @@ where
                             payment_hash: Some(params.payment_hash),
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
-                            onion_packet: vec![],
+                            peeled_onion_packet: None,
                             previous_tlc: None,
                         },
                         rpc_reply,

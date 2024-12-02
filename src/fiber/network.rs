@@ -208,8 +208,8 @@ pub enum NetworkActorCommand {
         RpcReplyPort<Result<u64, TlcErrPacket>>,
     ),
     PeelPaymentOnionPacket(
-        Vec<u8>, // onion_packet
-        Hash256, // payment_hash
+        PaymentOnionPacket, // onion_packet
+        Hash256,            // payment_hash
         RpcReplyPort<Result<PeeledPaymentOnionPacket, String>>,
     ),
     UpdateChannelFunding(Hash256, Transaction, FundingRequest),
@@ -475,7 +475,7 @@ pub struct AcceptChannelCommand {
 
 #[derive(Debug)]
 pub struct SendOnionPacketCommand {
-    pub packet: Vec<u8>,
+    pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
@@ -1394,7 +1394,7 @@ where
                     .await;
             }
             NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, reply) => {
-                let response = PaymentOnionPacket::new(onion_packet)
+                let response = onion_packet
                     .peel(
                         &state.private_key,
                         Some(payment_hash.as_ref()),
@@ -2131,7 +2131,7 @@ where
         reply: RpcReplyPort<Result<u64, TlcErrPacket>>,
     ) {
         let SendOnionPacketCommand {
-            packet,
+            peeled_onion_packet,
             previous_tlc,
         } = command;
 
@@ -2143,12 +2143,7 @@ where
                 .expect("send error failed");
         };
 
-        let Ok(peeled_packet) = PeeledPaymentOnionPacket::deserialize(&packet) else {
-            info!("onion packet is empty, ignore it");
-            return invalid_onion_error(reply);
-        };
-
-        let info = peeled_packet.current;
+        let info = peeled_onion_packet.current.clone();
         debug!("Processing onion packet info: {:?}", info);
 
         let Some(channel_outpoint) = &info.channel_outpoint else {
@@ -2184,8 +2179,8 @@ where
                 preimage: None,
                 payment_hash: Some(info.payment_hash),
                 expiry: info.expiry,
-                hash_algorithm: info.tlc_hash_algorithm,
-                onion_packet: peeled_packet.next.map(|next| next.data).unwrap_or_default(),
+                hash_algorithm: info.hash_algorithm,
+                peeled_onion_packet: Some(peeled_onion_packet),
                 previous_tlc,
             },
             rpc_reply,
@@ -2344,7 +2339,7 @@ where
 
         let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
-        let peeled_packet =
+        let peeled_onion_packet =
             match PeeledPaymentOnionPacket::create(session_key, hops, &Secp256k1::signing_only()) {
                 Ok(packet) => packet,
                 Err(e) => {
@@ -2357,7 +2352,7 @@ where
                 }
             };
         let command = SendOnionPacketCommand {
-            packet: peeled_packet.serialize(),
+            peeled_onion_packet,
             previous_tlc: None,
         };
 

@@ -595,7 +595,7 @@ impl CchActor {
                                 expiry: now_timestamp_as_millis_u64()
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
-                                onion_packet: vec![],
+                                peeled_onion_packet: None,
                                 previous_tlc: None,
                             },
                             rpc_reply,

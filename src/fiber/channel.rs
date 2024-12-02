@@ -8,7 +8,7 @@ use crate::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
         serde_utils::PubNonceAsBytes,
-        types::{ChannelUpdate, TlcErr, TlcErrPacket, TlcErrorCode},
+        types::{ChannelUpdate, PeeledPaymentOnionPacket, TlcErr, TlcErrPacket, TlcErrorCode},
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
     now_timestamp_as_millis_u64,
@@ -65,8 +65,7 @@ use crate::{
 };
 
 use super::{
-    config::DEFAULT_MIN_SHUTDOWN_FEE,
-    config::{MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
+    config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
     fee::calculate_shutdown_tx_fee,
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
@@ -74,9 +73,9 @@ use super::{
     serde_utils::EntityHex,
     types::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel, Privkey, Pubkey,
-        ReestablishChannel, RemoveTlc, RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck,
-        TxCollaborationMsg, TxComplete, TxUpdate,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel,
+        PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
@@ -145,7 +144,8 @@ pub struct AddTlcCommand {
     pub payment_hash: Option<Hash256>,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
-    pub onion_packet: Vec<u8>,
+    /// Peeled onion packet for the current node
+    pub peeled_onion_packet: Option<PeeledPaymentOnionPacket>,
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
@@ -704,9 +704,13 @@ where
         let tlc_infos = state.get_tlcs_for_forwarding();
         for info in tlc_infos {
             assert!(info.tlc.is_received());
-            let onion_packet = info.tlc.onion_packet;
+            let added_tlc_id = info.tlc.id.into();
+            let peeled_onion_packet = info
+                .tlc
+                .peeled_onion_packet
+                .expect("peeled onion packet exists in tlcs for forwarding");
             let _ = self
-                .handle_forward_onion_packet(state, onion_packet, info.tlc.id.into())
+                .handle_forward_onion_packet(state, peeled_onion_packet, added_tlc_id)
                 .await;
         }
     }
@@ -820,39 +824,33 @@ where
         // If this is the last hop, we should check the payment hash and amount and then
         // try to fulfill the payment, find the corresponding payment preimage from payment hash.
         let mut preimage = None;
-        let mut peeled_packet_bytes: Option<Vec<u8>> = None;
         let mut update_invoice_payment_hash: Option<Hash256> = None;
 
-        if !add_tlc.onion_packet.is_empty() {
-            // TODO: Here we call network actor to peel the onion packet. Indeed, this message is forwarded from
-            // the network actor when it handles `FiberMessage::ChannelNormalOperation`. A better alternative is
-            // peeling the onion packet there before forwarding the message to the channel actor.
-            let peeled_packet = call!(self.network, |tx| NetworkActorMessage::Command(
-                NetworkActorCommand::PeelPaymentOnionPacket(
-                    add_tlc.onion_packet.clone(),
-                    add_tlc.payment_hash.clone(),
-                    tx
-                )
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE)
-            .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))?;
+        let peeled_onion_packet = match add_tlc.onion_packet.clone() {
+            Some(onion_packet) => Some(
+                self.peel_onion_packet(onion_packet, add_tlc.payment_hash.clone())
+                    .await?,
+            ),
+            None => None,
+        };
 
+        if let Some(ref peeled_onion_packet) = peeled_onion_packet {
             // check the payment hash and amount
-            if peeled_packet.current.payment_hash != add_tlc.payment_hash {
+            if peeled_onion_packet.current.payment_hash != add_tlc.payment_hash {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "Payment hash mismatch".to_string(),
                 ));
             }
 
             let received_amount = add_tlc.amount;
-            let forward_amount = peeled_packet.current.amount;
+            let forward_amount = peeled_onion_packet.current.amount;
             debug!(
                 "received_amount: {} forward_amount: {}",
                 add_tlc.amount, forward_amount
             );
 
             // TODO: check the expiry time, if it's expired, we should return an error.
-            if peeled_packet.is_last() {
+            if peeled_onion_packet.is_last() {
                 if forward_amount != add_tlc.amount {
                     return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                 }
@@ -869,9 +867,9 @@ where
                 // if this is the last hop, store the preimage.
                 // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
                 // here we can do error check early here for better error handling.
-                preimage = peeled_packet
+                preimage = peeled_onion_packet
                     .current
-                    .preimage
+                    .payment_preimage
                     .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
                 if let Some(preimage) = preimage {
                     let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
@@ -882,7 +880,6 @@ where
                     return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
                 }
             } else {
-                peeled_packet_bytes = Some(peeled_packet.serialize());
                 assert!(received_amount >= forward_amount);
                 let forward_fee = received_amount.saturating_sub(forward_amount);
                 let fee_rate: u128 = state
@@ -902,8 +899,7 @@ where
             }
         }
 
-        let tlc =
-            state.create_inbounding_tlc(add_tlc.clone(), preimage, peeled_packet_bytes.clone())?;
+        let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage, peeled_onion_packet)?;
         state.insert_tlc(tlc.clone())?;
         if let Some(payment_hash) = update_invoice_payment_hash {
             self.store
@@ -931,7 +927,7 @@ where
     async fn handle_forward_onion_packet(
         &self,
         state: &mut ChannelActorState,
-        onion_packet: Vec<u8>,
+        peeled_onion_packet: PeeledPaymentOnionPacket,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
         let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
@@ -940,7 +936,7 @@ where
             .send_message(NetworkActorMessage::Command(
                 NetworkActorCommand::SendPaymentOnionPacket(
                     SendOnionPacketCommand {
-                        packet: onion_packet,
+                        peeled_onion_packet,
                         previous_tlc: Some((state.get_id(), added_tlc_id)),
                     },
                     rpc_reply,
@@ -1118,7 +1114,7 @@ where
                 payment_hash: tlc.payment_hash,
                 expiry: tlc.expiry,
                 hash_algorithm: tlc.hash_algorithm,
-                onion_packet: tlc.onion_packet,
+                onion_packet: tlc.peeled_onion_packet.and_then(|packet| packet.next),
             }),
         );
         debug!("Sending AddTlc message: {:?}", &msg);
@@ -1521,6 +1517,18 @@ where
             CkbInvoiceStatus::Open if invoice.is_expired() => CkbInvoiceStatus::Expired,
             status => status,
         }
+    }
+
+    async fn peel_onion_packet(
+        &self,
+        onion_packet: PaymentOnionPacket,
+        payment_hash: Hash256,
+    ) -> Result<PeeledPaymentOnionPacket, ProcessingChannelError> {
+        call!(self.network, |tx| NetworkActorMessage::Command(
+            NetworkActorCommand::PeelPaymentOnionPacket(onion_packet, payment_hash, tx)
+        ))
+        .expect(ASSUME_NETWORK_ACTOR_ALIVE)
+        .map_err(|err| ProcessingChannelError::PeelingOnionPacketError(err))
     }
 }
 
@@ -3326,7 +3334,7 @@ impl ChannelActorState {
                 tlc.is_received()
                     && tlc.creation_confirmed_at.is_some()
                     && tlc.removed_at.is_none()
-                    && tlc.tlc.onion_packet.is_empty()
+                    && tlc.tlc.is_last_hop()
             })
             .cloned()
             .collect()
@@ -3341,7 +3349,7 @@ impl ChannelActorState {
                     && tlc.removed_at.is_none()
                     && tlc.tlc.previous_tlc.is_none()
                     && tlc.relay_status == TlcRelayStatus::WaitingForward
-                    && !tlc.tlc.onion_packet.is_empty()
+                    && !tlc.tlc.is_last_hop()
             })
             .cloned()
             .collect()
@@ -3638,7 +3646,7 @@ impl ChannelActorState {
             self.to_remote_amount
         );
 
-        let relay_status = if !tlc.onion_packet.is_empty() {
+        let relay_status = if !tlc.is_last_hop() {
             if tlc.is_received() {
                 TlcRelayStatus::WaitingForward
             } else {
@@ -4181,7 +4189,7 @@ impl ChannelActorState {
             expiry: command.expiry,
             payment_preimage: Some(preimage),
             hash_algorithm: command.hash_algorithm,
-            onion_packet: command.onion_packet,
+            peeled_onion_packet: command.peeled_onion_packet,
             previous_tlc: command
                 .previous_tlc
                 .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
@@ -4192,7 +4200,7 @@ impl ChannelActorState {
         &self,
         message: AddTlc,
         payment_preimage: Option<Hash256>,
-        onion_packet: Option<Vec<u8>>,
+        peeled_onion_packet: Option<PeeledPaymentOnionPacket>,
     ) -> Result<TLC, ProcessingChannelError> {
         if self.get_received_tlc(message.tlc_id).is_some() {
             return Err(ProcessingChannelError::InvalidParameter(format!(
@@ -4207,14 +4215,15 @@ impl ChannelActorState {
                 self.get_next_received_tlc_id()
             )));
         }
+
         Ok(TLC {
+            peeled_onion_packet,
             id: TLCId::Received(message.tlc_id),
             amount: message.amount,
             payment_hash: message.payment_hash,
             expiry: message.expiry,
             payment_preimage,
             hash_algorithm: message.hash_algorithm,
-            onion_packet: onion_packet.unwrap_or_default(),
             previous_tlc: None,
         })
     }
@@ -4964,7 +4973,11 @@ impl ChannelActorState {
                                                     payment_hash: info.tlc.payment_hash,
                                                     expiry: info.tlc.expiry,
                                                     hash_algorithm: info.tlc.hash_algorithm,
-                                                    onion_packet: info.tlc.onion_packet.clone(),
+                                                    onion_packet: info
+                                                        .tlc
+                                                        .peeled_onion_packet
+                                                        .as_ref()
+                                                        .and_then(|packet| packet.next.clone()),
                                                 }),
                                             ),
                                         ),
@@ -5793,6 +5806,7 @@ impl From<&AcceptChannel> for ChannelBasePublicKeys {
 type ShortHash = [u8; 20];
 
 /// A tlc output.
+#[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TLC {
     /// The id of a TLC.
@@ -5807,9 +5821,10 @@ pub struct TLC {
     pub payment_preimage: Option<Hash256>,
     /// Which hash algorithm is applied on the preimage
     pub hash_algorithm: HashAlgorithm,
-    /// The onion packet which encodes the routing information for the payment.
-    /// Note: this is the onion_packet need to be forwarded to the next hop when current TLC is a middle hop.
-    pub onion_packet: Vec<u8>,
+
+    /// For received TLC from a payment, this is the peeled onion packet for the current node.
+    pub peeled_onion_packet: Option<PeeledPaymentOnionPacket>,
+
     /// The previous tlc id if this tlc is a part of a multi-tlc payment.
     /// Note: this is used to track the tlc chain for a multi-tlc payment,
     ///       we need to know previous when removing tlc backwardly.
@@ -5828,6 +5843,15 @@ impl TLC {
 
     pub fn is_received(&self) -> bool {
         !self.is_offered()
+    }
+
+    // Whether this TLC is the last hop in a payment route
+    pub fn is_last_hop(&self) -> bool {
+        self.peeled_onion_packet
+            .as_ref()
+            .map(|packet| packet.is_last())
+            // Consider this TLC as the last hop when there's no peeled onion packet
+            .unwrap_or(true)
     }
 
     // Change this tlc to the opposite side.
