@@ -3104,6 +3104,11 @@ impl<T> OnionPacket<T> {
         }
     }
 
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
@@ -3125,8 +3130,7 @@ impl<T: HopData> OnionPacket<T> {
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
-        let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
+        let sphinx_packet = self.into_sphinx_onion_packet()?;
         let shared_secret = sphinx_packet.shared_secret(&privkey.0);
 
         let (new_current, new_next) = sphinx_packet
