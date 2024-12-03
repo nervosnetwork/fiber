@@ -2143,19 +2143,21 @@ where
             previous_tlc,
         } = command;
 
-        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
+        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>,
+                                   shared_secret: &[u8; 32]| {
             let error_detail =
                 TlcErr::new_node_fail(TlcErrorCode::InvalidOnionPayload, state.get_public_key());
             reply
-                .send(Err(TlcErrPacket::new(error_detail)))
+                .send(Err(TlcErrPacket::new(error_detail, shared_secret)))
                 .expect("send error failed");
         };
 
         let info = peeled_onion_packet.current.clone();
+        let shared_secret = peeled_onion_packet.shared_secret;
         debug!("Processing onion packet info: {:?}", info);
 
         let Some(channel_outpoint) = &info.channel_outpoint else {
-            return invalid_onion_error(reply);
+            return invalid_onion_error(reply, &shared_secret);
         };
 
         let unknown_next_peer = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
@@ -2165,7 +2167,7 @@ where
                 None,
             );
             reply
-                .send(Err(TlcErrPacket::new(error_detail)))
+                .send(Err(TlcErrPacket::new(error_detail, &shared_secret)))
                 .expect("send add tlc response");
         };
 
@@ -2207,7 +2209,7 @@ where
                 );
                 let error_detail = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
                 return reply
-                    .send(Err(TlcErrPacket::new(error_detail)))
+                    .send(Err(TlcErrPacket::new(error_detail, &shared_secret)))
                     .expect("send add tlc response");
             }
         }
@@ -2232,7 +2234,12 @@ where
                             .record_payment_success(payment_session);
                     }
                     RemoveTlcReason::RemoveTlcFail(reason) => {
-                        let error_detail = reason.decode().expect("decoded error");
+                        let error_detail = reason
+                            .decode(
+                                &payment_session.session_key,
+                                payment_session.hops_public_keys(),
+                            )
+                            .unwrap_or(TlcErr::new(TlcErrorCode::InvalidOnionError));
                         self.update_graph_with_tlc_fail(&error_detail).await;
                         let need_to_retry = self
                             .network_graph
@@ -2370,7 +2377,10 @@ where
             .await;
         match recv.await.expect("msg recv error") {
             Err(e) => {
-                if let Some(error_detail) = e.decode() {
+                if let Some(error_detail) = e.decode(
+                    &payment_session.session_key,
+                    payment_session.hops_public_keys(),
+                ) {
                     // This is the error implies we send payment request to the first hop failed
                     // graph or payment history need to update and then have a retry
                     self.update_graph_with_tlc_fail(&error_detail).await;

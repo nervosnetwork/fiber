@@ -16,7 +16,7 @@ use ckb_types::{
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
-use fiber_sphinx::SphinxError;
+use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
@@ -1234,20 +1234,82 @@ impl TlcErr {
 //       is not placed on-chain due to the possibility of hop failure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TlcErrPacket {
-    // TODO: replace this with the real onion packet
     pub onion_packet: Vec<u8>,
 }
 
+pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
+const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
+
+/// Always decrypting 27 times so the erroring node cannot learn its relative position in the route
+/// by performing a timing analysis if the sender were to retry the same route multiple times.
+const ERROR_DECODING_PASSES: usize = 27;
+
 impl TlcErrPacket {
-    pub fn new(tlc_fail: TlcErr) -> Self {
+    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
+    /// Use all zeros for the origin node.
+    pub fn new(tlc_fail: TlcErr, _shared_secret: &[u8; 32]) -> Self {
         dbg!(&tlc_fail);
-        TlcErrPacket {
-            onion_packet: tlc_fail.serialize(),
+        let payload = tlc_fail.serialize();
+
+        let onion_packet =
+            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload).into_bytes();
+        return TlcErrPacket { onion_packet };
+    }
+
+    // TODO: Enable error encryption by replacing `new` with this method.
+    // The encryption has been disabled so we can split the PR into small pieces and apply future
+    // upgrades without breaking the network protocol.
+    #[cfg(test)]
+    pub fn new_with_encryption(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
+        dbg!(&tlc_fail);
+        let payload = tlc_fail.serialize();
+
+        let onion_packet = (if shared_secret != &NO_SHARED_SECRET {
+            OnionErrorPacket::create(shared_secret, payload)
+        } else {
+            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload)
+        })
+        .into_bytes();
+        return TlcErrPacket { onion_packet };
+    }
+
+    pub fn is_plaintext(&self) -> bool {
+        self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
+    }
+
+    /// Intermediate node forwards the error to the previous hop using the shared secret used in forwarding
+    /// the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        if !self.is_plaintext() {
+            let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
+                .xor_cipher_stream(shared_secret)
+                .into_bytes();
+            TlcErrPacket { onion_packet }
+        } else {
+            // If it is not encrypted, just send back as it is.
+            self
         }
     }
 
-    pub fn decode(&self) -> Option<TlcErr> {
-        TlcErr::deserialize(&self.onion_packet)
+    pub fn decode(&self, session_key: &[u8; 32], hops_public_keys: Vec<Pubkey>) -> Option<TlcErr> {
+        if self.is_plaintext() {
+            let error = TlcErr::deserialize(&self.onion_packet[32..]);
+            if error.is_some() {
+                return error;
+            }
+        }
+
+        let hops_public_keys = hops_public_keys.iter().map(|k| k.0.clone()).collect();
+        let session_key = SecretKey::from_slice(session_key).ok()?;
+        OnionErrorPacket::from_bytes(self.onion_packet.clone())
+            .parse(hops_public_keys, session_key, TlcErr::deserialize)
+            .map(|(error, hop_index)| {
+                for _ in hop_index..ERROR_DECODING_PASSES {
+                    OnionErrorPacket::from_bytes(self.onion_packet.clone())
+                        .xor_cipher_stream(&NO_SHARED_SECRET);
+                }
+                error
+            })
     }
 }
 
@@ -1314,6 +1376,7 @@ pub enum TlcErrorCode {
     InvalidOnionPayload = PERM | 22,
     MppTimeout = 23,
     InvalidOnionBlinding = BADONION | PERM | 24,
+    InvalidOnionError = BADONION | PERM | 25,
 }
 
 impl TlcErrorCode {
@@ -3025,6 +3088,9 @@ pub struct OnionPacket<T> {
 pub struct PeeledOnionPacket<T> {
     // The decrypted hop data for the current hop
     pub current: T,
+    // The shared secret for `current` used for returning error. Set to all zeros for the origin node
+    // who has no shared secret.
+    pub shared_secret: [u8; 32],
     // The packet for the next hop
     pub next: Option<OnionPacket<T>>,
 }
@@ -3063,6 +3129,7 @@ impl<T: HopData> OnionPacket<T> {
     ) -> Result<PeeledOnionPacket<T>, Error> {
         let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
             .map_err(|err| Error::OnionPacket(err.into()))?;
+        let shared_secret = sphinx_packet.shared_secret(&privkey.0);
 
         let (new_current, new_next) = sphinx_packet
             .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
@@ -3077,7 +3144,11 @@ impl<T: HopData> OnionPacket<T> {
             .any(|b| *b != 0)
             .then(|| OnionPacket::new(new_next.into_bytes()));
 
-        Ok(PeeledOnionPacket { current, next })
+        Ok(PeeledOnionPacket {
+            current,
+            next,
+            shared_secret,
+        })
     }
 }
 
@@ -3123,7 +3194,12 @@ impl<T: HopData> PeeledOnionPacket<T> {
             None
         };
 
-        Ok(PeeledOnionPacket { current, next })
+        Ok(PeeledOnionPacket {
+            current,
+            next,
+            // Use all zeros for the sender
+            shared_secret: NO_SHARED_SECRET.clone(),
+        })
     }
 
     /// Returns true if this is the peeled packet for the last destination.
@@ -3150,23 +3226,36 @@ impl<T: HopData> PeeledOnionPacket<T> {
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut res = pack_hop_data(&self.current);
+        res.extend(self.shared_secret);
         if let Some(ref next) = self.next {
-            res.append(&mut (next.data.clone()));
+            res.extend(&next.data[..]);
         }
         res
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        let current_len = get_hop_data_len(data)
+        let mut read_bytes = get_hop_data_len(data)
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
         let current = unpack_hop_data(data)
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        let next = if current_len < data.len() {
-            Some(OnionPacket::new(data[current_len..].to_vec()))
+
+        // Ensure backward compatibility
+        let mut shared_secret = NO_SHARED_SECRET.clone();
+        if data.len() >= read_bytes + 32 && data.len() != read_bytes + T::PACKET_DATA_LEN {
+            shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
+            read_bytes += 32;
+        }
+
+        let next = if read_bytes < data.len() {
+            Some(OnionPacket::new(data[read_bytes..].to_vec()))
         } else {
             None
         };
-        Ok(Self { current, next })
+        Ok(Self {
+            current,
+            shared_secret,
+            next,
+        })
     }
 }
 
