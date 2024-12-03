@@ -80,3 +80,22 @@ jobs:
           flags: unittests
           verbose: false
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        profile: [dev, release]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: Swatinem/rust-cache@v2
+      - uses: dsherret/rust-toolchain-file@v1
+      - name: Install Dependencies (Windows)
+        if: contains(matrix.os, 'windows')
+        run: |
+          vcpkg integrate install
+          vcpkg install openssl:x64-windows-static-md
+      - run: cargo build --verbose --profile ${{ matrix.profile }}
