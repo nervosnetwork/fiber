@@ -8,7 +8,10 @@ use crate::{
         fee::calculate_tlc_forward_fee,
         network::{get_chain_hash, SendOnionPacketCommand},
         serde_utils::PubNonceAsBytes,
-        types::{ChannelUpdate, PeeledPaymentOnionPacket, TlcErr, TlcErrPacket, TlcErrorCode},
+        types::{
+            ChannelUpdate, PeeledPaymentOnionPacket, TlcErr, TlcErrPacket, TlcErrorCode,
+            NO_SHARED_SECRET,
+        },
     },
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
     now_timestamp_as_millis_u64,
@@ -485,7 +488,7 @@ where
                     // and only send RemoveTlc message to peer if the TLC is not in our state
                     error!("Error handling AddTlc message: {:?}", e);
                     assert!(tlc_count == state.tlcs.len());
-                    let error_detail = self.get_tlc_detail_error(state, &e).await;
+                    let error_detail = self.get_tlc_detail_error(state, &e.source).await;
                     if state.get_received_tlc(tlc_id).is_none() {
                         self.network
                             .send_message(NetworkActorMessage::new_command(
@@ -496,13 +499,14 @@ where
                                         tlc_id,
                                         reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                             error_detail,
+                                            &e.shared_secret,
                                         )),
                                     }),
                                 )),
                             ))
                             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
-                    return Err(e);
+                    return Err(e.source);
                 }
                 Ok(())
             }
@@ -768,9 +772,11 @@ where
                         };
                         let command = RemoveTlcCommand {
                             id: tlc.get_id(),
-                            reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(
-                                error_code,
-                            ))),
+                            reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                TlcErr::new(error_code),
+                                // TODO: get shared secret to create the error packet
+                                &NO_SHARED_SECRET,
+                            )),
                         };
                         let result = self.handle_remove_tlc_command(state, command);
                         info!("try to settle down tlc: {:?} result: {:?}", &tlc, &result);
@@ -815,9 +821,13 @@ where
         &self,
         state: &mut ChannelActorState,
         add_tlc: AddTlc,
-    ) -> Result<(), ProcessingChannelError> {
-        state.check_for_tlc_update(Some(add_tlc.amount))?;
-        state.check_tlc_expiry(add_tlc.expiry)?;
+    ) -> Result<(), ProcessingChannelErrorWithSharedSecret> {
+        state
+            .check_for_tlc_update(Some(add_tlc.amount))
+            .map_err(ProcessingChannelError::without_shared_secret)?;
+        state
+            .check_tlc_expiry(add_tlc.expiry)
+            .map_err(ProcessingChannelError::without_shared_secret)?;
 
         // check the onion_packet is valid or not, if not, we should return an error.
         // If there is a next hop, we should send the AddTlc message to the next hop.
@@ -825,21 +835,26 @@ where
         // try to fulfill the payment, find the corresponding payment preimage from payment hash.
         let mut preimage = None;
         let mut update_invoice_payment_hash: Option<Hash256> = None;
+        let mut shared_secret = [0u8; 32];
 
         let peeled_onion_packet = match add_tlc.onion_packet.clone() {
             Some(onion_packet) => Some(
                 self.peel_onion_packet(onion_packet, add_tlc.payment_hash.clone())
-                    .await?,
+                    .await
+                    .map_err(ProcessingChannelError::without_shared_secret)?,
             ),
             None => None,
         };
 
         if let Some(ref peeled_onion_packet) = peeled_onion_packet {
+            shared_secret = peeled_onion_packet.shared_secret;
+
             // check the payment hash and amount
             if peeled_onion_packet.current.payment_hash != add_tlc.payment_hash {
                 return Err(ProcessingChannelError::InvalidParameter(
                     "Payment hash mismatch".to_string(),
-                ));
+                )
+                .with_shared_secret(shared_secret));
             }
 
             let received_amount = add_tlc.amount;
@@ -852,14 +867,16 @@ where
             // TODO: check the expiry time, if it's expired, we should return an error.
             if peeled_onion_packet.is_last() {
                 if forward_amount != add_tlc.amount {
-                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount
+                        .with_shared_secret(shared_secret));
                 }
 
                 let payment_hash = add_tlc.payment_hash;
                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
                     let invoice_status = self.get_invoice_status(&invoice);
                     if invoice_status != CkbInvoiceStatus::Open {
-                        return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                        return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status)
+                            .with_shared_secret(shared_secret));
                     }
                     update_invoice_payment_hash = Some(payment_hash);
                 }
@@ -874,10 +891,12 @@ where
                 if let Some(preimage) = preimage {
                     let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                     if add_tlc.payment_hash != filled_payment_hash {
-                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage
+                            .with_shared_secret(shared_secret));
                     }
                 } else {
-                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash
+                        .with_shared_secret(shared_secret));
                 }
             } else {
                 assert!(received_amount >= forward_amount);
@@ -894,13 +913,18 @@ where
                         "too low forward_fee: {}, expected_fee: {}",
                         forward_fee, expected_fee
                     );
-                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow
+                        .with_shared_secret(shared_secret));
                 }
             }
         }
 
-        let tlc = state.create_inbounding_tlc(add_tlc.clone(), preimage, peeled_onion_packet)?;
-        state.insert_tlc(tlc.clone())?;
+        let tlc = state
+            .create_inbounding_tlc(add_tlc.clone(), preimage, peeled_onion_packet)
+            .map_err(move |err| err.with_shared_secret(shared_secret))?;
+        state
+            .insert_tlc(tlc.clone())
+            .map_err(move |err| err.with_shared_secret(shared_secret))?;
         if let Some(payment_hash) = update_invoice_payment_hash {
             self.store
                 .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
@@ -956,6 +980,7 @@ where
                         command: ChannelCommand::RemoveTlc(
                             RemoveTlcCommand {
                                 id: added_tlc_id,
+                                // TODO: get the shared secret to encrypt the error packet at each hop
                                 reason: RemoveTlcReason::RemoveTlcFail(res),
                             },
                             port,
@@ -1389,7 +1414,8 @@ where
                     }
                     Err(err) => {
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail)));
+                        // TODO: get shared secret to create the error packet
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
                         Err(err)
                     }
                 }
@@ -2215,6 +2241,36 @@ pub enum ProcessingChannelError {
     TlcExpirySoon,
     #[error("The tlc expiry too far")]
     TlcExpiryTooFar,
+}
+
+/// ProcessingChannelError which brings the shared secret used in forwarding onion packet.
+/// The shared secret is required to obfuscate the error message.
+#[derive(Error, Debug)]
+#[error("{source}")]
+pub struct ProcessingChannelErrorWithSharedSecret {
+    pub source: ProcessingChannelError,
+    /// Reuse the shared secret used in forwarding onion packet to obfuscate the error message.
+    /// Set it to all zeros for errors that do not have the shared secret.
+    pub shared_secret: [u8; 32],
+}
+
+impl ProcessingChannelError {
+    pub fn with_shared_secret(
+        self,
+        shared_secret: [u8; 32],
+    ) -> ProcessingChannelErrorWithSharedSecret {
+        ProcessingChannelErrorWithSharedSecret {
+            source: self,
+            shared_secret,
+        }
+    }
+
+    pub fn without_shared_secret(self) -> ProcessingChannelErrorWithSharedSecret {
+        ProcessingChannelErrorWithSharedSecret {
+            source: self,
+            shared_secret: NO_SHARED_SECRET.clone(),
+        }
+    }
 }
 
 bitflags! {

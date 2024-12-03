@@ -956,6 +956,8 @@ pub struct PaymentSession {
     pub first_hop_channel_outpoint: Option<OutPoint>,
     pub first_hop_tlc_id: Option<u64>,
     pub route: SessionRoute,
+    // Session key for onion packet. Save it for decoding the error packet.
+    pub session_key: [u8; 32],
 }
 
 impl PaymentSession {
@@ -972,6 +974,7 @@ impl PaymentSession {
             first_hop_channel_outpoint: None,
             first_hop_tlc_id: None,
             route: SessionRoute::default(),
+            session_key: Default::default(),
         }
     }
 
@@ -1006,6 +1009,10 @@ impl PaymentSession {
 
     pub fn fee(&self) -> u128 {
         self.route.fee()
+    }
+
+    pub fn hops_public_keys(&self) -> Vec<Pubkey> {
+        self.route.nodes.iter().map(|x| x.pubkey).collect()
     }
 }
 

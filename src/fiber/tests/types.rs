@@ -5,12 +5,13 @@ use crate::fiber::{
     tests::test_utils::generate_pubkey,
     types::{
         secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-        TlcErrPacket, TlcErrorCode,
+        TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
     },
 };
 use ckb_types::packed::OutPointBuilder;
 use ckb_types::prelude::Builder;
-use secp256k1::{Secp256k1, SecretKey};
+use fiber_sphinx::OnionSharedSecretIter;
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::str::FromStr;
 
 #[test]
@@ -104,19 +105,59 @@ fn test_tlc_fail_error() {
     assert!(!tlc_fail_detail.error_code.is_node());
     assert!(tlc_fail_detail.error_code.is_bad_onion());
     assert!(tlc_fail_detail.error_code.is_perm());
-    let tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone());
+    let tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone(), &NO_SHARED_SECRET);
 
-    let convert_back: TlcErr = tlc_fail.decode().expect("decoded fail");
+    let convert_back: TlcErr = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");
     assert_eq!(tlc_fail_detail, convert_back);
 
     let node_fail =
         TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, generate_pubkey().into());
     assert!(node_fail.error_code.is_node());
-    let tlc_fail = TlcErrPacket::new(node_fail.clone());
-    let convert_back = tlc_fail.decode().expect("decoded fail");
+    let tlc_fail = TlcErrPacket::new(node_fail.clone(), &NO_SHARED_SECRET);
+    let convert_back = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");
     assert_eq!(node_fail, convert_back);
 
     let error_code = TlcErrorCode::PermanentNodeFailure;
     let convert = TlcErrorCode::from_str("PermanentNodeFailure").expect("convert error");
     assert_eq!(error_code, convert);
+}
+
+#[test]
+fn test_tlc_err_packet_encryption() {
+    // Setup
+    let secp = Secp256k1::new();
+    let hops_path = [
+        "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619",
+        "0324653eac434488002cc06bbfb7f10fe18991e35f9fe4302dbea6d2353dc0ab1c",
+        "027f31ebc5462c1fdce1b737ecff52d37d75dea43ce11c74d25aa297165faa2007",
+    ]
+    .iter()
+    .map(|s| Pubkey(PublicKey::from_str(s).expect("valid public key")))
+    .collect::<Vec<_>>();
+
+    let session_key = SecretKey::from_slice(&[0x41; 32]).expect("32 bytes, within curve order");
+    let hops_ss: Vec<[u8; 32]> =
+        OnionSharedSecretIter::new(hops_path.iter().map(|k| &k.0), session_key.clone(), &secp)
+            .collect();
+
+    let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
+    {
+        // Error from the first hop
+        let tlc_fail = TlcErrPacket::new_with_encryption(tlc_fail_detail.clone(), &hops_ss[0]);
+        let decrypted_tlc_fail_detail = tlc_fail
+            .decode(session_key.as_ref(), hops_path.clone())
+            .expect("decrypted");
+        assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
+    }
+
+    {
+        // Error from the the last hop
+        let mut tlc_fail = TlcErrPacket::new_with_encryption(tlc_fail_detail.clone(), &hops_ss[2]);
+        tlc_fail = tlc_fail.backward(&hops_ss[1]);
+        tlc_fail = tlc_fail.backward(&hops_ss[0]);
+        let decrypted_tlc_fail_detail = tlc_fail
+            .decode(session_key.as_ref(), hops_path.clone())
+            .expect("decrypted");
+        assert_eq!(decrypted_tlc_fail_detail, tlc_fail_detail);
+    }
 }
