@@ -46,6 +46,7 @@ fn build_server(addr: &str) -> Server {
             .set_nonblocking(true)
             .expect("set socket nonblocking");
         socket.set_reuse_address(true).expect("set reuse address");
+        #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
         socket.set_reuse_port(true).expect("set reuse port");
 
         socket.bind(&addr.into()).expect("bind socket to address");
