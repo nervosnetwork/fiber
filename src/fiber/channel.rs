@@ -140,8 +140,7 @@ pub enum TxCollaborationCommand {
 #[derive(Debug)]
 pub struct AddTlcCommand {
     pub amount: u128,
-    pub preimage: Option<Hash256>,
-    pub payment_hash: Option<Hash256>,
+    pub payment_hash: Hash256,
     pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
     /// Peeled onion packet for the current node
@@ -169,12 +168,6 @@ pub struct UpdateCommand {
     pub tlc_minimum_value: Option<u128>,
     pub tlc_maximum_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
-}
-
-fn get_random_preimage() -> Hash256 {
-    let mut preimage = [0u8; 32];
-    preimage.copy_from_slice(&rand::random::<[u8; 32]>());
-    preimage.into()
 }
 
 #[derive(Debug)]
@@ -4177,17 +4170,12 @@ impl ChannelActorState {
             "Must not have the same id in pending offered tlcs"
         );
 
-        let preimage = command.preimage.unwrap_or(get_random_preimage());
-        let payment_hash = command
-            .payment_hash
-            .unwrap_or_else(|| command.hash_algorithm.hash(preimage).into());
-
         TLC {
             id: TLCId::Offered(id),
             amount: command.amount,
-            payment_hash,
+            payment_hash: command.payment_hash,
             expiry: command.expiry,
-            payment_preimage: Some(preimage),
+            payment_preimage: None,
             hash_algorithm: command.hash_algorithm,
             peeled_onion_packet: command.peeled_onion_packet,
             previous_tlc: command
