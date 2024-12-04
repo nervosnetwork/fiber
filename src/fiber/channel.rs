@@ -152,6 +152,15 @@ pub struct AddTlcCommand {
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
+impl AddTlcCommand {
+    pub fn onion_shared_secret(&self) -> &[u8; 32] {
+        self.peeled_onion_packet
+            .as_ref()
+            .map(|packet| &packet.shared_secret)
+            .unwrap_or(&NO_SHARED_SECRET)
+    }
+}
+
 #[derive(Debug)]
 pub struct RemoveTlcCommand {
     pub id: u64,
@@ -740,7 +749,9 @@ where
                             command: ChannelCommand::RemoveTlc(
                                 RemoveTlcCommand {
                                     id: previous_tlc.into(),
-                                    reason: remove_reason.clone(),
+                                    reason: remove_reason
+                                        .clone()
+                                        .backward(tlc_info.tlc.onion_shared_secret()),
                                 },
                                 port,
                             ),
@@ -774,8 +785,7 @@ where
                             id: tlc.get_id(),
                             reason: RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                 TlcErr::new(error_code),
-                                // TODO: get shared secret to create the error packet
-                                &NO_SHARED_SECRET,
+                                tlc.onion_shared_secret(),
                             )),
                         };
                         let result = self.handle_remove_tlc_command(state, command);
@@ -1407,6 +1417,7 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
+                let shared_secret = command.onion_shared_secret().clone();
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
@@ -1414,8 +1425,7 @@ where
                     }
                     Err(err) => {
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        // TODO: get shared secret to create the error packet
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &shared_secret)));
                         Err(err)
                     }
                 }
@@ -5936,6 +5946,13 @@ impl TLC {
             TLCId::Offered(id) => id,
             TLCId::Received(id) => id,
         }
+    }
+
+    pub fn onion_shared_secret(&self) -> &[u8; 32] {
+        self.peeled_onion_packet
+            .as_ref()
+            .map(|packet| &packet.shared_secret)
+            .unwrap_or(&NO_SHARED_SECRET)
     }
 }
 

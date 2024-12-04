@@ -143,7 +143,7 @@ fn test_tlc_err_packet_encryption() {
     let tlc_fail_detail = TlcErr::new(TlcErrorCode::InvalidOnionVersion);
     {
         // Error from the first hop
-        let tlc_fail = TlcErrPacket::new_with_encryption(tlc_fail_detail.clone(), &hops_ss[0]);
+        let tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone(), &hops_ss[0]);
         let decrypted_tlc_fail_detail = tlc_fail
             .decode(session_key.as_ref(), hops_path.clone())
             .expect("decrypted");
@@ -152,7 +152,7 @@ fn test_tlc_err_packet_encryption() {
 
     {
         // Error from the the last hop
-        let mut tlc_fail = TlcErrPacket::new_with_encryption(tlc_fail_detail.clone(), &hops_ss[2]);
+        let mut tlc_fail = TlcErrPacket::new(tlc_fail_detail.clone(), &hops_ss[2]);
         tlc_fail = tlc_fail.backward(&hops_ss[1]);
         tlc_fail = tlc_fail.backward(&hops_ss[0]);
         let decrypted_tlc_fail_detail = tlc_fail
