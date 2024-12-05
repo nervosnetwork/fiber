@@ -37,7 +37,8 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 2000));
   console.log("accept channel result: ", res.body.result.channels);
-    if (res.body.result.channels.length != 2) {
+  const readyChannels = res.body.result.channels.filter(channel => channel.state.state_name === "CHANNEL_READY");
+    if (readyChannels.length != 2) {
     throw new Error("Assertion failed: expect there are 2 channels");
   }
 }

@@ -212,6 +212,9 @@ impl InternalResult {
                 | TlcErrorCode::InvalidOnionPayload => {
                     self.fail_node(nodes, 1);
                 }
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                    need_to_retry = false;
+                }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
                     debug!("first hop failed with error: {:?}", tlc_err);
@@ -285,6 +288,10 @@ impl InternalResult {
                     } else {
                         self.fail_range_pairs(nodes, 0, index - 1);
                     }
+                }
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                    need_to_retry = false;
+                    self.succeed_range_pairs(nodes, 0, index - 1);
                 }
                 _ => {
                     self.fail_node(nodes, index);

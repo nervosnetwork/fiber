@@ -1030,7 +1030,7 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1240,6 +1240,7 @@ pub struct TlcErrPacket {
 
 impl TlcErrPacket {
     pub fn new(tlc_fail: TlcErr) -> Self {
+        dbg!(&tlc_fail);
         TlcErrPacket {
             onion_packet: tlc_fail.serialize(),
         }
@@ -1389,7 +1390,7 @@ impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
