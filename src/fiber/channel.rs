@@ -673,41 +673,42 @@ where
 
     async fn try_to_relay_remove_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
         let tlc_info = state.get_offered_tlc(tlc_id).expect("expect tlc");
+        let (previous_channel_id, previous_tlc) =
+            tlc_info.previous_tlc.expect("expect previous tlc");
         assert!(tlc_info.is_offered());
+        assert!(previous_tlc.is_received());
+        assert!(previous_channel_id != state.get_id());
+
         let remove_reason = tlc_info
             .removed_at
             .as_ref()
             .expect("expect remove_at")
             .1
             .clone();
-        if let Some((previous_channel_id, previous_tlc)) = tlc_info.previous_tlc {
-            assert!(previous_tlc.is_received());
-            info!(
-                "begin to remove tlc from previous channel: {:?}",
-                &previous_tlc
-            );
-            assert!(previous_channel_id != state.get_id());
-            let (send, recv) = oneshot::channel::<Result<(), String>>();
-            let port = RpcReplyPort::from(send);
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                        channel_id: previous_channel_id,
-                        command: ChannelCommand::RemoveTlc(
-                            RemoveTlcCommand {
-                                id: previous_tlc.into(),
-                                reason: remove_reason,
-                            },
-                            port,
-                        ),
-                    }),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-            let res = recv.await.expect("remove tlc replied");
-            debug!("remove tlc from previous channel: {:?}", &res);
-        } else {
-            unreachable!("remove tlc without previous tlc");
-        }
+
+        debug!(
+            "begin to remove tlc from previous channel: {:?}",
+            &previous_tlc
+        );
+
+        let (send, recv) = oneshot::channel::<Result<(), String>>();
+        let port = RpcReplyPort::from(send);
+        self.network
+            .send_message(NetworkActorMessage::new_command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id: previous_channel_id,
+                    command: ChannelCommand::RemoveTlc(
+                        RemoveTlcCommand {
+                            id: previous_tlc.into(),
+                            reason: remove_reason,
+                        },
+                        port,
+                    ),
+                }),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        let res = recv.await.expect("remove tlc replied");
+        debug!("remove tlc from previous channel: {:?}", &res);
     }
 
     fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
@@ -1307,10 +1308,23 @@ where
                 id,
                 reason: reason.clone(),
             };
-            if let Ok(_) = self.handle_remove_tlc_command(state, command) {
-                state.tlc_state.remove_pending_remove_tlc(&tlc_id);
-            } else {
-                error!("Failed to remove tlc: {:?}, retry it later", &tlc_id);
+
+            match self.handle_remove_tlc_command(state, command) {
+                Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                    state.tlc_state.remove_pending_remove_tlc(&tlc_id);
+                }
+                Err(ProcessingChannelError::WaitingTlcAck) => {
+                    error!(
+                        "Failed to remove tlc: {:?} because of WaitingTlcAck, retry it later",
+                        &tlc_id
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to remove tlc: {:?} with reason: {:?}, will not retry",
+                        &tlc_id, err
+                    );
+                }
             }
         }
     }
