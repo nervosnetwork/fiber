@@ -37,6 +37,6 @@ assert {
 script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
-  console.log("31 step result: ", res.body);
+  console.log("29 step result: ", res.body);
   // for pay self router A -> B -> A, note A -> B and B -> A will use different channel
 }

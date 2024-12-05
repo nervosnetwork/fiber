@@ -673,7 +673,6 @@ fn test_announcement_message_serialize() {
 
     channel_announcement.udt_type_script = Some(ScriptBuilder::default().build());
 
-    eprintln!("channel_announcement: {:#?}", channel_announcement);
     let serialized = bincode::serialize(&channel_announcement).unwrap();
     let deserialized: ChannelAnnouncement = bincode::deserialize(&serialized).unwrap();
     assert_eq!(channel_announcement, deserialized);
@@ -943,7 +942,6 @@ fn test_send_payment_validate_htlc_expiry_delta() {
     };
 
     let result = SendPaymentData::new(send_command);
-    eprintln!("{:?}", result);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

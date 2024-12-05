@@ -355,7 +355,7 @@ impl CchActor {
         }
 
         order.channel_id = Some(tlc_notification.channel_id);
-        order.tlc_id = Some(tlc_notification.tlc.id.into());
+        order.tlc_id = Some(tlc_notification.tlc.tlc_id.into());
         state.orders_db.update_send_btc_order(order.clone()).await?;
 
         let req = routerrpc::SendPaymentRequest {
@@ -593,7 +593,7 @@ impl CchActor {
                                 expiry: now_timestamp_as_millis_u64()
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
-                                peeled_onion_packet: None,
+                                onion_packet: None,
                                 previous_tlc: None,
                             },
                             rpc_reply,

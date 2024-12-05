@@ -159,7 +159,6 @@ impl MockNetworkGraph {
                 tlc_minimum_value: min_htlc_value.unwrap_or(0),
                 channel_outpoint: channel_outpoint.clone(),
             };
-            eprintln!("add rev channel_update: {:?}", channel_update);
             self.graph.process_channel_update(channel_update).unwrap();
         }
     }
@@ -580,7 +579,6 @@ fn test_graph_build_router_fee_rate_optimize() {
         allow_self_payment: false,
         dry_run: false,
     });
-    eprintln!("route: {:?}", route);
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();

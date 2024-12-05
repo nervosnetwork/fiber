@@ -503,6 +503,8 @@ pub enum NetworkServiceEvent {
     ChannelCreated(PeerId, Hash256),
     // A outgoing channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
+    // A AddTlc peer message processed with failure
+    AddTlcFailed(PeerId, Hash256, TlcErr),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -600,6 +602,9 @@ pub enum NetworkActorEvent {
 
     // A tlc remove message is received. (payment_hash, remove_tlc)
     TlcRemoveReceived(Hash256, RemoveTlcReason),
+
+    // A payment need to retry
+    RetrySendPayment(Hash256),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1257,8 +1262,11 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                self.on_remove_tlc_event(state, payment_hash, remove_tlc_reason)
+                self.on_remove_tlc_event(myself, state, payment_hash, remove_tlc_reason)
                     .await;
+            }
+            NetworkActorEvent::RetrySendPayment(payment_hash) => {
+                let _ = self.try_payment_session(myself, state, payment_hash).await;
             }
         }
         Ok(())
@@ -1588,7 +1596,7 @@ where
                 let _ = reply.send(signature);
             }
             NetworkActorCommand::SendPayment(payment_request, reply) => {
-                match self.on_send_payment(state, payment_request).await {
+                match self.on_send_payment(myself, state, payment_request).await {
                     Ok(payment) => {
                         let _ = reply.send(Ok(payment));
                     }
@@ -2179,7 +2187,7 @@ where
                 payment_hash: info.payment_hash,
                 expiry: info.expiry,
                 hash_algorithm: info.hash_algorithm,
-                peeled_onion_packet: Some(peeled_onion_packet),
+                onion_packet: peeled_onion_packet.next.clone(),
                 previous_tlc,
             },
             rpc_reply,
@@ -2209,6 +2217,7 @@ where
 
     async fn on_remove_tlc_event(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_hash: Hash256,
         reason: RemoveTlcReason,
@@ -2231,7 +2240,9 @@ where
                             .await
                             .record_payment_fail(&payment_session, error_detail.clone());
                         if need_to_retry {
-                            let res = self.try_payment_session(state, payment_session).await;
+                            let res = self
+                                .try_payment_session(myself, state, payment_session.payment_hash())
+                                .await;
                             if res.is_err() {
                                 debug!("Failed to retry payment session: {:?}", res);
                             }
@@ -2363,7 +2374,7 @@ where
                     // This is the error implies we send payment request to the first hop failed
                     // graph or payment history need to update and then have a retry
                     self.update_graph_with_tlc_fail(&error_detail).await;
-                    let _ = self
+                    let need_to_retry = self
                         .network_graph
                         .write()
                         .await
@@ -2373,7 +2384,7 @@ where
                         error_detail.error_code_as_str()
                     );
                     self.set_payment_fail_with_error(payment_session, &err);
-                    return Err(Error::SendPaymentFirstHopError(err));
+                    return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
                 } else {
                     // This expected never to be happended, to be safe, we will set the payment session to failed
                     let err = format!("Failed to send onion packet, got malioucious error message");
@@ -2396,13 +2407,17 @@ where
 
     async fn try_payment_session(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
-        mut payment_session: PaymentSession,
+        payment_hash: Hash256,
     ) -> Result<PaymentSession, Error> {
-        let payment_data = payment_session.request.clone();
-        while payment_session.can_retry() {
-            payment_session.retried_times += 1;
+        let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
+            return Err(Error::InvalidParameter(payment_hash.to_string()));
+        };
 
+        let payment_data = payment_session.request.clone();
+        if payment_session.can_retry() {
+            payment_session.retried_times += 1;
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
@@ -2412,27 +2427,49 @@ where
                 .await
             {
                 Ok(payment_session) => return Ok(payment_session),
-                Err(Error::SendPaymentFirstHopError(_)) => {
-                    // we will retry the payment session
-                    continue;
+                Err(Error::SendPaymentFirstHopError(err, need_retry)) => {
+                    if need_retry {
+                        // If this is the first hop error, like the WaitingTlcAck error,
+                        // we will just retry later, return Ok here for letting endpoint user
+                        // know payment session is created successfully
+                        myself.send_after(Duration::from_millis(500), move || {
+                            NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+                                payment_hash,
+                            ))
+                        });
+                        return Ok(payment_session);
+                    } else {
+                        return Err(Error::SendPaymentError(err));
+                    }
                 }
                 Err(e) => {
+                    // we will retry the payment session,
+                    // but we need to retry later to let the actor to process failure,
+                    // so that we can make different choice for later try
+                    let payment_hash = payment_data.payment_hash;
+                    myself.send_after(Duration::from_millis(500), move || {
+                        NetworkActorMessage::new_event(NetworkActorEvent::RetrySendPayment(
+                            payment_hash,
+                        ))
+                    });
+                    debug!("send payment error: {:?}", e);
                     return Err(e);
                 }
             }
+        } else {
+            let error = payment_session.last_error.clone().unwrap_or_else(|| {
+                format!(
+                    "Failed to send payment session: {:?}, retried times: {}",
+                    payment_data.payment_hash, payment_session.retried_times
+                )
+            });
+            return Err(Error::SendPaymentError(error));
         }
-
-        let error = payment_session.last_error.clone().unwrap_or_else(|| {
-            format!(
-                "Failed to send payment session: {:?}, retried times: {}",
-                payment_data.payment_hash, payment_session.retried_times
-            )
-        });
-        return Err(Error::SendPaymentError(error));
     }
 
     async fn on_send_payment(
         &self,
+        myself: ActorRef<NetworkActorMessage>,
         state: &mut NetworkActorState<S>,
         payment_request: SendPaymentCommand,
     ) -> Result<SendPaymentResponse, Error> {
@@ -2467,7 +2504,9 @@ where
 
         let payment_session = PaymentSession::new(payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
-        let session = self.try_payment_session(state, payment_session).await?;
+        let session = self
+            .try_payment_session(myself, state, payment_session.payment_hash())
+            .await?;
         return Ok(session.into());
     }
 }
