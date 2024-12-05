@@ -522,9 +522,17 @@ async fn test_network_send_payment_normal_keysend_workflow() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (node_a, node_b, _new_channel_id) =
+    let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
+
+    let node_a_local_balance = node_a.get_local_balance_from_channel(channel_id);
+    let node_b_local_balance = node_b.get_local_balance_from_channel(channel_id);
+
+    eprintln!(
+        "before payment: node_a_local_balance: {}, node_b_local_balance: {}",
+        node_a_local_balance, node_b_local_balance
+    );
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
@@ -565,6 +573,16 @@ async fn test_network_send_payment_normal_keysend_workflow() {
         .expect("node_a alive")
         .unwrap();
 
+    let new_balance_node_a = node_a.get_local_balance_from_channel(channel_id);
+    let new_balance_node_b = node_b.get_local_balance_from_channel(channel_id);
+
+    assert_eq!(node_a_local_balance - new_balance_node_a, 10000);
+    assert_eq!(new_balance_node_b - node_b_local_balance, 10000);
+
+    eprintln!(
+        "after payment: node_a_local_balance: {}, node_b_local_balance: {}",
+        new_balance_node_a, new_balance_node_b
+    );
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     assert_eq!(res.status, PaymentSessionStatus::Success);
@@ -970,11 +988,19 @@ async fn test_network_send_payment_final_incorrect_hash() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (node_a, node_b, _new_channel_id) =
+    let (node_a, node_b, channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+
+    let node_a_local_balance = node_a.get_local_balance_from_channel(channel_id);
+    let node_b_local_balance = node_b.get_local_balance_from_channel(channel_id);
+
+    eprintln!(
+        "before payment: node_a_local_balance: {}, node_b_local_balance: {}",
+        node_a_local_balance, node_b_local_balance
+    );
 
     let node_b_pubkey = node_b.pubkey.clone();
     let payment_hash = gen_sha256_hash();
@@ -1010,7 +1036,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
     assert!(res.is_ok());
     assert_eq!(res.unwrap().status, PaymentSessionStatus::Inflight);
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
@@ -1021,6 +1047,17 @@ async fn test_network_send_payment_final_incorrect_hash() {
     assert_eq!(
         res.failed_error,
         Some("IncorrectOrUnknownPaymentDetails".to_string())
+    );
+
+    let new_balance_node_a = node_a.get_local_balance_from_channel(channel_id);
+    let new_balance_node_b = node_b.get_local_balance_from_channel(channel_id);
+
+    assert_eq!(node_a_local_balance - new_balance_node_a, 0);
+    assert_eq!(new_balance_node_b - node_b_local_balance, 0);
+
+    eprintln!(
+        "after payment: node_a_local_balance: {}, node_b_local_balance: {}",
+        new_balance_node_a, new_balance_node_b
     );
 }
 
@@ -1179,20 +1216,26 @@ async fn test_network_send_payment_with_dry_run() {
 async fn test_send_payment_with_3_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
-    let (node_a, _node_b, node_c, _, _) = create_3_nodes_with_established_channel(
+    let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
         true,
     )
     .await;
+    let node_a_local = node_a.get_local_balance_from_channel(channel_1);
+    let node_b_local_left = node_b.get_local_balance_from_channel(channel_1);
+    let node_b_local_right = node_b.get_local_balance_from_channel(channel_2);
+    let node_c_local = node_c.get_local_balance_from_channel(channel_2);
+
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    let sent_amount = 1000000 + 5;
     let node_c_pubkey = node_c.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_c_pubkey),
-                amount: Some(1000000 + 5),
+                amount: Some(sent_amount),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
                 invoice: None,
@@ -1223,6 +1266,20 @@ async fn test_send_payment_with_3_nodes() {
         .unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
+
+    let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
+    let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
+    let new_node_b_right = node_b.get_local_balance_from_channel(channel_2);
+    let new_node_c_local = node_c.get_local_balance_from_channel(channel_2);
+
+    let node_a_sent = node_a_local - new_node_a_local;
+    assert_eq!(node_a_sent, sent_amount + res.fee);
+    let node_b_sent = node_b_local_right - new_node_b_right;
+    let node_b_received = new_node_b_left - node_b_local_left;
+    let node_b_got = node_b_received - node_b_sent;
+    assert_eq!(node_b_got, res.fee);
+    let node_c_got = new_node_c_local - node_c_local;
+    assert_eq!(node_c_got, sent_amount);
 }
 
 #[tokio::test]
@@ -1230,12 +1287,18 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
 
-    let (node_a, _node_b, node_c, _, _) = create_3_nodes_with_established_channel(
+    let (node_a, node_b, node_c, channel_1, channel_2) = create_3_nodes_with_established_channel(
         (100000000000, 100000000000),
         (100000000000, 100000000000),
         true,
     )
     .await;
+
+    let node_a_local = node_a.get_local_balance_from_channel(channel_1);
+    let node_b_local_left = node_b.get_local_balance_from_channel(channel_1);
+    let node_b_local_right = node_b.get_local_balance_from_channel(channel_2);
+    let node_c_local = node_c.get_local_balance_from_channel(channel_2);
+
     // sleep for 2 seconds to make sure the channel is established
     tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
     let node_c_pubkey = node_c.pubkey.clone();
@@ -1277,6 +1340,20 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
         res.failed_error,
         Some("IncorrectOrUnknownPaymentDetails".to_string())
     );
+
+    let new_node_a_local = node_a.get_local_balance_from_channel(channel_1);
+    let new_node_b_left = node_b.get_local_balance_from_channel(channel_1);
+    let new_node_b_right = node_b.get_local_balance_from_channel(channel_2);
+    let new_node_c_local = node_c.get_local_balance_from_channel(channel_2);
+
+    let node_a_sent = node_a_local - new_node_a_local;
+    assert_eq!(node_a_sent, 0);
+    let node_b_sent = node_b_local_right - new_node_b_right;
+    let node_b_received = new_node_b_left - node_b_local_left;
+    let node_b_got = node_b_received - node_b_sent;
+    assert_eq!(node_b_got, 0);
+    let node_c_got = new_node_c_local - node_c_local;
+    assert_eq!(node_c_got, 0);
 }
 
 #[tokio::test]

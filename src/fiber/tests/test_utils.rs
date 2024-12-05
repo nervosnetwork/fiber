@@ -1,3 +1,4 @@
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -181,6 +182,20 @@ pub struct NetworkNode {
 impl NetworkNode {
     pub fn get_node_address(&self) -> &MultiAddr {
         &self.listening_addrs[0]
+    }
+
+    pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_local_amount
+    }
+
+    pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_remote_amount
     }
 }
 
