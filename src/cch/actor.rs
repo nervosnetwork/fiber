@@ -588,10 +588,8 @@ impl CchActor {
                         command: ChannelCommand::AddTlc(
                             AddTlcCommand {
                                 amount: order.amount_sats - order.fee_sats,
-                                preimage: None,
-                                payment_hash: Some(
-                                    Hash256::from_str(&order.payment_hash).expect("parse Hash256"),
-                                ),
+                                payment_hash: Hash256::from_str(&order.payment_hash)
+                                    .expect("parse Hash256"),
                                 expiry: now_timestamp_as_millis_u64()
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
