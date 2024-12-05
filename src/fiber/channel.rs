@@ -4107,24 +4107,25 @@ impl ChannelActorState {
                             if current.payment_hash != filled_payment_hash {
                                 return Err(ProcessingChannelError::FinalIncorrectPreimage);
                             }
+
+                            // update balance according to the tlc
+                            let (mut to_local_amount, mut to_remote_amount) =
+                                (self.to_local_amount, self.to_remote_amount);
+                            if add_tlc.is_offered() {
+                                to_local_amount -= add_tlc.amount;
+                                to_remote_amount += add_tlc.amount;
+                            } else {
+                                to_local_amount += add_tlc.amount;
+                                to_remote_amount -= add_tlc.amount;
+                            }
+                            self.to_local_amount = to_local_amount;
+                            self.to_remote_amount = to_remote_amount;
+
+                            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+                                to_local_amount, to_remote_amount, tlc_id, reason);
                         }
                     }
                 };
-
-                // update balance according to the tlc
-                let (mut to_local_amount, mut to_remote_amount) =
-                    (self.to_local_amount, self.to_remote_amount);
-                if add_tlc.is_offered() {
-                    to_local_amount -= add_tlc.amount;
-                    to_remote_amount += add_tlc.amount;
-                } else {
-                    to_local_amount += add_tlc.amount;
-                    to_remote_amount -= add_tlc.amount;
-                }
-                self.to_local_amount = to_local_amount;
-                self.to_remote_amount = to_remote_amount;
-                debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
-                    to_local_amount, to_remote_amount, tlc_id, reason);
 
                 self.tlc_state
                     .apply_tlc_remove(tlc_id, removed_at, reason.clone());
