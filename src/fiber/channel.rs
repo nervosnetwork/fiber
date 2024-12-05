@@ -638,13 +638,14 @@ where
                     if add_tlc.is_received() {
                         if let Err(e) = self.apply_add_tlc_operation(state, &add_tlc).await {
                             let error_detail = self.get_tlc_detail_error(state, &e).await;
-                            self.register_tlc_remove(
+                            self.register_retryable_tlc_remove(
                                 state,
                                 add_tlc.tlc_id,
                                 RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                     error_detail.clone(),
                                 )),
-                            );
+                            )
+                            .await;
                             self.network
                                 .clone()
                                 .send_message(NetworkActorMessage::new_notification(
@@ -691,27 +692,16 @@ where
             &previous_tlc
         );
 
-        let (send, recv) = oneshot::channel::<Result<(), String>>();
-        let port = RpcReplyPort::from(send);
-        self.network
-            .send_message(NetworkActorMessage::new_command(
-                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                    channel_id: previous_channel_id,
-                    command: ChannelCommand::RemoveTlc(
-                        RemoveTlcCommand {
-                            id: previous_tlc.into(),
-                            reason: remove_reason,
-                        },
-                        port,
-                    ),
-                }),
-            ))
-            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        let res = recv.await.expect("remove tlc replied");
-        debug!("remove tlc from previous channel: {:?}", &res);
+        self.register_retryable_relay_tlc_remove(
+            state,
+            previous_tlc.into(),
+            previous_channel_id,
+            remove_reason,
+        )
+        .await;
     }
 
-    fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
+    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
         let preimage = tlc_info
             .payment_preimage
@@ -754,7 +744,8 @@ where
             "register remove reason: {:?} with reason: {:?}",
             tlc.tlc_id, remove_reason
         );
-        self.register_tlc_remove(state, tlc.tlc_id, remove_reason);
+        self.register_retryable_tlc_remove(state, tlc.tlc_id, remove_reason)
+            .await;
     }
 
     async fn apply_add_tlc_operation(
@@ -862,7 +853,8 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(state, add_tlc.tlc_id.into());
+        self.try_to_settle_down_tlc(state, add_tlc.tlc_id.into())
+            .await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
         Ok(())
@@ -1282,48 +1274,94 @@ where
         Ok(())
     }
 
-    pub fn register_tlc_remove(
+    pub async fn register_retryable_tlc_remove(
         &self,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
-        let command = RemoveTlcCommand {
-            id: tlc_id.into(),
-            reason: reason.clone(),
-        };
-        if let Ok(_) = self.handle_remove_tlc_command(state, command) {
-            return;
-        } else {
-            error!("Failed to remove tlc: {:?}, retry it later", &tlc_id);
-            state.tlc_state.set_tlc_pending_remove(tlc_id, reason);
-        }
+        state.tlc_state.set_tlc_pending_remove(tlc_id, reason);
+        self.check_and_apply_retryable_remove_tlcs(state).await;
     }
 
-    pub fn check_tlc_setdown(&self, state: &mut ChannelActorState) {
-        let pending_removes = state.tlc_state.get_pending_remove();
-        for (tlc_id, reason) in pending_removes.iter() {
-            let id: u64 = (*tlc_id).into();
-            let command = RemoveTlcCommand {
-                id,
-                reason: reason.clone(),
-            };
+    pub async fn register_retryable_relay_tlc_remove(
+        &self,
+        state: &mut ChannelActorState,
+        tlc_id: u64,
+        channel_id: Hash256,
+        reason: RemoveTlcReason,
+    ) {
+        state
+            .tlc_state
+            .insert_relay_tlc_remove(channel_id, tlc_id, reason);
+        self.check_and_apply_retryable_remove_tlcs(state).await;
+    }
 
-            match self.handle_remove_tlc_command(state, command) {
-                Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
-                    state.tlc_state.remove_pending_remove_tlc(&tlc_id);
+    pub async fn check_and_apply_retryable_remove_tlcs(&self, state: &mut ChannelActorState) {
+        let pending_removes = state.tlc_state.get_pending_remove();
+        for retryable_remove in pending_removes.iter() {
+            match retryable_remove {
+                RetryableRemoveTlc::RemoveTlc(tlc_id, reason) => {
+                    let command = RemoveTlcCommand {
+                        id: (*tlc_id).into(),
+                        reason: reason.clone(),
+                    };
+
+                    match self.handle_remove_tlc_command(state, command) {
+                        Ok(_) | Err(ProcessingChannelError::RepeatedProcessing(_)) => {
+                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                        }
+                        Err(ProcessingChannelError::WaitingTlcAck) => {
+                            error!(
+                                "Failed to remove tlc: {:?} because of WaitingTlcAck, retry it later",
+                                &retryable_remove
+                            );
+                        }
+                        Err(err) => {
+                            error!(
+                                "Failed to remove tlc: {:?} with reason: {:?}, will not retry",
+                                &retryable_remove, err
+                            );
+                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                        }
+                    }
                 }
-                Err(ProcessingChannelError::WaitingTlcAck) => {
-                    error!(
-                        "Failed to remove tlc: {:?} because of WaitingTlcAck, retry it later",
-                        &tlc_id
-                    );
-                }
-                Err(err) => {
-                    error!(
-                        "Failed to remove tlc: {:?} with reason: {:?}, will not retry",
-                        &tlc_id, err
-                    );
+                RetryableRemoveTlc::RelayRemoveTlc(channel_id, tlc_id, reason) => {
+                    let (send, recv) = oneshot::channel::<Result<(), String>>();
+                    let port = RpcReplyPort::from(send);
+                    self.network
+                        .send_message(NetworkActorMessage::new_command(
+                            NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                channel_id: *channel_id,
+                                command: ChannelCommand::RemoveTlc(
+                                    RemoveTlcCommand {
+                                        id: *tlc_id,
+                                        reason: reason.clone(),
+                                    },
+                                    port,
+                                ),
+                            }),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    let res = recv.await.expect("remove tlc replied");
+                    match res {
+                        Ok(_) => {
+                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                        }
+                        Err(err) if err.contains("WaitingTlcAck") => {
+                            error!(
+                                "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
+                                &retryable_remove
+                            );
+                        }
+                        Err(err) => {
+                            error!(
+                                "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
+                                &retryable_remove, err
+                            );
+                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                        }
+                    }
                 }
             }
         }
@@ -1546,7 +1584,7 @@ where
                 debug!("Channel closed with uncooperative close");
             }
             ChannelEvent::CheckTlcSetdown => {
-                self.check_tlc_setdown(state);
+                self.check_and_apply_retryable_remove_tlcs(state).await;
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
@@ -2280,13 +2318,19 @@ impl PendingTlcs {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum RetryableRemoveTlc {
+    RemoveTlc(TLCId, RemoveTlcReason),
+    RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
+}
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
     local_pending_tlcs: PendingTlcs,
     remote_pending_tlcs: PendingTlcs,
     // if the tlc is pending to be removed, the reason will be stored here
     // this will only used for retrying remove TLC
-    pending_remove_tlcs_map: BTreeMap<TLCId, RemoveTlcReason>,
+    retryable_remove_tlcs: Vec<RetryableRemoveTlc>,
     waiting_ack: bool,
 }
 
@@ -2312,18 +2356,29 @@ impl TlcState {
     }
 
     pub fn set_tlc_pending_remove(&mut self, tlc_id: TLCId, reason: RemoveTlcReason) {
-        self.pending_remove_tlcs_map.insert(tlc_id, reason);
+        self.retryable_remove_tlcs
+            .push(RetryableRemoveTlc::RemoveTlc(tlc_id, reason));
     }
 
-    pub fn get_pending_remove(&self) -> Vec<(TLCId, RemoveTlcReason)> {
-        self.pending_remove_tlcs_map
-            .iter()
-            .map(|(tlc_id, reason)| (tlc_id.clone(), reason.clone()))
-            .collect()
+    pub fn insert_relay_tlc_remove(
+        &mut self,
+        channel_id: Hash256,
+        tlc_id: u64,
+        reason: RemoveTlcReason,
+    ) {
+        self.retryable_remove_tlcs
+            .push(RetryableRemoveTlc::RelayRemoveTlc(
+                channel_id, tlc_id, reason,
+            ));
     }
 
-    pub fn remove_pending_remove_tlc(&mut self, tlc_id: &TLCId) {
-        self.pending_remove_tlcs_map.remove(tlc_id);
+    pub fn get_pending_remove(&self) -> Vec<RetryableRemoveTlc> {
+        self.retryable_remove_tlcs.clone()
+    }
+
+    pub fn remove_pending_remove_tlc(&mut self, retryable_remove: &RetryableRemoveTlc) {
+        self.retryable_remove_tlcs
+            .retain(|remove| remove != retryable_remove);
     }
 
     pub fn get(&self, id: &TLCId) -> Option<&AddTlcInfo> {
