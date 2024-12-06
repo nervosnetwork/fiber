@@ -76,7 +76,7 @@ use super::{
         AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
         EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel,
         PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
@@ -644,6 +644,7 @@ where
                                 add_tlc.tlc_id,
                                 RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                     error_detail.clone(),
+                                    &NO_SHARED_SECRET,
                                 )),
                             );
                             self.network
@@ -736,11 +737,13 @@ where
                         CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
                         _ => unreachable!("unexpected invoice status"),
                     };
-                    remove_reason =
-                        RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(TlcErr::new(error_code)));
+                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(error_code),
+                        &NO_SHARED_SECRET,
+                    ));
                 }
                 CkbInvoiceStatus::Paid => {
-                    unreachable!("Paid invoice shold not be paid again");
+                    unreachable!("Paid invoice should not be paid again");
                 }
                 _ => {
                     self.store
@@ -1435,7 +1438,7 @@ where
                     }
                     Err(err) => {
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail)));
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
                         Err(err)
                     }
                 }
