@@ -2132,7 +2132,10 @@ async fn do_test_add_tlc_waiting_ack() {
         if i == 2 {
             // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err().decode().unwrap();
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
