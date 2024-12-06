@@ -1510,9 +1510,9 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiber-sphinx"
-version = "1.0.1"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c94381300373be2ca1021ecb906c34d1d71c7e4baf28ef5f4b8414fe0cd84ea2"
+checksum = "937d84d3b6b78b462457376163a1461c20ba76852734d25c6ba3a03ea27b15a0"
 dependencies = [
  "chacha20",
  "hmac",

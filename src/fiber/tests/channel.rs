@@ -7,7 +7,7 @@ use crate::fiber::network::SendPaymentCommand;
 use crate::fiber::tests::test_utils::{
     gen_rand_public_key, gen_sha256_hash, generate_seckey, NetworkNodeConfigBuilder,
 };
-use crate::fiber::types::{PaymentHopData, PeeledOnionPacket, TlcErrorCode};
+use crate::fiber::types::{PaymentHopData, PeeledOnionPacket, TlcErrorCode, NO_SHARED_SECRET};
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -2101,7 +2101,10 @@ async fn do_test_add_tlc_waiting_ack() {
         if i == 2 {
             // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err().decode().unwrap();
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
@@ -2152,7 +2155,10 @@ async fn do_test_add_tlc_number_limit() {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err().decode().unwrap();
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             dbg!(&add_tlc_result);
@@ -2205,7 +2211,10 @@ async fn do_test_add_tlc_value_limit() {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result.unwrap_err().decode().unwrap();
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());

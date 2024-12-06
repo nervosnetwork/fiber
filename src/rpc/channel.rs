@@ -10,7 +10,9 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, SendPaymentCommand},
     serde_utils::{EntityHex, U128Hex, U64Hex},
-    types::{Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
+    types::{
+        Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+    },
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
@@ -616,9 +618,11 @@ where
                                 RemoveTlcReason::RemoveTlcFail { .. } => {
                                     // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        TlcErrPacket::new(TlcErr::new(
-                                            err_code.expect("expect error code"),
-                                        )),
+                                        TlcErrPacket::new(
+                                            TlcErr::new(err_code.expect("expect error code")),
+                                            // TODO: get shared secret to create the error packet
+                                            &NO_SHARED_SECRET,
+                                        ),
                                     )
                                 }
                             },
