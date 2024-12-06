@@ -1918,13 +1918,21 @@ where
                 }
             }
             ChannelActorMessage::Event(e) => {
+                if matches!(e, ChannelEvent::CheckTlcSetdown)
+                    && !matches!(
+                        state.state,
+                        ChannelState::ChannelReady() | ChannelState::ShuttingDown(_)
+                    )
+                {
+                    return Ok(());
+                }
                 if let Err(err) = self.handle_event(&myself, state, e).await {
                     error!("Error while processing channel event: {:?}", err);
                 }
             }
         }
-
         self.store.insert_channel_actor_state(state.clone());
+
         Ok(())
     }
 }
