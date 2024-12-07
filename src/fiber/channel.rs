@@ -2325,7 +2325,7 @@ impl PendingTlcs {
         self.committed_index = self.tlcs.len();
     }
 
-    pub fn shrink_removed_tlcs(&mut self) {
+    pub fn shrink_removed_tlc(&mut self) {
         assert_eq!(self.committed_index, self.tlcs.len());
         let new_committed_index = self
             .get_committed_tlcs()
@@ -2590,7 +2590,7 @@ impl TlcState {
         )
     }
 
-    pub fn apply_tlc_remove(
+    pub fn mark_tlc_remove(
         &mut self,
         tlc_id: TLCId,
         removed_at: CommitmentNumbers,
@@ -2608,21 +2608,21 @@ impl TlcState {
         }
     }
 
-    pub fn shrink_removed_tlcs(
+    pub fn apply_remove_tlc(
         &mut self,
         tlc_id: TLCId,
         removed_at: CommitmentNumbers,
         reason: RemoveTlcReason,
     ) {
-        self.apply_tlc_remove(tlc_id, removed_at, reason);
+        self.mark_tlc_remove(tlc_id, removed_at, reason);
         // it's safe to remove multiple removed tlcs from pending TLCS,
         // just make sure the two partners are operating on correct pending list,
         // in other words, when one is remove from local TLCS,
         // the peer should remove it from remote TLCS
         if tlc_id.is_offered() {
-            self.local_pending_tlcs.shrink_removed_tlcs();
+            self.local_pending_tlcs.shrink_removed_tlc();
         } else {
-            self.remote_pending_tlcs.shrink_removed_tlcs();
+            self.remote_pending_tlcs.shrink_removed_tlc();
         }
     }
 }
@@ -4215,7 +4215,7 @@ impl ChannelActorState {
                             to_local_amount, to_remote_amount, tlc_id, reason);
                 }
                 self.tlc_state
-                    .shrink_removed_tlcs(tlc_id, removed_at, reason.clone());
+                    .apply_remove_tlc(tlc_id, removed_at, reason.clone());
             }
         }
 
