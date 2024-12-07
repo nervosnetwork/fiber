@@ -685,21 +685,15 @@ where
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
-        tlc_id: u64,
+        tlc_info: &AddTlcInfo,
+        remove_reason: RemoveTlcReason,
     ) {
-        let tlc_info = state.get_offered_tlc(tlc_id).expect("expect tlc");
+        assert!(tlc_info.is_offered());
         let (previous_channel_id, previous_tlc) =
             tlc_info.previous_tlc.expect("expect previous tlc");
         assert!(tlc_info.is_offered());
         assert!(previous_tlc.is_received());
         assert!(previous_channel_id != state.get_id());
-
-        let remove_reason = tlc_info
-            .removed_at
-            .as_ref()
-            .expect("expect remove_at")
-            .1
-            .clone();
 
         debug!(
             "begin to remove tlc from previous channel: {:?}",
@@ -928,7 +922,9 @@ where
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
         let remove_reason = remove_tlc.reason.clone();
-        let tlc_info = state.remove_tlc_with_reason(remove_tlc.tlc_id, &remove_reason)?;
+        let tlc_info = state
+            .remove_tlc_with_reason(remove_tlc.tlc_id, &remove_reason)
+            .expect("expect remove tlc successfully");
         if let (
             Some(ref udt_type_script),
             RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
@@ -949,15 +945,17 @@ where
             // because only the original sender cares about the TLC event to settle the payment
             self.network
                 .send_message(NetworkActorMessage::new_event(
-                    NetworkActorEvent::TlcRemoveReceived(tlc_info.payment_hash, remove_reason),
+                    NetworkActorEvent::TlcRemoveReceived(
+                        tlc_info.payment_hash,
+                        remove_reason.clone(),
+                    ),
                 ))
                 .expect("myself alive");
         } else {
             // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(myself, state, tlc_info.tlc_id.into())
+            self.try_to_relay_remove_tlc(myself, state, &tlc_info, remove_reason)
                 .await;
         }
-        state.tlc_state.shrink_removed_tlcs(remove_tlc.tlc_id);
         Ok(())
     }
 
@@ -2320,7 +2318,6 @@ impl PendingTlcs {
     }
 
     pub fn drop_remove_tlc(&mut self, tlc_id: &TLCId) {
-        //assert_eq!(self.committed_index, self.tlcs.len());
         self.tlcs.retain(|tlc| match tlc {
             TlcKind::RemoveTlc(info) => info.tlc_id != *tlc_id,
             _ => true,
@@ -2329,7 +2326,7 @@ impl PendingTlcs {
     }
 
     pub fn shrink_removed_tlcs(&mut self) {
-        //assert_eq!(self.committed_index, self.tlcs.len());
+        assert_eq!(self.committed_index, self.tlcs.len());
         let new_committed_index = self
             .get_committed_tlcs()
             .iter()
@@ -2611,7 +2608,13 @@ impl TlcState {
         }
     }
 
-    pub fn shrink_removed_tlcs(&mut self, tlc_id: TLCId) {
+    pub fn shrink_removed_tlcs(
+        &mut self,
+        tlc_id: TLCId,
+        removed_at: CommitmentNumbers,
+        reason: RemoveTlcReason,
+    ) {
+        self.apply_tlc_remove(tlc_id, removed_at, reason);
         // it's safe to remove multiple removed tlcs from pending TLCS,
         // just make sure the two partners are operating on correct pending list,
         // in other words, when one is remove from local TLCS,
@@ -4168,68 +4171,55 @@ impl ChannelActorState {
         reason: &RemoveTlcReason,
     ) -> Result<AddTlcInfo, ProcessingChannelError> {
         let removed_at = self.get_current_commitment_numbers();
-        let tlc = match self.tlc_state.get(&tlc_id).cloned() {
-            None => {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
-                    "Trying to remove non-existing tlc with id {:?}",
-                    tlc_id
-                )))
+        let current = self.tlc_state.get(&tlc_id).expect("TLC exists").clone();
+
+        match &current.removed_at {
+            Some((current_removed_at, current_remove_reason))
+                if current_remove_reason == reason && removed_at == *current_removed_at =>
+            {
+                debug!("Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason);
+                return Err(ProcessingChannelError::RepeatedProcessing(
+                    "TLC is already removed".to_string(),
+                ));
             }
-            Some(current) => {
-                let add_tlc = current.clone();
-                match &current.removed_at {
-                    Some((current_removed_at, current_remove_reason))
-                        if current_remove_reason == reason && removed_at == *current_removed_at =>
-                    {
-                        debug!(
-                            "Skipping removing of tlc {:?} as it is already removed at {:?} with the same reason {:?}", tlc_id, removed_at, reason
-                        );
-                        return Err(ProcessingChannelError::RepeatedProcessing(
-                            "TLC is already removed".to_string(),
-                        ));
-                    }
-                    Some((current_remove_reason, current_removed_at)) => {
-                        return Err(ProcessingChannelError::InvalidParameter(
+            Some((current_remove_reason, current_removed_at)) => {
+                return Err(ProcessingChannelError::InvalidParameter(
                             format!("Illegally removing the same tlc: {:?} was previously removed at {:?} for {:?}, and trying to remove it again at {:?} for {:?}",
                                 tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
-                    }
-                    None => {
-                        debug!(
-                            "Inserting remove reason {:?} at commitment number {:?} for tlc {:?} hash_algorithm: {:?}",
-                            reason, removed_at, current, add_tlc.hash_algorithm
-                        );
-                        if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
-                            let filled_payment_hash: Hash256 =
-                                add_tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
-                            if current.payment_hash != filled_payment_hash {
-                                return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                            }
-
-                            // update balance according to the tlc
-                            let (mut to_local_amount, mut to_remote_amount) =
-                                (self.to_local_amount, self.to_remote_amount);
-                            if add_tlc.is_offered() {
-                                to_local_amount -= add_tlc.amount;
-                                to_remote_amount += add_tlc.amount;
-                            } else {
-                                to_local_amount += add_tlc.amount;
-                                to_remote_amount -= add_tlc.amount;
-                            }
-                            self.to_local_amount = to_local_amount;
-                            self.to_remote_amount = to_remote_amount;
-
-                            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
-                                to_local_amount, to_remote_amount, tlc_id, reason);
-                        }
-                    }
-                };
-
-                self.tlc_state
-                    .apply_tlc_remove(tlc_id, removed_at, reason.clone());
-                current
             }
-        };
-        Ok(tlc.clone())
+            None => {
+                debug!("Inserting remove reason {:?} at commitment number {:?} for tlc {:?} hash_algorithm: {:?}",
+                        reason, removed_at, current, current.hash_algorithm);
+
+                if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
+                    let filled_payment_hash: Hash256 =
+                        current.hash_algorithm.hash(fulfill.payment_preimage).into();
+                    if current.payment_hash != filled_payment_hash {
+                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                    }
+
+                    // update balance according to the tlc
+                    let (mut to_local_amount, mut to_remote_amount) =
+                        (self.to_local_amount, self.to_remote_amount);
+                    if current.is_offered() {
+                        to_local_amount -= current.amount;
+                        to_remote_amount += current.amount;
+                    } else {
+                        to_local_amount += current.amount;
+                        to_remote_amount -= current.amount;
+                    }
+                    self.to_local_amount = to_local_amount;
+                    self.to_remote_amount = to_remote_amount;
+
+                    debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+                            to_local_amount, to_remote_amount, tlc_id, reason);
+                }
+                self.tlc_state
+                    .shrink_removed_tlcs(tlc_id, removed_at, reason.clone());
+            }
+        }
+
+        Ok(current.clone())
     }
 
     pub fn get_local_channel_public_keys(&self) -> &ChannelBasePublicKeys {
@@ -5413,10 +5403,12 @@ impl ChannelActorState {
 
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
+
         let staging_tlcs = self.tlc_state.commit_local_tlcs();
         for tlc in staging_tlcs {
             if let TlcKind::RemoveTlc(remove_tlc) = tlc {
-                self.remove_tlc_with_reason(remove_tlc.tlc_id, &remove_tlc.reason)?;
+                self.remove_tlc_with_reason(remove_tlc.tlc_id, &remove_tlc.reason)
+                    .expect("expect remove tlc successfully");
             }
         }
         self.tlc_state.set_waiting_ack(false);
