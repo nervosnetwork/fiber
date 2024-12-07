@@ -424,7 +424,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_message(&self.network, revoke_and_ack)?;
+                state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -627,7 +627,7 @@ where
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
-        state.handle_commitment_signed_message(commitment_signed, &self.network)?;
+        state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
         self.flush_staging_tlc_operations(myself, state).await;
         Ok(())
     }
@@ -4993,7 +4993,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    fn handle_commitment_signed_message(
+    fn verify_commitment_signed_and_send_ack(
         &mut self,
         commitment_signed: CommitmentSigned,
         network: &ActorRef<NetworkActorMessage>,
@@ -5313,7 +5313,7 @@ impl ChannelActorState {
         self.remote_commitment_points.push(commitment_point);
     }
 
-    fn handle_revoke_and_ack_message(
+    fn handle_revoke_and_ack_peer_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
