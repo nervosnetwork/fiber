@@ -1283,6 +1283,51 @@ async fn test_send_payment_with_3_nodes() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_3_nodes_overflow() {
+    // Fix issue #361
+
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
+        (1000000000 * 100000000, 1000000000 * 100000000),
+        (1000000000 * 100000000, 1000000000 * 100000000),
+        true,
+    )
+    .await;
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    let sent_amount = 0xfffffffffffffffffffffffffffffff;
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(sent_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
+    assert!(res
+        .err()
+        .unwrap()
+        .contains("The payment amount (21267647932558653966460912964485513215) should be less than 1844674407370955161"));
+}
+
+#[tokio::test]
 async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
