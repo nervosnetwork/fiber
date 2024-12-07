@@ -447,6 +447,14 @@ impl SendPaymentData {
             (payment_hash, Some(preimage))
         };
 
+        if udt_type_script.is_none() && amount >= u64::MAX as u128 {
+            return Err(format!(
+                "The payment amount ({}) should be less than {}",
+                amount,
+                u64::MAX
+            ));
+        }
+
         Ok(SendPaymentData {
             target_pubkey: target,
             amount,

@@ -604,7 +604,8 @@ where
                     .get_update_info_with(route[i].target)
                     .expect("channel_update is none");
                 let fee_rate = channel_update.fee_rate;
-                let fee = calculate_tlc_forward_fee(current_amount, fee_rate as u128);
+                let fee =
+                    calculate_tlc_forward_fee(current_amount, fee_rate as u128).expect("fee is ok");
                 let expiry = channel_update.tlc_expiry_delta;
                 (fee, expiry)
             };
@@ -738,7 +739,16 @@ where
 
                 let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
-                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128);
+                if next_hop_received_amount > channel_info.capacity() {
+                    continue;
+                }
+                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128)
+                    .map_err(|err| {
+                        PathFindError::PathFind(format!(
+                            "calculate_tlc_forward_fee error: {:?}",
+                            err
+                        ))
+                    })?;
                 let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge

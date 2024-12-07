@@ -834,9 +834,9 @@ where
                     .tlc_fee_proportional_millionths
                     .unwrap_or_default();
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                if forward_fee < expected_fee {
+                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
                     error!(
-                        "too low forward_fee: {}, expected_fee: {}",
+                        "too low forward_fee: {}, expected_fee: {:?}",
                         forward_fee, expected_fee
                     );
                     return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
