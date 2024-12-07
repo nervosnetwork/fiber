@@ -30,8 +30,4 @@ impl Migration for SampleMigration {
     fn version(&self) -> &str {
         &self.version
     }
-
-    fn expensive(&self) -> bool {
-        false
-    }
 }

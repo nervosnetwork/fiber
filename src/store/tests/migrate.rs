@@ -71,10 +71,6 @@ fn test_run_migration() {
         fn version(&self) -> &str {
             &self.version
         }
-
-        fn expensive(&self) -> bool {
-            false
-        }
     }
 
     let migrate = gen_migrate();
