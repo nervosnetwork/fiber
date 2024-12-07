@@ -152,25 +152,6 @@ pub trait Migration: Send + Sync {
 
     /// returns migration version, use `date +'%Y%m%d%H%M%S'` timestamp format
     fn version(&self) -> &str;
-
-    /// Will cost a lot of time to perform this migration operation.
-    ///
-    /// Override this function for `Migrations` which could be executed very fast.
-    fn expensive(&self) -> bool {
-        true
-    }
-
-    /// Check if the background migration can be resumed.
-    ///
-    /// If a migration can be resumed, it should implement the recovery logic in `migrate` function.
-    /// and the `MigirateWorker` will add the migration's handler with `register_thread`, so that then
-    /// main thread can wait for the background migration to store the progress and exit.
-    ///
-    /// Otherwise, the migration will be restarted from the beginning.
-    ///
-    fn can_resume(&self) -> bool {
-        false
-    }
 }
 
 const INIT_DB_VERSION: &str = "20241116135521";
@@ -198,9 +179,5 @@ impl Migration for DefaultMigration {
 
     fn version(&self) -> &str {
         &self.version
-    }
-
-    fn expensive(&self) -> bool {
-        false
     }
 }
