@@ -291,6 +291,7 @@ where
 
     pub async fn handle_peer_message(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         message: FiberChannelMessage,
     ) -> Result<(), ProcessingChannelError> {
@@ -377,7 +378,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::CommitmentSigned(commitment_signed) => {
-                self.handle_commitment_signed_peer_message(state, commitment_signed)
+                self.handle_commitment_signed_peer_message(myself, state, commitment_signed)
                     .await
             }
             FiberChannelMessage::TxSignatures(tx_signatures) => {
@@ -621,24 +622,31 @@ where
 
     async fn handle_commitment_signed_peer_message(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         state.handle_commitment_signed_message(commitment_signed, &self.network)?;
-        self.flush_staging_tlc_operations(state).await;
+        self.flush_staging_tlc_operations(myself, state).await;
         Ok(())
     }
 
-    async fn flush_staging_tlc_operations(&self, state: &mut ChannelActorState) {
+    async fn flush_staging_tlc_operations(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
         let pending_apply_tlcs = state.tlc_state.commit_remote_tlcs();
         for tlc_info in pending_apply_tlcs {
             match tlc_info {
                 TlcKind::AddTlc(add_tlc) => {
                     if add_tlc.is_received() {
-                        if let Err(e) = self.apply_add_tlc_operation(state, &add_tlc).await {
+                        if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await
+                        {
                             let error_detail = self.get_tlc_detail_error(state, &e).await;
                             self.register_retryable_tlc_remove(
+                                myself,
                                 state,
                                 add_tlc.tlc_id,
                                 RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
@@ -661,7 +669,7 @@ where
                 }
                 TlcKind::RemoveTlc(remove_tlc) => {
                     let _ = self
-                        .apply_remove_tlc_operation(state, remove_tlc)
+                        .apply_remove_tlc_operation(myself, state, remove_tlc)
                         .await
                         .map_err(|e| {
                             debug!("error happened in apply_remove_tlc_operation: {:?}", e);
@@ -672,7 +680,12 @@ where
         }
     }
 
-    async fn try_to_relay_remove_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
+    async fn try_to_relay_remove_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc_id: u64,
+    ) {
         let tlc_info = state.get_offered_tlc(tlc_id).expect("expect tlc");
         let (previous_channel_id, previous_tlc) =
             tlc_info.previous_tlc.expect("expect previous tlc");
@@ -693,6 +706,7 @@ where
         );
 
         self.register_retryable_relay_tlc_remove(
+            myself,
             state,
             previous_tlc.into(),
             previous_channel_id,
@@ -701,7 +715,12 @@ where
         .await;
     }
 
-    async fn try_to_settle_down_tlc(&self, state: &mut ChannelActorState, tlc_id: u64) {
+    async fn try_to_settle_down_tlc(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+        tlc_id: u64,
+    ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
         let preimage = tlc_info
             .payment_preimage
@@ -744,12 +763,13 @@ where
             "register remove reason: {:?} with reason: {:?}",
             tlc.tlc_id, remove_reason
         );
-        self.register_retryable_tlc_remove(state, tlc.tlc_id, remove_reason)
+        self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
     }
 
     async fn apply_add_tlc_operation(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         add_tlc: &AddTlcInfo,
     ) -> Result<(), ProcessingChannelError> {
@@ -853,7 +873,7 @@ where
         // we don't need to settle down the tlc if it is not the last hop here,
         // some e2e tests are calling AddTlc manually, so we can not use onion packet to
         // check whether it's the last hop here, maybe need to revisit in future.
-        self.try_to_settle_down_tlc(state, add_tlc.tlc_id.into())
+        self.try_to_settle_down_tlc(myself, state, add_tlc.tlc_id.into())
             .await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
@@ -899,6 +919,7 @@ where
 
     async fn apply_remove_tlc_operation(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         remove_tlc: RemoveTlcInfo,
     ) -> Result<(), ProcessingChannelError> {
@@ -930,7 +951,7 @@ where
                 .expect("myself alive");
         } else {
             // relay RemoveTlc to previous channel if needed
-            self.try_to_relay_remove_tlc(state, tlc_info.tlc_id.into())
+            self.try_to_relay_remove_tlc(myself, state, tlc_info.tlc_id.into())
                 .await;
         }
         state.tlc_state.shrink_removed_tlcs(remove_tlc.tlc_id);
@@ -1276,16 +1297,19 @@ where
 
     pub async fn register_retryable_tlc_remove(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
         reason: RemoveTlcReason,
     ) {
         state.tlc_state.set_tlc_pending_remove(tlc_id, reason);
-        self.check_and_apply_retryable_remove_tlcs(state).await;
+        self.check_and_apply_retryable_remove_tlcs(myself, state)
+            .await;
     }
 
     pub async fn register_retryable_relay_tlc_remove(
         &self,
+        myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: u64,
         channel_id: Hash256,
@@ -1294,10 +1318,15 @@ where
         state
             .tlc_state
             .insert_relay_tlc_remove(channel_id, tlc_id, reason);
-        self.check_and_apply_retryable_remove_tlcs(state).await;
+        self.check_and_apply_retryable_remove_tlcs(myself, state)
+            .await;
     }
 
-    pub async fn check_and_apply_retryable_remove_tlcs(&self, state: &mut ChannelActorState) {
+    pub async fn check_and_apply_retryable_remove_tlcs(
+        &self,
+        myself: &ActorRef<ChannelActorMessage>,
+        state: &mut ChannelActorState,
+    ) {
         let pending_removes = state.tlc_state.get_pending_remove();
         for retryable_remove in pending_removes.iter() {
             match retryable_remove {
@@ -1364,6 +1393,12 @@ where
                     }
                 }
             }
+        }
+        // If there are more pending removes, we will retry it later
+        if !state.tlc_state.get_pending_remove().is_empty() {
+            myself.send_after(AUTO_SETDOWN_TLC_INTERVAL, || {
+                ChannelActorMessage::Event(ChannelEvent::CheckTlcSetdown)
+            });
         }
     }
 
@@ -1584,7 +1619,8 @@ where
                 debug!("Channel closed with uncooperative close");
             }
             ChannelEvent::CheckTlcSetdown => {
-                self.check_and_apply_retryable_remove_tlcs(state).await;
+                self.check_and_apply_retryable_remove_tlcs(myself, state)
+                    .await;
             }
             ChannelEvent::PeerDisconnected => {
                 myself.stop(Some("PeerDisconnected".to_string()));
@@ -1932,17 +1968,6 @@ where
         }
     }
 
-    async fn post_start(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        _state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        myself.send_interval(AUTO_SETDOWN_TLC_INTERVAL, || {
-            ChannelActorMessage::Event(ChannelEvent::CheckTlcSetdown)
-        });
-        Ok(())
-    }
-
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -1957,7 +1982,7 @@ where
         );
         match message {
             ChannelActorMessage::PeerMessage(message) => {
-                if let Err(error) = self.handle_peer_message(state, message).await {
+                if let Err(error) = self.handle_peer_message(&myself, state, message).await {
                     error!("Error while processing channel message: {:?}", error);
                 }
             }
