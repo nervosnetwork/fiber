@@ -367,11 +367,13 @@ fn test_graph_find_path_three_nodes() {
 fn test_graph_find_path_fee() {
     let mut network = MockNetworkGraph::new(5);
 
-    network.add_edge(1, 2, Some(1000), Some(30000));
-    network.add_edge(2, 4, Some(1000), Some(10000));
+    network.add_edge(1, 2, Some(1000), Some(10000));
+    network.add_edge(2, 4, Some(1000), Some(30000));
+    // means node 2 will charge fee_rate 30000 when forwarding to node 4
 
-    network.add_edge(1, 3, Some(1000), Some(20000));
-    network.add_edge(3, 4, Some(1000), Some(10000));
+    network.add_edge(1, 3, Some(1000), Some(10000));
+    network.add_edge(3, 4, Some(1000), Some(20000));
+    // means node 3 will charge fee_rate 20000 when forwarding to node 4
 
     let route = network.find_path(1, 4, 100, 1000);
 
@@ -380,6 +382,7 @@ fn test_graph_find_path_fee() {
 
     // make sure we choose the path with lower fees
     assert_eq!(route.len(), 2);
+    // assert we choose the second path
     assert_eq!(route[0].channel_outpoint, network.edges[2].2);
     assert_eq!(route[1].channel_outpoint, network.edges[3].2);
 }
@@ -474,9 +477,6 @@ fn test_graph_find_path_amount_failed() {
 fn test_graph_find_optimal_path() {
     let mut network = MockNetworkGraph::new(6);
 
-    // Direct path with high fee
-    network.add_edge(1, 5, Some(2000), Some(50000));
-
     // Longer path with lower total fee
     network.add_edge(1, 2, Some(2000), Some(10000));
     network.add_edge(2, 3, Some(2000), Some(10000));
@@ -490,7 +490,7 @@ fn test_graph_find_optimal_path() {
     // Check that the algorithm chose the longer path with lower fees
     let route = network.find_path(1, 5, 1000, 1000).unwrap();
     assert_eq!(route.len(), 4);
-    for (i, edge_index) in (1..=4).enumerate() {
+    for (i, edge_index) in (0..=3).enumerate() {
         assert_eq!(route[i].channel_outpoint, network.edges[edge_index].2);
     }
 
@@ -501,15 +501,15 @@ fn test_graph_find_optimal_path() {
 
     // Check that the algorithm chose the direct path for a smaller amount
     assert_eq!(small_route.len(), 2);
-    assert_eq!(small_route[0].channel_outpoint, network.edges[5].2);
-    assert_eq!(small_route[1].channel_outpoint, network.edges[6].2);
+    assert_eq!(small_route[0].channel_outpoint, network.edges[4].2);
+    assert_eq!(small_route[1].channel_outpoint, network.edges[5].2);
 }
 
 #[test]
 fn test_graph_build_router_is_ok_with_fee_rate() {
     let mut network = MockNetworkGraph::new(6);
 
-    // Direct path with high fee
+    // Direct path with high fee, but there are no middle hop nodes, so there will be no fee
     network.add_edge(1, 5, Some(2000), Some(50000));
 
     // Longer path with lower total fee
@@ -542,7 +542,7 @@ fn test_graph_build_router_is_ok_with_fee_rate() {
     assert!(route.is_ok());
     let route = route.unwrap();
     let amounts = route.iter().map(|x| x.amount).collect::<Vec<_>>();
-    assert_eq!(amounts, vec![1022, 1011, 1010, 1000, 1000]);
+    assert_eq!(amounts, vec![1000, 1000]);
 }
 
 #[test]

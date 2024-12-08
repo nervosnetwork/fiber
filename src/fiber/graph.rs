@@ -606,6 +606,10 @@ where
                 let fee_rate = channel_update.fee_rate;
                 let fee =
                     calculate_tlc_forward_fee(current_amount, fee_rate as u128).expect("fee is ok");
+                eprintln!(
+                    "build router with fee: {:?}  current_amount: {:?}",
+                    fee, current_amount
+                );
                 let expiry = channel_update.tlc_expiry_delta;
                 (fee, expiry)
             };
@@ -737,23 +741,42 @@ where
 
                 edges_expanded += 1;
 
-                let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
                 if next_hop_received_amount > channel_info.capacity() {
                     continue;
                 }
-                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128)
+
+                let fee = if from == source {
+                    0
+                } else {
+                    eprintln!(
+                        "next_hop_received_amount: {} channel_update.fee_rate: {} ",
+                        next_hop_received_amount, channel_update.fee_rate
+                    );
+                    calculate_tlc_forward_fee(
+                        next_hop_received_amount,
+                        channel_update.fee_rate as u128,
+                    )
                     .map_err(|err| {
                         PathFindError::PathFind(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
-                    })?;
+                    })?
+                };
+                eprintln!(
+                    "debug next_hop_received_amount: {}, fee: {}",
+                    next_hop_received_amount, fee
+                );
                 let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge
                 if let Some(max_fee_amount) = max_fee_amount {
                     if amount_to_send > amount + max_fee_amount {
+                        eprintln!(
+                            "skip amount_to_send: {}, amount: {}, max_fee_amount: {} !!!!",
+                            amount_to_send, amount, max_fee_amount
+                        );
                         continue;
                     }
                 }
@@ -841,6 +864,7 @@ where
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
         }
+        eprintln!("debug returnning result: {:?}", result);
         Ok(result)
     }
 
@@ -947,6 +971,7 @@ impl SessionRoute {
         let first_amount = self.nodes.first().map_or(0, |s| s.amount);
         let last_amount = self.nodes.last().map_or(0, |s| s.amount);
         assert!(first_amount >= last_amount);
+        eprintln!("debug self.nodes: {:?}", self.nodes);
         first_amount - last_amount
     }
 }
