@@ -25,14 +25,14 @@ pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
 /// Default minimum ckb funding amount for auto accepting an open channel request.
 pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * CKB_SHANNONS;
 
-/// The expiry delta to forward a tlc, in milliseconds, default to 8 hour.
-pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 8 * 60 * 60 * 1000;
+/// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
+pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
 /// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
 pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
 
-/// The maximum expiry delta for a payment, in milliseconds. 5 days
-pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 5 * 24 * 60 * 60 * 1000; // 5 days
+/// The maximum expiry delta for a payment, in milliseconds. 2 weeks
+pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;

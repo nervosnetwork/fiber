@@ -1405,7 +1405,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
                 payment_hash: None,
-                final_tlc_expiry_delta: Some(5 * 24 * 60 * 60 * 1000 + 1), // 5 days + 1 ms
+                final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 + 1), // 14 days + 1 ms
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,
@@ -1430,7 +1430,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
                 target_pubkey: Some(node_c_pubkey),
                 amount: Some(1000000000),
                 payment_hash: None,
-                final_tlc_expiry_delta: Some(5 * 24 * 60 * 60 * 1000 - 100), // 5 days - 100, will not find a path
+                final_tlc_expiry_delta: Some(14 * 24 * 60 * 60 * 1000 - 100), // 14 days - 100, will not find a path
                 invoice: None,
                 timeout: None,
                 max_fee_amount: None,

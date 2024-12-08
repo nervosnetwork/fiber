@@ -713,7 +713,6 @@ where
             next_hop: None,
             incoming_tlc_expiry: final_tlc_expiry_delta,
         });
-        eprintln!("final_tlc_expiry_delta: {}", final_tlc_expiry_delta);
 
         while let Some(cur_hop) = nodes_heap.pop() {
             nodes_visited += 1;
