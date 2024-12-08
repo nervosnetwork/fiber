@@ -1328,11 +1328,11 @@ where
         state: &mut ChannelActorState,
     ) {
         let pending_removes = state.tlc_state.get_pending_remove();
-        for retryable_remove in pending_removes.iter() {
+        for retryable_remove in pending_removes.into_iter() {
             match retryable_remove {
-                RetryableRemoveTlc::RemoveTlc(tlc_id, reason) => {
+                RetryableRemoveTlc::RemoveTlc(tlc_id, ref reason) => {
                     let command = RemoveTlcCommand {
-                        id: (*tlc_id).into(),
+                        id: tlc_id.into(),
                         reason: reason.clone(),
                     };
 
@@ -1355,16 +1355,16 @@ where
                         }
                     }
                 }
-                RetryableRemoveTlc::RelayRemoveTlc(channel_id, tlc_id, reason) => {
+                RetryableRemoveTlc::RelayRemoveTlc(channel_id, tlc_id, ref reason) => {
                     let (send, recv) = oneshot::channel::<Result<(), String>>();
                     let port = RpcReplyPort::from(send);
                     self.network
                         .send_message(NetworkActorMessage::new_command(
                             NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
-                                channel_id: *channel_id,
+                                channel_id: channel_id,
                                 command: ChannelCommand::RemoveTlc(
                                     RemoveTlcCommand {
-                                        id: *tlc_id,
+                                        id: tlc_id,
                                         reason: reason.clone(),
                                     },
                                     port,
