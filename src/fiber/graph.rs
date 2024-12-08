@@ -658,7 +658,7 @@ where
         amount: u128,
         max_fee_amount: Option<u128>,
         udt_type_script: Option<Script>,
-        fianl_tlc_expiry_delta: u64,
+        final_tlc_expiry_delta: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
     ) -> Result<Vec<PathEdge>, PathFindError> {
@@ -712,7 +712,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_tlc_expiry: fianl_tlc_expiry_delta,
+            incoming_tlc_expiry: final_tlc_expiry_delta,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
