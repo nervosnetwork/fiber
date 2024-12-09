@@ -1,10 +1,14 @@
+# This configuration file only contains the necessary configurations for the testnet deployment.
+# All options' descriptions can be found via `fnn --help` and be overridden by command line arguments or environment variables.
 fiber:
   listening_addr: "/ip4/127.0.0.1/tcp/8228"
   bootnode_addrs:
     - "/ip4/54.179.226.154/tcp/8228/p2p/Qmes1EBD4yNo9Ywkfe6eRw9tG1nVNGLDmMud1xJMsoYFKy"
     - "/ip4/54.179.226.154/tcp/18228/p2p/QmdyQWjPtbK4NWWsvy8s69NGJaQULwgeQDT5ZpNDrTNaeV"
   announce_listening_addr: true
-  # chain spec, can be mainnet | testnet | "path to chain spec file"
+  announced_addrs:
+    # If you want to announce your fiber node public address to the network, you need to add the address here, the peer id can be found via rpc `node_info`
+    # - "/ip4/YOUR-FIBER-NODE-PUBLIC-IP/tcp/8228/p2p/YOUR-FIBER-NODE-PEER-ID"
   chain: testnet
   # lock script configurations related to fiber network
   # https://github.com/nervosnetwork/fiber-scripts/blob/main/deployment/testnet/migrations/2024-09-14-084742.json
@@ -39,6 +43,9 @@ fiber:
           dep_type: code
 
 rpc:
+  # By default RPC only binds to localhost, thus it only allows accessing from the same machine.
+  # Allowing arbitrary machines to access the JSON-RPC port is dangerous and strongly discouraged.
+  # Please strictly limit the access to only trusted machines.
   listening_addr: "127.0.0.1:8227"
 
 ckb:
