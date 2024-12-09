@@ -26,7 +26,6 @@ use crate::{
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
 use ckb_jsonrpc_types::Status;
-use ckb_types::packed::OutPointBuilder;
 use ckb_types::{
     core::{FeeRate, TransactionView},
     packed::{CellInput, Script, Transaction},
@@ -840,7 +839,7 @@ async fn test_network_send_previous_tlc_error() {
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[0].pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
         },
@@ -849,7 +848,7 @@ async fn test_network_send_previous_tlc_error() {
             amount: 8,
             expiry: 9,
             next_hop: None,
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
         },

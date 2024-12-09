@@ -2151,23 +2151,11 @@ where
             previous_tlc,
         } = command;
 
-        let invalid_onion_error = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>,
-                                   shared_secret: &[u8; 32]| {
-            let error_detail =
-                TlcErr::new_node_fail(TlcErrorCode::InvalidOnionPayload, state.get_public_key());
-            reply
-                .send(Err(TlcErrPacket::new(error_detail, shared_secret)))
-                .expect("send error failed");
-        };
-
         let info = peeled_onion_packet.current.clone();
         let shared_secret = peeled_onion_packet.shared_secret;
         debug!("Processing onion packet info: {:?}", info);
 
-        let Some(channel_outpoint) = &info.channel_outpoint else {
-            return invalid_onion_error(reply, &shared_secret);
-        };
-
+        let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
         let unknown_next_peer = |reply: RpcReplyPort<Result<u64, TlcErrPacket>>| {
             let error_detail = TlcErr::new_channel_fail(
                 TlcErrorCode::UnknownNextPeer,
@@ -2179,7 +2167,7 @@ where
                 .expect("send add tlc response");
         };
 
-        let channel_id = match state.outpoint_channel_map.get(channel_outpoint) {
+        let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
             None => {
                 error!(
@@ -2340,7 +2328,7 @@ where
                 return Err(Error::SendPaymentError(error));
             }
             Ok(hops) => {
-                assert!(hops[0].channel_outpoint.is_some());
+                assert_ne!(hops[0].funding_tx_hash, Hash256::default());
                 return Ok(hops);
             }
         };
@@ -2354,10 +2342,8 @@ where
         hops: Vec<PaymentHopData>,
     ) -> Result<PaymentSession, Error> {
         let session_key = Privkey::from_slice(KeyPair::generate_random_key().as_ref());
-        let first_channel_outpoint = hops[0]
-            .channel_outpoint
-            .clone()
-            .expect("first hop channel must exist");
+        assert_ne!(hops[0].funding_tx_hash, Hash256::default());
+        let first_channel_outpoint = OutPoint::new(hops[0].funding_tx_hash.into(), 0);
 
         payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);

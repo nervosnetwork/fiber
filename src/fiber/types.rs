@@ -3043,8 +3043,7 @@ pub struct PaymentHopData {
     // this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
     pub hash_algorithm: HashAlgorithm,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub channel_outpoint: Option<OutPoint>,
+    pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
 }
 
