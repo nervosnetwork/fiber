@@ -3039,7 +3039,6 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
-    pub payment_hash: Hash256,
     // this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
     pub hash_algorithm: HashAlgorithm,
@@ -3064,7 +3063,7 @@ impl HopData for PaymentHopData {
     }
 
     fn assoc_data(&self) -> Option<Vec<u8>> {
-        Some(self.payment_hash.as_ref().to_vec())
+        None
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -3157,6 +3156,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<T>,
+        assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         if hops_infos.is_empty() {
@@ -3174,7 +3174,11 @@ impl<T: HopData> PeeledOnionPacket<T> {
         let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
 
         let current = hops_infos.swap_remove(0);
-        let assoc_data = current.assoc_data();
+        let assoc_data = if assoc_data.is_some() {
+            assoc_data
+        } else {
+            current.assoc_data()
+        };
 
         let next = if !hops_path.is_empty() {
             Some(OnionPacket::new(

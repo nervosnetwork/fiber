@@ -485,6 +485,7 @@ pub struct AcceptChannelCommand {
 pub struct SendOnionPacketCommand {
     pub peeled_onion_packet: PeeledPaymentOnionPacket,
     pub previous_tlc: Option<(Hash256, u64)>,
+    pub payment_hash: Hash256,
 }
 
 impl NetworkActorMessage {
@@ -2149,6 +2150,7 @@ where
         let SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc,
+            payment_hash,
         } = command;
 
         let info = peeled_onion_packet.current.clone();
@@ -2182,7 +2184,7 @@ where
         let command = ChannelCommand::AddTlc(
             AddTlcCommand {
                 amount: info.amount,
-                payment_hash: info.payment_hash,
+                payment_hash,
                 expiry: info.expiry,
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
@@ -2350,21 +2352,26 @@ where
 
         let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
         let rpc_reply = RpcReplyPort::from(send);
-        let peeled_onion_packet =
-            match PeeledPaymentOnionPacket::create(session_key, hops, &Secp256k1::signing_only()) {
-                Ok(packet) => packet,
-                Err(e) => {
-                    let err = format!(
-                        "Failed to create onion packet: {:?}, error: {:?}",
-                        payment_data.payment_hash, e
-                    );
-                    self.set_payment_fail_with_error(payment_session, &err);
-                    return Err(Error::SendPaymentError(err));
-                }
-            };
+        let peeled_onion_packet = match PeeledPaymentOnionPacket::create(
+            session_key,
+            hops,
+            Some(payment_data.payment_hash.as_ref().to_vec()),
+            &Secp256k1::signing_only(),
+        ) {
+            Ok(packet) => packet,
+            Err(e) => {
+                let err = format!(
+                    "Failed to create onion packet: {:?}, error: {:?}",
+                    payment_data.payment_hash, e
+                );
+                self.set_payment_fail_with_error(payment_session, &err);
+                return Err(Error::SendPaymentError(err));
+            }
+        };
         let command = SendOnionPacketCommand {
             peeled_onion_packet,
             previous_tlc: None,
+            payment_hash: payment_data.payment_hash,
         };
 
         self.handle_send_onion_packet_command(state, command, rpc_reply)

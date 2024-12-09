@@ -619,7 +619,6 @@ where
             // the last hop will check the amount from TLC and the amount from the onion packet
             hops_data.push(PaymentHopData {
                 amount: current_amount,
-                payment_hash,
                 next_hop,
                 hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
@@ -632,7 +631,6 @@ where
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
             amount: current_amount,
-            payment_hash,
             next_hop: Some(route[0].target),
             hash_algorithm: hash_algorithm,
             expiry: current_expiry,

@@ -832,10 +832,8 @@ async fn test_network_send_previous_tlc_error() {
     let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
         .take(1)
         .collect();
-    let payment_hash = [1; 32].into();
     let hops_infos = vec![
         PaymentHopData {
-            payment_hash,
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[0].pubkey().into()),
@@ -844,7 +842,6 @@ async fn test_network_send_previous_tlc_error() {
             payment_preimage: None,
         },
         PaymentHopData {
-            payment_hash,
             amount: 8,
             expiry: 9,
             next_hop: None,
@@ -853,12 +850,18 @@ async fn test_network_send_previous_tlc_error() {
             payment_preimage: None,
         },
     ];
-    let packet = PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)
-        .expect("create peeled packet");
+    let generated_payment_hash = gen_sha256_hash();
+
+    let packet = PeeledOnionPacket::create(
+        generate_seckey().into(),
+        hops_infos.clone(),
+        Some(generated_payment_hash.as_ref().to_vec()),
+        &secp,
+    )
+    .expect("create peeled packet");
 
     // step1: try to send a invalid onion_packet with add_tlc
     // ==================================================================================
-    let generated_payment_hash = gen_sha256_hash();
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
             ChannelCommandWithId {

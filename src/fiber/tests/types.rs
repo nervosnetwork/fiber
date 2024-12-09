@@ -47,10 +47,8 @@ fn test_peeled_onion_packet() {
     let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
         .take(3)
         .collect();
-    let payment_hash = [1; 32].into();
     let hops_infos = vec![
         PaymentHopData {
-            payment_hash,
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[1].pubkey().into()),
@@ -59,7 +57,6 @@ fn test_peeled_onion_packet() {
             payment_preimage: None,
         },
         PaymentHopData {
-            payment_hash,
             amount: 5,
             expiry: 6,
             next_hop: Some(keys[2].pubkey().into()),
@@ -68,7 +65,6 @@ fn test_peeled_onion_packet() {
             payment_preimage: None,
         },
         PaymentHopData {
-            payment_hash,
             amount: 8,
             expiry: 9,
             next_hop: None,
@@ -77,8 +73,9 @@ fn test_peeled_onion_packet() {
             payment_preimage: None,
         },
     ];
-    let packet = PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)
-        .expect("create peeled packet");
+    let packet =
+        PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), None, &secp)
+            .expect("create peeled packet");
 
     let serialized = packet.serialize();
     let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");

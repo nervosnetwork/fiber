@@ -790,13 +790,6 @@ where
         };
 
         if let Some(ref peeled_onion_packet) = peeled_onion_packet {
-            // check the payment hash and amount
-            if peeled_onion_packet.current.payment_hash != add_tlc.payment_hash {
-                return Err(ProcessingChannelError::InvalidParameter(
-                    "Payment hash mismatch".to_string(),
-                ));
-            }
-
             let received_amount = add_tlc.amount;
             let forward_amount = peeled_onion_packet.current.amount;
             debug!(
@@ -856,6 +849,7 @@ where
                 // if this is not the last hop, forward TLC to next hop
                 self.handle_forward_onion_packet(
                     state,
+                    add_tlc.payment_hash,
                     peeled_onion_packet.clone(),
                     add_tlc.tlc_id.into(),
                 )
@@ -964,6 +958,7 @@ where
     async fn handle_forward_onion_packet(
         &self,
         state: &mut ChannelActorState,
+        payment_hash: Hash256,
         peeled_onion_packet: PeeledPaymentOnionPacket,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
@@ -975,6 +970,7 @@ where
                     SendOnionPacketCommand {
                         peeled_onion_packet,
                         previous_tlc: Some((state.get_id(), added_tlc_id)),
+                        payment_hash,
                     },
                     rpc_reply,
                 ),
