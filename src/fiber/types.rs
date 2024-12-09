@@ -3058,7 +3058,7 @@ pub trait HopData: Sized {
 }
 
 impl HopData for PaymentHopData {
-    const PACKET_DATA_LEN: usize = 1300;
+    const PACKET_DATA_LEN: usize = 6500;
 
     fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop.clone()
