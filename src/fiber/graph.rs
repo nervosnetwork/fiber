@@ -610,15 +610,19 @@ where
                 (fee, expiry)
             };
 
+            let funding_tx_hash = if let Some(next_channel_outpoint) = next_channel_outpoint {
+                next_channel_outpoint.tx_hash().into()
+            } else {
+                Hash256::default()
+            };
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
             hops_data.push(PaymentHopData {
                 amount: current_amount,
-                payment_hash,
                 next_hop,
                 hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
-                channel_outpoint: next_channel_outpoint,
+                funding_tx_hash,
                 payment_preimage: if is_last { preimage } else { None },
             });
             current_expiry += expiry;
@@ -627,11 +631,10 @@ where
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
             amount: current_amount,
-            payment_hash,
             next_hop: Some(route[0].target),
             hash_algorithm: hash_algorithm,
             expiry: current_expiry,
-            channel_outpoint: Some(route[0].channel_outpoint.clone()),
+            funding_tx_hash: route[0].channel_outpoint.tx_hash().into(),
             payment_preimage: None,
         });
         hops_data.reverse();
@@ -936,7 +939,14 @@ impl SessionRoute {
             .zip(payment_hops)
             .map(|(pubkey, hop)| SessionRouteNode {
                 pubkey,
-                channel_outpoint: hop.channel_outpoint.clone().unwrap_or_default(),
+                channel_outpoint: OutPoint::new(
+                    if hop.funding_tx_hash != Hash256::default() {
+                        hop.funding_tx_hash.into()
+                    } else {
+                        Hash256::default().into()
+                    },
+                    0,
+                ),
                 amount: hop.amount,
             })
             .collect();

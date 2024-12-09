@@ -739,8 +739,14 @@ fn test_graph_build_route_three_nodes() {
     assert!(route.is_ok());
     let route = route.unwrap();
     assert_eq!(route.len(), 3);
-    assert_eq!(route[0].channel_outpoint, Some(network.edges[0].2.clone()));
-    assert_eq!(route[1].channel_outpoint, Some(network.edges[1].2.clone()));
+    assert_eq!(
+        route[0].funding_tx_hash,
+        network.edges[0].2.tx_hash().into()
+    );
+    assert_eq!(
+        route[1].funding_tx_hash,
+        network.edges[1].2.tx_hash().into()
+    );
 
     assert_eq!(route[0].next_hop, Some(node2.into()));
     assert_eq!(route[1].next_hop, Some(node3.into()));

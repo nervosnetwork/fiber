@@ -29,7 +29,7 @@ use std::{
 use tentacle::secio::PeerId;
 use tracing::{error, info};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Store {
     pub(crate) db: Arc<DB>,
 }

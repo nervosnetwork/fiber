@@ -4,12 +4,10 @@ use crate::fiber::{
     hash_algorithm::HashAlgorithm,
     tests::test_utils::generate_pubkey,
     types::{
-        secp256k1_instance, AddTlc, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey, TlcErr,
-        TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+        secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
+        TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
     },
 };
-use ckb_types::packed::OutPointBuilder;
-use ckb_types::prelude::Builder;
 use fiber_sphinx::OnionSharedSecretIter;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use std::str::FromStr;
@@ -49,38 +47,35 @@ fn test_peeled_onion_packet() {
     let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
         .take(3)
         .collect();
-    let payment_hash = [1; 32].into();
     let hops_infos = vec![
         PaymentHopData {
-            payment_hash,
             amount: 2,
             expiry: 3,
             next_hop: Some(keys[1].pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
         },
         PaymentHopData {
-            payment_hash,
             amount: 5,
             expiry: 6,
             next_hop: Some(keys[2].pubkey().into()),
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
         },
         PaymentHopData {
-            payment_hash,
             amount: 8,
             expiry: 9,
             next_hop: None,
-            channel_outpoint: Some(OutPointBuilder::default().build().into()),
+            funding_tx_hash: Hash256::default(),
             hash_algorithm: HashAlgorithm::Sha256,
             payment_preimage: None,
         },
     ];
-    let packet = PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), &secp)
-        .expect("create peeled packet");
+    let packet =
+        PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), None, &secp)
+            .expect("create peeled packet");
 
     let serialized = packet.serialize();
     let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");

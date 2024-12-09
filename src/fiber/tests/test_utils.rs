@@ -165,6 +165,7 @@ pub fn generate_store() -> Store {
     store.expect("create store")
 }
 
+#[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
@@ -406,8 +407,16 @@ impl NetworkNode {
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
-        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
-        for i in 0..N {
+        let nodes = Self::new_interconnected_nodes(N).await;
+        match nodes.try_into() {
+            Ok(nodes) => nodes,
+            Err(_) => unreachable!(),
+        }
+    }
+
+    pub async fn new_interconnected_nodes(n: usize) -> Vec<Self> {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
+        for i in 0..n {
             let new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
