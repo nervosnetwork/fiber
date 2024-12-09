@@ -402,7 +402,7 @@ async fn test_public_channel_saved_to_the_owner_graph() {
             .await;
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let node1_store = node1.store.clone();
     let node1_id = node1.peer_id.clone();
@@ -460,7 +460,7 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
     assert_eq!(status, Status::Committed);
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node3_store = node3.store.clone();
     node3.stop().await;
@@ -504,7 +504,7 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
     // thus refusing to save the channel to the graph.
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node3_store = node3.store.clone();
     node3.stop().await;
@@ -533,7 +533,7 @@ async fn test_network_send_payment_normal_keysend_workflow() {
         node_a_local_balance, node_b_local_balance
     );
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_b_pubkey = node_b.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -639,7 +639,7 @@ async fn test_network_send_payment_send_each_other() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_a_pubkey = node_a.pubkey.clone();
     let node_b_pubkey = node_b.pubkey.clone();
@@ -733,7 +733,7 @@ async fn test_network_send_payment_send_with_ack() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_b_pubkey = node_b.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -948,7 +948,7 @@ async fn test_network_send_payment_keysend_with_payment_hash() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_b_pubkey = node_b.pubkey.clone();
     let payment_hash = gen_sha256_hash();
@@ -994,7 +994,7 @@ async fn test_network_send_payment_final_incorrect_hash() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_a_local_balance = node_a.get_local_balance_from_channel(channel_id);
     let node_b_local_balance = node_b.get_local_balance_from_channel(channel_id);
@@ -1115,7 +1115,7 @@ async fn test_network_send_payment_amount_is_too_large() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_b_pubkey = node_b.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1159,7 +1159,7 @@ async fn test_network_send_payment_with_dry_run() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     let node_b_pubkey = node_b.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1230,7 +1230,7 @@ async fn test_send_payment_with_3_nodes() {
     let node_c_local = node_c.get_local_balance_from_channel(channel_2);
 
     // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let sent_amount = 1000000 + 5;
     let node_c_pubkey = node_c.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1391,7 +1391,7 @@ async fn test_send_payment_with_3_nodes_overflow() {
     .await;
 
     // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let sent_amount = 0xfffffffffffffffffffffffffffffff;
     let node_c_pubkey = node_c.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1440,7 +1440,7 @@ async fn test_send_payment_fail_with_3_nodes_invalid_hash() {
     let node_c_local = node_c.get_local_balance_from_channel(channel_2);
 
     // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let node_c_pubkey = node_c.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -1511,7 +1511,7 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
     .await;
 
     // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     let node_c_pubkey = node_c.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
@@ -1590,6 +1590,125 @@ async fn test_send_payment_fail_with_3_nodes_final_tlc_expiry_delta() {
 }
 
 #[tokio::test]
+async fn test_send_payment_fail_with_3_nodes_dry_run_fee() {
+    // Fix issue #360, dryrun option should get correct fee
+
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (node_a, _node_b, node_c, ..) = create_3_nodes_with_established_channel(
+        (100000000000, 100000000000),
+        (100000000000, 100000000000),
+        true,
+    )
+    .await;
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(2000000000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: true,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.fee, 2000000);
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: true,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    // expect smaller fee since amount is smaller
+    assert_eq!(res.fee, 1000000);
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: Some(res.fee), // exact the same fee limit
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.fee, 1000000);
+
+    let node_c_pubkey = node_c.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_c_pubkey),
+                amount: Some(1000000000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: Some(res.fee - 1), // set a smaller fee limit, path find will fail
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
+}
+
+#[tokio::test]
 async fn test_network_send_payment_dry_run_can_still_query() {
     init_tracing();
 
@@ -1601,7 +1720,7 @@ async fn test_network_send_payment_dry_run_can_still_query() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let payment_hash = gen_sha256_hash();
     let node_b_pubkey = node_b.pubkey.clone();
@@ -1666,7 +1785,7 @@ async fn test_network_send_payment_dry_run_will_not_create_payment_session() {
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 
     let payment_hash = gen_sha256_hash();
     let node_b_pubkey = node_b.pubkey.clone();
@@ -1740,7 +1859,7 @@ async fn test_stash_broadcast_messages() {
         });
 
     // Wait for the channel announcement to be broadcasted
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 }
 
 async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {

@@ -740,18 +740,25 @@ where
 
                 edges_expanded += 1;
 
-                let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
                 if next_hop_received_amount > channel_info.capacity() {
                     continue;
                 }
-                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128)
+
+                let fee = if from == source {
+                    0
+                } else {
+                    calculate_tlc_forward_fee(
+                        next_hop_received_amount,
+                        channel_update.fee_rate as u128,
+                    )
                     .map_err(|err| {
                         PathFindError::PathFind(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
-                    })?;
+                    })?
+                };
                 let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge
@@ -844,6 +851,7 @@ where
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
         }
+
         Ok(result)
     }
 
