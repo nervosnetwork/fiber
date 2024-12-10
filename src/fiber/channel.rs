@@ -2626,6 +2626,7 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_used_nonce_in_commitment_signed: Option<PubNonce>,
 
+    // The nonces that are sent by the counterparty, the length is at most 2
     #[serde_as(as = "Vec<(U64Hex, PubNonceAsBytes)>")]
     pub remote_nonces: Vec<(u64, PubNonce)>,
 
@@ -2635,6 +2636,7 @@ pub struct ChannelActorState {
 
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
+    // The length of this vector is at most the maximum number of flighting tlcs.
     pub remote_commitment_points: Vec<(u64, Pubkey)>,
     pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
 
@@ -3912,6 +3914,7 @@ impl ChannelActorState {
             "Getting remote nonce: commitment number {}, current nonces: {:?}",
             comitment_number, &self.remote_nonces
         );
+        assert!(self.remote_nonces.len() <= 2);
         self.remote_nonces
             .iter()
             .rev()
@@ -3922,13 +3925,7 @@ impl ChannelActorState {
                     None
                 }
             })
-            .unwrap_or_else(|| {
-                self.remote_nonces
-                    .last()
-                    .expect("expect remote nonce")
-                    .1
-                    .clone()
-            })
+            .expect("get_remote_nonce")
     }
 
     fn save_remote_nonce(&mut self, nonce: PubNonce) {
@@ -3936,13 +3933,14 @@ impl ChannelActorState {
             "Saving remote nonce: new nonce {:?}, current nonces {:?}, commitment numbers {:?}",
             &nonce, &self.remote_nonces, self.commitment_numbers
         );
-        self.remote_nonces
-            .push((self.get_remote_commitment_number() + 1, nonce));
-        loop {
-            let len = self.remote_nonces.len();
-            if len <= 2 {
-                break;
-            }
+
+        let next_remote_number = if self.remote_nonces.is_empty() {
+            0
+        } else {
+            self.get_remote_commitment_number() + 1
+        };
+        self.remote_nonces.push((next_remote_number, nonce));
+        if self.remote_nonces.len() > 2 {
             self.remote_nonces.remove(0);
         }
     }
@@ -5253,7 +5251,7 @@ impl ChannelActorState {
             .push((self.get_local_commitment_number(), commitment_point));
 
         let len = self.remote_commitment_points.len();
-        if len > 5 {
+        if len > (self.max_tlc_number_in_flight + 1) as usize {
             let min_remote_commitment = self
                 .tlc_state
                 .all_tlcs()
@@ -5263,6 +5261,9 @@ impl ChannelActorState {
             self.remote_commitment_points
                 .retain(|(num, _)| *num >= min_remote_commitment);
         }
+        assert!(
+            self.remote_commitment_points.len() <= (self.max_tlc_number_in_flight + 1) as usize
+        );
     }
 
     fn handle_revoke_and_ack_message(
