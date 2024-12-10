@@ -1503,7 +1503,6 @@ where
                                 FiberChannelMessage::TxSignatures(TxSignatures {
                                     channel_id: *channel_id,
                                     witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                    tx_hash: funding_tx.hash().into(),
                                 }),
                             ),
                         }
@@ -1531,7 +1530,6 @@ where
                                 FiberChannelMessage::TxSignatures(TxSignatures {
                                     channel_id: *channel_id,
                                     witnesses: witnesses.into_iter().map(|x| x.unpack()).collect(),
-                                    tx_hash: funding_tx.hash().into(),
                                 }),
                             ),
                         }

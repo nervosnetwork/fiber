@@ -5925,7 +5925,6 @@ impl ::core::fmt::Display for TxSignatures {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "tx_hash", self.tx_hash())?;
         write!(f, ", {}: {}", "witnesses", self.witnesses())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -5941,12 +5940,11 @@ impl ::core::default::Default for TxSignatures {
     }
 }
 impl TxSignatures {
-    const DEFAULT_VALUE: [u8; 84] = [
-        84, 0, 0, 0, 16, 0, 0, 0, 48, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 48] = [
+        48, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0,
     ];
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -5969,17 +5967,11 @@ impl TxSignatures {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32::new_unchecked(self.0.slice(start..end))
     }
-    pub fn tx_hash(&self) -> Byte32 {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte32::new_unchecked(self.0.slice(start..end))
-    }
     pub fn witnesses(&self) -> BytesVec {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             BytesVec::new_unchecked(self.0.slice(start..end))
         } else {
             BytesVec::new_unchecked(self.0.slice(start..))
@@ -6013,7 +6005,6 @@ impl molecule::prelude::Entity for TxSignatures {
     fn as_builder(self) -> Self::Builder {
         Self::new_builder()
             .channel_id(self.channel_id())
-            .tx_hash(self.tx_hash())
             .witnesses(self.witnesses())
     }
 }
@@ -6037,7 +6028,6 @@ impl<'r> ::core::fmt::Display for TxSignaturesReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
-        write!(f, ", {}: {}", "tx_hash", self.tx_hash())?;
         write!(f, ", {}: {}", "witnesses", self.witnesses())?;
         let extra_count = self.count_extra_fields();
         if extra_count != 0 {
@@ -6047,7 +6037,7 @@ impl<'r> ::core::fmt::Display for TxSignaturesReader<'r> {
     }
 }
 impl<'r> TxSignaturesReader<'r> {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn total_size(&self) -> usize {
         molecule::unpack_number(self.as_slice()) as usize
     }
@@ -6070,17 +6060,11 @@ impl<'r> TxSignaturesReader<'r> {
         let end = molecule::unpack_number(&slice[8..]) as usize;
         Byte32Reader::new_unchecked(&self.as_slice()[start..end])
     }
-    pub fn tx_hash(&self) -> Byte32Reader<'r> {
-        let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[8..]) as usize;
-        let end = molecule::unpack_number(&slice[12..]) as usize;
-        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
-    }
     pub fn witnesses(&self) -> BytesVecReader<'r> {
         let slice = self.as_slice();
-        let start = molecule::unpack_number(&slice[12..]) as usize;
+        let start = molecule::unpack_number(&slice[8..]) as usize;
         if self.has_extra_fields() {
-            let end = molecule::unpack_number(&slice[16..]) as usize;
+            let end = molecule::unpack_number(&slice[12..]) as usize;
             BytesVecReader::new_unchecked(&self.as_slice()[start..end])
         } else {
             BytesVecReader::new_unchecked(&self.as_slice()[start..])
@@ -6134,25 +6118,19 @@ impl<'r> molecule::prelude::Reader<'r> for TxSignaturesReader<'r> {
             return ve!(Self, OffsetsNotMatch);
         }
         Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
-        Byte32Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
-        BytesVecReader::verify(&slice[offsets[2]..offsets[3]], compatible)?;
+        BytesVecReader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
         Ok(())
     }
 }
 #[derive(Clone, Debug, Default)]
 pub struct TxSignaturesBuilder {
     pub(crate) channel_id: Byte32,
-    pub(crate) tx_hash: Byte32,
     pub(crate) witnesses: BytesVec,
 }
 impl TxSignaturesBuilder {
-    pub const FIELD_COUNT: usize = 3;
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
-        self
-    }
-    pub fn tx_hash(mut self, v: Byte32) -> Self {
-        self.tx_hash = v;
         self
     }
     pub fn witnesses(mut self, v: BytesVec) -> Self {
@@ -6166,7 +6144,6 @@ impl molecule::prelude::Builder for TxSignaturesBuilder {
     fn expected_length(&self) -> usize {
         molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
             + self.channel_id.as_slice().len()
-            + self.tx_hash.as_slice().len()
             + self.witnesses.as_slice().len()
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
@@ -6175,15 +6152,12 @@ impl molecule::prelude::Builder for TxSignaturesBuilder {
         offsets.push(total_size);
         total_size += self.channel_id.as_slice().len();
         offsets.push(total_size);
-        total_size += self.tx_hash.as_slice().len();
-        offsets.push(total_size);
         total_size += self.witnesses.as_slice().len();
         writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
         for offset in offsets.into_iter() {
             writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
         }
         writer.write_all(self.channel_id.as_slice())?;
-        writer.write_all(self.tx_hash.as_slice())?;
         writer.write_all(self.witnesses.as_slice())?;
         Ok(())
     }

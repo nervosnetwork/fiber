@@ -54,7 +54,6 @@ struct CommitmentSigned {
 
 table TxSignatures {
     channel_id: Byte32,
-    tx_hash:    Byte32,
     witnesses:  BytesVec,
 }
 

@@ -762,7 +762,6 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxSignatures {
     pub channel_id: Hash256,
-    pub tx_hash: Hash256,
     pub witnesses: Vec<Vec<u8>>,
 }
 
@@ -770,7 +769,6 @@ impl From<TxSignatures> for molecule_fiber::TxSignatures {
     fn from(tx_signatures: TxSignatures) -> Self {
         molecule_fiber::TxSignatures::new_builder()
             .channel_id(tx_signatures.channel_id.into())
-            .tx_hash(tx_signatures.tx_hash.into())
             .witnesses(
                 BytesVec::new_builder()
                     .set(
@@ -792,7 +790,6 @@ impl TryFrom<molecule_fiber::TxSignatures> for TxSignatures {
     fn try_from(tx_signatures: molecule_fiber::TxSignatures) -> Result<Self, Self::Error> {
         Ok(TxSignatures {
             channel_id: tx_signatures.channel_id().into(),
-            tx_hash: tx_signatures.tx_hash().into(),
             witnesses: tx_signatures
                 .witnesses()
                 .into_iter()
