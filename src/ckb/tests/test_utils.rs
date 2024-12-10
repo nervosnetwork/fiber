@@ -379,6 +379,14 @@ impl Actor for MockChainActor {
                     );
                 }
             }
+
+            AddTxs(_txs) => {
+                unimplemented!()
+            }
+            RemoveTx(_tx_hash) => {
+                unimplemented!()
+            }
+
             Sign(tx, reply_port) => {
                 // We don't need to sign the funding transaction in mock chain actor,
                 // as any funding transaction is considered correct if we can successfully
