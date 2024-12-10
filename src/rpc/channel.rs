@@ -99,12 +99,30 @@ pub(crate) struct OpenChannelResult {
 pub(crate) struct AcceptChannelParams {
     /// The temporary channel ID of the channel to accept
     temporary_channel_id: Hash256,
+
     /// The amount of CKB or UDT to fund the channel with
     #[serde_as(as = "U128Hex")]
     funding_amount: u128,
+
     /// The script used to receive the channel balance, an optional parameter,
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
     shutdown_script: Option<Script>,
+
+    /// The max tlc sum value in flight for the channel, default is u128::MAX
+    #[serde_as(as = "Option<U128Hex>")]
+    max_tlc_value_in_flight: Option<u128>,
+
+    /// The max tlc number in flight send from our side, default is 125
+    #[serde_as(as = "Option<U64Hex>")]
+    max_tlc_number_in_flight: Option<u64>,
+
+    /// The maximal value sent from our side, which means we can only send tlc amount less than `max_tlc_value`, default is u128::MAX
+    #[serde_as(as = "Option<U128Hex>")]
+    max_tlc_value: Option<u128>,
+
+    /// The minimal value sent from our side, which means we can send tlc amount larger than `min_tlc_value`, default is 0
+    #[serde_as(as = "Option<U128Hex>")]
+    min_tlc_value: Option<u128>,
 }
 
 #[derive(Clone, Serialize)]
@@ -509,6 +527,10 @@ where
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+                    max_tlc_value: params.max_tlc_value,
+                    min_tlc_value: params.min_tlc_value,
                 },
                 rpc_reply,
             ))

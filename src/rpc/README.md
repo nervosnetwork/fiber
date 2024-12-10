@@ -178,6 +178,10 @@ Accepts a channel opening request from a peer.
 * `funding_amount` - u128, The amount of CKB or UDT to fund the channel with
 * `shutdown_script` - `Option<Script>`, The script used to receive the channel balance, an optional parameter,
  default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
+* `max_tlc_value_in_flight` - `Option<u128>`, The max tlc sum value in flight for the channel, default is u128::MAX
+* `max_tlc_number_in_flight` - `Option<u64>`, The max tlc number in flight send from our side, default is 125
+* `max_tlc_value` - `Option<u128>`, The maximal value sent from our side, which means we can only send tlc amount less than `max_tlc_value`, default is u128::MAX
+* `min_tlc_value` - `Option<u128>`, The minimal value sent from our side, which means we can send tlc amount larger than `min_tlc_value`, default is 0
 
 ##### Returns
 
