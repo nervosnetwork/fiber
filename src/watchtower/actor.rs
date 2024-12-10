@@ -11,7 +11,7 @@ use ckb_sdk::{
 use ckb_types::{
     self,
     core::{Capacity, TransactionView},
-    packed::{Bytes, CellInput, CellOutput, OutPoint, Transaction, WitnessArgs},
+    packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction, WitnessArgs},
     prelude::*,
 };
 use molecule::prelude::Entity;
@@ -129,9 +129,10 @@ where
                         _peer_id,
                         channel_id,
                         revocation_data,
-                        _settlement_data,
+                        settlement_data,
                     ) => {
-                        self.store.update_revocation(channel_id, revocation_data);
+                        self.store
+                            .update_revocation(channel_id, revocation_data, settlement_data);
                     }
                     NetworkServiceEvent::RemoteCommitmentSigned(
                         _peer_id,
@@ -139,7 +140,8 @@ where
                         _commitment_tx,
                         settlement_data,
                     ) => {
-                        self.store.update_settlement(channel_id, settlement_data);
+                        self.store
+                            .update_remote_settlement(channel_id, settlement_data);
                     }
                     _ => {
                         // ignore
@@ -250,95 +252,30 @@ where
                                                                 }
                                                             } else {
                                                                 info!("Found a force closed commitment tx submitted by remote: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
+                                                                try_settle_commitment_tx(
+                                                                    commitment_lock,
+                                                                    ckb_client,
+                                                                    channel_data
+                                                                        .remote_settlement_data
+                                                                        .clone()
+                                                                        .expect("settlement data should be some"),
+                                                                    secret_key,
+                                                                    &mut cell_collector,
+                                                                );
                                                             }
                                                         } else {
                                                             // it's a force closed commitment tx which is submitted by local
                                                             info!("Found a force closed commitment tx submitted by local: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
-                                                            let script = commitment_lock
-                                                                .as_builder()
-                                                                .args(
-                                                                    lock_args[0..36]
-                                                                        .to_vec()
-                                                                        .pack(),
-                                                                )
-                                                                .build();
-                                                            let search_key = SearchKey {
-                                                                script: script.into(),
-                                                                script_type: ScriptType::Lock,
-                                                                script_search_mode: Some(
-                                                                    SearchMode::Prefix,
-                                                                ),
-                                                                with_data: None,
-                                                                filter: None,
-                                                                group_by_transaction: None,
-                                                            };
-
-                                                            // the live cells number should be 1 or 0 for normal case, however, an attacker may create a lot of cells to implement a tx pinning attack.
-                                                            match ckb_client.get_cells(
-                                                                search_key,
-                                                                Order::Desc,
-                                                                100u32.into(),
-                                                                None,
-                                                            ) {
-                                                                Ok(cells) => {
-                                                                    for cell in cells.objects {
-                                                                        let cell_output: CellOutput = cell.output.into();
-                                                                        let commitment_tx_out_point =
-                                                                            OutPoint::new(
-                                                                                cell.out_point
-                                                                                    .tx_hash
-                                                                                    .pack(),
-                                                                                cell.out_point
-                                                                                    .index
-                                                                                    .value(),
-                                                                            );
-                                                                        let lock_script_args =
-                                                                            cell_output
-                                                                                .lock()
-                                                                                .args()
-                                                                                .raw_data();
-                                                                        if lock_script_args.len()
-                                                                            == 36
-                                                                        {
-                                                                            let since = u64::from_le_bytes(cell_output.lock().args().raw_data()[20..28].try_into().expect("u64 from slice"));
-                                                                            // TODO check since
-                                                                            match build_settlement_tx(
-                                                                                commitment_tx_out_point,
-                                                                                since,
-                                                                                channel_data.settlement_data.clone().expect("settlement data should be some"),
-                                                                                secret_key,
-                                                                                &mut cell_collector,
-                                                                            ) {
-                                                                                Ok(tx) => {
-                                                                                    match ckb_client
-                                                                                        .send_transaction(
-                                                                                            tx.data().into(),
-                                                                                            None,
-                                                                                        ) {
-                                                                                        Ok(tx_hash) => {
-                                                                                            info!("Settlement tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                                        }
-                                                                                        Err(err) => {
-                                                                                            error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                                Err(err) => {
-                                                                                    error!("Failed to build settlement tx: {:?}", err);
-                                                                                }
-                                                                            }
-                                                                        } else {
-                                                                            // TODO use 0x00 ~ 0xFD to get back the funds
-                                                                        }
-                                                                    }
-                                                                }
-                                                                Err(err) => {
-                                                                    error!(
-                                                                        "Failed to get cells: {:?}",
-                                                                        err
-                                                                    );
-                                                                }
-                                                            }
+                                                            try_settle_commitment_tx(
+                                                                commitment_lock,
+                                                                ckb_client,
+                                                                channel_data
+                                                                    .local_settlement_data
+                                                                    .clone()
+                                                                    .expect("settlement data should be some"),
+                                                                secret_key,
+                                                                &mut cell_collector,
+                                                            );
                                                         }
                                                     } else {
                                                         // there may be a race condition that PeriodicCheck is triggered before the remove_channel fn is called
@@ -456,6 +393,72 @@ fn build_revocation_tx(
     }
 
     Err(Box::new(RpcError::Other(anyhow!("Not enough capacity"))))
+}
+
+fn try_settle_commitment_tx(
+    commitment_lock: Script,
+    ckb_client: CkbRpcClient,
+    settlement_data: SettlementData,
+    secret_key: SecretKey,
+    cell_collector: &mut DefaultCellCollector,
+) {
+    let lock_args = commitment_lock.args().raw_data();
+    let script = commitment_lock
+        .as_builder()
+        .args(lock_args[0..36].to_vec().pack())
+        .build();
+    let search_key = SearchKey {
+        script: script.into(),
+        script_type: ScriptType::Lock,
+        script_search_mode: Some(SearchMode::Prefix),
+        with_data: None,
+        filter: None,
+        group_by_transaction: None,
+    };
+
+    // the live cells number should be 1 or 0 for normal case, however, an attacker may create a lot of cells to implement a tx pinning attack.
+    match ckb_client.get_cells(search_key, Order::Desc, 100u32.into(), None) {
+        Ok(cells) => {
+            for cell in cells.objects {
+                let cell_output: CellOutput = cell.output.into();
+                let commitment_tx_out_point =
+                    OutPoint::new(cell.out_point.tx_hash.pack(), cell.out_point.index.value());
+                let lock_script_args = cell_output.lock().args().raw_data();
+                if lock_script_args.len() == 36 {
+                    let since = u64::from_le_bytes(
+                        cell_output.lock().args().raw_data()[20..28]
+                            .try_into()
+                            .expect("u64 from slice"),
+                    );
+                    // TODO check since
+                    match build_settlement_tx(
+                        commitment_tx_out_point,
+                        since,
+                        settlement_data.clone(),
+                        secret_key,
+                        cell_collector,
+                    ) {
+                        Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
+                            Ok(tx_hash) => {
+                                info!("Settlement tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                            }
+                            Err(err) => {
+                                error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
+                            }
+                        },
+                        Err(err) => {
+                            error!("Failed to build settlement tx: {:?}", err);
+                        }
+                    }
+                } else {
+                    // TODO use 0x00 ~ 0xFD to get back the funds
+                }
+            }
+        }
+        Err(err) => {
+            error!("Failed to get cells: {:?}", err);
+        }
+    }
 }
 
 fn build_settlement_tx(

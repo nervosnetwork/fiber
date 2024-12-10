@@ -626,7 +626,8 @@ impl WatchtowerStore for Store {
                 channel_id,
                 funding_tx_lock,
                 revocation_data: None,
-                settlement_data: None,
+                local_settlement_data: None,
+                remote_settlement_data: None,
             },
             "ChannelData",
         );
@@ -640,26 +641,32 @@ impl WatchtowerStore for Store {
         self.db.delete(key).expect("delete should be OK");
     }
 
-    fn update_revocation(&self, channel_id: Hash256, revocation_data: RevocationData) {
+    fn update_revocation(
+        &self,
+        channel_id: Hash256,
+        revocation_data: RevocationData,
+        settlement_data: SettlementData,
+    ) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
             channel_data.revocation_data = Some(revocation_data);
+            channel_data.local_settlement_data = Some(settlement_data);
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
         }
     }
 
-    fn update_settlement(&self, channel_id: Hash256, settlement_data: SettlementData) {
+    fn update_remote_settlement(&self, channel_id: Hash256, settlement_data: SettlementData) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
         if let Some(mut channel_data) = self
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.settlement_data = Some(settlement_data);
+            channel_data.remote_settlement_data = Some(settlement_data);
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();
