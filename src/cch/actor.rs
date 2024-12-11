@@ -19,7 +19,7 @@ use crate::fiber::channel::{
     AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason};
+use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_SECRET};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
 use crate::now_timestamp_as_millis_u64;
@@ -594,6 +594,7 @@ impl CchActor {
                                     + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
                                 onion_packet: None,
+                                shared_secret: NO_SHARED_SECRET.clone(),
                                 previous_tlc: None,
                             },
                             rpc_reply,

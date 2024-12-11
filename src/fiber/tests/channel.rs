@@ -69,6 +69,7 @@ fn test_pending_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -82,6 +83,7 @@ fn test_pending_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -148,6 +150,7 @@ fn test_pending_tlcs_duplicated_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -185,6 +188,7 @@ fn test_pending_tlcs_duplicated_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -226,6 +230,7 @@ fn test_pending_tlcs_with_remove_tlc() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -239,6 +244,7 @@ fn test_pending_tlcs_with_remove_tlc() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -874,6 +880,7 @@ async fn test_network_send_previous_tlc_error() {
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1963,6 +1970,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2253,6 +2261,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2304,6 +2313,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2361,6 +2371,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         previous_tlc: None,
     };
 
@@ -2383,6 +2394,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 10,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         previous_tlc: None,
     };
 
@@ -2421,6 +2433,7 @@ async fn do_test_add_tlc_duplicated() {
             payment_hash: digest.into(),
             expiry: now_timestamp_as_millis_u64() + 10,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2460,6 +2473,7 @@ async fn do_test_add_tlc_waiting_ack() {
             payment_hash: gen_sha256_hash().into(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2514,6 +2528,7 @@ async fn do_test_add_tlc_number_limit() {
             payment_hash: gen_sha256_hash().into(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2569,6 +2584,7 @@ async fn do_test_add_tlc_value_limit() {
             payment_hash: gen_sha256_hash().into(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2631,6 +2647,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,

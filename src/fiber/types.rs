@@ -1247,20 +1247,7 @@ const ERROR_DECODING_PASSES: usize = 27;
 impl TlcErrPacket {
     /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
     /// Use all zeros for the origin node.
-    pub fn new(tlc_fail: TlcErr, _shared_secret: &[u8; 32]) -> Self {
-        dbg!(&tlc_fail);
-        let payload = tlc_fail.serialize();
-
-        let onion_packet =
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload).into_bytes();
-        return TlcErrPacket { onion_packet };
-    }
-
-    // TODO: Enable error encryption by replacing `new` with this method.
-    // The encryption has been disabled so we can split the PR into small pieces and apply future
-    // upgrades without breaking the network protocol.
-    #[cfg(test)]
-    pub fn new_with_encryption(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
+    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
         dbg!(&tlc_fail);
         let payload = tlc_fail.serialize();
 
@@ -1277,7 +1264,7 @@ impl TlcErrPacket {
         self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
     }
 
-    /// Intermediate node forwards the error to the previous hop using the shared secret used in forwarding
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
     /// the onion packet.
     pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
         if !self.is_plaintext() {
@@ -1415,6 +1402,21 @@ impl TlcErrorCode {
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl RemoveTlcReason {
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
+    /// the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
+                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
+            }
+        }
+    }
 }
 
 impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
@@ -3104,6 +3106,11 @@ impl<T> OnionPacket<T> {
         }
     }
 
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
@@ -3125,8 +3132,7 @@ impl<T: HopData> OnionPacket<T> {
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
-        let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
+        let sphinx_packet = self.into_sphinx_onion_packet()?;
         let shared_secret = sphinx_packet.shared_secret(&privkey.0);
 
         let (new_current, new_next) = sphinx_packet
