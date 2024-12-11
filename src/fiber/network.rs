@@ -2188,6 +2188,7 @@ where
                 expiry: info.expiry,
                 hash_algorithm: info.hash_algorithm,
                 onion_packet: peeled_onion_packet.next.clone(),
+                shared_secret: shared_secret.clone(),
                 previous_tlc,
             },
             rpc_reply,
@@ -2347,6 +2348,9 @@ where
         assert_ne!(hops[0].funding_tx_hash, Hash256::default());
         let first_channel_outpoint = OutPoint::new(hops[0].funding_tx_hash.into(), 0);
 
+        payment_session
+            .session_key
+            .copy_from_slice(session_key.as_ref());
         payment_session.route =
             SessionRoute::new(state.get_public_key(), payment_data.target_pubkey, &hops);
 
