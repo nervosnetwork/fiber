@@ -50,8 +50,9 @@ use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
     ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
     OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
-    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
-    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
+    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
@@ -3103,8 +3104,12 @@ where
                 commitment_fee_rate,
                 commitment_delay_epoch,
                 funding_fee_rate,
-                max_tlc_value_in_flight,
-                max_tlc_number_in_flight,
+                max_tlc_value_in_flight: max_tlc_value_in_flight
+                    .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
+                max_tlc_number_in_flight: max_tlc_number_in_flight
+                    .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                max_tlc_value: tlc_max_value.unwrap_or(self.tlc_max_value),
+                min_tlc_value: tlc_min_value.unwrap_or(self.tlc_min_value),
             }),
             network.clone().get_cell(),
         )

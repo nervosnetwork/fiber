@@ -310,6 +310,7 @@ fn test_channel_actor_state_store() {
         latest_commitment_transaction: None,
         remote_max_tlc_value_in_flight: 100,
         remote_max_tlc_number_in_flight: 100,
+        remote_max_tlc_value: 100,
         remote_min_tlc_value: 0,
         local_max_tlc_number_in_flight: 100,
         local_max_tlc_value_in_flight: 100,

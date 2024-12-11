@@ -189,9 +189,10 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
+pub const DEFAULT_MAX_TLC_VALUE: u128 = u128::MAX;
+pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
-pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 
 #[derive(Debug)]
 pub struct TxUpdateCommand {
@@ -208,8 +209,10 @@ pub struct OpenChannelParameter {
     pub commitment_fee_rate: Option<u64>,
     pub commitment_delay_epoch: Option<EpochNumberWithFraction>,
     pub funding_fee_rate: Option<u64>,
-    pub max_tlc_value_in_flight: Option<u128>,
-    pub max_tlc_number_in_flight: Option<u64>,
+    pub max_tlc_value_in_flight: u128,
+    pub max_tlc_number_in_flight: u64,
+    pub max_tlc_value: u128,
+    pub min_tlc_value: u128,
 }
 
 pub struct AcceptChannelParameter {
@@ -587,6 +590,7 @@ where
             }
             ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
+            | ProcessingChannelError::TlcAmountExceedLimit
             | ProcessingChannelError::TlcValueInflightExceedLimit
             | ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
             ProcessingChannelError::InvalidState(_) => match state.state {
@@ -1725,6 +1729,7 @@ where
                     next_local_nonce,
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
+                    max_tlc_value: remote_max_tlc_value,
                     min_tlc_value: remote_min_tlc_value,
                     channel_announcement_nonce,
                     ..
@@ -1770,6 +1775,7 @@ where
                     *second_per_commitment_point,
                     *remote_max_tlc_value_in_flight,
                     *remote_max_tlc_number_in_flight,
+                    *remote_max_tlc_value,
                     *remote_min_tlc_value,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
@@ -1836,6 +1842,8 @@ where
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
+                max_tlc_value,
+                min_tlc_value,
             }) => {
                 let public = public_channel_info.is_some();
                 let peer_id = self.get_remote_peer_id();
@@ -1869,8 +1877,10 @@ where
                     funding_fee_rate,
                     funding_udt_type_script.clone(),
                     shutdown_script.clone(),
-                    max_tlc_value_in_flight.unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
-                    max_tlc_number_in_flight.unwrap_or(DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT),
+                    max_tlc_value_in_flight,
+                    max_tlc_number_in_flight,
+                    max_tlc_value,
+                    min_tlc_value,
                 );
 
                 channel.check_open_channel_parameters()?;
@@ -1898,7 +1908,8 @@ where
                     commitment_delay_epoch: channel.commitment_delay_epoch,
                     max_tlc_value_in_flight: channel.local_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: channel.local_max_tlc_number_in_flight,
-                    min_tlc_value: DEFAULT_MIN_TLC_VALUE,
+                    max_tlc_value: channel.local_max_tlc_value,
+                    min_tlc_value: channel.local_min_tlc_value,
                     channel_flags,
                     first_per_commitment_point: channel
                         .signer
@@ -2710,6 +2721,8 @@ pub struct ChannelActorState {
     pub remote_max_tlc_value_in_flight: u128,
     // The maximum number of tlcs that we can accept.
     pub remote_max_tlc_number_in_flight: u64,
+    // The maximum value of tlc the peer side can send
+    pub remote_max_tlc_value: u128,
     // The remote min tlc value the peer side can send
     pub remote_min_tlc_value: u128,
 
@@ -2882,6 +2895,8 @@ pub enum ProcessingChannelError {
     TlcValueInflightExceedLimit,
     #[error("The tlc amount below minimal")]
     TlcAmountIsTooLow,
+    #[error("The tlc amount exceed maximal")]
+    TlcAmountExceedLimit,
     #[error("The tlc expiry soon")]
     TlcExpirySoon,
     #[error("The tlc expiry too far")]
@@ -3433,6 +3448,7 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
         remote_max_tlc_value_in_flight: u128,
         remote_max_tlc_number_in_flight: u64,
+        remote_max_tlc_value: u128,
         remote_min_tlc_value: u128,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
@@ -3484,6 +3500,7 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             remote_max_tlc_value_in_flight,
             remote_max_tlc_number_in_flight,
+            remote_max_tlc_value,
             remote_min_tlc_value,
             local_max_tlc_value_in_flight,
             local_max_tlc_number_in_flight,
@@ -3513,6 +3530,8 @@ impl ChannelActorState {
         shutdown_script: Script,
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
+        local_max_tlc_value: u128,
+        local_min_tlc_value: u128,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -3537,11 +3556,13 @@ impl ChannelActorState {
             local_channel_public_keys: local_pubkeys,
             local_max_tlc_number_in_flight,
             local_max_tlc_value_in_flight,
-            local_max_tlc_value: u128::MAX,
-            local_min_tlc_value: 0,
+            local_max_tlc_value,
+            local_min_tlc_value,
+            // these values will update after accept channel peer message handled
             remote_max_tlc_number_in_flight: MAX_TLC_NUMBER_IN_FLIGHT,
-            remote_max_tlc_value_in_flight: u128::MAX,
-            remote_min_tlc_value: 0,
+            remote_max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
+            remote_max_tlc_value: DEFAULT_MAX_TLC_VALUE,
+            remote_min_tlc_value: DEFAULT_MIN_TLC_VALUE,
             remote_channel_public_keys: None,
             last_used_nonce_in_commitment_signed: None,
             remote_nonces: vec![],
@@ -3554,7 +3575,6 @@ impl ChannelActorState {
             local_reserved_ckb_amount,
             remote_reserved_ckb_amount: 0,
             latest_commitment_transaction: None,
-
             reestablishing: false,
             created_at: SystemTime::now(),
         }
@@ -4165,9 +4185,6 @@ impl ChannelActorState {
                 payment_hash, tlc
             )));
         }
-        if tlc.amount == 0 {
-            return Err(ProcessingChannelError::TlcAmountIsTooLow);
-        }
         if tlc.is_offered() {
             // TODO: We should actually also consider all our fulfilled tlcs here.
             // Because this is also the amount that we can actually spend.
@@ -4690,6 +4707,10 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> Result<(), ProcessingChannelError> {
         if is_sent {
+            if add_amount == 0 || add_amount < self.local_min_tlc_value {
+                return Err(ProcessingChannelError::TlcAmountIsTooLow);
+            }
+
             let active_offered_tls_number = self.get_all_offer_tlcs().count();
 
             if active_offered_tls_number as u64 + 1 > self.local_max_tlc_number_in_flight {
@@ -4705,6 +4726,9 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
+            if add_amount == 0 || add_amount < self.remote_min_tlc_value {
+                return Err(ProcessingChannelError::TlcAmountIsTooLow);
+            }
             let active_received_tls_number = self.get_all_received_tlcs().count();
 
             if active_received_tls_number as u64 + 1 > self.remote_max_tlc_number_in_flight {
