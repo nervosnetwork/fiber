@@ -68,7 +68,8 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     tlc_expiry_delta: Option<u64>,
 
-    /// The minimum value for a TLC, an optional parameter.
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
 
@@ -116,9 +117,10 @@ pub(crate) struct AcceptChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 
-    /// The minimal value sent from our side, which means we can send tlc amount larger than `min_tlc_value`, default is 0
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
     #[serde_as(as = "Option<U128Hex>")]
-    min_tlc_value: Option<u128>,
+    tlc_min_value: Option<u128>,
 }
 
 #[derive(Clone, Serialize)]
@@ -524,7 +526,7 @@ where
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
-                    min_tlc_value: params.min_tlc_value,
+                    min_tlc_value: params.tlc_min_value,
                 },
                 rpc_reply,
             ))

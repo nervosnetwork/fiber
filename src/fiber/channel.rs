@@ -2705,14 +2705,14 @@ pub struct ChannelActorState {
     pub remote_max_tlc_value_in_flight: u128,
     // The maximum number of tlcs that we can accept.
     pub remote_max_tlc_number_in_flight: u64,
-    // The remote min tlc value the peer side can send
+    // The min tlc value our side can send
     pub remote_min_tlc_value: u128,
 
     // The local maximum value can be in pending
     pub local_max_tlc_value_in_flight: u128,
     // The local maximum number of tlcs that we can accept.
     pub local_max_tlc_number_in_flight: u64,
-    // The local min tlc value our side can send
+    // The min tlc value the peer sider can send
     pub local_min_tlc_value: u128,
 
     // Below are fields that are only usable after the channel is funded,
@@ -3378,7 +3378,7 @@ impl ChannelActorState {
             ) {
                 (
                     Some(expiry_delta),
-                    Some(min_value),
+                    Some(tlc_min_value),
                     Some(fee_proportional_millionths),
                 ) => Some(ChannelUpdate::new_unsigned(
                     Default::default(),
@@ -3387,7 +3387,7 @@ impl ChannelActorState {
                     message_flags,
                     0,
                     expiry_delta,
-                    min_value,
+                    tlc_min_value,
                     fee_proportional_millionths,
                 )),
                 _ => {
@@ -4656,7 +4656,7 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> Result<(), ProcessingChannelError> {
         if is_sent {
-            if add_amount == 0 || add_amount < self.local_min_tlc_value {
+            if add_amount == 0 || add_amount < self.remote_min_tlc_value {
                 return Err(ProcessingChannelError::TlcAmountIsTooLow);
             }
 
@@ -4675,7 +4675,7 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
-            if add_amount == 0 || add_amount < self.remote_min_tlc_value {
+            if add_amount == 0 || add_amount < self.local_min_tlc_value {
                 return Err(ProcessingChannelError::TlcAmountIsTooLow);
             }
             let active_received_tls_number = self.get_all_received_tlcs().count();
