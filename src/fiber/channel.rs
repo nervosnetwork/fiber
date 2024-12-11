@@ -147,6 +147,11 @@ pub struct AddTlcCommand {
     pub hash_algorithm: HashAlgorithm,
     /// Onion packet for the next node
     pub onion_packet: Option<PaymentOnionPacket>,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it for outbound (offered) TLC to backward errors.
+    /// Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
@@ -651,7 +656,7 @@ where
                                 add_tlc.tlc_id,
                                 RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                     error_detail.clone(),
-                                    &NO_SHARED_SECRET,
+                                    &add_tlc.shared_secret,
                                 )),
                             )
                             .await;
@@ -699,13 +704,15 @@ where
             .as_ref()
             .expect("expect remove_at")
             .1
-            .clone();
+            .clone()
+            .backward(&tlc_info.shared_secret);
 
         debug!(
             "begin to remove tlc from previous channel: {:?}",
             &previous_tlc
         );
 
+        // TODO: encrypt the error to backward
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
@@ -748,7 +755,7 @@ where
                     };
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(error_code),
-                        &NO_SHARED_SECRET,
+                        &tlc.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Paid => {
@@ -1513,6 +1520,7 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
+                let shared_secret = command.shared_secret.clone();
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
@@ -1520,7 +1528,7 @@ where
                     }
                     Err(err) => {
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &shared_secret)));
                         Err(err)
                     }
                 }
@@ -2111,6 +2119,10 @@ pub struct AddTlcInfo {
     pub hash_algorithm: HashAlgorithm,
     // the onion packet for multi-hop payment
     pub onion_packet: Option<PaymentOnionPacket>,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it to backward errors. Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
     pub created_at: CommitmentNumbers,
     pub removed_at: Option<(CommitmentNumbers, RemoveTlcReason)>,
     pub payment_preimage: Option<Hash256>,
@@ -4682,6 +4694,7 @@ impl ChannelActorState {
             payment_preimage: None,
             removed_at: None,
             onion_packet: command.onion_packet,
+            shared_secret: command.shared_secret,
             previous_tlc: command
                 .previous_tlc
                 .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
@@ -4701,6 +4714,8 @@ impl ChannelActorState {
             hash_algorithm: message.hash_algorithm,
             // will be set when apply AddTlc operations after the signature is checked
             onion_packet: message.onion_packet,
+            // No need to save shared secret for inbound TLC.
+            shared_secret: NO_SHARED_SECRET.clone(),
             created_at: self.get_current_commitment_numbers(),
             payment_preimage: None,
             removed_at: None,
