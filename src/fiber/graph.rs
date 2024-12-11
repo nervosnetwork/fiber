@@ -138,8 +138,6 @@ pub struct ChannelUpdateInfo {
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub tlc_minimum_value: u128,
-    /// The maximum value which may be relayed to the next hop via the channel.
-    pub tlc_maximum_value: u128,
     pub fee_rate: u64,
     /// Most recent update for the channel received from the network
     /// Mostly redundant with the data we store in fields explicitly.
@@ -432,7 +430,6 @@ where
             enabled: !disabled,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
-            tlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
             last_update_message: update.clone(),
         });
@@ -769,10 +766,7 @@ where
                 }
                 // check to make sure the current hop can send the amount
                 // if `tlc_maximum_value` equals 0, it means there is no limit
-                if amount_to_send > channel_info.capacity()
-                    || (channel_update.tlc_maximum_value != 0
-                        && amount_to_send > channel_update.tlc_maximum_value)
-                {
+                if amount_to_send > channel_info.capacity() {
                     continue;
                 }
                 if amount_to_send < channel_update.tlc_minimum_value {

@@ -261,7 +261,6 @@ async fn test_node1_node2_channel_update() {
             0,
             42,
             0,
-            0,
             10,
         );
 
@@ -329,7 +328,6 @@ async fn test_channel_update_version() {
             0,
             0,
             42,
-            0,
             0,
             10,
         );
