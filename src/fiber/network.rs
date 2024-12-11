@@ -274,7 +274,6 @@ pub struct OpenChannelCommand {
     pub funding_fee_rate: Option<u64>,
     pub tlc_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
-    pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
@@ -482,7 +481,6 @@ pub struct AcceptChannelCommand {
     pub shutdown_script: Option<Script>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
-    pub max_tlc_value: Option<u128>,
     pub min_tlc_value: Option<u128>,
 }
 
@@ -727,7 +725,6 @@ where
                                 shutdown_script: None,
                                 max_tlc_number_in_flight: None,
                                 max_tlc_value_in_flight: None,
-                                max_tlc_value: None,
                                 min_tlc_value: None,
                             };
                             state.create_inbound_channel(accept_channel).await?;
@@ -3047,7 +3044,6 @@ where
             funding_fee_rate,
             tlc_expiry_delta,
             tlc_min_value,
-            tlc_max_value,
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
@@ -3095,7 +3091,6 @@ where
                     max_tlc_number_in_flight.unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_min_value.unwrap_or(self.tlc_min_value),
-                    tlc_max_value.unwrap_or(self.tlc_max_value),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
@@ -3108,7 +3103,6 @@ where
                     .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
                 max_tlc_number_in_flight: max_tlc_number_in_flight
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
-                max_tlc_value: tlc_max_value.unwrap_or(self.tlc_max_value),
                 min_tlc_value: tlc_min_value.unwrap_or(self.tlc_min_value),
             }),
             network.clone().get_cell(),
@@ -3131,7 +3125,6 @@ where
             shutdown_script,
             max_tlc_number_in_flight,
             max_tlc_value_in_flight,
-            max_tlc_value,
             min_tlc_value,
         } = accept_channel;
 
@@ -3184,7 +3177,6 @@ where
                     max_tlc_number_in_flight.unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                     self.tlc_expiry_delta,
                     min_tlc_value.unwrap_or(self.tlc_min_value),
-                    max_tlc_value.unwrap_or(self.tlc_max_value),
                     self.tlc_fee_proportional_millionths,
                 )),
                 seed,
@@ -3194,7 +3186,6 @@ where
                 max_tlc_number_in_flight: max_tlc_number_in_flight
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
-                max_tlc_value: max_tlc_value.unwrap_or(self.tlc_max_value),
                 min_tlc_value: min_tlc_value.unwrap_or(self.tlc_min_value),
             }),
             network.clone().get_cell(),

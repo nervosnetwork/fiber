@@ -169,7 +169,6 @@ pub struct UpdateCommand {
     pub enabled: Option<bool>,
     pub tlc_expiry_delta: Option<u64>,
     pub tlc_minimum_value: Option<u128>,
-    pub tlc_maximum_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
 }
 
@@ -189,7 +188,6 @@ pub const MIN_COMMITMENT_DELAY_EPOCHS: u64 = 1;
 pub const MAX_COMMITMENT_DELAY_EPOCHS: u64 = 84;
 pub const DEFAULT_MAX_TLC_VALUE_IN_FLIGHT: u128 = u128::MAX;
 pub const DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 30;
-pub const DEFAULT_MAX_TLC_VALUE: u128 = u128::MAX;
 pub const DEFAULT_MIN_TLC_VALUE: u128 = 0;
 pub const SYS_MAX_TLC_NUMBER_IN_FLIGHT: u64 = 253;
 pub const MAX_TLC_NUMBER_IN_FLIGHT: u64 = 125;
@@ -211,7 +209,6 @@ pub struct OpenChannelParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub max_tlc_value: u128,
     pub min_tlc_value: u128,
 }
 
@@ -225,7 +222,6 @@ pub struct AcceptChannelParameter {
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub max_tlc_value: u128,
     pub min_tlc_value: u128,
 }
 
@@ -1263,7 +1259,6 @@ where
             enabled,
             tlc_expiry_delta,
             tlc_minimum_value,
-            tlc_maximum_value,
             tlc_fee_proportional_millionths,
         } = command;
 
@@ -1285,10 +1280,6 @@ where
 
         if let Some(value) = tlc_minimum_value {
             updated |= state.update_our_tlc_min_value(value);
-        }
-
-        if let Some(value) = tlc_maximum_value {
-            updated |= state.update_our_tlc_max_value(value);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {
@@ -1703,7 +1694,6 @@ where
                 channel_id_sender,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                max_tlc_value,
                 min_tlc_value,
             }) => {
                 let peer_id = self.get_remote_peer_id();
@@ -1729,7 +1719,6 @@ where
                     next_local_nonce,
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
-                    max_tlc_value: remote_max_tlc_value,
                     min_tlc_value: remote_min_tlc_value,
                     channel_announcement_nonce,
                     ..
@@ -1775,11 +1764,9 @@ where
                     *second_per_commitment_point,
                     *remote_max_tlc_value_in_flight,
                     *remote_max_tlc_number_in_flight,
-                    *remote_max_tlc_value,
                     *remote_min_tlc_value,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
-                    max_tlc_value,
                     min_tlc_value,
                 );
                 state.check_accept_channel_parameters()?;
@@ -1842,7 +1829,6 @@ where
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                max_tlc_value,
                 min_tlc_value,
             }) => {
                 let public = public_channel_info.is_some();
@@ -1879,7 +1865,6 @@ where
                     shutdown_script.clone(),
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
-                    max_tlc_value,
                     min_tlc_value,
                 );
 
@@ -1908,7 +1893,6 @@ where
                     commitment_delay_epoch: channel.commitment_delay_epoch,
                     max_tlc_value_in_flight: channel.local_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: channel.local_max_tlc_number_in_flight,
-                    max_tlc_value: channel.local_max_tlc_value,
                     min_tlc_value: channel.local_min_tlc_value,
                     channel_flags,
                     first_per_commitment_point: channel
@@ -2721,8 +2705,6 @@ pub struct ChannelActorState {
     pub remote_max_tlc_value_in_flight: u128,
     // The maximum number of tlcs that we can accept.
     pub remote_max_tlc_number_in_flight: u64,
-    // The maximum value of tlc the peer side can send
-    pub remote_max_tlc_value: u128,
     // The remote min tlc value the peer side can send
     pub remote_min_tlc_value: u128,
 
@@ -2730,8 +2712,6 @@ pub struct ChannelActorState {
     pub local_max_tlc_value_in_flight: u128,
     // The local maximum number of tlcs that we can accept.
     pub local_max_tlc_number_in_flight: u64,
-    // The local max tlc value our side can send
-    pub local_max_tlc_value: u128,
     // The local min tlc value our side can send
     pub local_min_tlc_value: u128,
 
@@ -2806,8 +2786,6 @@ pub struct PublicChannelInfo {
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
 
-    // Max/min value of the tlc that we will accept.
-    pub tlc_max_value: Option<u128>,
     pub tlc_min_value: Option<u128>,
     // The expiry delta timestamp, in milliseconds, for the tlc.
     pub tlc_expiry_delta: Option<u64>,
@@ -2829,14 +2807,12 @@ impl PublicChannelInfo {
         max_tlc_number_in_flight: u64,
         tlc_expiry_delta: u64,
         tlc_min_value: u128,
-        tlc_max_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
             tlc_fee_proportional_millionths: Some(tlc_fee_proportional_millionths),
-            tlc_max_value: Some(tlc_max_value),
             tlc_min_value: Some(tlc_min_value),
             tlc_expiry_delta: Some(tlc_expiry_delta),
             enabled: true,
@@ -3398,13 +3374,11 @@ impl ChannelActorState {
             match (
                 info.tlc_expiry_delta,
                 info.tlc_min_value,
-                info.tlc_max_value,
                 info.tlc_fee_proportional_millionths,
             ) {
                 (
                     Some(expiry_delta),
                     Some(min_value),
-                    Some(max_value),
                     Some(fee_proportional_millionths),
                 ) => Some(ChannelUpdate::new_unsigned(
                     Default::default(),
@@ -3414,7 +3388,6 @@ impl ChannelActorState {
                     0,
                     expiry_delta,
                     min_value,
-                    max_value,
                     fee_proportional_millionths,
                 )),
                 _ => {
@@ -3448,11 +3421,9 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
         remote_max_tlc_value_in_flight: u128,
         remote_max_tlc_number_in_flight: u64,
-        remote_max_tlc_value: u128,
         remote_min_tlc_value: u128,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
-        local_max_tlc_value: u128,
         local_min_tlc_value: u128,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -3500,11 +3471,9 @@ impl ChannelActorState {
             latest_commitment_transaction: None,
             remote_max_tlc_value_in_flight,
             remote_max_tlc_number_in_flight,
-            remote_max_tlc_value,
             remote_min_tlc_value,
             local_max_tlc_value_in_flight,
             local_max_tlc_number_in_flight,
-            local_max_tlc_value,
             local_min_tlc_value,
             reestablishing: false,
             created_at: SystemTime::now(),
@@ -3530,7 +3499,6 @@ impl ChannelActorState {
         shutdown_script: Script,
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
-        local_max_tlc_value: u128,
         local_min_tlc_value: u128,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
@@ -3556,12 +3524,10 @@ impl ChannelActorState {
             local_channel_public_keys: local_pubkeys,
             local_max_tlc_number_in_flight,
             local_max_tlc_value_in_flight,
-            local_max_tlc_value,
             local_min_tlc_value,
             // these values will update after accept channel peer message handled
             remote_max_tlc_number_in_flight: MAX_TLC_NUMBER_IN_FLIGHT,
             remote_max_tlc_value_in_flight: DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
-            remote_max_tlc_value: DEFAULT_MAX_TLC_VALUE,
             remote_min_tlc_value: DEFAULT_MIN_TLC_VALUE,
             remote_channel_public_keys: None,
             last_used_nonce_in_commitment_signed: None,
@@ -3871,23 +3837,6 @@ impl ChannelActorState {
             _ => {
                 self.public_channel_state_mut()
                     .tlc_fee_proportional_millionths = Some(fee);
-                true
-            }
-        }
-    }
-
-    fn get_our_tlc_max_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.tlc_max_value)
-    }
-
-    fn update_our_tlc_max_value(&mut self, value: u128) -> bool {
-        let old_value = self.get_our_tlc_max_value();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_max_value = Some(value);
                 true
             }
         }

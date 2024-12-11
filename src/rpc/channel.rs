@@ -116,10 +116,6 @@ pub(crate) struct AcceptChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 
-    /// The maximal value sent from our side, which means we can only send tlc amount less than `max_tlc_value`, default is u128::MAX
-    #[serde_as(as = "Option<U128Hex>")]
-    max_tlc_value: Option<u128>,
-
     /// The minimal value sent from our side, which means we can send tlc amount larger than `min_tlc_value`, default is 0
     #[serde_as(as = "Option<U128Hex>")]
     min_tlc_value: Option<u128>,
@@ -504,7 +500,6 @@ where
                     funding_fee_rate: params.funding_fee_rate,
                     tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
-                    tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
@@ -529,7 +524,6 @@ where
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
-                    max_tlc_value: params.max_tlc_value,
                     min_tlc_value: params.min_tlc_value,
                 },
                 rpc_reply,
@@ -690,7 +684,6 @@ where
                             enabled: params.enabled,
                             tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
-                            tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                         },
                         rpc_reply,

@@ -97,7 +97,6 @@ impl MockNetworkGraph {
         capacity: Option<u128>,
         fee_rate: Option<u128>,
         min_htlc_value: Option<u128>,
-        max_htlc_value: Option<u128>,
         udt_type_script: Option<Script>,
         other_fee_rate: Option<u128>,
     ) {
@@ -141,7 +140,6 @@ impl MockNetworkGraph {
             channel_flags: 0,
             tlc_expiry_delta: 11,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
-            tlc_maximum_value: max_htlc_value.unwrap_or(10000),
             tlc_minimum_value: min_htlc_value.unwrap_or(0),
             channel_outpoint: channel_outpoint.clone(),
         };
@@ -155,7 +153,6 @@ impl MockNetworkGraph {
                 channel_flags: 0,
                 tlc_expiry_delta: 22,
                 tlc_fee_proportional_millionths: fee_rate,
-                tlc_maximum_value: max_htlc_value.unwrap_or(10000),
                 tlc_minimum_value: min_htlc_value.unwrap_or(0),
                 channel_outpoint: channel_outpoint.clone(),
             };
@@ -170,16 +167,7 @@ impl MockNetworkGraph {
         capacity: Option<u128>,
         fee_rate: Option<u128>,
     ) {
-        self.add_edge_with_config(
-            node_a,
-            node_b,
-            capacity,
-            fee_rate,
-            Some(0),
-            Some(10000),
-            None,
-            None,
-        );
+        self.add_edge_with_config(node_a, node_b, capacity, fee_rate, Some(0), None, None);
     }
 
     pub fn add_edge_udt(
@@ -196,7 +184,6 @@ impl MockNetworkGraph {
             capacity,
             fee_rate,
             Some(0),
-            Some(10000),
             Some(udt_type_script),
             None,
         );
@@ -758,39 +745,11 @@ fn test_graph_build_route_three_nodes() {
 }
 
 #[test]
-fn test_graph_build_route_exceed_max_htlc_value() {
-    let mut network = MockNetworkGraph::new(3);
-    // Add edges with max_htlc_value set to 50
-    network.add_edge_with_config(0, 2, Some(500), Some(2), None, Some(50), None, None);
-    network.add_edge_with_config(2, 3, Some(500), Some(2), None, Some(50), None, None);
-    let node3 = network.keys[3];
-
-    // Test build route from node1 to node3 with amount exceeding max_htlc_value
-    let route = network.graph.build_route(SendPaymentData {
-        target_pubkey: node3.into(),
-        amount: 100, // Exceeds max_htlc_value of 50
-        payment_hash: Hash256::default(),
-        invoice: None,
-        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
-        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-        timeout: Some(10),
-        max_fee_amount: Some(1000),
-        max_parts: None,
-        keysend: false,
-        udt_type_script: None,
-        preimage: None,
-        allow_self_payment: false,
-        dry_run: false,
-    });
-    assert!(route.is_err());
-}
-
-#[test]
 fn test_graph_build_route_below_min_htlc_value() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_htlc_value set to 50
-    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None, None);
-    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, None);
+    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
+    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None);
     let node3 = network.keys[3];
 
     // Test build route from node1 to node3 with amount below min_htlc_value
@@ -1121,27 +1080,9 @@ fn test_graph_build_route_with_double_edge_node() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_htlc_value set to 50
     // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
-    network.add_edge_with_config(
-        0,
-        2,
-        Some(500),
-        Some(5000),
-        Some(50),
-        None,
-        None,
-        Some(600000),
-    );
+    network.add_edge_with_config(0, 2, Some(500), Some(5000), Some(50), None, Some(600000));
     // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
-    network.add_edge_with_config(
-        2,
-        0,
-        Some(500),
-        Some(100000),
-        Some(50),
-        None,
-        None,
-        Some(200),
-    );
+    network.add_edge_with_config(2, 0, Some(500), Some(100000), Some(50), None, Some(200));
 
     // node0 is the source node
     let command = SendPaymentCommand {
@@ -1169,29 +1110,11 @@ fn test_graph_build_route_with_other_node_maybe_better() {
     let mut network = MockNetworkGraph::new(3);
     // Add edges with min_htlc_value set to 50
     // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
-    network.add_edge_with_config(
-        0,
-        2,
-        Some(500),
-        Some(600000),
-        Some(50),
-        None,
-        None,
-        Some(600000),
-    );
+    network.add_edge_with_config(0, 2, Some(500), Some(600000), Some(50), None, Some(600000));
     // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
-    network.add_edge_with_config(
-        2,
-        0,
-        Some(500),
-        Some(100000),
-        Some(50),
-        None,
-        None,
-        Some(600000),
-    );
+    network.add_edge_with_config(2, 0, Some(500), Some(100000), Some(50), None, Some(600000));
     // B <-> C, B is initiator
-    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None, Some(1));
+    network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, Some(1));
 
     let node0 = network.keys[0];
     let node1 = network.keys[2];
@@ -1279,7 +1202,6 @@ fn test_graph_build_route_with_path_limits() {
             Some(5000000),
             Some(fee_rate),
             Some(50),
-            Some(10000000),
             None,
             Some(100),
         );
@@ -1329,7 +1251,6 @@ fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
             Some(100), // the capacity can not provide the fee with long path
             Some(500),
             Some(50),
-            None,
             None,
             Some(100),
         );
