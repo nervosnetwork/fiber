@@ -6,14 +6,18 @@ pub mod fiber;
 pub use fiber::{start_network, FiberConfig, NetworkServiceEvent};
 pub mod cch;
 pub use cch::{start_cch, CchActor, CchConfig};
+
 pub mod rpc;
 pub use rpc::{start_rpc, RpcConfig};
 pub mod invoice;
 pub mod store;
 pub mod watchtower;
-pub use errors::{Error, Result};
-pub mod actors;
+
 mod errors;
+pub use errors::{Error, Result};
+
+pub mod actors;
+
 pub mod tasks;
 
 use git_version::git_version;

@@ -7,6 +7,7 @@ mod invoice;
 mod peer;
 mod utils;
 
+use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
 use crate::{
     cch::CchMessage,
@@ -66,7 +67,14 @@ fn build_server(addr: &str) -> Server {
 }
 
 pub async fn start_rpc<
-    S: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 >(
     config: RpcConfig,
     fiber_config: Option<FiberConfig>,

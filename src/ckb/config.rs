@@ -148,7 +148,7 @@ serde_with::serde_conv!(
 );
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq, Hash)]
 pub struct UdtScript {
     pub code_hash: H256,
     #[serde_as(as = "ScriptHashTypeWrapper")]
@@ -158,7 +158,7 @@ pub struct UdtScript {
 }
 
 #[serde_as]
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdtCellDep {
     #[serde_as(as = "DepTypeWrapper")]
     pub dep_type: DepType,
@@ -166,7 +166,7 @@ pub struct UdtCellDep {
     pub index: u32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct UdtArgInfo {
     pub name: String,
     pub script: UdtScript,
@@ -174,7 +174,7 @@ pub struct UdtArgInfo {
     pub cell_deps: Vec<UdtCellDep>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct UdtCfgInfos(pub Vec<UdtArgInfo>);
 
 impl FromStr for UdtCfgInfos {

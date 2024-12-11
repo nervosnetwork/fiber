@@ -49,6 +49,12 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
@@ -181,6 +187,27 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
 
+    /// Gossip network maintenance interval, in milli-seconds. [default: 1000]
+    /// This is the interval to maintain the gossip network, including connecting to more peers, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-network-maintenance-interval-ms",
+        env,
+        help = "Gossip network maintenance interval, in milli-seconds. [default: 1000]"
+    )]
+    pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
+
+    /// Gossip store maintenance interval, in milli-seconds. [default: 1000]
+    /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
+    /// are available, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-store-maintenance-interval-ms",
+        env,
+        help = "Gossip store maintenance interval, in milli-seconds. [default: 1000]"
+    )]
+    pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
+
     /// Whether to sync the network graph from the network. [default: true]
     #[arg(
         name = "FIBER_SYNC_NETWORK_GRAPH",
@@ -191,7 +218,10 @@ pub struct FiberConfig {
     pub(crate) sync_network_graph: Option<bool>,
 }
 
-#[derive(PartialEq, Copy, Clone, Default)]
+/// Must be a valid utf-8 string of length maximal length 32 bytes.
+/// If the length is less than 32 bytes, it will be padded with 0.
+/// If the length is more than 32 bytes, it should be truncated.
+#[derive(Eq, PartialEq, Copy, Clone, Default, Hash)]
 pub struct AnnouncedNodeName(pub [u8; 32]);
 
 impl AnnouncedNodeName {
@@ -355,6 +385,16 @@ impl FiberConfig {
             .expect("read or generate secret key")
             .into();
         secio_kp.public_key()
+    }
+
+    pub fn gossip_network_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_network_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS)
+    }
+
+    pub fn gossip_store_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_store_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS)
     }
 
     pub fn sync_network_graph(&self) -> bool {

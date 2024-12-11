@@ -1,16 +1,29 @@
 use super::test_utils::generate_seckey;
 use crate::fiber::{
-    gen::fiber as molecule_fiber,
+    gen::{fiber as molecule_fiber, gossip},
     hash_algorithm::HashAlgorithm,
     tests::test_utils::generate_pubkey,
     types::{
-        secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-        TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+        secp256k1_instance, AddTlc, BroadcastMessageID, Cursor, Hash256, PaymentHopData,
+        PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
     },
 };
+use ckb_types::packed::{OutPoint, OutPointBuilder};
+use ckb_types::prelude::Builder;
 use fiber_sphinx::OnionSharedSecretIter;
-use secp256k1::{PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey};
 use std::str::FromStr;
+
+fn gen_rand_public_key() -> Pubkey {
+    let secp = secp256k1_instance();
+    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
+    PublicKey::from_keypair(&key_pair).into()
+}
+
+// TODO: Generate a really random OutPoint
+fn gen_random_channel_outpoint() -> OutPoint {
+    OutPointBuilder::default().build()
+}
 
 #[test]
 fn test_serde_public_key() {
@@ -23,6 +36,76 @@ fn test_serde_public_key() {
     );
     let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
     assert_eq!(pubkey, public_key)
+}
+
+#[test]
+fn test_serde_cursor_node_announcement() {
+    let now = 0u64;
+    let node_id = gen_rand_public_key();
+    let cursor = Cursor::new(now, BroadcastMessageID::NodeAnnouncement(node_id));
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_serde_cursor_channel_announcement() {
+    let now = 0u64;
+    let channel_announcement_id = gen_random_channel_outpoint();
+    let cursor = Cursor::new(
+        now,
+        BroadcastMessageID::ChannelAnnouncement(channel_announcement_id),
+    );
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_serde_cursor_channel_update() {
+    let now = 0u64;
+    let channel_update_id = gen_random_channel_outpoint();
+    let cursor = Cursor::new(now, BroadcastMessageID::ChannelUpdate(channel_update_id));
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_cursor_timestamp() {
+    let node_id = gen_rand_public_key();
+    // 255 is larger than 256 in little endian.
+    assert!(
+        Cursor::new(255, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+            < Cursor::new(256, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
+}
+
+#[test]
+fn test_cursor_types() {
+    let node_id = gen_rand_public_key();
+    let channel_outpoint = gen_random_channel_outpoint();
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint.clone())
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint.clone())
+        ) < Cursor::new(
+            0,
+            BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
+        )
+    );
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
 }
 
 #[test]

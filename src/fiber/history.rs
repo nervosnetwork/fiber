@@ -367,10 +367,12 @@ where
         for (channel, direction, result) in results.into_iter() {
             self.inner.insert((channel, direction), result);
         }
-        for channel in self.store.get_channels(None).iter() {
-            self.add_node_channel_map(channel.node1(), channel.out_point());
-            self.add_node_channel_map(channel.node2(), channel.out_point());
-        }
+        return;
+        todo!("Implement load from store for PaymentHistory");
+        // for channel in self.store.get_channels(None).iter() {
+        //     self.add_node_channel_map(channel.node1(), channel.out_point());
+        //     self.add_node_channel_map(channel.node2(), channel.out_point());
+        // }
     }
 
     pub(crate) fn apply_pair_result(
