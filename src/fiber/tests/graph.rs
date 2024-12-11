@@ -96,7 +96,7 @@ impl MockNetworkGraph {
         node_b: usize,
         capacity: Option<u128>,
         fee_rate: Option<u128>,
-        min_htlc_value: Option<u128>,
+        min_tlc_value: Option<u128>,
         udt_type_script: Option<Script>,
         other_fee_rate: Option<u128>,
     ) {
@@ -140,7 +140,7 @@ impl MockNetworkGraph {
             channel_flags: 0,
             tlc_expiry_delta: 11,
             tlc_fee_proportional_millionths: fee_rate.unwrap_or(0),
-            tlc_minimum_value: min_htlc_value.unwrap_or(0),
+            tlc_minimum_value: min_tlc_value.unwrap_or(0),
             channel_outpoint: channel_outpoint.clone(),
         };
         self.graph.process_channel_update(channel_update).unwrap();
@@ -153,7 +153,7 @@ impl MockNetworkGraph {
                 channel_flags: 0,
                 tlc_expiry_delta: 22,
                 tlc_fee_proportional_millionths: fee_rate,
-                tlc_minimum_value: min_htlc_value.unwrap_or(0),
+                tlc_minimum_value: min_tlc_value.unwrap_or(0),
                 channel_outpoint: channel_outpoint.clone(),
             };
             self.graph.process_channel_update(channel_update).unwrap();
@@ -745,17 +745,17 @@ fn test_graph_build_route_three_nodes() {
 }
 
 #[test]
-fn test_graph_build_route_below_min_htlc_value() {
+fn test_graph_build_route_below_min_tlc_value() {
     let mut network = MockNetworkGraph::new(3);
-    // Add edges with min_htlc_value set to 50
+    // Add edges with min_tlc_value set to 50
     network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
     network.add_edge_with_config(2, 3, Some(500), Some(2), Some(50), None, None);
     let node3 = network.keys[3];
 
-    // Test build route from node1 to node3 with amount below min_htlc_value
+    // Test build route from node1 to node3 with amount below min_tlc_value
     let route = network.graph.build_route(SendPaymentData {
         target_pubkey: node3.into(),
-        amount: 10, // Below min_htlc_value of 50
+        amount: 10, // Below min_tlc_value of 50
         payment_hash: Hash256::default(),
         invoice: None,
         final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
@@ -1078,7 +1078,7 @@ fn test_graph_payment_pay_self_with_one_node() {
 #[test]
 fn test_graph_build_route_with_double_edge_node() {
     let mut network = MockNetworkGraph::new(3);
-    // Add edges with min_htlc_value set to 50
+    // Add edges with min_tlc_value set to 50
     // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
     network.add_edge_with_config(0, 2, Some(500), Some(5000), Some(50), None, Some(600000));
     // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
@@ -1108,7 +1108,7 @@ fn test_graph_build_route_with_double_edge_node() {
 #[test]
 fn test_graph_build_route_with_other_node_maybe_better() {
     let mut network = MockNetworkGraph::new(3);
-    // Add edges with min_htlc_value set to 50
+    // Add edges with min_tlc_value set to 50
     // A <-> B, A is initiator, and A -> B with fee rate 5000, B -> A with fee rate 600000
     network.add_edge_with_config(0, 2, Some(500), Some(600000), Some(50), None, Some(600000));
     // A -> B, B is initiator, B -> A with fee rate 100000, A -> B with fee rate 200
@@ -1192,7 +1192,7 @@ fn test_graph_payment_pay_self_will_ok() {
 #[test]
 fn test_graph_build_route_with_path_limits() {
     let mut network = MockNetworkGraph::new(100);
-    // Add edges with min_htlc_value set to 50
+    // Add edges with min_tlc_value set to 50
     let mut fee_rate = 100000;
     for i in 0..99 {
         fee_rate -= 1000;
@@ -1243,7 +1243,7 @@ fn test_graph_build_route_with_path_limits() {
 #[test]
 fn test_graph_build_route_with_path_limit_fail_with_fee_not_enough() {
     let mut network = MockNetworkGraph::new(100);
-    // Add edges with min_htlc_value set to 50
+    // Add edges with min_tlc_value set to 50
     for i in 0..99 {
         network.add_edge_with_config(
             i,
