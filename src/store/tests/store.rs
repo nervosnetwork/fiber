@@ -259,6 +259,7 @@ fn test_channel_actor_state_store() {
             enabled: false,
             tlc_fee_proportional_millionths: 123,
             tlc_expiry_delta: 3,
+            tlc_min_value: 10,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),

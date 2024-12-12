@@ -554,7 +554,6 @@ pub struct OpenChannel {
     pub commitment_delay_epoch: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
     pub funding_pubkey: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
@@ -583,7 +582,6 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
-            .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
             .funding_pubkey(open_channel.funding_pubkey.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
@@ -616,7 +614,6 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: open_channel.min_tlc_value().unpack(),
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
@@ -645,7 +642,6 @@ pub struct AcceptChannel {
     pub reserved_ckb_amount: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
     pub tlc_basepoint: Pubkey,
@@ -664,7 +660,6 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
-            .min_tlc_value(accept_channel.min_tlc_value.pack())
             .funding_pubkey(accept_channel.funding_pubkey.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
@@ -694,7 +689,6 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: accept_channel.min_tlc_value().unpack(),
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
@@ -1113,34 +1107,6 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelMinTlcValueUpdate {
-    pub channel_id: Hash256,
-    pub min_tlc_value: u128,
-}
-
-impl From<ChannelMinTlcValueUpdate> for molecule_fiber::ChannelMinTlcValueUpdate {
-    fn from(channel_constraints_update: ChannelMinTlcValueUpdate) -> Self {
-        molecule_fiber::ChannelMinTlcValueUpdate::new_builder()
-            .channel_id(channel_constraints_update.channel_id.into())
-            .min_tlc_value(channel_constraints_update.min_tlc_value.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ChannelMinTlcValueUpdate> for ChannelMinTlcValueUpdate {
-    type Error = Error;
-
-    fn try_from(
-        channel_constraints_update: molecule_fiber::ChannelMinTlcValueUpdate,
-    ) -> Result<Self, Self::Error> {
-        Ok(ChannelMinTlcValueUpdate {
-            channel_id: channel_constraints_update.channel_id().into(),
-            min_tlc_value: channel_constraints_update.min_tlc_value().unpack(),
         })
     }
 }
@@ -2162,14 +2128,6 @@ impl FiberMessage {
         ))
     }
 
-    pub fn channel_constraints_update(
-        channel_constraints_update: ChannelMinTlcValueUpdate,
-    ) -> Self {
-        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelMinTlcValueUpdate(
-            channel_constraints_update,
-        ))
-    }
-
     pub fn node_announcement(node_announcement: NodeAnnouncement) -> Self {
         FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(node_announcement))
     }
@@ -2203,7 +2161,6 @@ pub enum FiberChannelMessage {
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
-    ChannelMinTlcValueUpdate(ChannelMinTlcValueUpdate),
 }
 
 impl FiberChannelMessage {
@@ -2225,9 +2182,6 @@ impl FiberChannelMessage {
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
-            FiberChannelMessage::ChannelMinTlcValueUpdate(channel_constraints_update) => {
-                channel_constraints_update.channel_id
-            }
             FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 reestablish_channel.channel_id
             }
@@ -2827,11 +2781,6 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                         announcement_signatures.into(),
                     )
                 }
-                FiberChannelMessage::ChannelMinTlcValueUpdate(channel_constraints_update) => {
-                    molecule_fiber::FiberMessageUnion::ChannelMinTlcValueUpdate(
-                        channel_constraints_update.into(),
-                    )
-                }
             },
             FiberMessage::BroadcastMessage(m) => match m {
                 FiberBroadcastMessage::NodeAnnouncement(node_annoucement) => {
@@ -2985,13 +2934,6 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
             molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update) => {
                 FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
                     channel_update.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::ChannelMinTlcValueUpdate(
-                channel_constraints_update,
-            ) => {
-                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelMinTlcValueUpdate(
-                    channel_constraints_update.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::GetBroadcastMessages(get_broadcast_messages) => {

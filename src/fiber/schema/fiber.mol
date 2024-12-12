@@ -20,7 +20,6 @@ table OpenChannel {
     commitment_fee_rate:         Uint64,
     max_tlc_value_in_flight:     Uint128,
     max_tlc_number_in_flight:    Uint64,
-    min_tlc_value:               Uint128,
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
     // deprecated
@@ -44,7 +43,6 @@ table AcceptChannel {
     reserved_ckb_amount:         Uint64,
     max_tlc_value_in_flight:     Uint128,
     max_tlc_number_in_flight:    Uint64,
-    min_tlc_value:               Uint128,
     // deprecated
     commitment_delay_epoch:      Uint64,
     funding_pubkey:              Pubkey,
@@ -99,11 +97,6 @@ table TxInitRBF {
 
 table TxAckRBF {
     channel_id: Byte32,
-}
-
-table ChannelMinTlcValueUpdate {
-    channel_id: Byte32,
-    min_tlc_value: Uint128,
 }
 
 table Shutdown {
@@ -342,7 +335,6 @@ union FiberMessage {
     AddTlc,
     RemoveTlc,
     RevokeAndAck,
-    ChannelMinTlcValueUpdate,
     Shutdown,
     ClosingSigned,
     ReestablishChannel,

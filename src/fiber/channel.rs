@@ -73,11 +73,10 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelMinTlcValueUpdate, ChannelReady,
-        ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
-        Hash256, OpenChannel, PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc,
-        RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
-        NO_SHARED_SECRET,
+        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
+        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel,
+        PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
+        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
@@ -210,7 +209,6 @@ pub struct OpenChannelParameter {
     pub funding_fee_rate: Option<u64>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
 }
 
 pub struct AcceptChannelParameter {
@@ -223,7 +221,6 @@ pub struct AcceptChannelParameter {
     pub channel_id_sender: Option<oneshot::Sender<Hash256>>,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
 }
 
 pub enum ChannelInitializationParameter {
@@ -552,10 +549,6 @@ where
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                 state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
-                Ok(())
-            }
-            FiberChannelMessage::ChannelMinTlcValueUpdate(ref constraints) => {
-                state.remote_constraints.min_tlc_value = constraints.min_tlc_value;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_)
@@ -1284,17 +1277,6 @@ where
 
         if let Some(value) = tlc_minimum_value {
             updated |= state.update_our_tlc_min_value(value);
-            self.network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
-                        self.get_remote_peer_id(),
-                        FiberMessage::channel_constraints_update(ChannelMinTlcValueUpdate {
-                            channel_id: state.get_id(),
-                            min_tlc_value: value,
-                        }),
-                    )),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {
@@ -1535,7 +1517,7 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        debug!("Error processing AddTlc command: {:?}", &err);
+                        eprintln!("Error processing AddTlc command: {:?}", &err);
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
                         let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
                         Err(err)
@@ -1710,7 +1692,6 @@ where
                 channel_id_sender,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                min_tlc_value,
             }) => {
                 let peer_id = self.get_remote_peer_id();
                 debug!(
@@ -1735,7 +1716,6 @@ where
                     next_local_nonce,
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
-                    min_tlc_value: remote_min_tlc_value,
                     channel_announcement_nonce,
                     ..
                 } = &open_channel;
@@ -1780,10 +1760,8 @@ where
                     *second_per_commitment_point,
                     *remote_max_tlc_value_in_flight,
                     *remote_max_tlc_number_in_flight,
-                    *remote_min_tlc_value,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
-                    min_tlc_value,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -1801,7 +1779,6 @@ where
                     reserved_ckb_amount: local_reserved_ckb_amount,
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
-                    min_tlc_value,
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     tlc_basepoint: state.signer.tlc_base_key.pubkey(),
                     first_per_commitment_point: state
@@ -1845,7 +1822,6 @@ where
                 funding_fee_rate,
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
-                min_tlc_value,
             }) => {
                 let public = public_channel_info.is_some();
                 let peer_id = self.get_remote_peer_id();
@@ -1881,7 +1857,6 @@ where
                     shutdown_script.clone(),
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
-                    min_tlc_value,
                 );
 
                 channel.check_open_channel_parameters()?;
@@ -1909,7 +1884,6 @@ where
                     commitment_delay_epoch: channel.commitment_delay_epoch,
                     max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
-                    min_tlc_value: channel.local_constraints.min_tlc_value,
                     channel_flags,
                     first_per_commitment_point: channel
                         .signer
@@ -2653,20 +2627,13 @@ pub struct ChannelConstraints {
     pub max_tlc_value_in_flight: u128,
     // The maximum number of tlcs that we can accept.
     pub max_tlc_number_in_flight: u64,
-    // The min tlc value our side can send
-    pub min_tlc_value: u128,
 }
 
 impl ChannelConstraints {
-    pub fn new(
-        max_tlc_value_in_flight: u128,
-        max_tlc_number_in_flight: u64,
-        min_tlc_value: u128,
-    ) -> Self {
+    pub fn new(max_tlc_value_in_flight: u128, max_tlc_number_in_flight: u64) -> Self {
         Self {
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
-            min_tlc_value,
         }
     }
 
@@ -2674,7 +2641,6 @@ impl ChannelConstraints {
         Self::new(
             DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
             DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
-            DEFAULT_MIN_TLC_VALUE,
         )
     }
 }
@@ -2822,6 +2788,9 @@ pub struct PublicChannelInfo {
     // The expiry delta timestamp, in milliseconds, for the tlc.
     pub tlc_expiry_delta: u64,
 
+    /// The minimal tcl value we can receive in relay tlc
+    pub tlc_min_value: u128,
+
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
     pub remote_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -2834,10 +2803,15 @@ pub struct PublicChannelInfo {
 }
 
 impl PublicChannelInfo {
-    pub fn new(tlc_expiry_delta: u64, tlc_fee_proportional_millionths: u128) -> Self {
+    pub fn new(
+        tlc_min_value: u128,
+        tlc_expiry_delta: u64,
+        tlc_fee_proportional_millionths: u128,
+    ) -> Self {
         Self {
-            tlc_fee_proportional_millionths,
+            tlc_min_value,
             tlc_expiry_delta,
+            tlc_fee_proportional_millionths,
             enabled: true,
             ..Default::default()
         }
@@ -3404,7 +3378,7 @@ impl ChannelActorState {
                 message_flags,
                 0,
                 info.tlc_expiry_delta,
-                self.get_our_tlc_min_value(),
+                info.tlc_min_value,
                 info.tlc_fee_proportional_millionths,
             ))
         })
@@ -3433,10 +3407,8 @@ impl ChannelActorState {
         second_commitment_point: Pubkey,
         remote_max_tlc_value_in_flight: u128,
         remote_max_tlc_number_in_flight: u64,
-        remote_min_tlc_value: u128,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
-        local_min_tlc_value: u128,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -3484,12 +3456,10 @@ impl ChannelActorState {
             local_constraints: ChannelConstraints::new(
                 local_max_tlc_value_in_flight,
                 local_max_tlc_number_in_flight,
-                local_min_tlc_value,
             ),
             remote_constraints: ChannelConstraints::new(
                 remote_max_tlc_value_in_flight,
                 remote_max_tlc_number_in_flight,
-                remote_min_tlc_value,
             ),
             reestablishing: false,
             created_at: SystemTime::now(),
@@ -3515,7 +3485,6 @@ impl ChannelActorState {
         shutdown_script: Script,
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
-        local_min_tlc_value: u128,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -3541,7 +3510,6 @@ impl ChannelActorState {
             local_constraints: ChannelConstraints::new(
                 local_max_tlc_value_in_flight,
                 local_max_tlc_number_in_flight,
-                local_min_tlc_value,
             ),
             // these values will update after accept channel peer message handled
             remote_constraints: ChannelConstraints::default(),
@@ -3858,17 +3826,21 @@ impl ChannelActorState {
         }
     }
 
-    fn get_our_tlc_min_value(&self) -> u128 {
-        self.local_constraints.min_tlc_value
+    fn get_our_tlc_min_value(&self) -> Option<u128> {
+        self.public_channel_info
+            .as_ref()
+            .map(|state| state.tlc_min_value)
     }
 
     fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
         let old_value = self.get_our_tlc_min_value();
-        if old_value != value {
-            self.local_constraints.min_tlc_value = value;
-            return true;
+        match old_value {
+            Some(old_value) if old_value == value => false,
+            _ => {
+                self.public_channel_state_mut().tlc_min_value = value;
+                true
+            }
         }
-        false
     }
 
     fn get_our_enabled(&self) -> Option<bool> {
@@ -4668,7 +4640,7 @@ impl ChannelActorState {
         is_sent: bool,
     ) -> Result<(), ProcessingChannelError> {
         if is_sent {
-            if add_amount == 0 || add_amount < self.remote_constraints.min_tlc_value {
+            if add_amount == 0 {
                 return Err(ProcessingChannelError::TlcAmountIsTooLow);
             }
 
@@ -4689,7 +4661,7 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
-            if add_amount == 0 || add_amount < self.local_constraints.min_tlc_value {
+            if add_amount == 0 {
                 return Err(ProcessingChannelError::TlcAmountIsTooLow);
             }
             let active_received_tls_number = self.get_all_received_tlcs().count();
@@ -4936,7 +4908,6 @@ impl ChannelActorState {
         self.remote_constraints = ChannelConstraints::new(
             accept_channel.max_tlc_value_in_flight,
             accept_channel.max_tlc_number_in_flight,
-            accept_channel.min_tlc_value,
         );
 
         self.check_accept_channel_parameters()?;
