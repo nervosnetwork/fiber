@@ -155,13 +155,13 @@ Attempts to open a channel with a peer.
 * `commitment_delay_epoch` - `Option<EpochNumberWithFraction>`, The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
 * `commitment_fee_rate` - `Option<u64>`, The fee rate for the commitment transaction, an optional parameter.
 * `funding_fee_rate` - `Option<u64>`, The fee rate for the funding transaction, an optional parameter.
-* `tlc_expiry_delta` - `Option<u64>`, The expiry delta for the TLC locktime, an optional parameter.
+* `tlc_expiry_delta` - `Option<u64>`, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
 * `tlc_min_value` - `Option<u128>`, The minimum value for a TLC our side can receive
  an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
-* `tlc_max_value` - `Option<u128>`, The maximum value for a TLC, an optional parameter.
-* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, an optional parameter.
+* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
 * `max_tlc_value_in_flight` - `Option<u128>`, The maximum value in flight for TLCs, an optional parameter.
-* `max_tlc_number_in_flight` - `Option<u64>`, The maximum number of TLCs that can be accepted, an optional parameter.
+* `max_tlc_number_in_flight` - `Option<u64>`, The maximum number of TLCs that can be accepted, an optional parameter, default is 125
 
 ##### Returns
 
@@ -183,6 +183,9 @@ Accepts a channel opening request from a peer.
 * `max_tlc_number_in_flight` - `Option<u64>`, The max tlc number in flight send from our side, default is 125
 * `tlc_min_value` - `Option<u128>`, The minimum value for a TLC our side can receive
  an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+* `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+ The unit is millionths of the amount. default is 1000 which means 0.1%.
+* `tlc_expiry_delta` - `Option<u64>`, The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
 
 ##### Returns
 

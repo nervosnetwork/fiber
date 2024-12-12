@@ -357,6 +357,8 @@ async fn test_open_and_accept_channel() {
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))
@@ -1912,6 +1914,8 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))
@@ -2106,6 +2110,8 @@ async fn establish_channel_between_nodes(
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))
@@ -2818,6 +2824,8 @@ async fn test_revoke_old_commitment_transaction() {
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))
@@ -2998,6 +3006,8 @@ async fn test_create_channel() {
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))
@@ -3126,6 +3136,8 @@ async fn test_reestablish_channel() {
                 max_tlc_number_in_flight: None,
                 max_tlc_value_in_flight: None,
                 min_tlc_value: None,
+                tlc_fee_proportional_millionths: None,
+                tlc_expiry_delta: None,
             },
             rpc_reply,
         ))

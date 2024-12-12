@@ -64,7 +64,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     funding_fee_rate: Option<u64>,
 
-    /// The expiry delta for the TLC locktime, an optional parameter.
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
     #[serde_as(as = "Option<U64Hex>")]
     tlc_expiry_delta: Option<u64>,
 
@@ -73,11 +73,8 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
 
-    /// The maximum value for a TLC, an optional parameter.
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_max_value: Option<u128>,
-
-    /// The fee proportional millionths for a TLC, an optional parameter.
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
 
@@ -85,7 +82,7 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U128Hex>")]
     max_tlc_value_in_flight: Option<u128>,
 
-    /// The maximum number of TLCs that can be accepted, an optional parameter.
+    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 }
@@ -121,6 +118,14 @@ pub(crate) struct AcceptChannelParams {
     /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    #[serde_as(as = "Option<U128Hex>")]
+    tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    tlc_expiry_delta: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -524,6 +529,8 @@ where
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     min_tlc_value: params.tlc_min_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                 },
                 rpc_reply,
             ))

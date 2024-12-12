@@ -482,6 +482,8 @@ pub struct AcceptChannelCommand {
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
     pub min_tlc_value: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_expiry_delta: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -726,6 +728,8 @@ where
                                 max_tlc_number_in_flight: None,
                                 max_tlc_value_in_flight: None,
                                 min_tlc_value: None,
+                                tlc_fee_proportional_millionths: None,
+                                tlc_expiry_delta: None,
                             };
                             state.create_inbound_channel(accept_channel).await?;
                         }
@@ -3102,6 +3106,9 @@ where
                 max_tlc_number_in_flight: max_tlc_number_in_flight
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 min_tlc_value: tlc_min_value.unwrap_or(self.tlc_min_value),
+                tlc_fee_proportional_millionths: tlc_fee_proportional_millionths
+                    .unwrap_or(self.tlc_fee_proportional_millionths),
+                tlc_expiry_delta: tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
             }),
             network.clone().get_cell(),
         )
@@ -3124,6 +3131,8 @@ where
             max_tlc_number_in_flight,
             max_tlc_value_in_flight,
             min_tlc_value,
+            tlc_fee_proportional_millionths,
+            tlc_expiry_delta,
         } = accept_channel;
 
         let (peer_id, open_channel) = self
@@ -3183,6 +3192,9 @@ where
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
                 min_tlc_value: min_tlc_value.unwrap_or(self.tlc_min_value),
+                tlc_fee_proportional_millionths: tlc_fee_proportional_millionths
+                    .unwrap_or(self.tlc_fee_proportional_millionths),
+                tlc_expiry_delta: tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
             }),
             network.clone().get_cell(),
         )
