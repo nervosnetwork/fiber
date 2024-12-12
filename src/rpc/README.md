@@ -281,7 +281,6 @@ Updates a channel.
 
  The expiry delta for the TLC locktime
 * `tlc_minimum_value` - `Option<u128>`, The minimum value for a TLC
-* `tlc_maximum_value` - `Option<u128>`, The maximum value for a TLC
 * `tlc_fee_proportional_millionths` - `Option<u128>`, The fee proportional millionths for a TLC
 
 ##### Returns

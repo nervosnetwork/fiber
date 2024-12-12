@@ -258,8 +258,6 @@ fn test_channel_actor_state_store() {
         public_channel_info: Some(PublicChannelInfo {
             enabled: false,
             tlc_fee_proportional_millionths: Some(123),
-            max_tlc_number_in_flight: 100,
-            max_tlc_value_in_flight: 100,
             tlc_min_value: Some(2),
             tlc_expiry_delta: Some(3),
             local_channel_announcement_signature: Some((

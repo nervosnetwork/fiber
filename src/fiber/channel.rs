@@ -1124,7 +1124,6 @@ where
         state.increment_next_offered_tlc_id();
 
         debug!("Inserted tlc into channel state: {:?}", &tlc);
-
         let add_tlc = AddTlc {
             channel_id: state.get_id(),
             tlc_id: tlc.tlc_id().into(),
@@ -2780,11 +2779,7 @@ pub struct PublicChannelInfo {
     // This is a fee that is paid by the sender of the tlc.
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
-    // TODO: consider this value while building the commitment transaction.
     pub tlc_fee_proportional_millionths: Option<u128>,
-
-    pub max_tlc_value_in_flight: u128,
-    pub max_tlc_number_in_flight: u64,
 
     pub tlc_min_value: Option<u128>,
     // The expiry delta timestamp, in milliseconds, for the tlc.
@@ -2803,15 +2798,11 @@ pub struct PublicChannelInfo {
 
 impl PublicChannelInfo {
     pub fn new(
-        max_tlc_value_in_flight: u128,
-        max_tlc_number_in_flight: u64,
         tlc_expiry_delta: u64,
         tlc_min_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
-            max_tlc_value_in_flight,
-            max_tlc_number_in_flight,
             tlc_fee_proportional_millionths: Some(tlc_fee_proportional_millionths),
             tlc_min_value: Some(tlc_min_value),
             tlc_expiry_delta: Some(tlc_expiry_delta),

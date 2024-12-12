@@ -314,9 +314,6 @@ pub struct UpdateChannelParams {
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
-    /// The maximum value for a TLC
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_maximum_value: Option<u128>,
     /// The fee proportional millionths for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
