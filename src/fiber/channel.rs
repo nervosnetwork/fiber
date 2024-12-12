@@ -850,8 +850,8 @@ where
                     .public_channel_info
                     .as_ref()
                     .expect("public channel exits")
-                    .tlc_fee_proportional_millionths
-                    .unwrap_or_default();
+                    .tlc_fee_proportional_millionths;
+
                 let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
                 if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
                     error!(
@@ -2842,11 +2842,10 @@ pub struct PublicChannelInfo {
     // This is a fee that is paid by the sender of the tlc.
     // The detailed calculation for the fee of forwarding tlcs is
     // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
-    pub tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_fee_proportional_millionths: u128,
 
-    pub tlc_min_value: Option<u128>,
     // The expiry delta timestamp, in milliseconds, for the tlc.
-    pub tlc_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: u64,
 
     // Channel announcement signatures, may be empty for private channel.
     pub local_channel_announcement_signature: Option<(EcdsaSignature, PartialSignature)>,
@@ -2860,15 +2859,10 @@ pub struct PublicChannelInfo {
 }
 
 impl PublicChannelInfo {
-    pub fn new(
-        tlc_expiry_delta: u64,
-        tlc_min_value: u128,
-        tlc_fee_proportional_millionths: u128,
-    ) -> Self {
+    pub fn new(tlc_expiry_delta: u64, tlc_fee_proportional_millionths: u128) -> Self {
         Self {
-            tlc_fee_proportional_millionths: Some(tlc_fee_proportional_millionths),
-            tlc_min_value: Some(tlc_min_value),
-            tlc_expiry_delta: Some(tlc_expiry_delta),
+            tlc_fee_proportional_millionths,
+            tlc_expiry_delta,
             enabled: true,
             ..Default::default()
         }
@@ -3425,30 +3419,19 @@ impl ChannelActorState {
         let message_flags = if local_is_node1 { 0 } else { 1 };
 
         self.public_channel_info.as_ref().and_then(|info| {
-            match (
+            Some(ChannelUpdate::new_unsigned(
+                Default::default(),
+                self.must_get_funding_transaction_outpoint(),
+                std::time::UNIX_EPOCH
+                    .elapsed()
+                    .expect("Duration since unix epoch")
+                    .as_secs(),
+                message_flags,
+                0,
                 info.tlc_expiry_delta,
-                info.tlc_min_value,
+                self.get_our_tlc_min_value(),
                 info.tlc_fee_proportional_millionths,
-            ) {
-                (
-                    Some(expiry_delta),
-                    Some(tlc_min_value),
-                    Some(fee_proportional_millionths),
-                ) => Some(ChannelUpdate::new_unsigned(
-                    Default::default(),
-                    self.must_get_funding_transaction_outpoint(),
-                    std::time::UNIX_EPOCH.elapsed().expect("Duration since unix epoch").as_secs(),
-                    message_flags,
-                    0,
-                    expiry_delta,
-                    tlc_min_value,
-                    fee_proportional_millionths,
-                )),
-                _ => {
-                    warn!("Missing channel update parameters, cannot create channel update message: public_channel_info={:?}", info);
-                    None
-                }
-            }
+            ))
         })
     }
 
@@ -3897,7 +3880,7 @@ impl ChannelActorState {
     fn get_our_tlc_fee_proportional_millionths(&self) -> Option<u128> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.tlc_fee_proportional_millionths)
+            .map(|state| state.tlc_fee_proportional_millionths)
     }
 
     fn update_our_tlc_fee_proportional_millionths(&mut self, fee: u128) -> bool {
@@ -3906,27 +3889,23 @@ impl ChannelActorState {
             Some(old_fee) if old_fee == fee => false,
             _ => {
                 self.public_channel_state_mut()
-                    .tlc_fee_proportional_millionths = Some(fee);
+                    .tlc_fee_proportional_millionths = fee;
                 true
             }
         }
     }
 
-    fn get_our_tlc_min_value(&self) -> Option<u128> {
-        self.public_channel_info
-            .as_ref()
-            .and_then(|state| state.tlc_min_value)
+    fn get_our_tlc_min_value(&self) -> u128 {
+        self.local_constraints.min_tlc_value
     }
 
     fn update_our_tlc_min_value(&mut self, value: u128) -> bool {
         let old_value = self.get_our_tlc_min_value();
-        match old_value {
-            Some(old_value) if old_value == value => false,
-            _ => {
-                self.public_channel_state_mut().tlc_min_value = Some(value);
-                true
-            }
+        if old_value != value {
+            self.local_constraints.min_tlc_value = value;
+            return true;
         }
+        false
     }
 
     fn get_our_enabled(&self) -> Option<bool> {
@@ -3947,7 +3926,7 @@ impl ChannelActorState {
     fn get_our_tlc_expiry_delta(&self) -> Option<u64> {
         self.public_channel_info
             .as_ref()
-            .and_then(|state| state.tlc_expiry_delta)
+            .map(|info| info.tlc_expiry_delta)
     }
 
     fn update_our_tlc_expiry_delta(&mut self, value: u64) -> bool {
@@ -3955,7 +3934,7 @@ impl ChannelActorState {
         match old_value {
             Some(old_value) if old_value == value => false,
             _ => {
-                self.public_channel_state_mut().tlc_expiry_delta = Some(value);
+                self.public_channel_state_mut().tlc_expiry_delta = value;
                 true
             }
         }

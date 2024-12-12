@@ -3092,7 +3092,6 @@ where
                 seed,
                 public_channel_info: public.then_some(PublicChannelInfo::new(
                     tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
-                    tlc_min_value.unwrap_or(self.tlc_min_value),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
@@ -3181,7 +3180,6 @@ where
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
                     self.tlc_expiry_delta,
-                    min_tlc_value.unwrap_or(self.tlc_min_value),
                     self.tlc_fee_proportional_millionths,
                 )),
                 seed,

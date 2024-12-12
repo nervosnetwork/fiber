@@ -257,9 +257,8 @@ fn test_channel_actor_state_store() {
         state: ChannelState::NegotiatingFunding(NegotiatingFundingFlags::THEIR_INIT_SENT),
         public_channel_info: Some(PublicChannelInfo {
             enabled: false,
-            tlc_fee_proportional_millionths: Some(123),
-            tlc_min_value: Some(2),
-            tlc_expiry_delta: Some(3),
+            tlc_fee_proportional_millionths: 123,
+            tlc_expiry_delta: 3,
             local_channel_announcement_signature: Some((
                 mock_ecdsa_signature(),
                 MaybeScalar::two(),
