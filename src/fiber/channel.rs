@@ -1543,6 +1543,7 @@ where
                         Ok(())
                     }
                     Err(err) => {
+                        debug!("Error processing AddTlc command: {:?}", &err);
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
                         let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
                         Err(err)

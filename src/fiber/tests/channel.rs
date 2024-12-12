@@ -1,5 +1,5 @@
 use crate::fiber::channel::{
-    AddTlcInfo, CommitmentNumbers, RemoveTlcInfo, TLCId, TlcKind, TlcState,
+    AddTlcInfo, CommitmentNumbers, RemoveTlcInfo, TLCId, TlcKind, TlcState, UpdateCommand,
 };
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
@@ -457,6 +457,14 @@ async fn test_public_channel_saved_to_the_other_nodes_graph() {
         node2_funding_amount,
         None,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
     let status = node3.submit_tx(funding_tx).await;
@@ -497,6 +505,14 @@ async fn test_public_channel_with_unconfirmed_funding_tx() {
         true,
         node1_funding_amount,
         node2_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -2064,8 +2080,16 @@ async fn establish_channel_between_nodes(
     public: bool,
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
-    max_tlc_number_in_flight: Option<u64>,
-    max_tlc_value_in_flight: Option<u128>,
+    a_max_tlc_number_in_flight: Option<u64>,
+    a_max_tlc_value_in_flight: Option<u128>,
+    a_tlc_expiry_delta: Option<u64>,
+    a_tlc_min_value: Option<u128>,
+    a_tlc_fee_proportional_millionths: Option<u128>,
+    b_max_tlc_number_in_flight: Option<u64>,
+    b_max_tlc_value_in_flight: Option<u128>,
+    b_tlc_expiry_delta: Option<u64>,
+    b_tlc_min_value: Option<u128>,
+    b_tlc_fee_proportional_millionths: Option<u128>,
 ) -> (Hash256, TransactionView) {
     let message = |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
@@ -2078,11 +2102,11 @@ async fn establish_channel_between_nodes(
                 commitment_fee_rate: None,
                 commitment_delay_epoch: None,
                 funding_fee_rate: None,
-                tlc_expiry_delta: None,
-                tlc_min_value: None,
-                tlc_fee_proportional_millionths: None,
-                max_tlc_number_in_flight,
-                max_tlc_value_in_flight,
+                tlc_expiry_delta: a_tlc_expiry_delta,
+                tlc_min_value: a_tlc_min_value,
+                tlc_fee_proportional_millionths: a_tlc_fee_proportional_millionths,
+                max_tlc_number_in_flight: a_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: a_max_tlc_value_in_flight,
             },
             rpc_reply,
         ))
@@ -2107,11 +2131,11 @@ async fn establish_channel_between_nodes(
                 temp_channel_id: open_channel_result.channel_id,
                 funding_amount: node_b_funding_amount,
                 shutdown_script: None,
-                max_tlc_number_in_flight: None,
-                max_tlc_value_in_flight: None,
-                min_tlc_value: None,
-                tlc_fee_proportional_millionths: None,
-                tlc_expiry_delta: None,
+                max_tlc_number_in_flight: b_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: b_max_tlc_value_in_flight,
+                min_tlc_value: b_tlc_min_value,
+                tlc_fee_proportional_millionths: b_tlc_fee_proportional_millionths,
+                tlc_expiry_delta: b_tlc_expiry_delta,
             },
             rpc_reply,
         ))
@@ -2174,6 +2198,14 @@ async fn create_nodes_with_established_channel(
         node_b_funding_amount,
         None,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
 
@@ -2221,6 +2253,14 @@ async fn create_n_nodes_with_established_channel(
                 public,
                 amounts[i].0,
                 amounts[i].1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 None,
                 None,
             )
@@ -2512,6 +2552,14 @@ async fn do_test_add_tlc_number_limit() {
         node_b_funding_amount,
         Some(3),
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
 
@@ -2567,6 +2615,14 @@ async fn do_test_add_tlc_value_limit() {
         node_b_funding_amount,
         None,
         Some(3000000000),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await;
 
@@ -2604,6 +2660,347 @@ async fn do_test_add_tlc_value_limit() {
             assert!(add_tlc_result.is_ok());
         }
     }
+}
+
+#[tokio::test]
+async fn do_test_add_tlc_min_tlc_value_limit() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        true,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        Some(100),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // A -> B will be no limit
+    let tlc_amount = 200;
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+    };
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    assert!(add_tlc_result.is_ok());
+
+    // B -> A will not be able to send amount less than 100
+    let tlc_amount = 99;
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+    };
+    let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_err());
+
+    // B -> A can send at least 100
+    let tlc_amount = 100;
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+    };
+    let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_ok());
+}
+
+#[tokio::test]
+async fn test_channel_update_tlc_expiry() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        true,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    // update channel with new tlc_expiry_delta which is too small
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: Some(1000),
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_err());
+    assert!(update_result
+        .unwrap_err()
+        .to_string()
+        .contains("TLC expiry delta is too small"));
+
+    // update channel with new tlc_expiry_delta which is ok
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: Some(900000),
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+}
+
+#[tokio::test]
+async fn test_channel_update_tlc_sync_up() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        true,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // A -> B now will be with no limit
+    let tlc_amount = 99;
+    let node_b_pubkey = node_b.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    // this is the payment_hash generated by keysend
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    // A -> B now will be with limit, add tlc command with amount 99
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+    };
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+    assert!(add_tlc_result.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // update channel with new tlc_minimum_value
+    let update_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(true),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: Some(100),
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+
+    // sleep for a while to make sure the Update processed by both party
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let tlc_amount = 99;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
+    assert!(res
+        .unwrap_err()
+        .to_string()
+        .contains("Failed to build route, PathFind error: no path found"));
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    // A -> B now will be with limit, can not send amount less than 100
+    let tlc_amount = 99;
+    let add_tlc_command = AddTlcCommand {
+        amount: tlc_amount,
+        hash_algorithm: HashAlgorithm::CkbHash,
+        payment_hash: gen_sha256_hash().into(),
+        expiry: now_timestamp_as_millis_u64() + 100000000,
+        onion_packet: None,
+        previous_tlc: None,
+    };
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    assert!(add_tlc_result.is_err());
+
+    // B -> A is OK anyway
+    let node_a_pubkey = node_a.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_a_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_b.network_actor, message).expect("node_a alive");
+    eprintln!("debug now res: {:?}", res);
+    assert!(res.is_ok());
 }
 
 #[tokio::test]
