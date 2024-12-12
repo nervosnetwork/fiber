@@ -67,7 +67,8 @@ table TxUpdate {
 }
 
 struct TxComplete {
-    channel_id: Byte32,
+    channel_id:                       Byte32,
+    commitment_tx_partial_signature:  Byte32,
 }
 
 table TxAbort {

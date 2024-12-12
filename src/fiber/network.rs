@@ -513,6 +513,8 @@ pub enum NetworkServiceEvent {
     ChannelCreated(PeerId, Hash256),
     // A outgoing channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
+    // A funding tx is completed. The watch tower may use this to monitor the channel.
+    RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
     // A AddTlc peer message processed with failure
     AddTlcFailed(PeerId, Hash256, TlcErr),
     // The channel is ready to use (with funding transaction confirmed
@@ -3351,50 +3353,57 @@ where
         match command {
             // Need to handle the force shutdown command specially because the ChannelActor may not exist when remote peer is disconnected.
             ChannelCommand::Shutdown(shutdown, rpc_reply) if shutdown.force => {
-                match self.store.get_channel_actor_state(&channel_id) {
-                    Some(mut state) => {
-                        match state.state {
-                            ChannelState::ChannelReady() => {
-                                debug!("Handling force shutdown command in ChannelReady state");
-                            }
-                            ChannelState::ShuttingDown(flags) => {
-                                debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
-                            }
-                            _ => {
-                                let error = Error::ChannelError(
-                                    ProcessingChannelError::InvalidState(format!(
-                                        "Handling force shutdown command invalid state {:?}",
-                                        &state.state
-                                    )),
-                                );
+                if let Some(actor) = self.channels.get(&channel_id) {
+                    actor.send_message(ChannelActorMessage::Command(ChannelCommand::Shutdown(
+                        shutdown, rpc_reply,
+                    )))?;
+                    Ok(())
+                } else {
+                    match self.store.get_channel_actor_state(&channel_id) {
+                        Some(mut state) => {
+                            match state.state {
+                                ChannelState::ChannelReady() => {
+                                    debug!("Handling force shutdown command in ChannelReady state");
+                                }
+                                ChannelState::ShuttingDown(flags) => {
+                                    debug!("Handling force shutdown command in ShuttingDown state, flags: {:?}", &flags);
+                                }
+                                _ => {
+                                    let error = Error::ChannelError(
+                                        ProcessingChannelError::InvalidState(format!(
+                                            "Handling force shutdown command invalid state {:?}",
+                                            &state.state
+                                        )),
+                                    );
 
-                                let _ = rpc_reply.send(Err(error.to_string()));
-                                return Err(error);
-                            }
-                        };
+                                    let _ = rpc_reply.send(Err(error.to_string()));
+                                    return Err(error);
+                                }
+                            };
 
-                        let transaction = state
-                            .latest_commitment_transaction
-                            .clone()
-                            .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
-                        self.network
-                            .send_message(NetworkActorMessage::new_event(
-                                NetworkActorEvent::CommitmentTransactionPending(
-                                    transaction,
-                                    channel_id,
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                            let transaction = state
+                                .latest_commitment_transaction
+                                .clone()
+                                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+                            self.network
+                                .send_message(NetworkActorMessage::new_event(
+                                    NetworkActorEvent::CommitmentTransactionPending(
+                                        transaction,
+                                        channel_id,
+                                    ),
+                                ))
+                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-                        state.update_state(ChannelState::ShuttingDown(
-                            ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
-                        ));
-                        self.store.insert_channel_actor_state(state);
+                            state.update_state(ChannelState::ShuttingDown(
+                                ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+                            ));
+                            self.store.insert_channel_actor_state(state);
 
-                        let _ = rpc_reply.send(Ok(()));
-                        Ok(())
+                            let _ = rpc_reply.send(Ok(()));
+                            Ok(())
+                        }
+                        None => Err(Error::ChannelNotFound(channel_id)),
                     }
-                    None => Err(Error::ChannelNotFound(channel_id)),
                 }
             }
             _ => match self.channels.get(&channel_id) {

@@ -1265,9 +1265,42 @@ where
         state: &mut ChannelActorState,
         command: ShutdownCommand,
     ) -> ProcessingChannelResult {
-        // The force shutdown command has been handled speically in the `NetworkActorState#send_command_to_channel` function.
-        // We only need to handle the normal shutdown command here.
         debug!("Handling shutdown command: {:?}", &command);
+        if command.force {
+            match state.state {
+                ChannelState::ChannelReady() => {
+                    debug!("Handling force shutdown command in ChannelReady state");
+                }
+                ChannelState::ShuttingDown(flags) => {
+                    debug!(
+                        "Handling force shutdown command in ShuttingDown state, flags: {:?}",
+                        &flags
+                    );
+                }
+                _ => {
+                    return Err(ProcessingChannelError::InvalidState(format!(
+                        "Handling force shutdown command invalid state {:?}",
+                        &state.state
+                    )));
+                }
+            };
+
+            let transaction = state
+                .latest_commitment_transaction
+                .clone()
+                .expect("latest_commitment_transaction should exist when channel is in ChannelReady of ShuttingDown state");
+            self.network
+                .send_message(NetworkActorMessage::new_event(
+                    NetworkActorEvent::CommitmentTransactionPending(transaction, state.get_id()),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+
+            state.update_state(ChannelState::ShuttingDown(
+                ShuttingDownFlags::WAITING_COMMITMENT_CONFIRMATION,
+            ));
+            return Ok(());
+        }
+
         let flags = match state.state {
             ChannelState::ChannelReady() => {
                 debug!("Handling shutdown command in ChannelReady state");
@@ -1551,8 +1584,10 @@ where
             }
             TxCollaborationCommand::TxComplete() => {
                 state.check_tx_complete_preconditions()?;
+                let commitment_tx_partial_signature = state.build_init_commitment_tx_signature()?;
                 let fiber_message = FiberMessage::tx_complete(TxComplete {
                     channel_id: state.get_id(),
+                    commitment_tx_partial_signature,
                 });
                 self.network
                     .send_message(NetworkActorMessage::new_command(
@@ -4004,7 +4039,10 @@ impl ChannelActorState {
 
     // Send RevokeAndAck message to the counterparty, and update the
     // channel state accordingly.
-    fn send_revoke_and_ack_message(&mut self, network: &ActorRef<NetworkActorMessage>) {
+    fn send_revoke_and_ack_message(
+        &mut self,
+        network: &ActorRef<NetworkActorMessage>,
+    ) -> ProcessingChannelResult {
         let key_agg_ctx = {
             let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
             let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
@@ -4054,14 +4092,7 @@ impl ChannelActorState {
             let commitment_number = self.get_remote_commitment_number() - 1;
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                (Since::new(
-                    SinceType::EpochNumberWithFraction,
-                    self.commitment_delay_epoch,
-                    true,
-                )
-                .value())
-                .to_le_bytes()
-                .as_slice(),
+                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
@@ -4087,14 +4118,7 @@ impl ChannelActorState {
             ) = self.build_settlement_transaction_outputs(false);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                (Since::new(
-                    SinceType::EpochNumberWithFraction,
-                    self.commitment_delay_epoch,
-                    true,
-                )
-                .value())
-                .to_le_bytes()
-                .as_slice(),
+                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 self.get_remote_commitment_number().to_be_bytes().as_slice(),
             ]
             .concat();
@@ -4109,7 +4133,7 @@ impl ChannelActorState {
                 .concat(),
             );
 
-            sign_ctx.sign(message.as_slice()).expect("valid signature")
+            sign_ctx.sign(message.as_slice())?
         };
 
         // Note that we must update channel state here to update commitment number,
@@ -4130,6 +4154,7 @@ impl ChannelActorState {
                 )),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        Ok(())
     }
 
     pub fn get_id(&self) -> Hash256 {
@@ -5250,8 +5275,21 @@ impl ChannelActorState {
                     ));
                 }
             }
-            TxCollaborationMsg::TxComplete(_msg) => {
+            TxCollaborationMsg::TxComplete(tx_complete) => {
                 self.check_tx_complete_preconditions()?;
+                let settlement_data = self.check_init_commitment_tx_signature(
+                    tx_complete.commitment_tx_partial_signature,
+                )?;
+                network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::RemoteTxComplete(
+                            self.get_remote_peer_id(),
+                            self.get_id(),
+                            self.get_funding_lock_script(),
+                            settlement_data,
+                        ),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 let flags = flags | CollaboratingFundingTxFlags::THEIR_TX_COMPLETE_SENT;
                 self.update_state(ChannelState::CollaboratingFundingTx(flags));
             }
@@ -5351,8 +5389,8 @@ impl ChannelActorState {
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
-            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
-                self.send_revoke_and_ack_message(network);
+            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
+                self.send_revoke_and_ack_message(network)?;
                 match flags {
                     CommitmentSignedFlags::ChannelReady() => {}
                     CommitmentSignedFlags::PendingShutdown() => {
@@ -5629,14 +5667,11 @@ impl ChannelActorState {
                 (output, output_data)
             };
 
-            let delay_epoch = self.commitment_delay_epoch;
             let commitment_number = self.get_local_commitment_number() - 1;
 
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
-                    .to_le_bytes()
-                    .as_slice(),
+                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
@@ -5671,14 +5706,7 @@ impl ChannelActorState {
             ) = self.build_settlement_transaction_outputs(true);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
-                (Since::new(
-                    SinceType::EpochNumberWithFraction,
-                    self.commitment_delay_epoch,
-                    true,
-                )
-                .value())
-                .to_le_bytes()
-                .as_slice(),
+                self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 self.get_local_commitment_number().to_be_bytes().as_slice(),
             ]
             .concat();
@@ -5831,7 +5859,7 @@ impl ChannelActorState {
                     // Resetting our remote commitment number to the actual remote commitment number
                     // and resend the RevokeAndAck message.
                     self.set_remote_commitment_number(acutal_remote_commitment_number);
-                    self.send_revoke_and_ack_message(network);
+                    self.send_revoke_and_ack_message(network)?;
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(
@@ -5919,12 +5947,14 @@ impl ChannelActorState {
             // Otherwise, it is possible that when the network actor is processing ControlFiberChannel,
             // it receives another SendFiberMessage command, and that message (e.g. CommitmentSigned)
             // is processed first, thus breaking the order of messages.
+            let commitment_tx_partial_signature = self.build_init_commitment_tx_signature()?;
             network
                 .send_message(NetworkActorMessage::new_command(
                     NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
                         self.get_remote_peer_id(),
                         FiberMessage::tx_complete(TxComplete {
                             channel_id: self.get_id(),
+                            commitment_tx_partial_signature,
                         }),
                     )),
                 ))
@@ -5942,6 +5972,116 @@ impl ChannelActorState {
             ));
         }
         Ok(())
+    }
+
+    fn build_init_commitment_tx_signature(&self) -> Result<PartialSignature, SigningError> {
+        let key_agg_ctx = {
+            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+            KeyAggContext::new([remote_pubkey, local_pubkey]).expect("Valid pubkeys")
+        };
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let sign_ctx = {
+            let local_nonce = self.get_local_nonce();
+            let remote_nonce = self.get_remote_nonce();
+            let nonces = [local_nonce, remote_nonce];
+            let agg_nonce = AggNonce::sum(nonces);
+            Musig2SignContext {
+                key_agg_ctx,
+                agg_nonce,
+                seckey: self.signer.funding_key.clone(),
+                secnonce: self.get_local_musig2_secnonce(),
+            }
+        };
+        let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
+            self.build_settlement_transaction_outputs(false);
+        let version = 0u64;
+        let commitment_lock_script_args = [
+            &blake2b_256(x_only_aggregated_pubkey)[0..20],
+            self.get_delay_epoch_as_lock_args_bytes().as_slice(),
+            version.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        let message = blake2b_256(
+            [
+                to_local_output.as_slice(),
+                to_local_output_data.as_slice(),
+                to_remote_output.as_slice(),
+                to_remote_output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+
+        sign_ctx.sign(message.as_slice())
+    }
+
+    fn check_init_commitment_tx_signature(
+        &self,
+        signature: PartialSignature,
+    ) -> Result<SettlementData, ProcessingChannelError> {
+        let key_agg_ctx = {
+            let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
+            let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
+            KeyAggContext::new([local_pubkey, remote_pubkey]).expect("Valid pubkeys")
+        };
+        let x_only_aggregated_pubkey = key_agg_ctx.aggregated_pubkey::<Point>().serialize_xonly();
+        let local_nonce = self.get_local_nonce();
+        let remote_nonce = self.get_remote_nonce();
+        let nonces = [remote_nonce.clone(), local_nonce];
+        let agg_nonce = AggNonce::sum(nonces);
+        let verify_ctx = Musig2VerifyContext {
+            key_agg_ctx: key_agg_ctx.clone(),
+            agg_nonce: agg_nonce.clone(),
+            pubkey: *self.get_remote_funding_pubkey(),
+            pubnonce: remote_nonce,
+        };
+        let ([to_local_output, to_remote_output], [to_local_output_data, to_remote_output_data]) =
+            self.build_settlement_transaction_outputs(true);
+        let version = 0u64;
+        let commitment_lock_script_args = [
+            &blake2b_256(x_only_aggregated_pubkey)[0..20],
+            self.get_delay_epoch_as_lock_args_bytes().as_slice(),
+            version.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        let message = blake2b_256(
+            [
+                to_local_output.as_slice(),
+                to_local_output_data.as_slice(),
+                to_remote_output.as_slice(),
+                to_remote_output_data.as_slice(),
+                commitment_lock_script_args.as_slice(),
+            ]
+            .concat(),
+        );
+
+        verify_ctx.verify(signature, message.as_slice())?;
+
+        let settlement_data = {
+            let sign_ctx = Musig2SignContext {
+                key_agg_ctx,
+                agg_nonce,
+                seckey: self.signer.funding_key.clone(),
+                secnonce: self.get_local_musig2_secnonce(),
+            };
+
+            let our_signature = sign_ctx.sign(message.as_slice())?;
+            let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
+                [signature, our_signature],
+                message.as_slice(),
+            )?;
+
+            SettlementData {
+                x_only_aggregated_pubkey,
+                aggregated_signature,
+                to_local_output,
+                to_local_output_data,
+                to_remote_output,
+                to_remote_output_data,
+            }
+        };
+        Ok(settlement_data)
     }
 
     // TODO: More checks to the funding tx.
@@ -6174,15 +6314,12 @@ impl ChannelActorState {
 
     fn build_commitment_transaction_output(&self, for_remote: bool) -> (CellOutput, Bytes) {
         let x_only_aggregated_pubkey = self.get_commitment_lock_script_xonly(for_remote);
-        let delay_epoch = self.commitment_delay_epoch;
         let version = self.get_current_commitment_number(for_remote);
         let htlcs = self.get_active_htlcs(for_remote);
 
         let mut commitment_lock_script_args = [
             &blake2b_256(x_only_aggregated_pubkey)[0..20],
-            (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
-                .to_le_bytes()
-                .as_slice(),
+            self.get_delay_epoch_as_lock_args_bytes().as_slice(),
             version.to_be_bytes().as_slice(),
         ]
         .concat();
@@ -6427,6 +6564,15 @@ impl ChannelActorState {
         )?;
         self.complete_partially_signed_tx(&tx)
     }
+
+    fn get_delay_epoch_as_lock_args_bytes(&self) -> [u8; 8] {
+        let since = Since::new(
+            SinceType::EpochNumberWithFraction,
+            self.commitment_delay_epoch,
+            true,
+        );
+        since.value().to_le_bytes()
+    }
 }
 
 pub trait ChannelActorStateStore {
@@ -6546,23 +6692,14 @@ pub struct Musig2SignContext {
 }
 
 impl Musig2SignContext {
-    pub fn sign(self, message: &[u8]) -> Result<PartialSignature, ProcessingChannelError> {
-        let result = sign_partial(
+    pub fn sign(self, message: &[u8]) -> Result<PartialSignature, SigningError> {
+        sign_partial(
             &self.key_agg_ctx,
             self.seckey,
             self.secnonce.clone(),
             &self.agg_nonce,
             message,
-        );
-        debug!(
-            "Musig2 signing partial message {:?} with nonce {:?} (public nonce: {:?}), agg nonce {:?}: result {:?}",
-            hex::encode(message),
-            self.secnonce,
-            self.secnonce.public_nonce(),
-            &self.agg_nonce,
-            &result
-        );
-        Ok(result?)
+        )
     }
 }
 

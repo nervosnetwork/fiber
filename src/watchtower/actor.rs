@@ -80,47 +80,17 @@ where
             WatchtowerMessage::NetworkServiceEvent(event) => {
                 trace!("Received NetworkServiceEvent: {:?}", event);
                 match event {
-                    NetworkServiceEvent::ChannelReady(
-                        peer_id,
+                    NetworkServiceEvent::RemoteTxComplete(
+                        _peer_id,
                         channel_id,
-                        funding_tx_out_point,
+                        funding_tx_lock,
+                        settlement_data,
                     ) => {
-                        let rpc_url = state.config.rpc_url.clone();
-                        tokio::task::block_in_place(move || {
-                            let ckb_client = CkbRpcClient::new(&rpc_url);
-                            match ckb_client
-                                .get_transaction(funding_tx_out_point.tx_hash().unpack())
-                            {
-                                Ok(Some(tx_with_status)) => {
-                                    if tx_with_status.tx_status.status != Status::Committed {
-                                        error!("Funding tx: {:?} is not committed yet, maybe it's a bug in the fn on_channel_ready", funding_tx_out_point);
-                                    } else if let Some(tx) = tx_with_status.transaction {
-                                        match tx.inner {
-                                            Either::Left(tx) => {
-                                                let tx: Transaction = tx.inner.into();
-                                                self.store.insert_watch_channel(
-                                                    channel_id,
-                                                    tx.raw()
-                                                        .outputs()
-                                                        .get(0)
-                                                        .expect("get output 0 of tx")
-                                                        .lock(),
-                                                );
-                                            }
-                                            Either::Right(_tx) => {
-                                                // unreachable, ignore
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    error!("Cannot find funding tx: {:?} for channel: {:?} from peer: {:?}", funding_tx_out_point, channel_id, peer_id);
-                                }
-                                Err(err) => {
-                                    error!("Failed to get funding tx: {:?}", err);
-                                }
-                            }
-                        });
+                        self.store.insert_watch_channel(
+                            channel_id,
+                            funding_tx_lock,
+                            settlement_data,
+                        );
                     }
                     NetworkServiceEvent::ChannelClosed(_peer_id, channel_id, _close_tx_hash) => {
                         self.store.remove_watch_channel(channel_id);
@@ -160,12 +130,6 @@ where
 {
     fn periodic_check(&self, state: &WatchtowerState) {
         for channel_data in self.store.get_watch_channels() {
-            if channel_data.revocation_data.is_none() {
-                continue;
-            }
-            let revocation_data = channel_data
-                .revocation_data
-                .expect("get channel revocation data");
             let secret_key = state.secret_key;
             let rpc_url = state.config.rpc_url.clone();
             tokio::task::block_in_place(move || {
@@ -212,67 +176,77 @@ where
                                                         );
 
                                                         if blake160(
-                                                            &revocation_data
+                                                            &channel_data
+                                                                .local_settlement_data
                                                                 .x_only_aggregated_pubkey,
                                                         )
                                                         .0 == pub_key_hash
                                                         {
-                                                            if revocation_data.commitment_number
-                                                                >= commitment_number
+                                                            match channel_data
+                                                                .revocation_data
+                                                                .clone()
                                                             {
-                                                                warn!("Found an old version commitment tx submitted by remote: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
-                                                                let commitment_tx_out_point =
-                                                                    OutPoint::new(
-                                                                        tx.calc_tx_hash(),
-                                                                        0,
-                                                                    );
-                                                                match build_revocation_tx(
-                                                                    commitment_tx_out_point,
-                                                                    revocation_data,
-                                                                    secret_key,
-                                                                    &mut cell_collector,
-                                                                ) {
-                                                                    Ok(tx) => {
-                                                                        match ckb_client
-                                                                            .send_transaction(
-                                                                                tx.data().into(),
-                                                                                None,
-                                                                            ) {
-                                                                            Ok(tx_hash) => {
-                                                                                info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                            }
-                                                                            Err(err) => {
-                                                                                error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                Some(revocation_data)
+                                                                    if revocation_data
+                                                                        .commitment_number
+                                                                        >= commitment_number =>
+                                                                {
+                                                                    warn!("Found an old version commitment tx submitted by remote: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
+                                                                    let commitment_tx_out_point =
+                                                                        OutPoint::new(
+                                                                            tx.calc_tx_hash(),
+                                                                            0,
+                                                                        );
+                                                                    match build_revocation_tx(
+                                                                        commitment_tx_out_point,
+                                                                        revocation_data,
+                                                                        secret_key,
+                                                                        &mut cell_collector,
+                                                                    ) {
+                                                                        Ok(tx) => {
+                                                                            match ckb_client
+                                                                                .send_transaction(
+                                                                                    tx.data()
+                                                                                        .into(),
+                                                                                    None,
+                                                                                ) {
+                                                                                Ok(tx_hash) => {
+                                                                                    info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                                }
+                                                                                Err(err) => {
+                                                                                    error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                                }
                                                                             }
                                                                         }
-                                                                    }
-                                                                    Err(err) => {
-                                                                        error!("Failed to build revocation tx: {:?}", err);
+                                                                        Err(err) => {
+                                                                            error!("Failed to build revocation tx: {:?}", err);
+                                                                        }
                                                                     }
                                                                 }
-                                                            } else {
-                                                                info!("Found a force closed commitment tx submitted by remote: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
-                                                                try_settle_commitment_tx(
-                                                                    commitment_lock,
-                                                                    ckb_client,
-                                                                    channel_data
-                                                                        .remote_settlement_data
-                                                                        .clone()
-                                                                        .expect("settlement data should be some"),
-                                                                    secret_key,
-                                                                    &mut cell_collector,
-                                                                );
+                                                                _ => {
+                                                                    info!("Found a force closed commitment tx submitted by remote: {:?}, commitment number: {}", tx.calc_tx_hash(), commitment_number);
+                                                                    try_settle_commitment_tx(
+                                                                        commitment_lock,
+                                                                        ckb_client,
+                                                                        channel_data
+                                                                            .local_settlement_data
+                                                                            .clone(),
+                                                                        secret_key,
+                                                                        &mut cell_collector,
+                                                                    );
+                                                                }
                                                             }
                                                         } else {
-                                                            // it's a force closed commitment tx which is submitted by local
-                                                            info!("Found a force closed commitment tx submitted by local: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
+                                                            info!("Found a force closed commitment tx submitted by local: {:?}, commitment number: {}", tx.calc_tx_hash(), commitment_number);
                                                             try_settle_commitment_tx(
                                                                 commitment_lock,
                                                                 ckb_client,
                                                                 channel_data
-                                                                    .local_settlement_data
+                                                                    .remote_settlement_data
                                                                     .clone()
-                                                                    .expect("settlement data should be some"),
+                                                                    .expect(
+                                                                        "remote settlement data",
+                                                                    ),
                                                                 secret_key,
                                                                 &mut cell_collector,
                                                             );

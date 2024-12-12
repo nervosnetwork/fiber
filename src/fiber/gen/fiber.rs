@@ -6604,6 +6604,12 @@ impl ::core::fmt::Display for TxComplete {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_tx_partial_signature",
+            self.commitment_tx_partial_signature()
+        )?;
         write!(f, " }}")
     }
 }
@@ -6614,15 +6620,19 @@ impl ::core::default::Default for TxComplete {
     }
 }
 impl TxComplete {
-    const DEFAULT_VALUE: [u8; 32] = [
+    const DEFAULT_VALUE: [u8; 64] = [
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
     ];
-    pub const TOTAL_SIZE: usize = 32;
-    pub const FIELD_SIZES: [usize; 1] = [32];
-    pub const FIELD_COUNT: usize = 1;
+    pub const TOTAL_SIZE: usize = 64;
+    pub const FIELD_SIZES: [usize; 2] = [32, 32];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32 {
         Byte32::new_unchecked(self.0.slice(0..32))
+    }
+    pub fn commitment_tx_partial_signature(&self) -> Byte32 {
+        Byte32::new_unchecked(self.0.slice(32..64))
     }
     pub fn as_reader<'r>(&'r self) -> TxCompleteReader<'r> {
         TxCompleteReader::new_unchecked(self.as_slice())
@@ -6650,7 +6660,9 @@ impl molecule::prelude::Entity for TxComplete {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder().channel_id(self.channel_id())
+        Self::new_builder()
+            .channel_id(self.channel_id())
+            .commitment_tx_partial_signature(self.commitment_tx_partial_signature())
     }
 }
 #[derive(Clone, Copy)]
@@ -6673,15 +6685,24 @@ impl<'r> ::core::fmt::Display for TxCompleteReader<'r> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
         write!(f, "{} {{ ", Self::NAME)?;
         write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(
+            f,
+            ", {}: {}",
+            "commitment_tx_partial_signature",
+            self.commitment_tx_partial_signature()
+        )?;
         write!(f, " }}")
     }
 }
 impl<'r> TxCompleteReader<'r> {
-    pub const TOTAL_SIZE: usize = 32;
-    pub const FIELD_SIZES: [usize; 1] = [32];
-    pub const FIELD_COUNT: usize = 1;
+    pub const TOTAL_SIZE: usize = 64;
+    pub const FIELD_SIZES: [usize; 2] = [32, 32];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(&self) -> Byte32Reader<'r> {
         Byte32Reader::new_unchecked(&self.as_slice()[0..32])
+    }
+    pub fn commitment_tx_partial_signature(&self) -> Byte32Reader<'r> {
+        Byte32Reader::new_unchecked(&self.as_slice()[32..64])
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
@@ -6708,13 +6729,18 @@ impl<'r> molecule::prelude::Reader<'r> for TxCompleteReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct TxCompleteBuilder {
     pub(crate) channel_id: Byte32,
+    pub(crate) commitment_tx_partial_signature: Byte32,
 }
 impl TxCompleteBuilder {
-    pub const TOTAL_SIZE: usize = 32;
-    pub const FIELD_SIZES: [usize; 1] = [32];
-    pub const FIELD_COUNT: usize = 1;
+    pub const TOTAL_SIZE: usize = 64;
+    pub const FIELD_SIZES: [usize; 2] = [32, 32];
+    pub const FIELD_COUNT: usize = 2;
     pub fn channel_id(mut self, v: Byte32) -> Self {
         self.channel_id = v;
+        self
+    }
+    pub fn commitment_tx_partial_signature(mut self, v: Byte32) -> Self {
+        self.commitment_tx_partial_signature = v;
         self
     }
 }
@@ -6726,6 +6752,7 @@ impl molecule::prelude::Builder for TxCompleteBuilder {
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
         writer.write_all(self.channel_id.as_slice())?;
+        writer.write_all(self.commitment_tx_partial_signature.as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {

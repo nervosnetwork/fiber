@@ -857,12 +857,16 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
+    pub commitment_tx_partial_signature: PartialSignature,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
         molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                tx_complete.commitment_tx_partial_signature,
+            ))
             .build()
     }
 }
@@ -873,6 +877,10 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                tx_complete.commitment_tx_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
         })
     }
 }
