@@ -2999,7 +2999,6 @@ async fn test_channel_update_tlc_sync_up() {
         ))
     };
     let res = call!(node_b.network_actor, message).expect("node_a alive");
-    eprintln!("debug now res: {:?}", res);
     assert!(res.is_ok());
 }
 

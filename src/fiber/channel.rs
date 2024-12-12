@@ -66,11 +66,7 @@ use crate::{
 };
 
 use super::{
-    config::{
-        DEFAULT_MIN_SHUTDOWN_FEE, DEFAULT_TLC_EXPIRY_DELTA,
-        DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS, MAX_PAYMENT_TLC_EXPIRY_LIMIT,
-        MIN_TLC_EXPIRY_DELTA,
-    },
+    config::{DEFAULT_MIN_SHUTDOWN_FEE, MAX_PAYMENT_TLC_EXPIRY_LIMIT, MIN_TLC_EXPIRY_DELTA},
     fee::calculate_shutdown_tx_fee,
     hash_algorithm::HashAlgorithm,
     key::blake2b_hash_with_salt,
@@ -215,8 +211,6 @@ pub struct OpenChannelParameter {
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub tlc_fee_proportional_millionths: u128,
-    pub tlc_expiry_delta: u64,
 }
 
 pub struct AcceptChannelParameter {
@@ -230,8 +224,6 @@ pub struct AcceptChannelParameter {
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
     pub min_tlc_value: u128,
-    pub tlc_fee_proportional_millionths: u128,
-    pub tlc_expiry_delta: u64,
 }
 
 pub enum ChannelInitializationParameter {
@@ -1719,8 +1711,6 @@ where
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
                 min_tlc_value,
-                tlc_fee_proportional_millionths,
-                tlc_expiry_delta,
             }) => {
                 let peer_id = self.get_remote_peer_id();
                 debug!(
@@ -1746,8 +1736,6 @@ where
                     max_tlc_value_in_flight: remote_max_tlc_value_in_flight,
                     max_tlc_number_in_flight: remote_max_tlc_number_in_flight,
                     min_tlc_value: remote_min_tlc_value,
-                    tlc_fee_proportional_millionths: remote_tlc_fee_proportional_millionths,
-                    tlc_expiry_delta: remote_tlc_expiry_delta,
                     channel_announcement_nonce,
                     ..
                 } = &open_channel;
@@ -1793,13 +1781,9 @@ where
                     *remote_max_tlc_value_in_flight,
                     *remote_max_tlc_number_in_flight,
                     *remote_min_tlc_value,
-                    *remote_tlc_fee_proportional_millionths,
-                    *remote_tlc_expiry_delta,
                     max_tlc_number_in_flight,
                     max_tlc_value_in_flight,
                     min_tlc_value,
-                    tlc_fee_proportional_millionths,
-                    tlc_expiry_delta,
                 );
                 state.check_accept_channel_parameters()?;
 
@@ -1818,8 +1802,6 @@ where
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
                     min_tlc_value,
-                    tlc_fee_proportional_millionths,
-                    tlc_expiry_delta,
                     funding_pubkey: state.signer.funding_key.pubkey(),
                     tlc_basepoint: state.signer.tlc_base_key.pubkey(),
                     first_per_commitment_point: state
@@ -1864,8 +1846,6 @@ where
                 max_tlc_number_in_flight,
                 max_tlc_value_in_flight,
                 min_tlc_value,
-                tlc_fee_proportional_millionths,
-                tlc_expiry_delta,
             }) => {
                 let public = public_channel_info.is_some();
                 let peer_id = self.get_remote_peer_id();
@@ -1902,8 +1882,6 @@ where
                     max_tlc_value_in_flight,
                     max_tlc_number_in_flight,
                     min_tlc_value,
-                    tlc_fee_proportional_millionths,
-                    tlc_expiry_delta,
                 );
 
                 channel.check_open_channel_parameters()?;
@@ -1932,10 +1910,6 @@ where
                     max_tlc_value_in_flight: channel.local_constraints.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: channel.local_constraints.max_tlc_number_in_flight,
                     min_tlc_value: channel.local_constraints.min_tlc_value,
-                    tlc_fee_proportional_millionths: channel
-                        .local_constraints
-                        .tlc_fee_proportional_millionths,
-                    tlc_expiry_delta: channel.local_constraints.tlc_expiry_delta,
                     channel_flags,
                     first_per_commitment_point: channel
                         .signer
@@ -2675,16 +2649,6 @@ impl TlcState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
 pub struct ChannelConstraints {
-    // The fee rate for tlc transfers. We only have these values set when
-    // this is a public channel. Both sides may set this value differently.
-    // This is a fee that is paid by the sender of the tlc.
-    // The detailed calculation for the fee of forwarding tlcs is
-    // `fee = round_above(tlc_fee_proportional_millionths * tlc_value / 1,000,000)`.
-    pub tlc_fee_proportional_millionths: u128,
-
-    // The expiry delta timestamp, in milliseconds, for the tlc.
-    pub tlc_expiry_delta: u64,
-
     // The maximum value can be in pending
     pub max_tlc_value_in_flight: u128,
     // The maximum number of tlcs that we can accept.
@@ -2695,15 +2659,11 @@ pub struct ChannelConstraints {
 
 impl ChannelConstraints {
     pub fn new(
-        tlc_fee_proportional_millionths: u128,
-        tlc_expiry_delta: u64,
         max_tlc_value_in_flight: u128,
         max_tlc_number_in_flight: u64,
         min_tlc_value: u128,
     ) -> Self {
         Self {
-            tlc_fee_proportional_millionths,
-            tlc_expiry_delta,
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
             min_tlc_value,
@@ -2712,8 +2672,6 @@ impl ChannelConstraints {
 
     pub fn default() -> Self {
         Self::new(
-            DEFAULT_TLC_FEE_PROPORTIONAL_MILLIONTHS,
-            DEFAULT_TLC_EXPIRY_DELTA,
             DEFAULT_MAX_TLC_VALUE_IN_FLIGHT,
             DEFAULT_MAX_TLC_NUMBER_IN_FLIGHT,
             DEFAULT_MIN_TLC_VALUE,
@@ -3476,13 +3434,9 @@ impl ChannelActorState {
         remote_max_tlc_value_in_flight: u128,
         remote_max_tlc_number_in_flight: u64,
         remote_min_tlc_value: u128,
-        remote_fee_proportional_millionths: u128,
-        remote_tlc_expiry_delta: u64,
         local_max_tlc_number_in_flight: u64,
         local_max_tlc_value_in_flight: u128,
         local_min_tlc_value: u128,
-        local_fee_proportional_millionths: u128,
-        local_tlc_expiry_delta: u64,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_base_pubkeys = signer.get_base_public_keys();
@@ -3528,15 +3482,11 @@ impl ChannelActorState {
             remote_reserved_ckb_amount,
             latest_commitment_transaction: None,
             local_constraints: ChannelConstraints::new(
-                local_fee_proportional_millionths,
-                local_tlc_expiry_delta,
                 local_max_tlc_value_in_flight,
                 local_max_tlc_number_in_flight,
                 local_min_tlc_value,
             ),
             remote_constraints: ChannelConstraints::new(
-                remote_fee_proportional_millionths,
-                remote_tlc_expiry_delta,
                 remote_max_tlc_value_in_flight,
                 remote_max_tlc_number_in_flight,
                 remote_min_tlc_value,
@@ -3566,8 +3516,6 @@ impl ChannelActorState {
         local_max_tlc_value_in_flight: u128,
         local_max_tlc_number_in_flight: u64,
         local_min_tlc_value: u128,
-        tlc_fee_proportional_millionths: u128,
-        tlc_expiry_delta: u64,
     ) -> Self {
         let signer = InMemorySigner::generate_from_seed(seed);
         let local_pubkeys = signer.get_base_public_keys();
@@ -3591,8 +3539,6 @@ impl ChannelActorState {
             signer,
             local_channel_public_keys: local_pubkeys,
             local_constraints: ChannelConstraints::new(
-                tlc_fee_proportional_millionths,
-                tlc_expiry_delta,
                 local_max_tlc_value_in_flight,
                 local_max_tlc_number_in_flight,
                 local_min_tlc_value,
@@ -4988,8 +4934,6 @@ impl ChannelActorState {
         self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
 
         self.remote_constraints = ChannelConstraints::new(
-            accept_channel.tlc_fee_proportional_millionths,
-            accept_channel.tlc_expiry_delta,
             accept_channel.max_tlc_value_in_flight,
             accept_channel.max_tlc_number_in_flight,
             accept_channel.min_tlc_value,

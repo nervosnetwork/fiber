@@ -3105,9 +3105,6 @@ where
                 max_tlc_number_in_flight: max_tlc_number_in_flight
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 min_tlc_value: tlc_min_value.unwrap_or(self.tlc_min_value),
-                tlc_fee_proportional_millionths: tlc_fee_proportional_millionths
-                    .unwrap_or(self.tlc_fee_proportional_millionths),
-                tlc_expiry_delta: tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
             }),
             network.clone().get_cell(),
         )
@@ -3179,8 +3176,8 @@ where
                 funding_amount,
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
-                    self.tlc_expiry_delta,
-                    self.tlc_fee_proportional_millionths,
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                    tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 seed,
                 open_channel,
@@ -3190,9 +3187,6 @@ where
                     .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
                 max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
                 min_tlc_value: min_tlc_value.unwrap_or(self.tlc_min_value),
-                tlc_fee_proportional_millionths: tlc_fee_proportional_millionths
-                    .unwrap_or(self.tlc_fee_proportional_millionths),
-                tlc_expiry_delta: tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
             }),
             network.clone().get_cell(),
         )
