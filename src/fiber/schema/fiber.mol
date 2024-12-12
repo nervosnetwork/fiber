@@ -105,6 +105,11 @@ table TxAckRBF {
     channel_id: Byte32,
 }
 
+table ChannelMinTlcValueUpdate {
+    channel_id: Byte32,
+    min_tlc_value: Uint128,
+}
+
 table Shutdown {
     channel_id:   Byte32,
     fee_rate:     Uint64,
@@ -341,6 +346,7 @@ union FiberMessage {
     AddTlc,
     RemoveTlc,
     RevokeAndAck,
+    ChannelMinTlcValueUpdate,
     Shutdown,
     ClosingSigned,
     ReestablishChannel,

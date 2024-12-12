@@ -77,10 +77,11 @@ use super::{
     network::FiberMessageWithPeerId,
     serde_utils::EntityHex,
     types::{
-        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelReady, ClosingSigned, CommitmentSigned,
-        EcdsaSignature, FiberChannelMessage, FiberMessage, Hash256, OpenChannel,
-        PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc, RemoveTlcFulfill,
-        RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate, NO_SHARED_SECRET,
+        AcceptChannel, AddTlc, ChannelAnnouncement, ChannelMinTlcValueUpdate, ChannelReady,
+        ClosingSigned, CommitmentSigned, EcdsaSignature, FiberChannelMessage, FiberMessage,
+        Hash256, OpenChannel, PaymentOnionPacket, Privkey, Pubkey, ReestablishChannel, RemoveTlc,
+        RemoveTlcFulfill, RemoveTlcReason, RevokeAndAck, TxCollaborationMsg, TxComplete, TxUpdate,
+        NO_SHARED_SECRET,
     },
     NetworkActorCommand, NetworkActorEvent, NetworkActorMessage, ASSUME_NETWORK_ACTOR_ALIVE,
 };
@@ -559,6 +560,10 @@ where
             }
             FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                 state.handle_reestablish_channel_message(reestablish_channel, &self.network)?;
+                Ok(())
+            }
+            FiberChannelMessage::ChannelMinTlcValueUpdate(ref constraints) => {
+                state.remote_constraints.min_tlc_value = constraints.min_tlc_value;
                 Ok(())
             }
             FiberChannelMessage::TxAbort(_)
@@ -1287,6 +1292,17 @@ where
 
         if let Some(value) = tlc_minimum_value {
             updated |= state.update_our_tlc_min_value(value);
+            self.network
+                .send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                        self.get_remote_peer_id(),
+                        FiberMessage::channel_constraints_update(ChannelMinTlcValueUpdate {
+                            channel_id: state.get_id(),
+                            min_tlc_value: value,
+                        }),
+                    )),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         }
 
         if let Some(fee) = tlc_fee_proportional_millionths {

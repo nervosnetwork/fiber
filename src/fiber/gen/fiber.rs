@@ -8217,6 +8217,271 @@ impl molecule::prelude::Builder for TxAckRBFBuilder {
     }
 }
 #[derive(Clone)]
+pub struct ChannelMinTlcValueUpdate(molecule::bytes::Bytes);
+impl ::core::fmt::LowerHex for ChannelMinTlcValueUpdate {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl ::core::fmt::Debug for ChannelMinTlcValueUpdate {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl ::core::fmt::Display for ChannelMinTlcValueUpdate {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl ::core::default::Default for ChannelMinTlcValueUpdate {
+    fn default() -> Self {
+        let v = molecule::bytes::Bytes::from_static(&Self::DEFAULT_VALUE);
+        ChannelMinTlcValueUpdate::new_unchecked(v)
+    }
+}
+impl ChannelMinTlcValueUpdate {
+    const DEFAULT_VALUE: [u8; 60] = [
+        60, 0, 0, 0, 12, 0, 0, 0, 44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0,
+    ];
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn channel_id(&self) -> Byte32 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32::new_unchecked(self.0.slice(start..end))
+    }
+    pub fn min_tlc_value(&self) -> Uint128 {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Uint128::new_unchecked(self.0.slice(start..end))
+        } else {
+            Uint128::new_unchecked(self.0.slice(start..))
+        }
+    }
+    pub fn as_reader<'r>(&'r self) -> ChannelMinTlcValueUpdateReader<'r> {
+        ChannelMinTlcValueUpdateReader::new_unchecked(self.as_slice())
+    }
+}
+impl molecule::prelude::Entity for ChannelMinTlcValueUpdate {
+    type Builder = ChannelMinTlcValueUpdateBuilder;
+    const NAME: &'static str = "ChannelMinTlcValueUpdate";
+    fn new_unchecked(data: molecule::bytes::Bytes) -> Self {
+        ChannelMinTlcValueUpdate(data)
+    }
+    fn as_bytes(&self) -> molecule::bytes::Bytes {
+        self.0.clone()
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.0[..]
+    }
+    fn from_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        ChannelMinTlcValueUpdateReader::from_slice(slice).map(|reader| reader.to_entity())
+    }
+    fn from_compatible_slice(slice: &[u8]) -> molecule::error::VerificationResult<Self> {
+        ChannelMinTlcValueUpdateReader::from_compatible_slice(slice)
+            .map(|reader| reader.to_entity())
+    }
+    fn new_builder() -> Self::Builder {
+        ::core::default::Default::default()
+    }
+    fn as_builder(self) -> Self::Builder {
+        Self::new_builder()
+            .channel_id(self.channel_id())
+            .min_tlc_value(self.min_tlc_value())
+    }
+}
+#[derive(Clone, Copy)]
+pub struct ChannelMinTlcValueUpdateReader<'r>(&'r [u8]);
+impl<'r> ::core::fmt::LowerHex for ChannelMinTlcValueUpdateReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        use molecule::hex_string;
+        if f.alternate() {
+            write!(f, "0x")?;
+        }
+        write!(f, "{}", hex_string(self.as_slice()))
+    }
+}
+impl<'r> ::core::fmt::Debug for ChannelMinTlcValueUpdateReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:#x})", Self::NAME, self)
+    }
+}
+impl<'r> ::core::fmt::Display for ChannelMinTlcValueUpdateReader<'r> {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{} {{ ", Self::NAME)?;
+        write!(f, "{}: {}", "channel_id", self.channel_id())?;
+        write!(f, ", {}: {}", "min_tlc_value", self.min_tlc_value())?;
+        let extra_count = self.count_extra_fields();
+        if extra_count != 0 {
+            write!(f, ", .. ({} fields)", extra_count)?;
+        }
+        write!(f, " }}")
+    }
+}
+impl<'r> ChannelMinTlcValueUpdateReader<'r> {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn total_size(&self) -> usize {
+        molecule::unpack_number(self.as_slice()) as usize
+    }
+    pub fn field_count(&self) -> usize {
+        if self.total_size() == molecule::NUMBER_SIZE {
+            0
+        } else {
+            (molecule::unpack_number(&self.as_slice()[molecule::NUMBER_SIZE..]) as usize / 4) - 1
+        }
+    }
+    pub fn count_extra_fields(&self) -> usize {
+        self.field_count() - Self::FIELD_COUNT
+    }
+    pub fn has_extra_fields(&self) -> bool {
+        Self::FIELD_COUNT != self.field_count()
+    }
+    pub fn channel_id(&self) -> Byte32Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[4..]) as usize;
+        let end = molecule::unpack_number(&slice[8..]) as usize;
+        Byte32Reader::new_unchecked(&self.as_slice()[start..end])
+    }
+    pub fn min_tlc_value(&self) -> Uint128Reader<'r> {
+        let slice = self.as_slice();
+        let start = molecule::unpack_number(&slice[8..]) as usize;
+        if self.has_extra_fields() {
+            let end = molecule::unpack_number(&slice[12..]) as usize;
+            Uint128Reader::new_unchecked(&self.as_slice()[start..end])
+        } else {
+            Uint128Reader::new_unchecked(&self.as_slice()[start..])
+        }
+    }
+}
+impl<'r> molecule::prelude::Reader<'r> for ChannelMinTlcValueUpdateReader<'r> {
+    type Entity = ChannelMinTlcValueUpdate;
+    const NAME: &'static str = "ChannelMinTlcValueUpdateReader";
+    fn to_entity(&self) -> Self::Entity {
+        Self::Entity::new_unchecked(self.as_slice().to_owned().into())
+    }
+    fn new_unchecked(slice: &'r [u8]) -> Self {
+        ChannelMinTlcValueUpdateReader(slice)
+    }
+    fn as_slice(&self) -> &'r [u8] {
+        self.0
+    }
+    fn verify(slice: &[u8], compatible: bool) -> molecule::error::VerificationResult<()> {
+        use molecule::verification_error as ve;
+        let slice_len = slice.len();
+        if slice_len < molecule::NUMBER_SIZE {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
+        }
+        let total_size = molecule::unpack_number(slice) as usize;
+        if slice_len != total_size {
+            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        }
+        if slice_len < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE * 2, slice_len);
+        }
+        let offset_first = molecule::unpack_number(&slice[molecule::NUMBER_SIZE..]) as usize;
+        if offset_first % molecule::NUMBER_SIZE != 0 || offset_first < molecule::NUMBER_SIZE * 2 {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        if slice_len < offset_first {
+            return ve!(Self, HeaderIsBroken, offset_first, slice_len);
+        }
+        let field_count = offset_first / molecule::NUMBER_SIZE - 1;
+        if field_count < Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        } else if !compatible && field_count > Self::FIELD_COUNT {
+            return ve!(Self, FieldCountNotMatch, Self::FIELD_COUNT, field_count);
+        };
+        let mut offsets: Vec<usize> = slice[molecule::NUMBER_SIZE..offset_first]
+            .chunks_exact(molecule::NUMBER_SIZE)
+            .map(|x| molecule::unpack_number(x) as usize)
+            .collect();
+        offsets.push(total_size);
+        if offsets.windows(2).any(|i| i[0] > i[1]) {
+            return ve!(Self, OffsetsNotMatch);
+        }
+        Byte32Reader::verify(&slice[offsets[0]..offsets[1]], compatible)?;
+        Uint128Reader::verify(&slice[offsets[1]..offsets[2]], compatible)?;
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct ChannelMinTlcValueUpdateBuilder {
+    pub(crate) channel_id: Byte32,
+    pub(crate) min_tlc_value: Uint128,
+}
+impl ChannelMinTlcValueUpdateBuilder {
+    pub const FIELD_COUNT: usize = 2;
+    pub fn channel_id(mut self, v: Byte32) -> Self {
+        self.channel_id = v;
+        self
+    }
+    pub fn min_tlc_value(mut self, v: Uint128) -> Self {
+        self.min_tlc_value = v;
+        self
+    }
+}
+impl molecule::prelude::Builder for ChannelMinTlcValueUpdateBuilder {
+    type Entity = ChannelMinTlcValueUpdate;
+    const NAME: &'static str = "ChannelMinTlcValueUpdateBuilder";
+    fn expected_length(&self) -> usize {
+        molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1)
+            + self.channel_id.as_slice().len()
+            + self.min_tlc_value.as_slice().len()
+    }
+    fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
+        let mut total_size = molecule::NUMBER_SIZE * (Self::FIELD_COUNT + 1);
+        let mut offsets = Vec::with_capacity(Self::FIELD_COUNT);
+        offsets.push(total_size);
+        total_size += self.channel_id.as_slice().len();
+        offsets.push(total_size);
+        total_size += self.min_tlc_value.as_slice().len();
+        writer.write_all(&molecule::pack_number(total_size as molecule::Number))?;
+        for offset in offsets.into_iter() {
+            writer.write_all(&molecule::pack_number(offset as molecule::Number))?;
+        }
+        writer.write_all(self.channel_id.as_slice())?;
+        writer.write_all(self.min_tlc_value.as_slice())?;
+        Ok(())
+    }
+    fn build(&self) -> Self::Entity {
+        let mut inner = Vec::with_capacity(self.expected_length());
+        self.write(&mut inner)
+            .unwrap_or_else(|_| panic!("{} build should be ok", Self::NAME));
+        ChannelMinTlcValueUpdate::new_unchecked(inner.into())
+    }
+}
+#[derive(Clone)]
 pub struct Shutdown(molecule::bytes::Bytes);
 impl ::core::fmt::LowerHex for Shutdown {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
@@ -18471,7 +18736,7 @@ impl FiberMessage {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
-    pub const ITEMS_COUNT: usize = 26;
+    pub const ITEMS_COUNT: usize = 27;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -18491,19 +18756,20 @@ impl FiberMessage {
             10 => AddTlc::new_unchecked(inner).into(),
             11 => RemoveTlc::new_unchecked(inner).into(),
             12 => RevokeAndAck::new_unchecked(inner).into(),
-            13 => Shutdown::new_unchecked(inner).into(),
-            14 => ClosingSigned::new_unchecked(inner).into(),
-            15 => ReestablishChannel::new_unchecked(inner).into(),
-            16 => AnnouncementSignatures::new_unchecked(inner).into(),
-            17 => NodeAnnouncement::new_unchecked(inner).into(),
-            18 => ChannelAnnouncement::new_unchecked(inner).into(),
-            19 => ChannelUpdate::new_unchecked(inner).into(),
-            20 => GetBroadcastMessages::new_unchecked(inner).into(),
-            21 => GetBroadcastMessagesResult::new_unchecked(inner).into(),
-            22 => QueryChannelsWithinBlockRange::new_unchecked(inner).into(),
-            23 => QueryChannelsWithinBlockRangeResult::new_unchecked(inner).into(),
-            24 => QueryBroadcastMessagesWithinTimeRange::new_unchecked(inner).into(),
-            25 => QueryBroadcastMessagesWithinTimeRangeResult::new_unchecked(inner).into(),
+            13 => ChannelMinTlcValueUpdate::new_unchecked(inner).into(),
+            14 => Shutdown::new_unchecked(inner).into(),
+            15 => ClosingSigned::new_unchecked(inner).into(),
+            16 => ReestablishChannel::new_unchecked(inner).into(),
+            17 => AnnouncementSignatures::new_unchecked(inner).into(),
+            18 => NodeAnnouncement::new_unchecked(inner).into(),
+            19 => ChannelAnnouncement::new_unchecked(inner).into(),
+            20 => ChannelUpdate::new_unchecked(inner).into(),
+            21 => GetBroadcastMessages::new_unchecked(inner).into(),
+            22 => GetBroadcastMessagesResult::new_unchecked(inner).into(),
+            23 => QueryChannelsWithinBlockRange::new_unchecked(inner).into(),
+            24 => QueryChannelsWithinBlockRangeResult::new_unchecked(inner).into(),
+            25 => QueryBroadcastMessagesWithinTimeRange::new_unchecked(inner).into(),
+            26 => QueryBroadcastMessagesWithinTimeRangeResult::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -18560,7 +18826,7 @@ impl<'r> ::core::fmt::Display for FiberMessageReader<'r> {
     }
 }
 impl<'r> FiberMessageReader<'r> {
-    pub const ITEMS_COUNT: usize = 26;
+    pub const ITEMS_COUNT: usize = 27;
     pub fn item_id(&self) -> molecule::Number {
         molecule::unpack_number(self.as_slice())
     }
@@ -18580,19 +18846,20 @@ impl<'r> FiberMessageReader<'r> {
             10 => AddTlcReader::new_unchecked(inner).into(),
             11 => RemoveTlcReader::new_unchecked(inner).into(),
             12 => RevokeAndAckReader::new_unchecked(inner).into(),
-            13 => ShutdownReader::new_unchecked(inner).into(),
-            14 => ClosingSignedReader::new_unchecked(inner).into(),
-            15 => ReestablishChannelReader::new_unchecked(inner).into(),
-            16 => AnnouncementSignaturesReader::new_unchecked(inner).into(),
-            17 => NodeAnnouncementReader::new_unchecked(inner).into(),
-            18 => ChannelAnnouncementReader::new_unchecked(inner).into(),
-            19 => ChannelUpdateReader::new_unchecked(inner).into(),
-            20 => GetBroadcastMessagesReader::new_unchecked(inner).into(),
-            21 => GetBroadcastMessagesResultReader::new_unchecked(inner).into(),
-            22 => QueryChannelsWithinBlockRangeReader::new_unchecked(inner).into(),
-            23 => QueryChannelsWithinBlockRangeResultReader::new_unchecked(inner).into(),
-            24 => QueryBroadcastMessagesWithinTimeRangeReader::new_unchecked(inner).into(),
-            25 => QueryBroadcastMessagesWithinTimeRangeResultReader::new_unchecked(inner).into(),
+            13 => ChannelMinTlcValueUpdateReader::new_unchecked(inner).into(),
+            14 => ShutdownReader::new_unchecked(inner).into(),
+            15 => ClosingSignedReader::new_unchecked(inner).into(),
+            16 => ReestablishChannelReader::new_unchecked(inner).into(),
+            17 => AnnouncementSignaturesReader::new_unchecked(inner).into(),
+            18 => NodeAnnouncementReader::new_unchecked(inner).into(),
+            19 => ChannelAnnouncementReader::new_unchecked(inner).into(),
+            20 => ChannelUpdateReader::new_unchecked(inner).into(),
+            21 => GetBroadcastMessagesReader::new_unchecked(inner).into(),
+            22 => GetBroadcastMessagesResultReader::new_unchecked(inner).into(),
+            23 => QueryChannelsWithinBlockRangeReader::new_unchecked(inner).into(),
+            24 => QueryChannelsWithinBlockRangeResultReader::new_unchecked(inner).into(),
+            25 => QueryBroadcastMessagesWithinTimeRangeReader::new_unchecked(inner).into(),
+            26 => QueryBroadcastMessagesWithinTimeRangeResultReader::new_unchecked(inner).into(),
             _ => panic!("{}: invalid data", Self::NAME),
         }
     }
@@ -18631,19 +18898,20 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
             10 => AddTlcReader::verify(inner_slice, compatible),
             11 => RemoveTlcReader::verify(inner_slice, compatible),
             12 => RevokeAndAckReader::verify(inner_slice, compatible),
-            13 => ShutdownReader::verify(inner_slice, compatible),
-            14 => ClosingSignedReader::verify(inner_slice, compatible),
-            15 => ReestablishChannelReader::verify(inner_slice, compatible),
-            16 => AnnouncementSignaturesReader::verify(inner_slice, compatible),
-            17 => NodeAnnouncementReader::verify(inner_slice, compatible),
-            18 => ChannelAnnouncementReader::verify(inner_slice, compatible),
-            19 => ChannelUpdateReader::verify(inner_slice, compatible),
-            20 => GetBroadcastMessagesReader::verify(inner_slice, compatible),
-            21 => GetBroadcastMessagesResultReader::verify(inner_slice, compatible),
-            22 => QueryChannelsWithinBlockRangeReader::verify(inner_slice, compatible),
-            23 => QueryChannelsWithinBlockRangeResultReader::verify(inner_slice, compatible),
-            24 => QueryBroadcastMessagesWithinTimeRangeReader::verify(inner_slice, compatible),
-            25 => {
+            13 => ChannelMinTlcValueUpdateReader::verify(inner_slice, compatible),
+            14 => ShutdownReader::verify(inner_slice, compatible),
+            15 => ClosingSignedReader::verify(inner_slice, compatible),
+            16 => ReestablishChannelReader::verify(inner_slice, compatible),
+            17 => AnnouncementSignaturesReader::verify(inner_slice, compatible),
+            18 => NodeAnnouncementReader::verify(inner_slice, compatible),
+            19 => ChannelAnnouncementReader::verify(inner_slice, compatible),
+            20 => ChannelUpdateReader::verify(inner_slice, compatible),
+            21 => GetBroadcastMessagesReader::verify(inner_slice, compatible),
+            22 => GetBroadcastMessagesResultReader::verify(inner_slice, compatible),
+            23 => QueryChannelsWithinBlockRangeReader::verify(inner_slice, compatible),
+            24 => QueryChannelsWithinBlockRangeResultReader::verify(inner_slice, compatible),
+            25 => QueryBroadcastMessagesWithinTimeRangeReader::verify(inner_slice, compatible),
+            26 => {
                 QueryBroadcastMessagesWithinTimeRangeResultReader::verify(inner_slice, compatible)
             }
             _ => ve!(Self, UnknownItem, Self::ITEMS_COUNT, item_id),
@@ -18654,7 +18922,7 @@ impl<'r> molecule::prelude::Reader<'r> for FiberMessageReader<'r> {
 #[derive(Clone, Debug, Default)]
 pub struct FiberMessageBuilder(pub(crate) FiberMessageUnion);
 impl FiberMessageBuilder {
-    pub const ITEMS_COUNT: usize = 26;
+    pub const ITEMS_COUNT: usize = 27;
     pub fn set<I>(mut self, v: I) -> Self
     where
         I: ::core::convert::Into<FiberMessageUnion>,
@@ -18695,6 +18963,7 @@ pub enum FiberMessageUnion {
     AddTlc(AddTlc),
     RemoveTlc(RemoveTlc),
     RevokeAndAck(RevokeAndAck),
+    ChannelMinTlcValueUpdate(ChannelMinTlcValueUpdate),
     Shutdown(Shutdown),
     ClosingSigned(ClosingSigned),
     ReestablishChannel(ReestablishChannel),
@@ -18724,6 +18993,7 @@ pub enum FiberMessageUnionReader<'r> {
     AddTlc(AddTlcReader<'r>),
     RemoveTlc(RemoveTlcReader<'r>),
     RevokeAndAck(RevokeAndAckReader<'r>),
+    ChannelMinTlcValueUpdate(ChannelMinTlcValueUpdateReader<'r>),
     Shutdown(ShutdownReader<'r>),
     ClosingSigned(ClosingSignedReader<'r>),
     ReestablishChannel(ReestablishChannelReader<'r>),
@@ -18786,6 +19056,15 @@ impl ::core::fmt::Display for FiberMessageUnion {
             }
             FiberMessageUnion::RevokeAndAck(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
+            }
+            FiberMessageUnion::ChannelMinTlcValueUpdate(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    ChannelMinTlcValueUpdate::NAME,
+                    item
+                )
             }
             FiberMessageUnion::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
@@ -18913,6 +19192,15 @@ impl<'r> ::core::fmt::Display for FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::RevokeAndAck(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, RevokeAndAck::NAME, item)
             }
+            FiberMessageUnionReader::ChannelMinTlcValueUpdate(ref item) => {
+                write!(
+                    f,
+                    "{}::{}({})",
+                    Self::NAME,
+                    ChannelMinTlcValueUpdate::NAME,
+                    item
+                )
+            }
             FiberMessageUnionReader::Shutdown(ref item) => {
                 write!(f, "{}::{}({})", Self::NAME, Shutdown::NAME, item)
             }
@@ -19013,6 +19301,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(ref item) => write!(f, "{}", item),
             FiberMessageUnion::RemoveTlc(ref item) => write!(f, "{}", item),
             FiberMessageUnion::RevokeAndAck(ref item) => write!(f, "{}", item),
+            FiberMessageUnion::ChannelMinTlcValueUpdate(ref item) => write!(f, "{}", item),
             FiberMessageUnion::Shutdown(ref item) => write!(f, "{}", item),
             FiberMessageUnion::ClosingSigned(ref item) => write!(f, "{}", item),
             FiberMessageUnion::ReestablishChannel(ref item) => write!(f, "{}", item),
@@ -19051,6 +19340,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::AddTlc(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::RemoveTlc(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::RevokeAndAck(ref item) => write!(f, "{}", item),
+            FiberMessageUnionReader::ChannelMinTlcValueUpdate(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::Shutdown(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::ClosingSigned(ref item) => write!(f, "{}", item),
             FiberMessageUnionReader::ReestablishChannel(ref item) => write!(f, "{}", item),
@@ -19138,6 +19428,11 @@ impl ::core::convert::From<RemoveTlc> for FiberMessageUnion {
 impl ::core::convert::From<RevokeAndAck> for FiberMessageUnion {
     fn from(item: RevokeAndAck) -> Self {
         FiberMessageUnion::RevokeAndAck(item)
+    }
+}
+impl ::core::convert::From<ChannelMinTlcValueUpdate> for FiberMessageUnion {
+    fn from(item: ChannelMinTlcValueUpdate) -> Self {
+        FiberMessageUnion::ChannelMinTlcValueUpdate(item)
     }
 }
 impl ::core::convert::From<Shutdown> for FiberMessageUnion {
@@ -19270,6 +19565,11 @@ impl<'r> ::core::convert::From<RevokeAndAckReader<'r>> for FiberMessageUnionRead
         FiberMessageUnionReader::RevokeAndAck(item)
     }
 }
+impl<'r> ::core::convert::From<ChannelMinTlcValueUpdateReader<'r>> for FiberMessageUnionReader<'r> {
+    fn from(item: ChannelMinTlcValueUpdateReader<'r>) -> Self {
+        FiberMessageUnionReader::ChannelMinTlcValueUpdate(item)
+    }
+}
 impl<'r> ::core::convert::From<ShutdownReader<'r>> for FiberMessageUnionReader<'r> {
     fn from(item: ShutdownReader<'r>) -> Self {
         FiberMessageUnionReader::Shutdown(item)
@@ -19362,6 +19662,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(item) => item.as_bytes(),
             FiberMessageUnion::RemoveTlc(item) => item.as_bytes(),
             FiberMessageUnion::RevokeAndAck(item) => item.as_bytes(),
+            FiberMessageUnion::ChannelMinTlcValueUpdate(item) => item.as_bytes(),
             FiberMessageUnion::Shutdown(item) => item.as_bytes(),
             FiberMessageUnion::ClosingSigned(item) => item.as_bytes(),
             FiberMessageUnion::ReestablishChannel(item) => item.as_bytes(),
@@ -19392,6 +19693,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(item) => item.as_slice(),
             FiberMessageUnion::RemoveTlc(item) => item.as_slice(),
             FiberMessageUnion::RevokeAndAck(item) => item.as_slice(),
+            FiberMessageUnion::ChannelMinTlcValueUpdate(item) => item.as_slice(),
             FiberMessageUnion::Shutdown(item) => item.as_slice(),
             FiberMessageUnion::ClosingSigned(item) => item.as_slice(),
             FiberMessageUnion::ReestablishChannel(item) => item.as_slice(),
@@ -19422,19 +19724,20 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(_) => 10,
             FiberMessageUnion::RemoveTlc(_) => 11,
             FiberMessageUnion::RevokeAndAck(_) => 12,
-            FiberMessageUnion::Shutdown(_) => 13,
-            FiberMessageUnion::ClosingSigned(_) => 14,
-            FiberMessageUnion::ReestablishChannel(_) => 15,
-            FiberMessageUnion::AnnouncementSignatures(_) => 16,
-            FiberMessageUnion::NodeAnnouncement(_) => 17,
-            FiberMessageUnion::ChannelAnnouncement(_) => 18,
-            FiberMessageUnion::ChannelUpdate(_) => 19,
-            FiberMessageUnion::GetBroadcastMessages(_) => 20,
-            FiberMessageUnion::GetBroadcastMessagesResult(_) => 21,
-            FiberMessageUnion::QueryChannelsWithinBlockRange(_) => 22,
-            FiberMessageUnion::QueryChannelsWithinBlockRangeResult(_) => 23,
-            FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(_) => 24,
-            FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(_) => 25,
+            FiberMessageUnion::ChannelMinTlcValueUpdate(_) => 13,
+            FiberMessageUnion::Shutdown(_) => 14,
+            FiberMessageUnion::ClosingSigned(_) => 15,
+            FiberMessageUnion::ReestablishChannel(_) => 16,
+            FiberMessageUnion::AnnouncementSignatures(_) => 17,
+            FiberMessageUnion::NodeAnnouncement(_) => 18,
+            FiberMessageUnion::ChannelAnnouncement(_) => 19,
+            FiberMessageUnion::ChannelUpdate(_) => 20,
+            FiberMessageUnion::GetBroadcastMessages(_) => 21,
+            FiberMessageUnion::GetBroadcastMessagesResult(_) => 22,
+            FiberMessageUnion::QueryChannelsWithinBlockRange(_) => 23,
+            FiberMessageUnion::QueryChannelsWithinBlockRangeResult(_) => 24,
+            FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(_) => 25,
+            FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(_) => 26,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -19452,6 +19755,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(_) => "AddTlc",
             FiberMessageUnion::RemoveTlc(_) => "RemoveTlc",
             FiberMessageUnion::RevokeAndAck(_) => "RevokeAndAck",
+            FiberMessageUnion::ChannelMinTlcValueUpdate(_) => "ChannelMinTlcValueUpdate",
             FiberMessageUnion::Shutdown(_) => "Shutdown",
             FiberMessageUnion::ClosingSigned(_) => "ClosingSigned",
             FiberMessageUnion::ReestablishChannel(_) => "ReestablishChannel",
@@ -19488,6 +19792,7 @@ impl FiberMessageUnion {
             FiberMessageUnion::AddTlc(item) => item.as_reader().into(),
             FiberMessageUnion::RemoveTlc(item) => item.as_reader().into(),
             FiberMessageUnion::RevokeAndAck(item) => item.as_reader().into(),
+            FiberMessageUnion::ChannelMinTlcValueUpdate(item) => item.as_reader().into(),
             FiberMessageUnion::Shutdown(item) => item.as_reader().into(),
             FiberMessageUnion::ClosingSigned(item) => item.as_reader().into(),
             FiberMessageUnion::ReestablishChannel(item) => item.as_reader().into(),
@@ -19525,6 +19830,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::AddTlc(item) => item.as_slice(),
             FiberMessageUnionReader::RemoveTlc(item) => item.as_slice(),
             FiberMessageUnionReader::RevokeAndAck(item) => item.as_slice(),
+            FiberMessageUnionReader::ChannelMinTlcValueUpdate(item) => item.as_slice(),
             FiberMessageUnionReader::Shutdown(item) => item.as_slice(),
             FiberMessageUnionReader::ClosingSigned(item) => item.as_slice(),
             FiberMessageUnionReader::ReestablishChannel(item) => item.as_slice(),
@@ -19557,19 +19863,20 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::AddTlc(_) => 10,
             FiberMessageUnionReader::RemoveTlc(_) => 11,
             FiberMessageUnionReader::RevokeAndAck(_) => 12,
-            FiberMessageUnionReader::Shutdown(_) => 13,
-            FiberMessageUnionReader::ClosingSigned(_) => 14,
-            FiberMessageUnionReader::ReestablishChannel(_) => 15,
-            FiberMessageUnionReader::AnnouncementSignatures(_) => 16,
-            FiberMessageUnionReader::NodeAnnouncement(_) => 17,
-            FiberMessageUnionReader::ChannelAnnouncement(_) => 18,
-            FiberMessageUnionReader::ChannelUpdate(_) => 19,
-            FiberMessageUnionReader::GetBroadcastMessages(_) => 20,
-            FiberMessageUnionReader::GetBroadcastMessagesResult(_) => 21,
-            FiberMessageUnionReader::QueryChannelsWithinBlockRange(_) => 22,
-            FiberMessageUnionReader::QueryChannelsWithinBlockRangeResult(_) => 23,
-            FiberMessageUnionReader::QueryBroadcastMessagesWithinTimeRange(_) => 24,
-            FiberMessageUnionReader::QueryBroadcastMessagesWithinTimeRangeResult(_) => 25,
+            FiberMessageUnionReader::ChannelMinTlcValueUpdate(_) => 13,
+            FiberMessageUnionReader::Shutdown(_) => 14,
+            FiberMessageUnionReader::ClosingSigned(_) => 15,
+            FiberMessageUnionReader::ReestablishChannel(_) => 16,
+            FiberMessageUnionReader::AnnouncementSignatures(_) => 17,
+            FiberMessageUnionReader::NodeAnnouncement(_) => 18,
+            FiberMessageUnionReader::ChannelAnnouncement(_) => 19,
+            FiberMessageUnionReader::ChannelUpdate(_) => 20,
+            FiberMessageUnionReader::GetBroadcastMessages(_) => 21,
+            FiberMessageUnionReader::GetBroadcastMessagesResult(_) => 22,
+            FiberMessageUnionReader::QueryChannelsWithinBlockRange(_) => 23,
+            FiberMessageUnionReader::QueryChannelsWithinBlockRangeResult(_) => 24,
+            FiberMessageUnionReader::QueryBroadcastMessagesWithinTimeRange(_) => 25,
+            FiberMessageUnionReader::QueryBroadcastMessagesWithinTimeRangeResult(_) => 26,
         }
     }
     pub fn item_name(&self) -> &str {
@@ -19587,6 +19894,7 @@ impl<'r> FiberMessageUnionReader<'r> {
             FiberMessageUnionReader::AddTlc(_) => "AddTlc",
             FiberMessageUnionReader::RemoveTlc(_) => "RemoveTlc",
             FiberMessageUnionReader::RevokeAndAck(_) => "RevokeAndAck",
+            FiberMessageUnionReader::ChannelMinTlcValueUpdate(_) => "ChannelMinTlcValueUpdate",
             FiberMessageUnionReader::Shutdown(_) => "Shutdown",
             FiberMessageUnionReader::ClosingSigned(_) => "ClosingSigned",
             FiberMessageUnionReader::ReestablishChannel(_) => "ReestablishChannel",
@@ -19673,6 +19981,11 @@ impl From<RemoveTlc> for FiberMessage {
 }
 impl From<RevokeAndAck> for FiberMessage {
     fn from(value: RevokeAndAck) -> Self {
+        Self::new_builder().set(value).build()
+    }
+}
+impl From<ChannelMinTlcValueUpdate> for FiberMessage {
+    fn from(value: ChannelMinTlcValueUpdate) -> Self {
         Self::new_builder().set(value).build()
     }
 }

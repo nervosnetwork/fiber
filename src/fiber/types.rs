@@ -1133,6 +1133,34 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelMinTlcValueUpdate {
+    pub channel_id: Hash256,
+    pub min_tlc_value: u128,
+}
+
+impl From<ChannelMinTlcValueUpdate> for molecule_fiber::ChannelMinTlcValueUpdate {
+    fn from(channel_constraints_update: ChannelMinTlcValueUpdate) -> Self {
+        molecule_fiber::ChannelMinTlcValueUpdate::new_builder()
+            .channel_id(channel_constraints_update.channel_id.into())
+            .min_tlc_value(channel_constraints_update.min_tlc_value.pack())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_fiber::ChannelMinTlcValueUpdate> for ChannelMinTlcValueUpdate {
+    type Error = Error;
+
+    fn try_from(
+        channel_constraints_update: molecule_fiber::ChannelMinTlcValueUpdate,
+    ) -> Result<Self, Self::Error> {
+        Ok(ChannelMinTlcValueUpdate {
+            channel_id: channel_constraints_update.channel_id().into(),
+            min_tlc_value: channel_constraints_update.min_tlc_value().unpack(),
+        })
+    }
+}
+
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlcFulfill {
     pub payment_preimage: Hash256,
@@ -2150,6 +2178,14 @@ impl FiberMessage {
         ))
     }
 
+    pub fn channel_constraints_update(
+        channel_constraints_update: ChannelMinTlcValueUpdate,
+    ) -> Self {
+        FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelMinTlcValueUpdate(
+            channel_constraints_update,
+        ))
+    }
+
     pub fn node_announcement(node_announcement: NodeAnnouncement) -> Self {
         FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(node_announcement))
     }
@@ -2183,6 +2219,7 @@ pub enum FiberChannelMessage {
     RemoveTlc(RemoveTlc),
     ReestablishChannel(ReestablishChannel),
     AnnouncementSignatures(AnnouncementSignatures),
+    ChannelMinTlcValueUpdate(ChannelMinTlcValueUpdate),
 }
 
 impl FiberChannelMessage {
@@ -2204,6 +2241,9 @@ impl FiberChannelMessage {
             FiberChannelMessage::AddTlc(add_tlc) => add_tlc.channel_id,
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => revoke_and_ack.channel_id,
             FiberChannelMessage::RemoveTlc(remove_tlc) => remove_tlc.channel_id,
+            FiberChannelMessage::ChannelMinTlcValueUpdate(channel_constraints_update) => {
+                channel_constraints_update.channel_id
+            }
             FiberChannelMessage::ReestablishChannel(reestablish_channel) => {
                 reestablish_channel.channel_id
             }
@@ -2803,6 +2843,11 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                         announcement_signatures.into(),
                     )
                 }
+                FiberChannelMessage::ChannelMinTlcValueUpdate(channel_constraints_update) => {
+                    molecule_fiber::FiberMessageUnion::ChannelMinTlcValueUpdate(
+                        channel_constraints_update.into(),
+                    )
+                }
             },
             FiberMessage::BroadcastMessage(m) => match m {
                 FiberBroadcastMessage::NodeAnnouncement(node_annoucement) => {
@@ -2956,6 +3001,13 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
             molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update) => {
                 FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
                     channel_update.try_into()?,
+                ))
+            }
+            molecule_fiber::FiberMessageUnion::ChannelMinTlcValueUpdate(
+                channel_constraints_update,
+            ) => {
+                FiberMessage::ChannelNormalOperation(FiberChannelMessage::ChannelMinTlcValueUpdate(
+                    channel_constraints_update.try_into()?,
                 ))
             }
             molecule_fiber::FiberMessageUnion::GetBroadcastMessages(get_broadcast_messages) => {
