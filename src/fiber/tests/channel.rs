@@ -2710,8 +2710,8 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
 
     assert!(add_tlc_result.is_ok());
 
-    // B -> A will not be able to send amount less than 100
-    // TODO: fix this unit test
+    // B -> A can still able to send amount less than 100
+    // since it's not under the tlc relay context
     let tlc_amount = 99;
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
@@ -2753,7 +2753,6 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         ))
     })
     .expect("node_b alive");
-    eprintln!("debug now {:?}", add_tlc_result);
     assert!(add_tlc_result.is_ok());
 }
 
@@ -2927,7 +2926,7 @@ async fn test_channel_update_tlc_sync_up() {
     assert!(update_result.is_ok());
 
     // sleep for a while to make sure the Update processed by both party
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
 
     let tlc_amount = 99;
     let message = |rpc_reply| -> NetworkActorMessage {

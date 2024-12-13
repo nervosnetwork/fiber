@@ -577,9 +577,9 @@ where
         assert!(!route.is_empty());
 
         let mut current_amount = amount;
-        let mut current_expiry = 0;
-        let mut hops_data = vec![];
         let current_time = now_timestamp_as_millis_u64();
+        let mut current_expiry = current_time + final_tlc_expiry_delta;
+        let mut hops_data = vec![];
 
         for i in (0..route.len()).rev() {
             let is_last = i == route.len() - 1;
@@ -591,15 +591,15 @@ where
                     Some(route[i + 1].channel_outpoint.clone()),
                 )
             };
-            let (fee, expiry) = if is_last {
-                (0, current_time + final_tlc_expiry_delta)
+            let (fee, expiry_delta) = if is_last {
+                (0, 0)
             } else {
                 let channel_info = self
                     .get_channel(&route[i].channel_outpoint)
                     .expect("channel not found");
                 let channel_update = channel_info
                     .get_update_info_with(route[i].target)
-                    .expect("channel_update is none");
+                    .expect("channel_update not found");
                 let fee_rate = channel_update.fee_rate;
                 let fee =
                     calculate_tlc_forward_fee(current_amount, fee_rate as u128).expect("fee is ok");
@@ -614,6 +614,7 @@ where
             };
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
+
             hops_data.push(PaymentHopData {
                 amount: current_amount,
                 next_hop,
@@ -622,7 +623,7 @@ where
                 funding_tx_hash,
                 payment_preimage: if is_last { preimage } else { None },
             });
-            current_expiry += expiry;
+            current_expiry += expiry_delta;
             current_amount += fee;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.

@@ -1306,6 +1306,7 @@ fn test_graph_payment_expiry_is_in_right_order() {
     let payment_data = SendPaymentData::new(command);
     assert!(payment_data.is_ok());
 
+    let current_time = now_timestamp_as_millis_u64();
     let route = network.graph.build_route(payment_data.unwrap());
     assert!(route.is_ok());
     let route = route.unwrap();
@@ -1314,7 +1315,35 @@ fn test_graph_payment_expiry_is_in_right_order() {
     assert_eq!(expiries.len(), 4);
     assert_eq!(expiries[0] - expiries[1], 11);
     assert_eq!(expiries[1] - expiries[2], 11);
-    assert_eq!(expiries[3], 0);
-    let expected_timestamp = now_timestamp_as_millis_u64() + DEFAULT_TLC_EXPIRY_DELTA;
-    assert!(expiries[2] <= expected_timestamp);
+    assert_eq!(expiries[2], expiries[3]);
+    assert!(expiries[3] >= current_time + DEFAULT_TLC_EXPIRY_DELTA);
+
+    let final_tlc_expiry_delta = 987654;
+    let command = SendPaymentCommand {
+        target_pubkey: Some(node3.into()),
+        amount: Some(100),
+        payment_hash: Some(Hash256::default()),
+        final_tlc_expiry_delta: Some(final_tlc_expiry_delta),
+        tlc_expiry_limit: None,
+        invoice: None,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: Some(false),
+        udt_type_script: None,
+        allow_self_payment: false,
+        dry_run: false,
+    };
+    let payment_data = SendPaymentData::new(command);
+    eprintln!("{:?}", payment_data);
+    assert!(payment_data.is_ok());
+
+    let current_time = now_timestamp_as_millis_u64();
+    let route = network.graph.build_route(payment_data.unwrap());
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    let expiries = route.iter().map(|e| e.expiry).collect::<Vec<_>>();
+    // we set 11 as tlc expiry delta in the test
+    assert_eq!(expiries.len(), 4);
+    assert!(expiries[3] >= current_time + final_tlc_expiry_delta);
 }

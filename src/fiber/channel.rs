@@ -582,22 +582,30 @@ where
             ProcessingChannelError::FinalIncorrectHTLCAmount => {
                 TlcErrorCode::FinalIncorrectTlcAmount
             }
+            ProcessingChannelError::IncorrectTlcExpiry => TlcErrorCode::IncorrectTlcExpiry,
+            ProcessingChannelError::IncorrectFinalTlcExpiry => {
+                TlcErrorCode::FinalIncorrectExpiryDelta
+            }
             ProcessingChannelError::TlcAmountIsTooLow => TlcErrorCode::AmountBelowMinimum,
             ProcessingChannelError::TlcNumberExceedLimit
             | ProcessingChannelError::TlcAmountExceedLimit
             | ProcessingChannelError::TlcValueInflightExceedLimit
             | ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
-            ProcessingChannelError::InvalidState(_) => match state.state {
+            ProcessingChannelError::InvalidState(error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
                     TlcErrorCode::PermanentChannelFailure
                 }
                 ChannelState::ChannelReady() => {
-                    // we expect `ChannelReady` will be both OK for tlc forwarding,
-                    // so here are the unreachable point in normal workflow,
-                    // set `TemporaryNodeFailure` for general temporary failure of the processing node here
-                    assert!(false, "unreachable point in normal workflow");
-                    TlcErrorCode::TemporaryNodeFailure
+                    if error.contains("channel is not public or disabled") {
+                        TlcErrorCode::TemporaryChannelFailure
+                    } else {
+                        // we expect `ChannelReady` will be both OK for tlc forwarding,
+                        // so here are the unreachable point in normal workflow,
+                        // set `TemporaryNodeFailure` for general temporary failure of the processing node here
+                        assert!(false, "unreachable point in normal workflow");
+                        TlcErrorCode::TemporaryNodeFailure
+                    }
                 }
                 // otherwise, channel maybe not ready
                 _ => TlcErrorCode::TemporaryChannelFailure,
@@ -645,31 +653,29 @@ where
         for tlc_info in pending_apply_tlcs {
             match tlc_info {
                 TlcKind::AddTlc(add_tlc) => {
-                    if add_tlc.is_received() {
-                        if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await
-                        {
-                            let error_detail = self.get_tlc_detail_error(state, &e).await;
-                            self.register_retryable_tlc_remove(
-                                myself,
-                                state,
-                                add_tlc.tlc_id,
-                                RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                    error_detail.clone(),
-                                    &NO_SHARED_SECRET,
-                                )),
-                            )
-                            .await;
-                            self.network
-                                .clone()
-                                .send_message(NetworkActorMessage::new_notification(
-                                    NetworkServiceEvent::AddTlcFailed(
-                                        state.get_local_peer_id(),
-                                        add_tlc.payment_hash,
-                                        error_detail,
-                                    ),
-                                ))
-                                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                        }
+                    assert!(add_tlc.is_received());
+                    if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
+                        let error_detail = self.get_tlc_detail_error(state, &e).await;
+                        self.register_retryable_tlc_remove(
+                            myself,
+                            state,
+                            add_tlc.tlc_id,
+                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                                error_detail.clone(),
+                                &NO_SHARED_SECRET,
+                            )),
+                        )
+                        .await;
+                        self.network
+                            .clone()
+                            .send_message(NetworkActorMessage::new_notification(
+                                NetworkServiceEvent::AddTlcFailed(
+                                    state.get_local_peer_id(),
+                                    add_tlc.payment_hash,
+                                    error_detail,
+                                ),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
                 TlcKind::RemoveTlc(remove_tlc) => {
@@ -806,6 +812,13 @@ where
                     return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
                 }
 
+                if add_tlc.expiry < peeled_onion_packet.current.expiry {
+                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+                }
+                if add_tlc.expiry < now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA {
+                    return Err(ProcessingChannelError::TlcExpirySoon);
+                }
+
                 if let Some(invoice) = self.store.get_invoice(&payment_hash) {
                     let invoice_status = self.get_invoice_status(&invoice);
                     if invoice_status != CkbInvoiceStatus::Open {
@@ -834,30 +847,50 @@ where
                     return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
                 }
             } else {
-                assert!(received_amount >= forward_amount);
-                let forward_fee = received_amount.saturating_sub(forward_amount);
-                let fee_rate: u128 = state
-                    .public_channel_info
-                    .as_ref()
-                    .expect("public channel exits")
-                    .tlc_fee_proportional_millionths;
+                match state.public_channel_info.as_ref() {
+                    Some(public_channel_info) if public_channel_info.enabled => {
+                        let min_tlc_value = public_channel_info.tlc_min_value;
+                        if min_tlc_value > received_amount {
+                            return Err(ProcessingChannelError::TlcAmountIsTooLow);
+                        }
 
-                let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                    error!(
-                        "too low forward_fee: {}, expected_fee: {:?}",
-                        forward_fee, expected_fee
-                    );
-                    return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                        if add_tlc.expiry
+                            < peeled_onion_packet.current.expiry
+                                + public_channel_info.tlc_expiry_delta
+                        {
+                            return Err(ProcessingChannelError::IncorrectTlcExpiry);
+                        }
+
+                        assert!(received_amount >= forward_amount);
+                        let forward_fee = received_amount.saturating_sub(forward_amount);
+                        let fee_rate: u128 = public_channel_info.tlc_fee_proportional_millionths;
+
+                        let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                        if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
+                            error!(
+                                "too low forward_fee: {}, expected_fee: {:?}",
+                                forward_fee, expected_fee
+                            );
+                            return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                        }
+                        // if this is not the last hop, forward TLC to next hop
+                        self.handle_forward_onion_packet(
+                            state,
+                            add_tlc.payment_hash,
+                            peeled_onion_packet.clone(),
+                            add_tlc.tlc_id.into(),
+                        )
+                        .await?;
+                    }
+                    _ => {
+                        // if we don't have public channel info, we can not forward the TLC
+                        // this may happended some malicious sender build a invalid onion router
+                        return Err(ProcessingChannelError::InvalidState(
+                            "Received AddTlc message, but the channel is not public or disabled"
+                                .to_string(),
+                        ));
+                    }
                 }
-                // if this is not the last hop, forward TLC to next hop
-                self.handle_forward_onion_packet(
-                    state,
-                    add_tlc.payment_hash,
-                    peeled_onion_packet.clone(),
-                    add_tlc.tlc_id.into(),
-                )
-                .await?;
             }
         }
 
@@ -2852,6 +2885,10 @@ pub enum ProcessingChannelError {
     WaitingTlcAck,
     #[error("Failed to peel onion packet: {0}")]
     PeelingOnionPacketError(String),
+    #[error("Forwarding node has tampered with the intended HTLC values or origin node has an obsolete cltv_expiry_delta")]
+    IncorrectTlcExpiry,
+    #[error("Upstream node set CLTV to less than the CLTV set by the sender")]
+    IncorrectFinalTlcExpiry,
     #[error("The amount in the HTLC is not expected")]
     FinalIncorrectHTLCAmount,
     #[error("The payment_hash is not expected for final hop")]
