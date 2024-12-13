@@ -132,6 +132,8 @@ pub enum ChannelCommand {
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
+    #[cfg(test)]
+    ReloadState(),
 }
 
 #[derive(Debug)]
@@ -262,7 +264,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: InvoiceStore,
+    S: InvoiceStore + ChannelActorStateStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -618,6 +620,9 @@ where
             ProcessingChannelError::InvalidParameter(_) => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
             }
+            ProcessingChannelError::TlcForwardingError(_) => {
+                unreachable!("TlcForwardingError should be handled before this point")
+            }
         };
 
         let channel_update = if error_code.is_update() {
@@ -655,27 +660,31 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        let error_detail = self.get_tlc_detail_error(state, &e).await;
+                        let error_packet = match e {
+                            // If we already have TlcErrPacket, we can directly use it to send back to the peer.
+                            ProcessingChannelError::TlcForwardingError(err_packet) => err_packet,
+                            _ => {
+                                let error_detail = self.get_tlc_detail_error(state, &e).await;
+                                self.network
+                                    .clone()
+                                    .send_message(NetworkActorMessage::new_notification(
+                                        NetworkServiceEvent::AddTlcFailed(
+                                            state.get_local_peer_id(),
+                                            add_tlc.payment_hash,
+                                            error_detail.clone(),
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)
+                            }
+                        };
                         self.register_retryable_tlc_remove(
                             myself,
                             state,
                             add_tlc.tlc_id,
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                error_detail.clone(),
-                                &NO_SHARED_SECRET,
-                            )),
+                            RemoveTlcReason::RemoveTlcFail(error_packet),
                         )
                         .await;
-                        self.network
-                            .clone()
-                            .send_message(NetworkActorMessage::new_notification(
-                                NetworkServiceEvent::AddTlcFailed(
-                                    state.get_local_peer_id(),
-                                    add_tlc.payment_hash,
-                                    error_detail,
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
                 TlcKind::RemoveTlc(remove_tlc) => {
@@ -1015,10 +1024,8 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         // If we failed to forward the onion packet, we should remove the tlc.
-        if let Err(_res) = recv.await.expect("expect command replied") {
-            return Err(ProcessingChannelError::PeelingOnionPacketError(
-                "failed to forward".to_string(),
-            ));
+        if let Err(res) = recv.await.expect("expect command replied") {
+            return Err(ProcessingChannelError::TlcForwardingError(res));
         }
         Ok(())
     }
@@ -1596,6 +1603,14 @@ where
                         Err(err)
                     }
                 }
+            }
+            #[cfg(test)]
+            ChannelCommand::ReloadState() => {
+                *state = self
+                    .store
+                    .get_channel_actor_state(&state.get_id())
+                    .expect("load channel state failed");
+                Ok(())
             }
         }
     }
@@ -2911,6 +2926,8 @@ pub enum ProcessingChannelError {
     TlcExpirySoon,
     #[error("The tlc expiry too far")]
     TlcExpiryTooFar,
+    #[error("Tlc forwarding error")]
+    TlcForwardingError(TlcErrPacket),
 }
 
 bitflags! {

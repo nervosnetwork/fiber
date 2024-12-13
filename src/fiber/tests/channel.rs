@@ -2925,7 +2925,7 @@ async fn test_channel_update_tlc_sync_up() {
     .unwrap();
     assert!(update_result.is_ok());
     // sleep for a while to make sure the Update processed by both party
-    tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
     let tlc_amount = 99;
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -3969,4 +3969,96 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
         node_b.trace_tx_hash(node_b_shutdown_tx_hash.clone()).await,
         Status::Committed
     );
+}
+
+#[tokio::test]
+async fn test_send_payment_with_channel_balance_error() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let nodes_num = 4;
+    let amounts = vec![(100000000000, 100000000000); nodes_num - 1];
+    let (nodes, channels) =
+        create_n_nodes_with_established_channel(&amounts, nodes_num, true).await;
+    let [node_0, _node_1, mut node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(3000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+
+    node_2.update_channel_local_balance(channels[2], 100).await;
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(3000),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment failed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    eprintln!("get payment_hash: {:?}", payment_hash);
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Failed);
 }

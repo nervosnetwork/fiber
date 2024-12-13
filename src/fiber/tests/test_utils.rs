@@ -1,4 +1,7 @@
+use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -180,26 +183,6 @@ pub struct NetworkNode {
     pub pubkey: Pubkey,
 }
 
-impl NetworkNode {
-    pub fn get_node_address(&self) -> &MultiAddr {
-        &self.listening_addrs[0]
-    }
-
-    pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
-            .get_channel_actor_state(&channel_id)
-            .expect("get channel")
-            .to_local_amount
-    }
-
-    pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
-        self.store
-            .get_channel_actor_state(&channel_id)
-            .expect("get channel")
-            .to_remote_amount
-    }
-}
-
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
@@ -276,6 +259,54 @@ impl NetworkNodeConfigBuilder {
 impl NetworkNode {
     pub async fn new() -> Self {
         Self::new_with_node_name_opt(None).await
+    }
+
+    pub fn get_node_address(&self) -> &MultiAddr {
+        &self.listening_addrs[0]
+    }
+
+    pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_local_amount
+    }
+
+    pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_remote_amount
+    }
+
+    pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+    }
+
+    pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
+        let channel_id = state.id.clone();
+        self.store.insert_channel_actor_state(state);
+        self.network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::ReloadState(),
+                }),
+            ))
+            .expect("network actor is live");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    pub async fn update_channel_local_balance(
+        &mut self,
+        channel_id: Hash256,
+        new_to_local_amount: u128,
+    ) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.to_local_amount = new_to_local_amount;
+        self.update_channel_actor_state(channel_actor_state).await;
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {
