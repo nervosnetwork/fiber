@@ -4271,16 +4271,16 @@ impl ChannelActorState {
         self.commitment_numbers.increment_remote();
     }
 
-    pub fn get_current_commitment_number(&self, local: bool) -> u64 {
-        if local {
+    pub fn get_current_commitment_number(&self, for_remote: bool) -> u64 {
+        if for_remote {
             self.get_local_commitment_number()
         } else {
             self.get_remote_commitment_number()
         }
     }
 
-    pub fn get_next_commitment_number(&self, local: bool) -> u64 {
-        self.get_current_commitment_number(local) + 1
+    pub fn get_next_commitment_number(&self, for_remote: bool) -> u64 {
+        self.get_current_commitment_number(for_remote) + 1
     }
 
     pub fn get_next_offering_tlc_id(&self) -> u64 {

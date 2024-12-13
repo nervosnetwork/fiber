@@ -623,16 +623,16 @@ impl WatchtowerStore for Store {
         &self,
         channel_id: Hash256,
         funding_tx_lock: Script,
-        local_settlement_data: SettlementData,
+        remote_settlement_data: SettlementData,
     ) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
         let value = serialize_to_vec(
             &ChannelData {
                 channel_id,
                 funding_tx_lock,
-                local_settlement_data,
+                remote_settlement_data,
+                local_settlement_data: None,
                 revocation_data: None,
-                remote_settlement_data: None,
             },
             "ChannelData",
         );
@@ -650,24 +650,6 @@ impl WatchtowerStore for Store {
         &self,
         channel_id: Hash256,
         revocation_data: RevocationData,
-        local_settlement_data: SettlementData,
-    ) {
-        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
-        if let Some(mut channel_data) = self
-            .get(key)
-            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
-        {
-            channel_data.local_settlement_data = local_settlement_data;
-            channel_data.revocation_data = Some(revocation_data);
-            let mut batch = self.batch();
-            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
-            batch.commit();
-        }
-    }
-
-    fn update_remote_settlement(
-        &self,
-        channel_id: Hash256,
         remote_settlement_data: SettlementData,
     ) {
         let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
@@ -675,7 +657,21 @@ impl WatchtowerStore for Store {
             .get(key)
             .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
         {
-            channel_data.remote_settlement_data = Some(remote_settlement_data);
+            channel_data.remote_settlement_data = remote_settlement_data;
+            channel_data.revocation_data = Some(revocation_data);
+            let mut batch = self.batch();
+            batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
+            batch.commit();
+        }
+    }
+
+    fn update_local_settlement(&self, channel_id: Hash256, local_settlement_data: SettlementData) {
+        let key = [&[WATCHTOWER_CHANNEL_PREFIX], channel_id.as_ref()].concat();
+        if let Some(mut channel_data) = self
+            .get(key)
+            .map(|v| deserialize_from::<ChannelData>(v.as_ref(), "ChannelData"))
+        {
+            channel_data.local_settlement_data = Some(local_settlement_data);
             let mut batch = self.batch();
             batch.put_kv(KeyValue::WatchtowerChannel(channel_id, channel_data));
             batch.commit();

@@ -204,8 +204,8 @@ fn test_store_wacthtower() {
             channel_id,
             funding_tx_lock: funding_tx_lock.clone(),
             revocation_data: None,
-            local_settlement_data: settlement_data.clone(),
-            remote_settlement_data: None,
+            local_settlement_data: None,
+            remote_settlement_data: settlement_data.clone(),
         }]
     );
 
@@ -223,9 +223,9 @@ fn test_store_wacthtower() {
         vec![ChannelData {
             channel_id,
             funding_tx_lock,
-            local_settlement_data: settlement_data,
+            local_settlement_data: None,
             revocation_data: Some(revocation_data),
-            remote_settlement_data: None,
+            remote_settlement_data: settlement_data,
         }]
     );
 

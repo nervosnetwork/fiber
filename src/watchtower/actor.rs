@@ -111,7 +111,7 @@ where
                         settlement_data,
                     ) => {
                         self.store
-                            .update_remote_settlement(channel_id, settlement_data);
+                            .update_local_settlement(channel_id, settlement_data);
                     }
                     _ => {
                         // ignore
@@ -177,7 +177,7 @@ where
 
                                                         if blake160(
                                                             &channel_data
-                                                                .local_settlement_data
+                                                                .remote_settlement_data
                                                                 .x_only_aggregated_pubkey,
                                                         )
                                                         .0 == pub_key_hash
@@ -229,7 +229,7 @@ where
                                                                         commitment_lock,
                                                                         ckb_client,
                                                                         channel_data
-                                                                            .local_settlement_data
+                                                                            .remote_settlement_data
                                                                             .clone(),
                                                                         secret_key,
                                                                         &mut cell_collector,
@@ -242,7 +242,7 @@ where
                                                                 commitment_lock,
                                                                 ckb_client,
                                                                 channel_data
-                                                                    .remote_settlement_data
+                                                                    .local_settlement_data
                                                                     .clone()
                                                                     .expect(
                                                                         "remote settlement data",
