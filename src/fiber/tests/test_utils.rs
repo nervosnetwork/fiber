@@ -2,6 +2,8 @@ use crate::fiber::channel::ChannelActorState;
 use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
 use ckb_types::{core::TransactionView, packed::Byte32};
@@ -307,6 +309,10 @@ impl NetworkNode {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
         self.update_channel_actor_state(channel_actor_state).await;
+    }
+
+    pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
+        self.store.get_payment_session(payment_hash)
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {

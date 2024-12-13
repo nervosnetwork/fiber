@@ -1335,7 +1335,6 @@ fn test_graph_payment_expiry_is_in_right_order() {
         dry_run: false,
     };
     let payment_data = SendPaymentData::new(command);
-    eprintln!("{:?}", payment_data);
     assert!(payment_data.is_ok());
 
     let current_time = now_timestamp_as_millis_u64();

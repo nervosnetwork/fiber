@@ -612,8 +612,8 @@ where
                 // otherwise, channel maybe not ready
                 _ => TlcErrorCode::TemporaryChannelFailure,
             },
-            ProcessingChannelError::RepeatedProcessing(_)
-            | ProcessingChannelError::SpawnErr(_)
+            ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::TemporaryChannelFailure,
+            ProcessingChannelError::SpawnErr(_)
             | ProcessingChannelError::Musig2SigningError(_)
             | ProcessingChannelError::Musig2VerifyError(_)
             | ProcessingChannelError::CapacityError(_) => TlcErrorCode::TemporaryNodeFailure,
@@ -1557,7 +1557,7 @@ where
                         Ok(())
                     }
                     Err(err) => {
-                        eprintln!("Error processing AddTlc command: {:?}", &err);
+                        debug!("Error processing AddTlc command: {:?}", &err);
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
                         let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
                         Err(err)
@@ -4167,40 +4167,36 @@ impl ChannelActorState {
             .all_tlcs()
             .find(|tlc| tlc.payment_hash == payment_hash)
         {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
+            return Err(ProcessingChannelError::RepeatedProcessing(format!(
                 "Trying to insert tlc with duplicate payment hash {:?} with tlc {:?}",
                 payment_hash, tlc
             )));
         }
         if tlc.is_offered() {
-            // TODO: We should actually also consider all our fulfilled tlcs here.
-            // Because this is also the amount that we can actually spend.
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
-            // TODO: handle transaction fee here.
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
+                debug!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
                     tlc.tlc_id,
                     tlc.amount,
                     self.to_local_amount - sent_tlc_value
-                )));
+                );
+                return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
-            // TODO: We should actually also consider all their fulfilled tlcs here.
-            // Because this is also the amount that we can actually spend.
             let received_tlc_value = self.get_received_tlc_balance();
             debug!("Value of remote received tlcs: {}", received_tlc_value);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
-            // TODO: handle transaction fee here.
             if received_tlc_value + tlc.amount > self.to_remote_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
+                debug!(
                     "Adding tlc {:?} with amount {} exceeds remote balance {}",
                     tlc.tlc_id,
                     tlc.amount,
                     self.to_remote_amount - received_tlc_value
-                )));
+                );
+                return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
         debug!(

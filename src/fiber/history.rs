@@ -508,6 +508,10 @@ where
     // is 1 when the success_time is now.
     fn time_factor(&self, time: u64) -> f64 {
         let time_ago = (now_timestamp_as_millis_u64() - time).max(0);
+        // if time_ago is less than 1 second, we treat it as 0, this makes the factor 1
+        // this is to avoid the factor is too small when the time is very close to now,
+        // this will make the probability calculation more stable
+        let time_ago = if time_ago < 1000 { 0 } else { time_ago };
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         let factor = exponent.exp();
         factor
@@ -521,6 +525,7 @@ where
         }
 
         let factor = self.time_factor(time);
+
         let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
         cannot_send
     }
@@ -542,7 +547,7 @@ where
         let mut prob = 1.0;
         if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
-                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).min(0);
+                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).max(0);
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
