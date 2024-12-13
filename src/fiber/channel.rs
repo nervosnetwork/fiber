@@ -4,6 +4,7 @@ use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::fiber::serde_utils::U64Hex;
 use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
@@ -2759,8 +2760,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_used_nonce_in_commitment_signed: Option<PubNonce>,
 
-    #[serde_as(as = "Vec<PubNonceAsBytes>")]
-    pub remote_nonces: Vec<PubNonce>,
+    // The nonces that are sent by the counterparty, the length is at most 2
+    #[serde_as(as = "Vec<(U64Hex, PubNonceAsBytes)>")]
+    pub remote_nonces: Vec<(u64, PubNonce)>,
 
     // The latest commitment transaction we're holding
     #[serde_as(as = "Option<EntityHex>")]
@@ -2768,7 +2770,8 @@ pub struct ChannelActorState {
 
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
-    pub remote_commitment_points: Vec<Pubkey>,
+    // The length of this vector is at most the maximum number of flighting tlcs.
+    pub remote_commitment_points: Vec<(u64, Pubkey)>,
     pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
 
     // The shutdown info for both local and remote, they are setup by the shutdown command or message.
@@ -3508,8 +3511,11 @@ impl ChannelActorState {
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
             last_used_nonce_in_commitment_signed: None,
-            remote_nonces: vec![remote_nonce],
-            remote_commitment_points: vec![first_commitment_point, second_commitment_point],
+            remote_nonces: vec![(0, remote_nonce)],
+            remote_commitment_points: vec![
+                (0, first_commitment_point),
+                (1, second_commitment_point),
+            ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
             local_reserved_ckb_amount,
@@ -4070,15 +4076,35 @@ impl ChannelActorState {
             "Getting remote nonce: commitment number {}, current nonces: {:?}",
             comitment_number, &self.remote_nonces
         );
-        self.remote_nonces[comitment_number as usize].clone()
+        assert!(self.remote_nonces.len() <= 2);
+        self.remote_nonces
+            .iter()
+            .rev()
+            .find_map(|(number, nonce)| {
+                if *number == comitment_number {
+                    Some(nonce.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("get_remote_nonce")
     }
 
     fn save_remote_nonce(&mut self, nonce: PubNonce) {
         debug!(
-            "Saving remote nonce: new nonce {:?}, current nonces {:?}",
-            &nonce, &self.remote_nonces
+            "Saving remote nonce: new nonce {:?}, current nonces {:?}, commitment numbers {:?}",
+            &nonce, &self.remote_nonces, self.commitment_numbers
         );
-        self.remote_nonces.push(nonce);
+
+        let next_remote_number = if self.remote_nonces.is_empty() {
+            0
+        } else {
+            self.get_remote_commitment_number() + 1
+        };
+        self.remote_nonces.push((next_remote_number, nonce));
+        if self.remote_nonces.len() > 2 {
+            self.remote_nonces.remove(0);
+        }
     }
 
     fn save_remote_nonce_for_raa(&mut self) {
@@ -4362,16 +4388,20 @@ impl ChannelActorState {
 
     /// Get the counterparty commitment point for the given commitment number.
     fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
-        debug!("Getting remote commitment point #{}", commitment_number);
-        let index = commitment_number as usize;
-        let commitment_point = self.remote_commitment_points[index];
         debug!(
-            "Obtained remote commitment point #{} (counting from 0) out of total {} commitment points: {:?}",
-            index,
-            self.remote_commitment_points.len(),
-            commitment_point
+            "Getting remote commitment point #{} from remote_commitment_points: {:?}",
+            commitment_number, &self.remote_commitment_points
         );
-        commitment_point
+        self.remote_commitment_points
+            .iter()
+            .find_map(|(number, point)| {
+                if *number == commitment_number {
+                    Some(point.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("remote commitment point should exist")
     }
 
     fn get_current_local_commitment_point(&self) -> Pubkey {
@@ -4948,8 +4978,8 @@ impl ChannelActorState {
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
-            accept_channel.first_per_commitment_point,
-            accept_channel.second_per_commitment_point,
+            (0, accept_channel.first_per_commitment_point),
+            (1, accept_channel.second_per_commitment_point),
         ];
         self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
         self.check_accept_channel_parameters()?;
@@ -5382,16 +5412,23 @@ impl ChannelActorState {
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
-        debug!(
-            "Setting remote commitment point #{} (counting from 0)): {:?}",
-            self.remote_commitment_points.len(),
-            commitment_point
+        self.remote_commitment_points
+            .push((self.get_local_commitment_number(), commitment_point));
+
+        let len = self.remote_commitment_points.len();
+        if len > (self.max_tlc_number_in_flight + 1) as usize {
+            let min_remote_commitment = self
+                .tlc_state
+                .all_tlcs()
+                .map(|x| x.created_at.remote)
+                .min()
+                .unwrap_or_default();
+            self.remote_commitment_points
+                .retain(|(num, _)| *num >= min_remote_commitment);
+        }
+        assert!(
+            self.remote_commitment_points.len() <= (self.max_tlc_number_in_flight + 1) as usize
         );
-        assert_eq!(
-            self.remote_commitment_points.len() as u64,
-            self.get_local_commitment_number()
-        );
-        self.remote_commitment_points.push(commitment_point);
     }
 
     fn handle_revoke_and_ack_message(
