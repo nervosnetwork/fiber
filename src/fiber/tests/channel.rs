@@ -2924,7 +2924,6 @@ async fn test_channel_update_tlc_sync_up() {
     })
     .unwrap();
     assert!(update_result.is_ok());
-
     // sleep for a while to make sure the Update processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(2500)).await;
 
@@ -2957,7 +2956,7 @@ async fn test_channel_update_tlc_sync_up() {
         .contains("Failed to build route, PathFind error: no path found"));
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-    // A -> B now will be with limit, can not send amount less than 100
+    // A -> B is OK since we are not in the tlc relay context
     let tlc_amount = 99;
     let add_tlc_command = AddTlcCommand {
         amount: tlc_amount,
@@ -2976,8 +2975,6 @@ async fn test_channel_update_tlc_sync_up() {
         ))
     })
     .expect("node_b alive");
-
-    // TODO: fix this unit test
     assert!(add_tlc_result.is_ok());
     // sleep for a while to make sure the AddTlc processed by both party
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
@@ -3006,6 +3003,51 @@ async fn test_channel_update_tlc_sync_up() {
     };
     let res = call!(node_b.network_actor, message).expect("node_a alive");
     assert!(res.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    // update channel to disable it from node_a
+    let update_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::Update(
+                    UpdateCommand {
+                        enabled: Some(false),
+                        tlc_expiry_delta: None,
+                        tlc_minimum_value: None,
+                        tlc_fee_proportional_millionths: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .unwrap();
+    assert!(update_result.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
 }
 
 #[tokio::test]
