@@ -212,6 +212,7 @@ Lists all channels.
 ##### Params
 
 * `peer_id` - `Option<PeerId>`, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
+* `include_closed` - `Option<bool>`, Whether to include closed channels in the list, an optional parameter, default value is false
 
 ##### Returns
 

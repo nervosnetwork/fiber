@@ -22,7 +22,8 @@ body:json {
     "method": "list_channels",
     "params": [
       {
-        "peer_id": "{{NODE2_PEERID}}"
+        "peer_id": "{{NODE2_PEERID}}",
+        "include_closed": true
       }
     ]
   }
@@ -35,5 +36,5 @@ assert {
 
 script:post-response {
   console.log(res.body.result);
-  bru.setVar("TX_HASH", res.body.result.channels.at(-1).latest_commitment_transaction_hash);
+  bru.setVar("TX_HASH", res.body.result.channels[0].latest_commitment_transaction_hash);
 }

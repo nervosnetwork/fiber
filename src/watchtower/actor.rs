@@ -10,7 +10,7 @@ use ckb_sdk::{
 };
 use ckb_types::{
     self,
-    core::{Capacity, TransactionView},
+    core::{Capacity, EpochNumberWithFraction, HeaderView, TransactionView},
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction, WitnessArgs},
     prelude::*,
 };
@@ -191,40 +191,56 @@ where
                                                                         .commitment_number
                                                                         >= commitment_number =>
                                                                 {
-                                                                    warn!("Found an old version commitment tx submitted by remote: {:?}, revocation commitment number: {}, commitment number: {}", tx.calc_tx_hash(), revocation_data.commitment_number, commitment_number);
                                                                     let commitment_tx_out_point =
                                                                         OutPoint::new(
                                                                             tx.calc_tx_hash(),
                                                                             0,
                                                                         );
-                                                                    match build_revocation_tx(
-                                                                        commitment_tx_out_point,
-                                                                        revocation_data,
-                                                                        secret_key,
-                                                                        &mut cell_collector,
+                                                                    match ckb_client.get_live_cell(
+                                                                        commitment_tx_out_point
+                                                                            .clone()
+                                                                            .into(),
+                                                                        false,
                                                                     ) {
-                                                                        Ok(tx) => {
-                                                                            match ckb_client
-                                                                                .send_transaction(
-                                                                                    tx.data()
-                                                                                        .into(),
-                                                                                    None,
+                                                                        Ok(cell_with_status) => {
+                                                                            if cell_with_status
+                                                                                .status
+                                                                                == "live"
+                                                                            {
+                                                                                warn!("Found an old version commitment tx submitted by remote: {:#x}", tx.calc_tx_hash());
+                                                                                match build_revocation_tx(
+                                                                                    commitment_tx_out_point,
+                                                                                    revocation_data,
+                                                                                    secret_key,
+                                                                                    &mut cell_collector,
                                                                                 ) {
-                                                                                Ok(tx_hash) => {
-                                                                                    info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                                                                                }
-                                                                                Err(err) => {
-                                                                                    error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                                    Ok(tx) => {
+                                                                                        match ckb_client
+                                                                                            .send_transaction(
+                                                                                                tx.data()
+                                                                                                    .into(),
+                                                                                                None,
+                                                                                            ) {
+                                                                                            Ok(tx_hash) => {
+                                                                                                info!("Revocation tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
+                                                                                            }
+                                                                                            Err(err) => {
+                                                                                                error!("Failed to send revocation tx: {:?}, error: {:?}", tx, err);
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                    Err(err) => {
+                                                                                        error!("Failed to build revocation tx: {:?}", err);
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         }
                                                                         Err(err) => {
-                                                                            error!("Failed to build revocation tx: {:?}", err);
+                                                                            error!("Failed to get live cell: {:?}", err);
                                                                         }
                                                                     }
                                                                 }
                                                                 _ => {
-                                                                    info!("Found a force closed commitment tx submitted by remote: {:?}, commitment number: {}", tx.calc_tx_hash(), commitment_number);
                                                                     try_settle_commitment_tx(
                                                                         commitment_lock,
                                                                         ckb_client,
@@ -237,7 +253,6 @@ where
                                                                 }
                                                             }
                                                         } else {
-                                                            info!("Found a force closed commitment tx submitted by local: {:?}, commitment number: {}", tx.calc_tx_hash(), commitment_number);
                                                             try_settle_commitment_tx(
                                                                 commitment_lock,
                                                                 ckb_client,
@@ -376,6 +391,17 @@ fn try_settle_commitment_tx(
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
 ) {
+    let current_epoch = match ckb_client.get_tip_header() {
+        Ok(tip_header) => {
+            let tip_header: HeaderView = tip_header.into();
+            tip_header.epoch()
+        }
+        Err(err) => {
+            error!("Failed to get tip header: {:?}", err);
+            return;
+        }
+    };
+
     let lock_args = commitment_lock.args().raw_data();
     let script = commitment_lock
         .as_builder()
@@ -389,7 +415,6 @@ fn try_settle_commitment_tx(
         filter: None,
         group_by_transaction: None,
     };
-
     // the live cells number should be 1 or 0 for normal case, however, an attacker may create a lot of cells to implement a tx pinning attack.
     match ckb_client.get_cells(search_key, Order::Desc, 100u32.into(), None) {
         Ok(cells) => {
@@ -398,34 +423,48 @@ fn try_settle_commitment_tx(
                 let commitment_tx_out_point =
                     OutPoint::new(cell.out_point.tx_hash.pack(), cell.out_point.index.value());
                 let lock_script_args = cell_output.lock().args().raw_data();
-                if lock_script_args.len() == 36 {
-                    let since = u64::from_le_bytes(
-                        cell_output.lock().args().raw_data()[20..28]
-                            .try_into()
-                            .expect("u64 from slice"),
-                    );
-                    // TODO check since
-                    match build_settlement_tx(
-                        commitment_tx_out_point,
-                        since,
-                        settlement_data.clone(),
-                        secret_key,
-                        cell_collector,
-                    ) {
-                        Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
-                            Ok(tx_hash) => {
-                                info!("Settlement tx: {:?} sent, tx_hash: {:?}", tx, tx_hash);
-                            }
-                            Err(err) => {
-                                error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
-                            }
-                        },
-                        Err(err) => {
-                            error!("Failed to build settlement tx: {:?}", err);
-                        }
+                let since = u64::from_le_bytes(
+                    lock_script_args[20..28].try_into().expect("u64 from slice"),
+                );
+                let header: HeaderView = match ckb_client.get_header_by_number(cell.block_number) {
+                    Ok(Some(header)) => header.into(),
+                    Ok(None) => {
+                        error!("Cannot find header: {}", cell.block_number);
+                        continue;
                     }
-                } else {
-                    // TODO use 0x00 ~ 0xFD to get back the funds
+                    Err(err) => {
+                        error!("Failed to get header: {:?}", err);
+                        continue;
+                    }
+                };
+                let since_epoch = EpochNumberWithFraction::from_full_value(since);
+                if header.epoch().to_rational() + since_epoch.to_rational()
+                    > current_epoch.to_rational()
+                {
+                    continue;
+                }
+                info!(
+                    "Found a force closed commitment tx: {:#x}",
+                    cell.out_point.tx_hash
+                );
+                match build_settlement_tx(
+                    commitment_tx_out_point,
+                    since,
+                    settlement_data.clone(),
+                    secret_key,
+                    cell_collector,
+                ) {
+                    Ok(tx) => match ckb_client.send_transaction(tx.data().into(), None) {
+                        Ok(tx_hash) => {
+                            info!("Settlement tx: {:?} sent, tx_hash: {:#x}", tx, tx_hash);
+                        }
+                        Err(err) => {
+                            error!("Failed to send settlement tx: {:?}, error: {:?}", tx, err);
+                        }
+                    },
+                    Err(err) => {
+                        error!("Failed to build settlement tx: {:?}", err);
+                    }
                 }
             }
         }
@@ -442,6 +481,7 @@ fn build_settlement_tx(
     secret_key: SecretKey,
     cell_collector: &mut DefaultCellCollector,
 ) -> Result<TransactionView, Box<dyn std::error::Error>> {
+    // TODO use 0x00 ~ 0xFD to get back the funds
     let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), &secret_key);
     let args = blake160(pubkey.serialize().as_ref());
     let fee_provider_lock_script = get_script_by_contract(Contract::Secp256k1Lock, args.as_bytes());

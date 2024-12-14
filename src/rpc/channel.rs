@@ -159,6 +159,8 @@ pub(crate) struct ListChannelsParams {
     /// The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
     #[serde_as(as = "Option<DisplayFromStr>")]
     peer_id: Option<PeerId>,
+    /// Whether to include closed channels in the list, an optional parameter, default value is false
+    include_closed: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -559,9 +561,12 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let mut channels: Vec<_> = self
-            .store
-            .get_active_channel_states(params.peer_id)
+        let channel_states = if params.include_closed.unwrap_or_default() {
+            self.store.get_channel_states(params.peer_id)
+        } else {
+            self.store.get_active_channel_states(params.peer_id)
+        };
+        let mut channels: Vec<_> = channel_states
             .into_iter()
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store

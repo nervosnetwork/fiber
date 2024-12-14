@@ -1193,7 +1193,6 @@ where
         state.tlc_state.add_local_tlc(TlcKind::AddTlc(tlc.clone()));
         state.increment_next_offered_tlc_id();
 
-        debug!("Inserted tlc into channel state: {:?}", &tlc);
         let add_tlc = AddTlc {
             channel_id: state.get_id(),
             tlc_id: tlc.tlc_id.into(),
@@ -1207,7 +1206,6 @@ where
         // Send tlc update message to peer.
         let msg =
             FiberMessageWithPeerId::new(state.get_remote_peer_id(), FiberMessage::add_tlc(add_tlc));
-        debug!("Sending AddTlc message: {:?}", &msg);
 
         self.network
             .send_message(NetworkActorMessage::new_command(
@@ -4352,14 +4350,6 @@ impl ChannelActorState {
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
-        debug!(
-            "Adding new tlc {:?} to channel {:?} with local balance {} and remote balance {}",
-            &tlc,
-            &self.get_id(),
-            self.to_local_amount,
-            self.to_remote_amount
-        );
-
         Ok(())
     }
 
