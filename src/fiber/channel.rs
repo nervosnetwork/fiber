@@ -1,8 +1,10 @@
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
+use futures::future::OptionFuture;
 use secp256k1::XOnlyPublicKey;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::fiber::serde_utils::U64Hex;
 use crate::{
     fiber::{
         fee::calculate_tlc_forward_fee,
@@ -148,6 +150,11 @@ pub struct AddTlcCommand {
     pub hash_algorithm: HashAlgorithm,
     /// Onion packet for the next node
     pub onion_packet: Option<PaymentOnionPacket>,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it for outbound (offered) TLC to backward errors.
+    /// Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
     pub previous_tlc: Option<(Hash256, u64)>,
 }
 
@@ -655,14 +662,15 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        let error_detail = self.get_tlc_detail_error(state, &e).await;
+                        let error_detail = self.get_tlc_detail_error(state, &e.source).await;
                         self.register_retryable_tlc_remove(
                             myself,
                             state,
                             add_tlc.tlc_id,
                             RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                                 error_detail.clone(),
-                                &NO_SHARED_SECRET,
+                                // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
+                                &e.shared_secret,
                             )),
                         )
                         .await;
@@ -709,13 +717,15 @@ where
             .as_ref()
             .expect("expect remove_at")
             .1
-            .clone();
+            .clone()
+            .backward(&tlc_info.shared_secret);
 
         debug!(
             "begin to remove tlc from previous channel: {:?}",
             &previous_tlc
         );
 
+        // TODO: encrypt the error to backward
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
@@ -758,7 +768,7 @@ where
                     };
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(error_code),
-                        &NO_SHARED_SECRET,
+                        &tlc.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Paid => {
@@ -785,113 +795,23 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         add_tlc: &AddTlcInfo,
-    ) -> Result<(), ProcessingChannelError> {
-        state.check_tlc_expiry(add_tlc.expiry)?;
-
-        assert!(state.get_received_tlc(add_tlc.tlc_id.into()).is_some());
-
-        let payment_hash = add_tlc.payment_hash;
-        let peeled_onion_packet = match add_tlc.onion_packet.clone() {
-            Some(onion_packet) => Some(
-                self.peel_onion_packet(onion_packet, add_tlc.payment_hash.clone())
-                    .await?,
-            ),
-            None => None,
-        };
-
-        if let Some(ref peeled_onion_packet) = peeled_onion_packet {
-            let received_amount = add_tlc.amount;
-            let forward_amount = peeled_onion_packet.current.amount;
-            debug!(
-                "received_amount: {} forward_amount: {}",
-                add_tlc.amount, forward_amount
-            );
-
-            if peeled_onion_packet.is_last() {
-                if forward_amount != add_tlc.amount {
-                    return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
-                }
-
-                if add_tlc.expiry < peeled_onion_packet.current.expiry {
-                    return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
-                }
-                if add_tlc.expiry < now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA {
-                    return Err(ProcessingChannelError::TlcExpirySoon);
-                }
-
-                if let Some(invoice) = self.store.get_invoice(&payment_hash) {
-                    let invoice_status = self.get_invoice_status(&invoice);
-                    if invoice_status != CkbInvoiceStatus::Open {
-                        return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
-                    }
-                    self.store
-                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                        .expect("update invoice status failed");
-                }
-
-                // if this is the last hop, store the preimage.
-                // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
-                // here we can do error check early here for better error handling.
-                let preimage = peeled_onion_packet
-                    .current
-                    .payment_preimage
-                    .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
-
-                if let Some(preimage) = preimage {
-                    let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
-                    if add_tlc.payment_hash != filled_payment_hash {
-                        return Err(ProcessingChannelError::FinalIncorrectPreimage);
-                    }
-                    state.set_received_tlc_preimage(add_tlc.tlc_id.into(), Some(preimage));
-                } else {
-                    return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
-                }
-            } else {
-                match state.public_channel_info.as_ref() {
-                    Some(public_channel_info) if public_channel_info.enabled => {
-                        let min_tlc_value = public_channel_info.tlc_min_value;
-                        if min_tlc_value > received_amount {
-                            return Err(ProcessingChannelError::TlcAmountIsTooLow);
-                        }
-
-                        if add_tlc.expiry
-                            < peeled_onion_packet.current.expiry
-                                + public_channel_info.tlc_expiry_delta
-                        {
-                            return Err(ProcessingChannelError::IncorrectTlcExpiry);
-                        }
-
-                        assert!(received_amount >= forward_amount);
-                        let forward_fee = received_amount.saturating_sub(forward_amount);
-                        let fee_rate: u128 = public_channel_info.tlc_fee_proportional_millionths;
-
-                        let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
-                        if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
-                            error!(
-                                "too low forward_fee: {}, expected_fee: {:?}",
-                                forward_fee, expected_fee
-                            );
-                            return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
-                        }
-                        // if this is not the last hop, forward TLC to next hop
-                        self.handle_forward_onion_packet(
-                            state,
-                            add_tlc.payment_hash,
-                            peeled_onion_packet.clone(),
-                            add_tlc.tlc_id.into(),
-                        )
-                        .await?;
-                    }
-                    _ => {
-                        // if we don't have public channel info, we can not forward the TLC
-                        // this may happended some malicious sender build a invalid onion router
-                        return Err(ProcessingChannelError::InvalidState(
-                            "Received AddTlc message, but the channel is not public or disabled"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
+    ) -> Result<(), ProcessingChannelErrorWithSharedSecret> {
+        // If needed, shared secret also get be extracted from the encrypted onion packet:
+        // - Extract public key from onion_packet[1..34]
+        // - Obtain share secret using DH Key Exchange from the public key and the network private key stored in the network actor state.
+        if let Some(peeled_onion_packet) = self
+            .apply_add_tlc_operation_without_peeled_onion_packet(state, add_tlc)
+            .await
+            .map_err(ProcessingChannelError::without_shared_secret)?
+        {
+            let shared_secret = peeled_onion_packet.shared_secret.clone();
+            self.apply_add_tlc_operation_with_peeled_onion_packet(
+                state,
+                add_tlc,
+                peeled_onion_packet,
+            )
+            .await
+            .map_err(move |err| err.with_shared_secret(shared_secret))?;
         }
 
         if let Some(ref udt_type_script) = state.funding_udt_type_script {
@@ -911,6 +831,125 @@ where
             .await;
 
         warn!("finished check tlc for peer message: {:?}", &add_tlc.tlc_id);
+        Ok(())
+    }
+
+    async fn apply_add_tlc_operation_without_peeled_onion_packet(
+        &self,
+        state: &mut ChannelActorState,
+        add_tlc: &AddTlcInfo,
+    ) -> Result<Option<PeeledPaymentOnionPacket>, ProcessingChannelError> {
+        state.check_tlc_expiry(add_tlc.expiry)?;
+
+        assert!(state.get_received_tlc(add_tlc.tlc_id.into()).is_some());
+
+        Ok(
+            OptionFuture::from(add_tlc.onion_packet.clone().map(|onion_packet| {
+                self.peel_onion_packet(onion_packet, add_tlc.payment_hash.clone())
+            }))
+            .await
+            .transpose()?,
+        )
+    }
+
+    async fn apply_add_tlc_operation_with_peeled_onion_packet(
+        &self,
+        state: &mut ChannelActorState,
+        add_tlc: &AddTlcInfo,
+        peeled_onion_packet: PeeledPaymentOnionPacket,
+    ) -> Result<(), ProcessingChannelError> {
+        let payment_hash = add_tlc.payment_hash;
+        let received_amount = add_tlc.amount;
+        let forward_amount = peeled_onion_packet.current.amount;
+        debug!(
+            "received_amount: {} forward_amount: {}",
+            add_tlc.amount, forward_amount
+        );
+
+        if peeled_onion_packet.is_last() {
+            if forward_amount != add_tlc.amount {
+                return Err(ProcessingChannelError::FinalIncorrectHTLCAmount);
+            }
+
+            if add_tlc.expiry < peeled_onion_packet.current.expiry {
+                return Err(ProcessingChannelError::IncorrectFinalTlcExpiry);
+            }
+            if add_tlc.expiry < now_timestamp_as_millis_u64() + MIN_TLC_EXPIRY_DELTA {
+                return Err(ProcessingChannelError::TlcExpirySoon);
+            }
+
+            if let Some(invoice) = self.store.get_invoice(&payment_hash) {
+                let invoice_status = self.get_invoice_status(&invoice);
+                if invoice_status != CkbInvoiceStatus::Open {
+                    return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
+                }
+                self.store
+                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                    .expect("update invoice status failed");
+            }
+
+            // if this is the last hop, store the preimage.
+            // though we will RemoveTlcFulfill the TLC in try_to_settle_down_tlc function,
+            // here we can do error check early here for better error handling.
+            let preimage = peeled_onion_packet
+                .current
+                .payment_preimage
+                .or_else(|| self.store.get_invoice_preimage(&add_tlc.payment_hash));
+
+            if let Some(preimage) = preimage {
+                let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
+                if add_tlc.payment_hash != filled_payment_hash {
+                    return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                }
+                state.set_received_tlc_preimage(add_tlc.tlc_id.into(), Some(preimage));
+            } else {
+                return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
+            }
+        } else {
+            match state.public_channel_info.as_ref() {
+                Some(public_channel_info) if public_channel_info.enabled => {
+                    let min_tlc_value = public_channel_info.tlc_min_value;
+                    if min_tlc_value > received_amount {
+                        return Err(ProcessingChannelError::TlcAmountIsTooLow);
+                    }
+
+                    if add_tlc.expiry
+                        < peeled_onion_packet.current.expiry + public_channel_info.tlc_expiry_delta
+                    {
+                        return Err(ProcessingChannelError::IncorrectTlcExpiry);
+                    }
+
+                    assert!(received_amount >= forward_amount);
+                    let forward_fee = received_amount.saturating_sub(forward_amount);
+                    let fee_rate: u128 = public_channel_info.tlc_fee_proportional_millionths;
+
+                    let expected_fee = calculate_tlc_forward_fee(forward_amount, fee_rate);
+                    if expected_fee.is_err() || forward_fee < expected_fee.clone().unwrap() {
+                        error!(
+                            "too low forward_fee: {}, expected_fee: {:?}",
+                            forward_fee, expected_fee
+                        );
+                        return Err(ProcessingChannelError::TlcForwardFeeIsTooLow);
+                    }
+                    // if this is not the last hop, forward TLC to next hop
+                    self.handle_forward_onion_packet(
+                        state,
+                        add_tlc.payment_hash,
+                        peeled_onion_packet.clone(),
+                        add_tlc.tlc_id.into(),
+                    )
+                    .await?;
+                }
+                _ => {
+                    // if we don't have public channel info, we can not forward the TLC
+                    // this may happended some malicious sender build a invalid onion router
+                    return Err(ProcessingChannelError::InvalidState(
+                        "Received AddTlc message, but the channel is not public or disabled"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1544,6 +1583,7 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
+                let shared_secret = command.shared_secret.clone();
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
@@ -1552,7 +1592,7 @@ where
                     Err(err) => {
                         eprintln!("Error processing AddTlc command: {:?}", &err);
                         let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &NO_SHARED_SECRET)));
+                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &shared_secret)));
                         Err(err)
                     }
                 }
@@ -2145,6 +2185,10 @@ pub struct AddTlcInfo {
     pub hash_algorithm: HashAlgorithm,
     // the onion packet for multi-hop payment
     pub onion_packet: Option<PaymentOnionPacket>,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it to backward errors. Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
     pub created_at: CommitmentNumbers,
     pub removed_at: Option<(CommitmentNumbers, RemoveTlcReason)>,
     pub payment_preimage: Option<Hash256>,
@@ -2770,8 +2814,9 @@ pub struct ChannelActorState {
     #[serde_as(as = "Option<PubNonceAsBytes>")]
     pub last_used_nonce_in_commitment_signed: Option<PubNonce>,
 
-    #[serde_as(as = "Vec<PubNonceAsBytes>")]
-    pub remote_nonces: Vec<PubNonce>,
+    // The nonces that are sent by the counterparty, the length is at most 2
+    #[serde_as(as = "Vec<(U64Hex, PubNonceAsBytes)>")]
+    pub remote_nonces: Vec<(u64, PubNonce)>,
 
     // The latest commitment transaction we're holding
     #[serde_as(as = "Option<EntityHex>")]
@@ -2779,7 +2824,8 @@ pub struct ChannelActorState {
 
     // All the commitment point that are sent from the counterparty.
     // We need to save all these points to derive the keys for the commitment transactions.
-    pub remote_commitment_points: Vec<Pubkey>,
+    // The length of this vector is at most the maximum number of flighting tlcs.
+    pub remote_commitment_points: Vec<(u64, Pubkey)>,
     pub remote_channel_public_keys: Option<ChannelBasePublicKeys>,
 
     // The shutdown info for both local and remote, they are setup by the shutdown command or message.
@@ -2911,6 +2957,34 @@ pub enum ProcessingChannelError {
     TlcExpirySoon,
     #[error("The tlc expiry too far")]
     TlcExpiryTooFar,
+}
+
+/// ProcessingChannelError which brings the shared secret used in forwarding onion packet.
+/// The shared secret is required to obfuscate the error message.
+#[derive(Error, Debug)]
+#[error("{source}")]
+pub struct ProcessingChannelErrorWithSharedSecret {
+    pub source: ProcessingChannelError,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it to backward errors. Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
+}
+
+impl ProcessingChannelError {
+    pub fn with_shared_secret(
+        self,
+        shared_secret: [u8; 32],
+    ) -> ProcessingChannelErrorWithSharedSecret {
+        ProcessingChannelErrorWithSharedSecret {
+            source: self,
+            shared_secret,
+        }
+    }
+
+    pub fn without_shared_secret(self) -> ProcessingChannelErrorWithSharedSecret {
+        self.with_shared_secret(NO_SHARED_SECRET.clone())
+    }
 }
 
 bitflags! {
@@ -3483,8 +3557,11 @@ impl ChannelActorState {
             commitment_numbers: Default::default(),
             remote_shutdown_script: Some(remote_shutdown_script),
             last_used_nonce_in_commitment_signed: None,
-            remote_nonces: vec![remote_nonce],
-            remote_commitment_points: vec![first_commitment_point, second_commitment_point],
+            remote_nonces: vec![(0, remote_nonce)],
+            remote_commitment_points: vec![
+                (0, first_commitment_point),
+                (1, second_commitment_point),
+            ],
             local_shutdown_info: None,
             remote_shutdown_info: None,
             local_reserved_ckb_amount,
@@ -4043,15 +4120,35 @@ impl ChannelActorState {
             "Getting remote nonce: commitment number {}, current nonces: {:?}",
             comitment_number, &self.remote_nonces
         );
-        self.remote_nonces[comitment_number as usize].clone()
+        assert!(self.remote_nonces.len() <= 2);
+        self.remote_nonces
+            .iter()
+            .rev()
+            .find_map(|(number, nonce)| {
+                if *number == comitment_number {
+                    Some(nonce.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("get_remote_nonce")
     }
 
     fn save_remote_nonce(&mut self, nonce: PubNonce) {
         debug!(
-            "Saving remote nonce: new nonce {:?}, current nonces {:?}",
-            &nonce, &self.remote_nonces
+            "Saving remote nonce: new nonce {:?}, current nonces {:?}, commitment numbers {:?}",
+            &nonce, &self.remote_nonces, self.commitment_numbers
         );
-        self.remote_nonces.push(nonce);
+
+        let next_remote_number = if self.remote_nonces.is_empty() {
+            0
+        } else {
+            self.get_remote_commitment_number() + 1
+        };
+        self.remote_nonces.push((next_remote_number, nonce));
+        if self.remote_nonces.len() > 2 {
+            self.remote_nonces.remove(0);
+        }
     }
 
     fn save_remote_nonce_for_raa(&mut self) {
@@ -4332,16 +4429,20 @@ impl ChannelActorState {
 
     /// Get the counterparty commitment point for the given commitment number.
     fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
-        debug!("Getting remote commitment point #{}", commitment_number);
-        let index = commitment_number as usize;
-        let commitment_point = self.remote_commitment_points[index];
         debug!(
-            "Obtained remote commitment point #{} (counting from 0) out of total {} commitment points: {:?}",
-            index,
-            self.remote_commitment_points.len(),
-            commitment_point
+            "Getting remote commitment point #{} from remote_commitment_points: {:?}",
+            commitment_number, &self.remote_commitment_points
         );
-        commitment_point
+        self.remote_commitment_points
+            .iter()
+            .find_map(|(number, point)| {
+                if *number == commitment_number {
+                    Some(point.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("remote commitment point should exist")
     }
 
     fn get_current_local_commitment_point(&self) -> Pubkey {
@@ -4746,6 +4847,7 @@ impl ChannelActorState {
             payment_preimage: None,
             removed_at: None,
             onion_packet: command.onion_packet,
+            shared_secret: command.shared_secret,
             previous_tlc: command
                 .previous_tlc
                 .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
@@ -4765,6 +4867,8 @@ impl ChannelActorState {
             hash_algorithm: message.hash_algorithm,
             // will be set when apply AddTlc operations after the signature is checked
             onion_packet: message.onion_packet,
+            // No need to save shared secret for inbound TLC.
+            shared_secret: NO_SHARED_SECRET.clone(),
             created_at: self.get_current_commitment_numbers(),
             payment_preimage: None,
             removed_at: None,
@@ -4937,8 +5041,8 @@ impl ChannelActorState {
         let remote_pubkeys = (&accept_channel).into();
         self.remote_channel_public_keys = Some(remote_pubkeys);
         self.remote_commitment_points = vec![
-            accept_channel.first_per_commitment_point,
-            accept_channel.second_per_commitment_point,
+            (0, accept_channel.first_per_commitment_point),
+            (1, accept_channel.second_per_commitment_point),
         ];
         self.remote_shutdown_script = Some(accept_channel.shutdown_script.clone());
 
@@ -5377,16 +5481,24 @@ impl ChannelActorState {
     }
 
     fn append_remote_commitment_point(&mut self, commitment_point: Pubkey) {
-        debug!(
-            "Setting remote commitment point #{} (counting from 0)): {:?}",
-            self.remote_commitment_points.len(),
-            commitment_point
+        self.remote_commitment_points
+            .push((self.get_local_commitment_number(), commitment_point));
+
+        let len = self.remote_commitment_points.len();
+        if len > (self.local_constraints.max_tlc_number_in_flight + 1) as usize {
+            let min_remote_commitment = self
+                .tlc_state
+                .all_tlcs()
+                .map(|x| x.created_at.remote)
+                .min()
+                .unwrap_or_default();
+            self.remote_commitment_points
+                .retain(|(num, _)| *num >= min_remote_commitment);
+        }
+        assert!(
+            self.remote_commitment_points.len()
+                <= (self.local_constraints.max_tlc_number_in_flight + 1) as usize
         );
-        assert_eq!(
-            self.remote_commitment_points.len() as u64,
-            self.get_local_commitment_number()
-        );
-        self.remote_commitment_points.push(commitment_point);
     }
 
     fn handle_revoke_and_ack_message(

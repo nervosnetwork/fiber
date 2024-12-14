@@ -1035,7 +1035,8 @@ impl PaymentSession {
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
-        self.route.nodes.iter().map(|x| x.pubkey).collect()
+        // Skip the first node, which is the sender.
+        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
     }
 }
 
