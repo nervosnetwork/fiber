@@ -32,7 +32,6 @@ use ckb_types::{
     prelude::{AsTransactionBuilder, Builder, Entity, IntoTransactionView, Pack, Unpack},
 };
 use ractor::call;
-use rand::Rng;
 use secp256k1::Secp256k1;
 use std::collections::HashSet;
 
@@ -2590,14 +2589,14 @@ async fn do_test_add_tlc_number_limit() {
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let max_tlc_number = 6;
+    let node_a_max_tlc_number = 2;
     let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
         node_a_funding_amount,
         node_b_funding_amount,
-        Some(max_tlc_number),
+        Some(node_a_max_tlc_number),
         None,
         None,
         None,
@@ -2611,11 +2610,9 @@ async fn do_test_add_tlc_number_limit() {
     .await;
 
     let tlc_amount = 1000000000;
-    let rand_in_100 = rand::thread_rng().gen_range(1..=100);
 
-    // both tlc sent from a -> b or b -> a will be charged as tlc numbers
-    // TODO: we should consider the tlc number limit for both direction
-    for i in 1..=max_tlc_number + 1 {
+    // A -> B will have tlc number limit 2
+    for i in 1..=node_a_max_tlc_number + 1 {
         std::thread::sleep(std::time::Duration::from_millis(400));
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
@@ -2626,8 +2623,7 @@ async fn do_test_add_tlc_number_limit() {
             shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
-        let source_node = if rand_in_100 > 50 { &node_a } else { &node_b };
-        let add_tlc_result = call!(source_node.network_actor, |rpc_reply| {
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -2637,7 +2633,71 @@ async fn do_test_add_tlc_number_limit() {
         })
         .expect("source node alive");
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        if i == max_tlc_number + 1 {
+        if i == node_a_max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            dbg!(&add_tlc_result);
+            assert!(add_tlc_result.is_ok());
+        }
+    }
+}
+
+#[tokio::test]
+async fn do_test_add_tlc_number_limit_reverse() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let node_b_max_tlc_number = 2;
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        true,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(node_b_max_tlc_number),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+    // B -> A will have tlc number limit 2
+    for i in 1..=node_b_max_tlc_number + 1 {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        if i == node_b_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result
                 .unwrap_err()
