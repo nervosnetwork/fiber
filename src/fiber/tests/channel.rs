@@ -2507,6 +2507,7 @@ async fn do_test_add_tlc_waiting_ack() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             previous_tlc: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
         };
         let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
