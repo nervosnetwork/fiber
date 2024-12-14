@@ -708,7 +708,6 @@ where
                         .apply_remove_tlc_operation(myself, state, remove_tlc)
                         .await
                         .map_err(|e| {
-                            debug!("error happened in apply_remove_tlc_operation: {:?}", e);
                             error!("Error handling apply_remove_tlc_operation: {:?}", e);
                         });
                 }
@@ -729,11 +728,6 @@ where
         assert!(tlc_info.is_offered());
         assert!(previous_tlc.is_received());
         assert!(previous_channel_id != state.get_id());
-
-        debug!(
-            "begin to remove tlc from previous channel: {:?}",
-            &previous_tlc
-        );
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
         self.register_retryable_relay_tlc_remove(
@@ -795,10 +789,6 @@ where
             }
         }
 
-        debug!(
-            "register remove reason: {:?} with reason: {:?}",
-            tlc.tlc_id, remove_reason
-        );
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
     }
@@ -874,10 +864,6 @@ where
         let payment_hash = add_tlc.payment_hash;
         let received_amount = add_tlc.amount;
         let forward_amount = peeled_onion_packet.current.amount;
-        debug!(
-            "received_amount: {} forward_amount: {}",
-            add_tlc.amount, forward_amount
-        );
 
         if peeled_onion_packet.is_last() {
             if forward_amount != add_tlc.amount {
@@ -1091,10 +1077,6 @@ where
                 )));
             }
             ChannelState::CollaboratingFundingTx(_) => {
-                debug!(
-                    "Processing commitment_signed command in from CollaboratingFundingTx state {:?}",
-                    &state.state
-                );
                 CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
             }
             ChannelState::SigningCommitment(flags)
@@ -1106,19 +1088,11 @@ where
                 )));
             }
             ChannelState::SigningCommitment(flags) => {
-                debug!(
-                    "Processing commitment_signed command in from SigningCommitment state {:?}",
-                    &state.state
-                );
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
             ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
-                    debug!(
-                        "Signing commitment transactions while shutdown is pending, current state {:?}",
-                        &state.state
-                    );
                     CommitmentSignedFlags::PendingShutdown()
                 } else {
                     return Err(ProcessingChannelError::InvalidState(format!(
@@ -1134,29 +1108,14 @@ where
                 )));
             }
         };
-
-        debug!(
-            "Building and signing commitment tx for state {:?}",
-            &state.state
-        );
         let (funding_tx_partial_signature, commitment_tx_partial_signature) =
             state.build_and_sign_commitment_tx()?;
-
-        debug!(
-            "Sending next local nonce {:?} (previous nonce {:?})",
-            state.get_next_local_nonce(),
-            state.get_local_nonce().borrow()
-        );
         let commitment_signed = CommitmentSigned {
             channel_id: state.get_id(),
             funding_tx_partial_signature,
             commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
-        debug!(
-            "Sending built commitment_signed message: {:?}",
-            &commitment_signed
-        );
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1245,13 +1204,6 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        debug!(
-            "Channel ({:?}) balance after removing tlc {:?}: local balance: {}, remote balance: {}",
-            state.get_id(),
-            tlc_kind,
-            state.to_local_amount,
-            state.to_remote_amount
-        );
         state.maybe_transition_to_shutdown(&self.network)?;
         self.handle_commitment_signed_command(state)?;
         state.tlc_state.set_waiting_ack(true);
@@ -3360,30 +3312,13 @@ impl ChannelActorState {
                     capacity,
                     self.funding_udt_type_script.clone(),
                 );
-                debug!(
-                    "Created unsigned channel announcement for channel {:?}: {:?}",
-                    &self.get_id(),
-                    &channel_announcement,
-                );
                 channel_announcement
             }
         };
 
-        debug!(
-            "Trying to complete channel announcement signatures for channel {:?}: {:?}",
-            &self.get_id(),
-            channel_announcement,
-        );
-
         let local_nonce = self
             .get_channel_announcement_musig2_secnonce()
             .public_nonce();
-        debug!(
-            "Local nonce: {:?}, remote nonce: {:?}, remote signatures: {:?}",
-            &local_nonce,
-            self.get_remote_channel_announcement_nonce(),
-            self.get_remote_channel_announcement_signature()
-        );
         let remote_nonce = self.get_remote_channel_announcement_nonce()?;
         let agg_nonce =
             AggNonce::sum(self.order_things_for_musig2(local_nonce, remote_nonce.clone()));
@@ -3402,8 +3337,6 @@ impl ChannelActorState {
 
         let (remote_node_signature, remote_partial_signature) =
             self.get_remote_channel_announcement_signature()?;
-
-        debug!("Aggregating partial signatures for channel {:?}", &self.id);
 
         if self.local_is_node1() {
             channel_announcement.node1_signature = Some(local_node_signature);
@@ -3469,12 +3402,6 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
     ) {
         let channel_update = self.generate_channel_update(network).await;
-
-        debug!(
-            "Broadcasting channel update message to peers: {:?}",
-            &channel_update
-        );
-
         network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::ProccessChannelUpdate(
@@ -4187,10 +4114,6 @@ impl ChannelActorState {
 
     pub fn get_remote_nonce(&self) -> PubNonce {
         let comitment_number = self.get_remote_commitment_number();
-        debug!(
-            "Getting remote nonce: commitment number {}, current nonces: {:?}",
-            comitment_number, &self.remote_nonces
-        );
         assert!(self.remote_nonces.len() <= 2);
         self.remote_nonces
             .iter()
@@ -4206,11 +4129,6 @@ impl ChannelActorState {
     }
 
     fn save_remote_nonce(&mut self, nonce: PubNonce) {
-        debug!(
-            "Saving remote nonce: new nonce {:?}, current nonces {:?}, commitment numbers {:?}",
-            &nonce, &self.remote_nonces, self.commitment_numbers
-        );
-
         let next_remote_number = if self.remote_nonces.is_empty() {
             0
         } else {
@@ -4224,18 +4142,10 @@ impl ChannelActorState {
 
     fn save_remote_nonce_for_raa(&mut self) {
         let nonce = self.get_remote_nonce();
-        debug!(
-            "Saving remote nonce used in commitment signed: {:?}",
-            &nonce
-        );
         self.last_used_nonce_in_commitment_signed = Some(nonce);
     }
 
     fn take_remote_nonce_for_raa(&mut self) -> PubNonce {
-        debug!(
-            "Taking remote nonce used in commitment signed: {:?}",
-            &self.last_used_nonce_in_commitment_signed
-        );
         self.last_used_nonce_in_commitment_signed
             .take()
             .expect("set last_used_nonce_in_commitment_signed in commitment signed")
@@ -4254,10 +4164,6 @@ impl ChannelActorState {
     }
 
     fn set_remote_commitment_number(&mut self, number: u64) {
-        debug!(
-            "Setting remote commitment number from {} to {}",
-            self.commitment_numbers.remote, number
-        );
         self.commitment_numbers.remote = number;
     }
 
@@ -4325,7 +4231,6 @@ impl ChannelActorState {
         }
         if tlc.is_offered() {
             let sent_tlc_value = self.get_offered_tlc_balance();
-            debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 debug!(
@@ -4338,7 +4243,6 @@ impl ChannelActorState {
             }
         } else {
             let received_tlc_value = self.get_received_tlc_balance();
-            debug!("Value of remote received tlcs: {}", received_tlc_value);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 debug!(
@@ -4379,9 +4283,6 @@ impl ChannelActorState {
                                 tlc_id,  current_removed_at, reason, removed_at, current_remove_reason)));
             }
             None => {
-                debug!("Inserting remove reason {:?} at commitment number {:?} for tlc {:?} hash_algorithm: {:?}",
-                        reason, removed_at, current, current.hash_algorithm);
-
                 if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
                     let filled_payment_hash: Hash256 =
                         current.hash_algorithm.hash(fulfill.payment_preimage).into();
@@ -4465,20 +4366,11 @@ impl ChannelActorState {
     }
 
     fn get_local_commitment_point(&self, commitment_number: u64) -> Pubkey {
-        let commitment_point = self.signer.get_commitment_point(commitment_number);
-        debug!(
-            "Obtained {}th local commitment point: {:?}",
-            commitment_number, commitment_point
-        );
-        commitment_point
+        self.signer.get_commitment_point(commitment_number)
     }
 
     /// Get the counterparty commitment point for the given commitment number.
     fn get_remote_commitment_point(&self, commitment_number: u64) -> Pubkey {
-        debug!(
-            "Getting remote commitment point #{} from remote_commitment_points: {:?}",
-            commitment_number, &self.remote_commitment_points
-        );
         self.remote_commitment_points
             .iter()
             .find_map(|(number, point)| {
@@ -4601,19 +4493,21 @@ impl ChannelActorState {
             .get_committed_tlcs()
             .into_iter()
             .chain(remote_pending_tlcs.get_committed_tlcs().into_iter())
-            .filter_map(|tlc| {
-                if matches!(tlc, TlcKind::AddTlc(info) if info.removed_at.is_none() && info.is_offered() == offered) {
-                    Some((tlc.tlc_id(), tlc.amount()))
-                } else {
-                    None
+            .filter_map(|tlc| match tlc {
+                TlcKind::AddTlc(info)
+                    if info.removed_at.is_none() && info.is_offered() == offered =>
+                {
+                    Some((tlc.tlc_id(), info.amount))
                 }
-            }).collect::<HashMap<TLCId, u128>>();
+                _ => None,
+            })
+            .collect::<HashMap<TLCId, u128>>();
         let mut fulfilled = 0;
 
         for tlc in local_pending_tlcs.get_staging_tlcs() {
             match tlc {
-                TlcKind::AddTlc(_info) => {
-                    pending.insert(tlc.tlc_id(), tlc.amount());
+                TlcKind::AddTlc(info) => {
+                    pending.insert(tlc.tlc_id(), info.amount);
                 }
                 TlcKind::RemoveTlc(remove_tlc) => {
                     if let Some(amount) = pending.remove(&remove_tlc.tlc_id) {
@@ -5302,10 +5196,6 @@ impl ChannelActorState {
                 )));
             }
             ChannelState::CollaboratingFundingTx(_) => {
-                debug!(
-                    "Processing commitment_signed message in state {:?}",
-                    &self.state
-                );
                 CommitmentSignedFlags::SigningCommitment(SigningCommitmentFlags::empty())
             }
             ChannelState::SigningCommitment(flags)
@@ -5317,16 +5207,9 @@ impl ChannelActorState {
                 )));
             }
             ChannelState::SigningCommitment(flags) => {
-                debug!(
-                    "Processing commitment_signed message in state {:?}",
-                    &self.state
-                );
                 CommitmentSignedFlags::SigningCommitment(flags)
             }
-            ChannelState::ChannelReady() => {
-                debug!("Processing commitment_signed message while channel ready");
-                CommitmentSignedFlags::ChannelReady()
-            }
+            ChannelState::ChannelReady() => CommitmentSignedFlags::ChannelReady(),
             ChannelState::ShuttingDown(flags) => {
                 if flags.contains(ShuttingDownFlags::AWAITING_PENDING_TLCS) {
                     debug!(
@@ -5366,11 +5249,6 @@ impl ChannelActorState {
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
-        debug!(
-            "Updating peer next remote nonce from {:?} to {:?}",
-            self.get_remote_nonce(),
-            &commitment_signed.next_local_nonce
-        );
         self.save_remote_nonce(commitment_signed.next_local_nonce);
         self.latest_commitment_transaction = Some(commitment_tx.data());
         match flags {
@@ -5379,7 +5257,7 @@ impl ChannelActorState {
                 self.update_state(ChannelState::SigningCommitment(flags));
                 self.maybe_transition_to_tx_signatures(flags, network)?;
             }
-            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown(_) => {
+            CommitmentSignedFlags::ChannelReady() | CommitmentSignedFlags::PendingShutdown() => {
                 self.send_revoke_and_ack_message(network)?;
                 match flags {
                     CommitmentSignedFlags::ChannelReady() => {}
@@ -6824,10 +6702,6 @@ impl InMemorySigner {
     pub fn derive_musig2_nonce(&self, commitment_number: u64) -> SecNonce {
         let commitment_point = self.get_commitment_point(commitment_number);
         let seckey = derive_private_key(&self.musig2_base_nonce, &commitment_point);
-        debug!(
-            "Deriving Musig2 nonce: commitment number: {}, commitment point: {:?}",
-            commitment_number, commitment_point
-        );
         SecNonce::build(seckey.as_ref()).build()
     }
 }

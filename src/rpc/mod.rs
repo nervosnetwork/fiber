@@ -89,9 +89,6 @@ pub async fn start_rpc<
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
     let server = build_server(listening_addr).await;
-<<<<<<< HEAD
-    let mut methods = InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc();
-=======
     let mut modules = RpcModule::new(());
     if config.is_module_enabled("invoice") {
         modules
@@ -103,7 +100,6 @@ pub async fn start_rpc<
             .merge(GraphRpcServerImpl::new(network_graph, store.clone()).into_rpc())
             .unwrap();
     }
->>>>>>> e679fc9 (chore: rebase e2e watchtower)
     if let Some(network_actor) = network_actor {
         if config.is_module_enabled("info") {
             modules

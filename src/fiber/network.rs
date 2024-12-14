@@ -49,9 +49,9 @@ use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
     ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
     OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
-    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
-    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
-    MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
+    RevocationData, SettlementData, ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE,
+    DEFAULT_FEE_RATE, DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS,
+    MAX_TLC_NUMBER_IN_FLIGHT, MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
@@ -1102,7 +1102,6 @@ where
         state: &mut NetworkActorState<S>,
         event: NetworkActorEvent,
     ) -> crate::Result<()> {
-        debug!("Handling event: {:?}", event);
         match event {
             NetworkActorEvent::PeerConnected(id, pubkey, session) => {
                 state.on_peer_connected(&id, pubkey, &session).await;
@@ -1382,7 +1381,6 @@ where
             }
 
             NetworkActorCommand::ControlFiberChannel(c) => {
-                info!("send command to channel: {:?}", c);
                 state
                     .send_command_to_channel(c.channel_id, c.command)
                     .await?
@@ -1537,10 +1535,6 @@ where
                         }
                     }
                 };
-                debug!(
-                    "Handled tx_signatures, peer: {:?}, messge to send: {:?}",
-                    &peer_id, &msg
-                );
                 myself
                     .send_message(NetworkActorMessage::new_command(
                         NetworkActorCommand::SendFiberMessage(msg),
@@ -3214,7 +3208,6 @@ where
                 }
             };
 
-            debug!("Transaction trace result: {:?}", &result);
             callback(result);
         });
     }
@@ -3508,7 +3501,6 @@ where
     }
 
     fn on_peer_disconnected(&mut self, id: &PeerId) {
-        info!("Peer {:?} disconnected from us ({:?})", id, &self.peer_id);
         if let Some(session) = self.peer_session_map.remove(id) {
             if let Some(channel_ids) = self.session_channels_map.remove(&session) {
                 for channel_id in channel_ids {
@@ -3752,7 +3744,6 @@ where
         );
         let network = self.network.clone();
         self.broadcast_tx_with_callback(transaction, move |result| {
-            debug!("Funding transaction broadcast result: {:?}", &result);
             let message = match result {
                 Ok(TraceTxResponse {
                     status:
@@ -4251,11 +4242,6 @@ impl ServiceProtocol for Handle {
 
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, version: &str) {
         let session = context.session;
-        info!(
-            "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
-            context.proto_id, session.id, session.address, session.ty, version
-        );
-
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
             let remote_peer_id = PeerId::from_public_key(&remote_pubkey);
             self.send_actor_message(NetworkActorMessage::new_event(
@@ -4271,11 +4257,6 @@ impl ServiceProtocol for Handle {
     }
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
-        info!(
-            "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
-            context.proto_id, context.session.id, &context.session.address, &context.session.ty
-        );
-
         match context.session.remote_pubkey.as_ref() {
             Some(pubkey) => {
                 let peer_id = PeerId::from_public_key(pubkey);

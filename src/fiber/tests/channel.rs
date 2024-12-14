@@ -4260,7 +4260,7 @@ async fn test_send_payment_with_disable_channel() {
     let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
