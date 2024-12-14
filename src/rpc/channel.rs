@@ -64,27 +64,30 @@ pub(crate) struct OpenChannelParams {
     #[serde_as(as = "Option<U64Hex>")]
     funding_fee_rate: Option<u64>,
 
-    /// The expiry delta for the TLC locktime, an optional parameter.
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
     tlc_expiry_delta: Option<u64>,
 
-    /// The minimum value for a TLC, an optional parameter.
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
 
-    /// The maximum value for a TLC, an optional parameter.
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_max_value: Option<u128>,
-
-    /// The fee proportional millionths for a TLC, an optional parameter.
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
 
     /// The maximum value in flight for TLCs, an optional parameter.
+    /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
     max_tlc_value_in_flight: Option<u128>,
 
-    /// The maximum number of TLCs that can be accepted, an optional parameter.
+    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 }
@@ -99,12 +102,40 @@ pub(crate) struct OpenChannelResult {
 pub(crate) struct AcceptChannelParams {
     /// The temporary channel ID of the channel to accept
     temporary_channel_id: Hash256,
+
     /// The amount of CKB or UDT to fund the channel with
     #[serde_as(as = "U128Hex")]
     funding_amount: u128,
+
     /// The script used to receive the channel balance, an optional parameter,
     /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
     shutdown_script: Option<Script>,
+
+    /// The max tlc sum value in flight for the channel, default is u128::MAX
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U128Hex>")]
+    max_tlc_value_in_flight: Option<u128>,
+
+    /// The max tlc number in flight send from our side, default is 125
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U64Hex>")]
+    max_tlc_number_in_flight: Option<u64>,
+
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    tlc_min_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
+    tlc_expiry_delta: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -298,9 +329,6 @@ pub struct UpdateChannelParams {
     /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
-    /// The maximum value for a TLC
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_maximum_value: Option<u128>,
     /// The fee proportional millionths for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
@@ -486,7 +514,6 @@ where
                     funding_fee_rate: params.funding_fee_rate,
                     tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
-                    tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
@@ -509,6 +536,11 @@ where
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+                    min_tlc_value: params.tlc_min_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                 },
                 rpc_reply,
             ))
@@ -670,7 +702,6 @@ where
                             enabled: params.enabled,
                             tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
-                            tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                         },
                         rpc_reply,

@@ -138,8 +138,6 @@ pub struct ChannelUpdateInfo {
     pub tlc_expiry_delta: u64,
     /// The minimum value, which must be relayed to the next hop via the channel
     pub tlc_minimum_value: u128,
-    /// The maximum value which may be relayed to the next hop via the channel.
-    pub tlc_maximum_value: u128,
     pub fee_rate: u64,
     /// Most recent update for the channel received from the network
     /// Mostly redundant with the data we store in fields explicitly.
@@ -432,7 +430,6 @@ where
             enabled: !disabled,
             tlc_expiry_delta: update.tlc_expiry_delta,
             tlc_minimum_value: update.tlc_minimum_value,
-            tlc_maximum_value: update.tlc_maximum_value,
             fee_rate: update.tlc_fee_proportional_millionths as u64,
             last_update_message: update.clone(),
         });
@@ -580,9 +577,9 @@ where
         assert!(!route.is_empty());
 
         let mut current_amount = amount;
-        let mut current_expiry = 0;
-        let mut hops_data = vec![];
         let current_time = now_timestamp_as_millis_u64();
+        let mut current_expiry = current_time + final_tlc_expiry_delta;
+        let mut hops_data = vec![];
 
         for i in (0..route.len()).rev() {
             let is_last = i == route.len() - 1;
@@ -594,15 +591,15 @@ where
                     Some(route[i + 1].channel_outpoint.clone()),
                 )
             };
-            let (fee, expiry) = if is_last {
-                (0, current_time + final_tlc_expiry_delta)
+            let (fee, expiry_delta) = if is_last {
+                (0, 0)
             } else {
                 let channel_info = self
                     .get_channel(&route[i].channel_outpoint)
                     .expect("channel not found");
                 let channel_update = channel_info
                     .get_update_info_with(route[i].target)
-                    .expect("channel_update is none");
+                    .expect("channel_update not found");
                 let fee_rate = channel_update.fee_rate;
                 let fee =
                     calculate_tlc_forward_fee(current_amount, fee_rate as u128).expect("fee is ok");
@@ -617,6 +614,7 @@ where
             };
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
+
             hops_data.push(PaymentHopData {
                 amount: current_amount,
                 next_hop,
@@ -625,7 +623,7 @@ where
                 funding_tx_hash,
                 payment_preimage: if is_last { preimage } else { None },
             });
-            current_expiry += expiry;
+            current_expiry += expiry_delta;
             current_amount += fee;
         }
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
@@ -769,10 +767,7 @@ where
                 }
                 // check to make sure the current hop can send the amount
                 // if `tlc_maximum_value` equals 0, it means there is no limit
-                if amount_to_send > channel_info.capacity()
-                    || (channel_update.tlc_maximum_value != 0
-                        && amount_to_send > channel_update.tlc_maximum_value)
-                {
+                if amount_to_send > channel_info.capacity() {
                     continue;
                 }
                 if amount_to_send < channel_update.tlc_minimum_value {

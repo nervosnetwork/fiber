@@ -22,7 +22,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
-use std::u64;
+use std::{u128, u64};
 use tentacle::multiaddr::{MultiAddr, Protocol};
 use tentacle::utils::{extract_peer_id, is_reachable, multiaddr_to_socketaddr};
 use tentacle::{
@@ -50,7 +50,8 @@ use super::channel::{
     ChannelActorMessage, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
     ChannelEvent, ChannelInitializationParameter, ChannelState, ChannelSubscribers,
     OpenChannelParameter, ProcessingChannelError, ProcessingChannelResult, PublicChannelInfo,
-    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE, MAX_COMMITMENT_DELAY_EPOCHS,
+    ShuttingDownFlags, DEFAULT_COMMITMENT_FEE_RATE, DEFAULT_FEE_RATE,
+    DEFAULT_MAX_TLC_VALUE_IN_FLIGHT, MAX_COMMITMENT_DELAY_EPOCHS, MAX_TLC_NUMBER_IN_FLIGHT,
     MIN_COMMITMENT_DELAY_EPOCHS, SYS_MAX_TLC_NUMBER_IN_FLIGHT,
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
@@ -273,7 +274,6 @@ pub struct OpenChannelCommand {
     pub funding_fee_rate: Option<u64>,
     pub tlc_expiry_delta: Option<u64>,
     pub tlc_min_value: Option<u128>,
-    pub tlc_max_value: Option<u128>,
     pub tlc_fee_proportional_millionths: Option<u128>,
     pub max_tlc_value_in_flight: Option<u128>,
     pub max_tlc_number_in_flight: Option<u64>,
@@ -479,6 +479,11 @@ pub struct AcceptChannelCommand {
     pub temp_channel_id: Hash256,
     pub funding_amount: u128,
     pub shutdown_script: Option<Script>,
+    pub max_tlc_value_in_flight: Option<u128>,
+    pub max_tlc_number_in_flight: Option<u64>,
+    pub min_tlc_value: Option<u128>,
+    pub tlc_fee_proportional_millionths: Option<u128>,
+    pub tlc_expiry_delta: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -720,6 +725,11 @@ where
                                     state.auto_accept_channel_ckb_funding_amount as u128
                                 },
                                 shutdown_script: None,
+                                max_tlc_number_in_flight: None,
+                                max_tlc_value_in_flight: None,
+                                min_tlc_value: None,
+                                tlc_fee_proportional_millionths: None,
+                                tlc_expiry_delta: None,
                             };
                             state.create_inbound_channel(accept_channel).await?;
                         }
@@ -3042,7 +3052,6 @@ where
             funding_fee_rate,
             tlc_expiry_delta,
             tlc_min_value,
-            tlc_max_value,
             tlc_fee_proportional_millionths,
             max_tlc_value_in_flight,
             max_tlc_number_in_flight,
@@ -3086,9 +3095,8 @@ where
                 funding_amount,
                 seed,
                 public_channel_info: public.then_some(PublicChannelInfo::new(
-                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_min_value.unwrap_or(self.tlc_min_value),
-                    tlc_max_value.unwrap_or(self.tlc_max_value),
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
                     tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 funding_udt_type_script,
@@ -3097,8 +3105,10 @@ where
                 commitment_fee_rate,
                 commitment_delay_epoch,
                 funding_fee_rate,
-                max_tlc_value_in_flight,
-                max_tlc_number_in_flight,
+                max_tlc_value_in_flight: max_tlc_value_in_flight
+                    .unwrap_or(DEFAULT_MAX_TLC_VALUE_IN_FLIGHT),
+                max_tlc_number_in_flight: max_tlc_number_in_flight
+                    .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
             }),
             network.clone().get_cell(),
         )
@@ -3118,6 +3128,11 @@ where
             temp_channel_id,
             funding_amount,
             shutdown_script,
+            max_tlc_number_in_flight,
+            max_tlc_value_in_flight,
+            min_tlc_value,
+            tlc_fee_proportional_millionths,
+            tlc_expiry_delta,
         } = accept_channel;
 
         let (peer_id, open_channel) = self
@@ -3165,15 +3180,17 @@ where
                 funding_amount,
                 reserved_ckb_amount,
                 public_channel_info: open_channel.is_public().then_some(PublicChannelInfo::new(
-                    self.tlc_expiry_delta,
-                    self.tlc_min_value,
-                    self.tlc_max_value,
-                    self.tlc_fee_proportional_millionths,
+                    min_tlc_value.unwrap_or(self.tlc_min_value),
+                    tlc_expiry_delta.unwrap_or(self.tlc_expiry_delta),
+                    tlc_fee_proportional_millionths.unwrap_or(self.tlc_fee_proportional_millionths),
                 )),
                 seed,
                 open_channel,
                 shutdown_script,
                 channel_id_sender: Some(tx),
+                max_tlc_number_in_flight: max_tlc_number_in_flight
+                    .unwrap_or(MAX_TLC_NUMBER_IN_FLIGHT),
+                max_tlc_value_in_flight: max_tlc_value_in_flight.unwrap_or(u128::MAX),
             }),
             network.clone().get_cell(),
         )

@@ -554,7 +554,6 @@ pub struct OpenChannel {
     pub commitment_delay_epoch: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
     pub funding_pubkey: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
@@ -583,7 +582,6 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
-            .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
             .funding_pubkey(open_channel.funding_pubkey.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
@@ -616,7 +614,6 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: open_channel.min_tlc_value().unpack(),
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
@@ -645,7 +642,6 @@ pub struct AcceptChannel {
     pub reserved_ckb_amount: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
     pub tlc_basepoint: Pubkey,
@@ -664,7 +660,6 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
-            .min_tlc_value(accept_channel.min_tlc_value.pack())
             .funding_pubkey(accept_channel.funding_pubkey.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
@@ -694,7 +689,6 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: accept_channel.min_tlc_value().unpack(),
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
@@ -1962,7 +1956,6 @@ pub struct ChannelUpdate {
     pub channel_flags: u32,
     pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
-    pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
 }
 
@@ -1975,7 +1968,6 @@ impl ChannelUpdate {
         channel_flags: u32,
         tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
-        tlc_maximum_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
         Self {
@@ -1987,7 +1979,6 @@ impl ChannelUpdate {
             channel_flags,
             tlc_expiry_delta,
             tlc_minimum_value,
-            tlc_maximum_value,
             tlc_fee_proportional_millionths,
         }
     }
@@ -2002,7 +1993,6 @@ impl ChannelUpdate {
             channel_flags: self.channel_flags,
             tlc_expiry_delta: self.tlc_expiry_delta,
             tlc_minimum_value: self.tlc_minimum_value,
-            tlc_maximum_value: self.tlc_maximum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
         };
         deterministically_hash(&unsigned_update)
@@ -2025,7 +2015,6 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             .channel_flags(channel_update.channel_flags.pack())
             .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
-            .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
             .build()
     }
@@ -2044,7 +2033,6 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
             channel_flags: channel_update.channel_flags().unpack(),
             tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
-            tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
                 .tlc_fee_proportional_millionths()
                 .unpack(),
