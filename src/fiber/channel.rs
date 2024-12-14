@@ -2025,9 +2025,10 @@ where
         trace!(
             "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
             &state.get_id(),
-            &message,
-            &state.state
+            &state.state,
+            message,
         );
+
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(&myself, state, message).await {

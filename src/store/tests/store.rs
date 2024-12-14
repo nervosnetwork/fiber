@@ -317,7 +317,17 @@ fn test_channel_actor_state_store() {
     let store = Store::new(tempdir().unwrap().path().join("store")).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
-    assert!(store.get_channel_actor_state(&state.id).is_some());
+    let get_state = store.get_channel_actor_state(&state.id);
+    assert!(get_state.is_some());
+    assert_eq!(
+        get_state
+            .unwrap()
+            .public_channel_info
+            .as_ref()
+            .unwrap()
+            .enabled,
+        false
+    );
     store.delete_channel_actor_state(&state.id);
     assert!(store.get_channel_actor_state(&state.id).is_none());
 }
