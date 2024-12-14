@@ -35,7 +35,7 @@ use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
@@ -1247,37 +1247,24 @@ const ERROR_DECODING_PASSES: usize = 27;
 impl TlcErrPacket {
     /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
     /// Use all zeros for the origin node.
-    pub fn new(tlc_fail: TlcErr, _shared_secret: &[u8; 32]) -> Self {
+    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
         dbg!(&tlc_fail);
         let payload = tlc_fail.serialize();
 
-        let onion_packet =
-            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload).into_bytes();
-        return TlcErrPacket { onion_packet };
-    }
-
-    // TODO: Enable error encryption by replacing `new` with this method.
-    // The encryption has been disabled so we can split the PR into small pieces and apply future
-    // upgrades without breaking the network protocol.
-    #[cfg(test)]
-    pub fn new_with_encryption(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
-        dbg!(&tlc_fail);
-        let payload = tlc_fail.serialize();
-
-        let onion_packet = (if shared_secret != &NO_SHARED_SECRET {
+        let onion_packet = if shared_secret != &NO_SHARED_SECRET {
             OnionErrorPacket::create(shared_secret, payload)
         } else {
             OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload)
-        })
+        }
         .into_bytes();
-        return TlcErrPacket { onion_packet };
+        TlcErrPacket { onion_packet }
     }
 
     pub fn is_plaintext(&self) -> bool {
         self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
     }
 
-    /// Intermediate node forwards the error to the previous hop using the shared secret used in forwarding
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
     /// the onion packet.
     pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
         if !self.is_plaintext() {
@@ -1299,8 +1286,11 @@ impl TlcErrPacket {
             }
         }
 
-        let hops_public_keys = hops_public_keys.iter().map(|k| k.0.clone()).collect();
-        let session_key = SecretKey::from_slice(session_key).ok()?;
+        let hops_public_keys: Vec<PublicKey> =
+            hops_public_keys.iter().map(|k| k.0.clone()).collect();
+        let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
+            error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
+        ).ok()?;
         OnionErrorPacket::from_bytes(self.onion_packet.clone())
             .parse(hops_public_keys, session_key, TlcErr::deserialize)
             .map(|(error, hop_index)| {
@@ -1415,6 +1405,21 @@ impl TlcErrorCode {
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl RemoveTlcReason {
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
+    /// the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
+                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
+            }
+        }
+    }
 }
 
 impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
@@ -3039,12 +3044,10 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 pub struct PaymentHopData {
     pub amount: u128,
     pub expiry: u64,
-    pub payment_hash: Hash256,
     // this is only specified in the last hop in the keysend mode
     pub payment_preimage: Option<Hash256>,
     pub hash_algorithm: HashAlgorithm,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub channel_outpoint: Option<OutPoint>,
+    pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
 }
 
@@ -3058,14 +3061,14 @@ pub trait HopData: Sized {
 }
 
 impl HopData for PaymentHopData {
-    const PACKET_DATA_LEN: usize = 1300;
+    const PACKET_DATA_LEN: usize = 6500;
 
     fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop.clone()
     }
 
     fn assoc_data(&self) -> Option<Vec<u8>> {
-        Some(self.payment_hash.as_ref().to_vec())
+        None
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -3106,6 +3109,11 @@ impl<T> OnionPacket<T> {
         }
     }
 
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.data
     }
@@ -3127,8 +3135,7 @@ impl<T: HopData> OnionPacket<T> {
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
-        let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
+        let sphinx_packet = self.into_sphinx_onion_packet()?;
         let shared_secret = sphinx_packet.shared_secret(&privkey.0);
 
         let (new_current, new_next) = sphinx_packet
@@ -3158,6 +3165,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<T>,
+        assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         if hops_infos.is_empty() {
@@ -3175,7 +3183,11 @@ impl<T: HopData> PeeledOnionPacket<T> {
         let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
 
         let current = hops_infos.swap_remove(0);
-        let assoc_data = current.assoc_data();
+        let assoc_data = if assoc_data.is_some() {
+            assoc_data
+        } else {
+            current.assoc_data()
+        };
 
         let next = if !hops_path.is_empty() {
             Some(OnionPacket::new(

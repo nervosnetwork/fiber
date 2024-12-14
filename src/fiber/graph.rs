@@ -610,15 +610,19 @@ where
                 (fee, expiry)
             };
 
+            let funding_tx_hash = if let Some(next_channel_outpoint) = next_channel_outpoint {
+                next_channel_outpoint.tx_hash().into()
+            } else {
+                Hash256::default()
+            };
             // make sure the final hop's amount is the same as the payment amount
             // the last hop will check the amount from TLC and the amount from the onion packet
             hops_data.push(PaymentHopData {
                 amount: current_amount,
-                payment_hash,
                 next_hop,
                 hash_algorithm: hash_algorithm,
                 expiry: current_expiry,
-                channel_outpoint: next_channel_outpoint,
+                funding_tx_hash,
                 payment_preimage: if is_last { preimage } else { None },
             });
             current_expiry += expiry;
@@ -627,11 +631,10 @@ where
         // Add the first hop as the instruction for the current node, so the logic for send HTLC can be reused.
         hops_data.push(PaymentHopData {
             amount: current_amount,
-            payment_hash,
             next_hop: Some(route[0].target),
             hash_algorithm: hash_algorithm,
             expiry: current_expiry,
-            channel_outpoint: Some(route[0].channel_outpoint.clone()),
+            funding_tx_hash: route[0].channel_outpoint.tx_hash().into(),
             payment_preimage: None,
         });
         hops_data.reverse();
@@ -737,18 +740,25 @@ where
 
                 edges_expanded += 1;
 
-                let fee_rate = channel_update.fee_rate;
                 let next_hop_received_amount = cur_hop.amount_received;
                 if next_hop_received_amount > channel_info.capacity() {
                     continue;
                 }
-                let fee = calculate_tlc_forward_fee(next_hop_received_amount, fee_rate as u128)
+
+                let fee = if from == source {
+                    0
+                } else {
+                    calculate_tlc_forward_fee(
+                        next_hop_received_amount,
+                        channel_update.fee_rate as u128,
+                    )
                     .map_err(|err| {
                         PathFindError::PathFind(format!(
                             "calculate_tlc_forward_fee error: {:?}",
                             err
                         ))
-                    })?;
+                    })?
+                };
                 let amount_to_send = next_hop_received_amount + fee;
 
                 // if the amount to send is greater than the amount we have, skip this edge
@@ -841,6 +851,7 @@ where
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
         }
+
         Ok(result)
     }
 
@@ -936,7 +947,14 @@ impl SessionRoute {
             .zip(payment_hops)
             .map(|(pubkey, hop)| SessionRouteNode {
                 pubkey,
-                channel_outpoint: hop.channel_outpoint.clone().unwrap_or_default(),
+                channel_outpoint: OutPoint::new(
+                    if hop.funding_tx_hash != Hash256::default() {
+                        hop.funding_tx_hash.into()
+                    } else {
+                        Hash256::default().into()
+                    },
+                    0,
+                ),
                 amount: hop.amount,
             })
             .collect();
@@ -1022,7 +1040,8 @@ impl PaymentSession {
     }
 
     pub fn hops_public_keys(&self) -> Vec<Pubkey> {
-        self.route.nodes.iter().map(|x| x.pubkey).collect()
+        // Skip the first node, which is the sender.
+        self.route.nodes.iter().skip(1).map(|x| x.pubkey).collect()
     }
 }
 
