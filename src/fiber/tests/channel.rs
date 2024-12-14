@@ -2613,7 +2613,6 @@ async fn do_test_add_tlc_number_limit() {
 
     // A -> B will have tlc number limit 2
     for i in 1..=node_a_max_tlc_number + 1 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2644,6 +2643,31 @@ async fn do_test_add_tlc_number_limit() {
             dbg!(&add_tlc_result);
             assert!(add_tlc_result.is_ok());
         }
+    }
+
+    // B -> A can still add tlc
+    for _ in 1..=node_a_max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
     }
 }
 
@@ -2677,7 +2701,6 @@ async fn do_test_add_tlc_number_limit_reverse() {
     let tlc_amount = 1000000000;
     // B -> A will have tlc number limit 2
     for i in 1..=node_b_max_tlc_number + 1 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2709,12 +2732,37 @@ async fn do_test_add_tlc_number_limit_reverse() {
             assert!(add_tlc_result.is_ok());
         }
     }
+
+    // A -> B can still add tlc
+    for _ in 1..=node_b_max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+    }
 }
 
 #[tokio::test]
 async fn do_test_add_tlc_value_limit() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 100000000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
@@ -2740,8 +2788,8 @@ async fn do_test_add_tlc_value_limit() {
 
     let tlc_amount = 1000000000;
 
+    // A -> B have tlc value limit 3_000_000_000
     for i in 1..=max_tlc_number + 1 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2772,6 +2820,31 @@ async fn do_test_add_tlc_value_limit() {
         } else {
             assert!(add_tlc_result.is_ok());
         }
+    }
+
+    // B -> A can still add tlc
+    for _ in 1..=max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_b alive");
+        // sleep for a while to make sure the AddTlc processed by both party
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        assert!(add_tlc_result.is_ok());
     }
 }
 

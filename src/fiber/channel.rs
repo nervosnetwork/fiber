@@ -4253,12 +4253,9 @@ impl ChannelActorState {
             )));
         }
         if tlc.is_offered() {
-            // TODO: We should actually also consider all our fulfilled tlcs here.
-            // Because this is also the amount that we can actually spend.
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
-            // TODO: handle transaction fee here.
             if sent_tlc_value + tlc.amount > self.to_local_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
@@ -4268,12 +4265,9 @@ impl ChannelActorState {
                 )));
             }
         } else {
-            // TODO: We should actually also consider all their fulfilled tlcs here.
-            // Because this is also the amount that we can actually spend.
             let received_tlc_value = self.get_received_tlc_balance();
             debug!("Value of remote received tlcs: {}", received_tlc_value);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
-            // TODO: handle transaction fee here.
             if received_tlc_value + tlc.amount > self.to_remote_amount {
                 return Err(ProcessingChannelError::InvalidParameter(format!(
                     "Adding tlc {:?} with amount {} exceeds remote balance {}",
@@ -4777,45 +4771,33 @@ impl ChannelActorState {
         add_amount: u128,
         is_sent: bool,
     ) -> Result<(), ProcessingChannelError> {
+        if add_amount == 0 {
+            return Err(ProcessingChannelError::TlcAmountIsTooLow);
+        }
         if is_sent {
-            if add_amount == 0 {
-                return Err(ProcessingChannelError::TlcAmountIsTooLow);
-            }
-
-            let active_offered_tls_number = self.get_all_offer_tlcs().count();
-
-            if active_offered_tls_number as u64 + 1
-                > self.local_constraints.max_tlc_number_in_flight
-            {
+            let active_offered_tls_number = self.get_all_offer_tlcs().count() as u64 + 1;
+            if active_offered_tls_number > self.local_constraints.max_tlc_number_in_flight {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
-            if self
+            let active_offered_amount = self
                 .get_all_offer_tlcs()
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
-                + add_amount
-                > self.local_constraints.max_tlc_value_in_flight
-            {
+                + add_amount;
+            if active_offered_amount > self.local_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         } else {
-            if add_amount == 0 {
-                return Err(ProcessingChannelError::TlcAmountIsTooLow);
-            }
-            let active_received_tls_number = self.get_all_received_tlcs().count();
-
-            if active_received_tls_number as u64 + 1
-                > self.remote_constraints.max_tlc_number_in_flight
-            {
+            let active_received_tls_number = self.get_all_received_tlcs().count() as u64 + 1;
+            if active_received_tls_number > self.remote_constraints.max_tlc_number_in_flight {
                 return Err(ProcessingChannelError::TlcNumberExceedLimit);
             }
 
-            if self
+            let active_received_amount = self
                 .get_all_received_tlcs()
                 .fold(0_u128, |sum, tlc| sum + tlc.amount)
-                + add_amount
-                > self.remote_constraints.max_tlc_value_in_flight
-            {
+                + add_amount;
+            if active_received_amount > self.remote_constraints.max_tlc_value_in_flight {
                 return Err(ProcessingChannelError::TlcValueInflightExceedLimit);
             }
         }
