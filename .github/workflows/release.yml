@@ -13,7 +13,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-20.04, ubuntu-22.04, macos-12, macos-13, windows-2019 ]
+        os: [ ubuntu-20.04, ubuntu-22.04, macos-13, windows-2019 ]
         include:
           - os: ubuntu-20.04
             bin_suffix:
@@ -21,12 +21,9 @@ jobs:
           - os: ubuntu-22.04
             bin_suffix:
             pkg_suffix: x86_64-linux
-          - os: macos-12
-            bin_suffix:
-            pkg_suffix: x86_64-darwin-portable
           - os: macos-13
             bin_suffix:
-            pkg_suffix: x86_64-darwin
+            pkg_suffix: x86_64-darwin-portable
           - os: windows-2019
             bin_suffix: .exe
             pkg_suffix: x86_64-windows
@@ -62,20 +59,13 @@ jobs:
     - if: matrix.os == 'ubuntu-22.04'
       name: Build linux
       run: cargo build --release
-    - if: matrix.os == 'macos-12'
+    - if: matrix.os == 'macos-13'
       name: Build macos portable
       run: |
         export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
         export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
         export OPENSSL_STATIC=1
         cargo build --release --features portable
-    - if: matrix.os == 'macos-13'
-      name: Build macos
-      run: |
-        export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
-        export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
-        export OPENSSL_STATIC=1
-        cargo build --release
     - if: matrix.os == 'windows-2019'
       name: Build windows
       run: cargo build --release
