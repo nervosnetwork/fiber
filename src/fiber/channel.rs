@@ -756,10 +756,11 @@ where
             let status = self.get_invoice_status(&invoice);
             match status {
                 CkbInvoiceStatus::Expired | CkbInvoiceStatus::Cancelled => {
-                    let error_code = match status {
-                        CkbInvoiceStatus::Expired => TlcErrorCode::InvoiceExpired,
-                        CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
-                        _ => unreachable!("unexpected invoice status"),
+                    let error_code = if status == CkbInvoiceStatus::Expired {
+                        TlcErrorCode::InvoiceExpired
+                    } else {
+                        assert_eq!(status, CkbInvoiceStatus::Cancelled);
+                        TlcErrorCode::InvoiceCancelled
                     };
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
                         TlcErr::new(error_code),
