@@ -566,7 +566,7 @@ where
         }
     }
 
-    async fn get_tlc_detail_error(
+    async fn get_tlc_error(
         &self,
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
@@ -668,8 +668,7 @@ where
                             // If we already have TlcErr, we can directly use it to send back to the peer.
                             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
                             _ => {
-                                let error_detail =
-                                    self.get_tlc_detail_error(state, &e.source).await;
+                                let error_detail = self.get_tlc_error(state, &e.source).await;
                                 self.network
                                     .clone()
                                     .send_message(NetworkActorMessage::new_notification(
@@ -1596,7 +1595,7 @@ where
                     }
                     Err(err) => {
                         debug!("Error processing AddTlc command: {:?}", &err);
-                        let tlc_err = self.get_tlc_detail_error(state, &err).await;
+                        let tlc_err = self.get_tlc_error(state, &err).await;
                         let _ = reply.send(Err(tlc_err));
                         Err(err)
                     }
