@@ -46,7 +46,7 @@ script:post-response {
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("remove tlc result: ", res.body);
-  if (!(res.body.error.message.includes("TLC is already removed"))) {
+  if (!(res.body.error.message.includes("Trying to remove non-existing tlc with id"))) {
     throw new Error("Assertion failed: error message is not right");
   }
 

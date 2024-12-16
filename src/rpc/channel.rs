@@ -610,6 +610,7 @@ where
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
                             onion_packet: None,
+                            shared_secret: NO_SHARED_SECRET.clone(),
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -652,7 +653,8 @@ where
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
                                         TlcErrPacket::new(
                                             TlcErr::new(err_code.expect("expect error code")),
-                                            // TODO: get shared secret to create the error packet
+                                            // Do not encrypt the error message when removing the TLC via RPC.
+                                            // TODO: use tlc id to look up the shared secret in the store
                                             &NO_SHARED_SECRET,
                                         ),
                                     )

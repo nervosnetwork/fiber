@@ -69,6 +69,7 @@ fn test_pending_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -82,6 +83,7 @@ fn test_pending_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -148,6 +150,7 @@ fn test_pending_tlcs_duplicated_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -185,6 +188,7 @@ fn test_pending_tlcs_duplicated_tlcs() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -226,6 +230,7 @@ fn test_pending_tlcs_with_remove_tlc() {
         expiry: now_timestamp_as_millis_u64() + 1000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -239,6 +244,7 @@ fn test_pending_tlcs_with_remove_tlc() {
         expiry: now_timestamp_as_millis_u64() + 2000,
         hash_algorithm: HashAlgorithm::Sha256,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_at: None,
@@ -885,6 +891,7 @@ async fn test_network_send_previous_tlc_error() {
                         hash_algorithm: HashAlgorithm::Sha256,
                         // invalid onion packet
                         onion_packet: packet.next.clone(),
+                        shared_secret: packet.shared_secret.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -1966,6 +1973,7 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2284,6 +2292,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2335,6 +2344,7 @@ async fn do_test_remove_tlc_with_wrong_hash_algorithm(
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,
@@ -2392,6 +2402,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + 10,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         previous_tlc: None,
     };
 
@@ -2414,6 +2425,7 @@ async fn do_test_remove_tlc_with_expiry_error() {
         payment_hash: digest.into(),
         expiry: now_timestamp_as_millis_u64() + MAX_PAYMENT_TLC_EXPIRY_LIMIT + 10,
         onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
         previous_tlc: None,
     };
 
@@ -2452,6 +2464,7 @@ async fn do_test_add_tlc_duplicated() {
             payment_hash: digest.into(),
             expiry: now_timestamp_as_millis_u64() + 10,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2477,14 +2490,46 @@ async fn do_test_add_tlc_waiting_ack() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (node_a, _node_b, new_channel_id) =
+    let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
             .await;
 
     let tlc_amount = 1000000000;
 
     for i in 1..=2 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_b alive");
+        if i == 2 {
+            // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            assert!(add_tlc_result.is_ok());
+        }
+    }
+
+    // send from b to a
+    for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
@@ -2492,8 +2537,9 @@ async fn do_test_add_tlc_waiting_ack() {
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
             previous_tlc: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
         };
-        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
                 ChannelCommandWithId {
                     channel_id: new_channel_id,
@@ -2519,18 +2565,18 @@ async fn do_test_add_tlc_waiting_ack() {
 #[tokio::test]
 async fn do_test_add_tlc_number_limit() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 100000000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
-    let max_tlc_number = 3;
+    let node_a_max_tlc_number = 2;
     let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
         &mut node_a,
         &mut node_b,
         true,
         node_a_funding_amount,
         node_b_funding_amount,
-        Some(3),
+        Some(node_a_max_tlc_number),
         None,
         None,
         None,
@@ -2545,14 +2591,15 @@ async fn do_test_add_tlc_number_limit() {
 
     let tlc_amount = 1000000000;
 
-    for i in 1..=max_tlc_number + 1 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
+    // A -> B will have tlc number limit 2
+    for i in 1..=node_a_max_tlc_number + 1 {
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_sha256_hash().into(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2563,9 +2610,9 @@ async fn do_test_add_tlc_number_limit() {
                 },
             ))
         })
-        .expect("node_b alive");
+        .expect("source node alive");
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        if i == max_tlc_number + 1 {
+        if i == node_a_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
             let code = add_tlc_result
                 .unwrap_err()
@@ -2577,12 +2624,125 @@ async fn do_test_add_tlc_number_limit() {
             assert!(add_tlc_result.is_ok());
         }
     }
+
+    // B -> A can still add tlc
+    for _ in 1..=node_a_max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn do_test_add_tlc_number_limit_reverse() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 100000000000;
+
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let node_b_max_tlc_number = 2;
+    let (new_channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        true,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(node_b_max_tlc_number),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let tlc_amount = 1000000000;
+    // B -> A will have tlc number limit 2
+    for i in 1..=node_b_max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        if i == node_b_max_tlc_number + 1 {
+            assert!(add_tlc_result.is_err());
+            let code = add_tlc_result
+                .unwrap_err()
+                .decode(&NO_SHARED_SECRET, vec![])
+                .unwrap();
+            assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
+        } else {
+            dbg!(&add_tlc_result);
+            assert!(add_tlc_result.is_ok());
+        }
+    }
+
+    // A -> B can still add tlc
+    for _ in 1..=node_b_max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("source node alive");
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        dbg!(&add_tlc_result);
+        assert!(add_tlc_result.is_ok());
+    }
 }
 
 #[tokio::test]
 async fn do_test_add_tlc_value_limit() {
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 100000000000;
 
     let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
@@ -2608,14 +2768,15 @@ async fn do_test_add_tlc_value_limit() {
 
     let tlc_amount = 1000000000;
 
+    // A -> B have tlc value limit 3_000_000_000
     for i in 1..=max_tlc_number + 1 {
-        std::thread::sleep(std::time::Duration::from_millis(400));
         let add_tlc_command = AddTlcCommand {
             amount: tlc_amount,
             hash_algorithm: HashAlgorithm::CkbHash,
             payment_hash: gen_sha256_hash().into(),
             expiry: now_timestamp_as_millis_u64() + 100000000,
             onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
             previous_tlc: None,
         };
         let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
@@ -2639,6 +2800,31 @@ async fn do_test_add_tlc_value_limit() {
         } else {
             assert!(add_tlc_result.is_ok());
         }
+    }
+
+    // B -> A can still add tlc
+    for _ in 1..=max_tlc_number + 1 {
+        let add_tlc_command = AddTlcCommand {
+            amount: tlc_amount,
+            hash_algorithm: HashAlgorithm::CkbHash,
+            payment_hash: gen_sha256_hash().into(),
+            expiry: now_timestamp_as_millis_u64() + 100000000,
+            onion_packet: None,
+            shared_secret: NO_SHARED_SECRET.clone(),
+            previous_tlc: None,
+        };
+        let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+            NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+                ChannelCommandWithId {
+                    channel_id: new_channel_id,
+                    command: ChannelCommand::AddTlc(add_tlc_command, rpc_reply),
+                },
+            ))
+        })
+        .expect("node_b alive");
+        // sleep for a while to make sure the AddTlc processed by both party
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        assert!(add_tlc_result.is_ok());
     }
 }
 
@@ -2677,6 +2863,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2700,6 +2887,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2723,6 +2911,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
     };
     let add_tlc_result = call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2832,7 +3021,7 @@ async fn test_channel_update_tlc_sync_up() {
         None,
     )
     .await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     // A -> B now will be with no limit
     let tlc_amount = 99;
@@ -2872,6 +3061,7 @@ async fn test_channel_update_tlc_sync_up() {
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -2945,6 +3135,7 @@ async fn test_channel_update_tlc_sync_up() {
         expiry: now_timestamp_as_millis_u64() + 100000000,
         onion_packet: None,
         previous_tlc: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
     };
     let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
@@ -3066,6 +3257,7 @@ async fn do_test_channel_with_simple_update_operation(algorithm: HashAlgorithm) 
                         payment_hash: digest.into(),
                         expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
                         onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
                         previous_tlc: None,
                     },
                     rpc_reply,

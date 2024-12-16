@@ -1,0 +1,91 @@
+name: Release
+on:
+  push:
+    tags: [ '*' ]
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.81.0
+permissions:
+  contents: write
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04, ubuntu-22.04, macos-13, windows-2019 ]
+        include:
+          - os: ubuntu-20.04
+            bin_suffix:
+            pkg_suffix: x86_64-linux-portable
+          - os: ubuntu-22.04
+            bin_suffix:
+            pkg_suffix: x86_64-linux
+          - os: macos-13
+            bin_suffix:
+            pkg_suffix: x86_64-darwin-portable
+          - os: windows-2019
+            bin_suffix: .exe
+            pkg_suffix: x86_64-windows
+    steps:
+    - name: Checkout the Repository
+      uses: actions/checkout@v4
+    - name: Install Rust Toolchain
+      run: |
+        rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal
+        rustup override set ${{ env.RUST_TOOLCHAIN }}
+    - if: matrix.os == 'windows-2019'
+      name: Windows Dependencies
+      run: |
+        iwr -useb get.scoop.sh -outfile 'install-scoop.ps1'
+        .\install-scoop.ps1 -RunAsAdmin
+        echo "LIBCLANG_PATH=$($HOME)/scoop/apps/llvm/current/bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        echo "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        scoop install llvm yasm
+    - if: matrix.os == 'ubuntu-20.04'
+      name: Build linux portable
+      run: |
+        export PWD_DIR=$(pwd)
+        curl -LO https://www.openssl.org/source/openssl-1.1.1s.tar.gz
+        tar -xzf openssl-1.1.1s.tar.gz
+        cd openssl-1.1.1s
+        ./Configure linux-x86_64 shared
+        make
+        cd ..
+        export OPENSSL_LIB_DIR=${PWD_DIR}/openssl-1.1.1s
+        export OPENSSL_INCLUDE_DIR=${PWD_DIR}/openssl-1.1.1s/include
+        export OPENSSL_STATIC=1
+        cargo build --release --features portable
+    - if: matrix.os == 'ubuntu-22.04'
+      name: Build linux
+      run: cargo build --release
+    - if: matrix.os == 'macos-13'
+      name: Build macos portable
+      run: |
+        export OPENSSL_LIB_DIR=/usr/local/opt/openssl@1.1/lib
+        export OPENSSL_INCLUDE_DIR=/usr/local/opt/openssl@1.1/include
+        export OPENSSL_STATIC=1
+        cargo build --release --features portable
+    - if: matrix.os == 'windows-2019'
+      name: Build windows
+      run: cargo build --release
+    - name: Get the Version
+      id: get_version
+      shell: bash
+      run: echo "VERSION=$(echo $GITHUB_REF | cut -d / -f 3)" >> $GITHUB_OUTPUT
+    - id: get_package
+      name: Package
+      shell: bash
+      run: |
+        pkgname="fnn_${{ steps.get_version.outputs.VERSION }}-${{ matrix.pkg_suffix }}.tar.gz"
+        cp "target/release/fnn${{ matrix.bin_suffix }}" "fnn${{ matrix.bin_suffix }}"
+        tar czvf "${pkgname}" "fnn${{ matrix.bin_suffix }}" "config"
+        echo "PKGNAME=${pkgname}" >> $GITHUB_OUTPUT
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        draft: true
+        files: |
+          ${{ steps.get_package.outputs.PKGNAME }}

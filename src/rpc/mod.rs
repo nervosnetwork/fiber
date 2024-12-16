@@ -32,8 +32,8 @@ use tokio::sync::{mpsc::Sender, RwLock};
 
 pub type InvoiceCommandWithReply = (InvoiceCommand, Sender<crate::Result<String>>);
 
-fn build_server(addr: &str) -> Server {
-    #[cfg(not(release))]
+async fn build_server(addr: &str) -> Server {
+    #[cfg(debug_assertions)]
     {
         // Use socket2 to set reuse address and reuse port,
         // so that we can restart the server without waiting for the port to be released.
@@ -56,7 +56,7 @@ fn build_server(addr: &str) -> Server {
             .build_from_tcp(socket)
             .expect("JsonRPC server built from TCP")
     }
-    #[cfg(release)]
+    #[cfg(not(debug_assertions))]
     {
         Server::builder()
             .build(addr)
@@ -76,7 +76,7 @@ pub async fn start_rpc<
     network_graph: Arc<RwLock<NetworkGraph<S>>>,
 ) -> ServerHandle {
     let listening_addr = config.listening_addr.as_deref().unwrap_or("[::]:0");
-    let server = build_server(listening_addr);
+    let server = build_server(listening_addr).await;
     let mut methods = InvoiceRpcServerImpl::new(store.clone(), fiber_config).into_rpc();
     if let Some(network_actor) = network_actor {
         let info = InfoRpcServerImpl::new(network_actor.clone(), store.clone());
