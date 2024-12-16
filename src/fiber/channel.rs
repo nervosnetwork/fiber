@@ -3436,7 +3436,7 @@ impl ChannelActorState {
         .await
     }
 
-    pub async fn generate_and_broadcast_channel_update(
+    async fn generate_and_broadcast_channel_update(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) {
@@ -3457,7 +3457,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    pub async fn try_create_channel_update_message(
+    async fn try_create_channel_update_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelUpdate> {
@@ -4796,13 +4796,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TlcKind {
-        // TODO: we are filling the user command with a new id here.
-        // The advantage of this is that we don't need to burden the users to
-        // provide a next id for each tlc. The disadvantage is that users may
-        // inadvertently click the same button twice, and we will process the same
-        // twice, the frontend needs to prevent this kind of behaviour.
-        // Is this what we want?
+    fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TlcKind {
         let id = self.get_next_offering_tlc_id();
         assert!(
             self.get_offered_tlc(id).is_none(),
@@ -4827,10 +4821,7 @@ impl ChannelActorState {
         })
     }
 
-    pub fn create_inbounding_tlc(
-        &self,
-        message: AddTlc,
-    ) -> Result<AddTlcInfo, ProcessingChannelError> {
+    fn create_inbounding_tlc(&self, message: AddTlc) -> Result<AddTlcInfo, ProcessingChannelError> {
         let tlc_info = AddTlcInfo {
             tlc_id: TLCId::Received(message.tlc_id),
             channel_id: self.get_id(),
@@ -4850,14 +4841,14 @@ impl ChannelActorState {
         Ok(tlc_info)
     }
 
-    pub fn create_witness_for_funding_cell(
+    fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
         create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature)
     }
 
-    pub fn aggregate_partial_signatures_to_consume_funding_cell(
+    fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
         partial_signatures: [PartialSignature; 2],
         tx: &TransactionView,
@@ -4883,7 +4874,7 @@ impl ChannelActorState {
             .build())
     }
 
-    pub fn sign_tx_to_consume_funding_cell(
+    fn sign_tx_to_consume_funding_cell(
         &self,
         psct: &PartiallySignedCommitmentTransaction,
     ) -> Result<TransactionView, ProcessingChannelError> {
@@ -4896,7 +4887,7 @@ impl ChannelActorState {
         )
     }
 
-    pub fn maybe_transition_to_shutdown(
+    fn maybe_transition_to_shutdown(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
@@ -5048,7 +5039,7 @@ impl ChannelActorState {
 
     // This is the dual of `handle_tx_collaboration_command`. Any logic error here is likely
     // to present in the other function as well.
-    pub fn handle_tx_collaboration_msg(
+    fn handle_tx_collaboration_msg(
         &mut self,
         msg: TxCollaborationMsg,
         network: &ActorRef<NetworkActorMessage>,
@@ -5824,7 +5815,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn fill_in_channel_id(&mut self) {
+    fn fill_in_channel_id(&mut self) {
         let local = &self.get_local_channel_public_keys().tlc_base_key;
         let remote = &self.get_remote_channel_public_keys().tlc_base_key;
         let channel_id = derive_channel_id_from_tlc_keys(local, remote);
