@@ -755,15 +755,15 @@ where
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             let status = self.get_invoice_status(&invoice);
             match status {
-                CkbInvoiceStatus::Expired | CkbInvoiceStatus::Cancelled => {
-                    let error_code = if status == CkbInvoiceStatus::Expired {
-                        TlcErrorCode::InvoiceExpired
-                    } else {
-                        assert_eq!(status, CkbInvoiceStatus::Cancelled);
-                        TlcErrorCode::InvoiceCancelled
-                    };
+                CkbInvoiceStatus::Expired => {
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(error_code),
+                        TlcErr::new(TlcErrorCode::InvoiceExpired),
+                        &tlc.shared_secret,
+                    ));
+                }
+                CkbInvoiceStatus::Cancelled => {
+                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
                     ));
                 }
