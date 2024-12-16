@@ -1,6 +1,7 @@
 name: Release
 on:
   push:
+    branches: [ 'playground/release' ]
     tags: [ '*' ]
 env:
   CARGO_TERM_COLOR: always
@@ -42,6 +43,8 @@ jobs:
         echo "LIBCLANG_PATH=$($HOME)/scoop/apps/llvm/current/bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
         echo "$env:USERPROFILE\scoop\shims" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         scoop install llvm yasm
+        vcpkg integrate install
+        vcpkg install openssl:x64-windows-static-md
     - if: matrix.os == 'ubuntu-20.04'
       name: Build linux portable
       run: |
