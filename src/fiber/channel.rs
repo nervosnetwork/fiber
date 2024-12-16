@@ -127,10 +127,7 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(
-        AddTlcCommand,
-        RpcReplyPort<Result<AddTlcResponse, TlcErrPacket>>,
-    ),
+    AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
@@ -667,9 +664,9 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        let error_packet = match e.source {
-                            // If we already have TlcErrPacket, we can directly use it to send back to the peer.
-                            ProcessingChannelError::TlcForwardingError(err_packet) => err_packet,
+                        let tlc_err = match e.source {
+                            // If we already have TlcErr, we can directly use it to send back to the peer.
+                            ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
                             _ => {
                                 let error_detail =
                                     self.get_tlc_detail_error(state, &e.source).await;
@@ -683,13 +680,14 @@ where
                                         ),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                                TlcErrPacket::new(
-                                    error_detail,
-                                    // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
-                                    &e.shared_secret,
-                                )
+                                error_detail
                             }
                         };
+                        let error_packet = TlcErrPacket::new(
+                            tlc_err,
+                            // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
+                            &e.shared_secret,
+                        );
                         self.register_retryable_tlc_remove(
                             myself,
                             state,
@@ -1048,7 +1046,7 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
+        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
         let rpc_reply = RpcReplyPort::from(send);
         self.network
             .send_message(NetworkActorMessage::Command(
@@ -1591,7 +1589,6 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
-                let shared_secret = command.shared_secret.clone();
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
@@ -1599,8 +1596,8 @@ where
                     }
                     Err(err) => {
                         debug!("Error processing AddTlc command: {:?}", &err);
-                        let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &shared_secret)));
+                        let tlc_err = self.get_tlc_detail_error(state, &err).await;
+                        let _ = reply.send(Err(tlc_err));
                         Err(err)
                     }
                 }
@@ -2980,7 +2977,7 @@ pub enum ProcessingChannelError {
     #[error("The tlc expiry too far")]
     TlcExpiryTooFar,
     #[error("Tlc forwarding error")]
-    TlcForwardingError(TlcErrPacket),
+    TlcForwardingError(TlcErr),
 }
 
 /// ProcessingChannelError which brings the shared secret used in forwarding onion packet.

@@ -2518,10 +2518,7 @@ async fn do_test_add_tlc_waiting_ack() {
         if i == 2 {
             // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result
-                .unwrap_err()
-                .decode(&NO_SHARED_SECRET, vec![])
-                .unwrap();
+            let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
@@ -2551,10 +2548,7 @@ async fn do_test_add_tlc_waiting_ack() {
         if i == 2 {
             // we are sending AddTlc constantly, so we should get a TemporaryChannelFailure
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result
-                .unwrap_err()
-                .decode(&NO_SHARED_SECRET, vec![])
-                .unwrap();
+            let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());
@@ -2614,10 +2608,7 @@ async fn do_test_add_tlc_number_limit() {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == node_a_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result
-                .unwrap_err()
-                .decode(&NO_SHARED_SECRET, vec![])
-                .unwrap();
+            let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             dbg!(&add_tlc_result);
@@ -2702,10 +2693,7 @@ async fn do_test_add_tlc_number_limit_reverse() {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == node_b_max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result
-                .unwrap_err()
-                .decode(&NO_SHARED_SECRET, vec![])
-                .unwrap();
+            let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             dbg!(&add_tlc_result);
@@ -2792,10 +2780,8 @@ async fn do_test_add_tlc_value_limit() {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
         if i == max_tlc_number + 1 {
             assert!(add_tlc_result.is_err());
-            let code = add_tlc_result
-                .unwrap_err()
-                .decode(&NO_SHARED_SECRET, vec![])
-                .unwrap();
+            let code = add_tlc_result.unwrap_err();
+
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
             assert!(add_tlc_result.is_ok());

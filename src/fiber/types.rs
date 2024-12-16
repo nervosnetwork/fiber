@@ -29,6 +29,7 @@ use secp256k1::{
 use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
@@ -1152,6 +1153,12 @@ pub enum TlcErrData {
 pub struct TlcErr {
     pub error_code: TlcErrorCode,
     pub extra_data: Option<TlcErrData>,
+}
+
+impl Display for TlcErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error_code_as_str().fmt(f)
+    }
 }
 
 impl TlcErr {
