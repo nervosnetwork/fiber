@@ -755,19 +755,22 @@ where
         if let Some(invoice) = self.store.get_invoice(&tlc.payment_hash) {
             let status = self.get_invoice_status(&invoice);
             match status {
-                CkbInvoiceStatus::Expired | CkbInvoiceStatus::Cancelled => {
-                    let error_code = match status {
-                        CkbInvoiceStatus::Expired => TlcErrorCode::InvoiceExpired,
-                        CkbInvoiceStatus::Cancelled => TlcErrorCode::InvoiceCancelled,
-                        _ => unreachable!("unexpected invoice status"),
-                    };
+                CkbInvoiceStatus::Expired => {
                     remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                        TlcErr::new(error_code),
+                        TlcErr::new(TlcErrorCode::InvoiceExpired),
+                        &tlc.shared_secret,
+                    ));
+                }
+                CkbInvoiceStatus::Cancelled => {
+                    remove_reason = RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
+                        TlcErr::new(TlcErrorCode::InvoiceCancelled),
                         &tlc.shared_secret,
                     ));
                 }
                 CkbInvoiceStatus::Paid => {
-                    unreachable!("Paid invoice should not be paid again");
+                    // we have already checked invoice status in apply_add_tlc_operation_with_peeled_onion_packet
+                    // this maybe happened when process is killed and restart
+                    error!("invoice already paid, ignore");
                 }
                 _ => {
                     self.store
@@ -795,7 +798,7 @@ where
         // - Extract public key from onion_packet[1..34]
         // - Obtain share secret using DH Key Exchange from the public key and the network private key stored in the network actor state.
         if let Some(peeled_onion_packet) = self
-            .apply_add_tlc_operation_without_peeled_onion_packet(state, add_tlc)
+            .try_add_tlc_peel_onion_packet(state, add_tlc)
             .await
             .map_err(ProcessingChannelError::without_shared_secret)?
         {
@@ -829,7 +832,7 @@ where
         Ok(())
     }
 
-    async fn apply_add_tlc_operation_without_peeled_onion_packet(
+    async fn try_add_tlc_peel_onion_packet(
         &self,
         state: &mut ChannelActorState,
         add_tlc: &AddTlcInfo,
@@ -1188,16 +1191,16 @@ where
         state.check_for_tlc_update(Some(command.amount), true, true)?;
         state.check_tlc_expiry(command.expiry)?;
         let tlc = state.create_outbounding_tlc(command.clone());
-        state.check_insert_tlc(tlc.as_add_tlc())?;
-        state.tlc_state.add_local_tlc(tlc.clone());
+        state.check_insert_tlc(&tlc)?;
+        state.tlc_state.add_local_tlc(TlcKind::AddTlc(tlc.clone()));
         state.increment_next_offered_tlc_id();
 
         debug!("Inserted tlc into channel state: {:?}", &tlc);
         let add_tlc = AddTlc {
             channel_id: state.get_id(),
-            tlc_id: tlc.tlc_id().into(),
+            tlc_id: tlc.tlc_id.into(),
             amount: command.amount,
-            payment_hash: tlc.payment_hash(),
+            payment_hash: command.payment_hash,
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
             onion_packet: command.onion_packet,
@@ -1216,7 +1219,7 @@ where
 
         self.handle_commitment_signed_command(state)?;
         state.tlc_state.set_waiting_ack(true);
-        Ok(tlc.tlc_id().into())
+        Ok(tlc.tlc_id.into())
     }
 
     pub fn handle_remove_tlc_command(
@@ -2265,42 +2268,6 @@ impl TlcKind {
     pub fn is_received(&self) -> bool {
         !self.is_offered()
     }
-
-    pub fn flip_mut(&mut self) {
-        match self {
-            TlcKind::AddTlc(info) => info.tlc_id.flip_mut(),
-            TlcKind::RemoveTlc(_) => {
-                unreachable!("RemoveTlc should not flip")
-            }
-        }
-    }
-
-    pub fn amount(&self) -> u128 {
-        match self {
-            TlcKind::AddTlc(add_tlc) => add_tlc.amount,
-            TlcKind::RemoveTlc(..) => {
-                unreachable!("RemoveTlc should not have amount")
-            }
-        }
-    }
-
-    pub fn payment_hash(&self) -> Hash256 {
-        match self {
-            TlcKind::AddTlc(add_tlc) => add_tlc.payment_hash,
-            TlcKind::RemoveTlc(..) => {
-                unreachable!("RemoveTlc should not have payment hash")
-            }
-        }
-    }
-
-    pub fn as_add_tlc(&self) -> &AddTlcInfo {
-        match self {
-            TlcKind::AddTlc(add_tlc) => &add_tlc,
-            TlcKind::RemoveTlc(..) => {
-                unreachable!("RemoveTlc should not be AddTlc")
-            }
-        }
-    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -2317,16 +2284,6 @@ impl PendingTlcs {
             committed_index: 0,
             next_tlc_id: 0,
         }
-    }
-
-    #[cfg(test)]
-    pub fn print(&self, prefix: &str) {
-        debug!(
-            "{} pending tlcs: {:?}, committed_index: {:?}",
-            prefix,
-            self.tlcs.iter().map(|t| t.log()).collect::<Vec<_>>(),
-            self.committed_index
-        );
     }
 
     pub fn next_tlc_id(&self) -> u64 {
@@ -3436,7 +3393,7 @@ impl ChannelActorState {
         .await
     }
 
-    pub async fn generate_and_broadcast_channel_update(
+    async fn generate_and_broadcast_channel_update(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) {
@@ -3457,7 +3414,7 @@ impl ChannelActorState {
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
     }
 
-    pub async fn try_create_channel_update_message(
+    async fn try_create_channel_update_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> Option<ChannelUpdate> {
@@ -4796,20 +4753,14 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn create_outbounding_tlc(&self, command: AddTlcCommand) -> TlcKind {
-        // TODO: we are filling the user command with a new id here.
-        // The advantage of this is that we don't need to burden the users to
-        // provide a next id for each tlc. The disadvantage is that users may
-        // inadvertently click the same button twice, and we will process the same
-        // twice, the frontend needs to prevent this kind of behaviour.
-        // Is this what we want?
+    fn create_outbounding_tlc(&self, command: AddTlcCommand) -> AddTlcInfo {
         let id = self.get_next_offering_tlc_id();
         assert!(
             self.get_offered_tlc(id).is_none(),
             "Must not have the same id in pending offered tlcs"
         );
 
-        TlcKind::AddTlc(AddTlcInfo {
+        AddTlcInfo {
             channel_id: self.get_id(),
             tlc_id: TLCId::Offered(id),
             amount: command.amount,
@@ -4824,13 +4775,10 @@ impl ChannelActorState {
             previous_tlc: command
                 .previous_tlc
                 .map(|(channel_id, tlc_id)| (channel_id, TLCId::Received(tlc_id))),
-        })
+        }
     }
 
-    pub fn create_inbounding_tlc(
-        &self,
-        message: AddTlc,
-    ) -> Result<AddTlcInfo, ProcessingChannelError> {
+    fn create_inbounding_tlc(&self, message: AddTlc) -> Result<AddTlcInfo, ProcessingChannelError> {
         let tlc_info = AddTlcInfo {
             tlc_id: TLCId::Received(message.tlc_id),
             channel_id: self.get_id(),
@@ -4850,14 +4798,14 @@ impl ChannelActorState {
         Ok(tlc_info)
     }
 
-    pub fn create_witness_for_funding_cell(
+    fn create_witness_for_funding_cell(
         &self,
         signature: CompactSignature,
     ) -> [u8; FUNDING_CELL_WITNESS_LEN] {
         create_witness_for_funding_cell(self.get_funding_lock_script_xonly(), signature)
     }
 
-    pub fn aggregate_partial_signatures_to_consume_funding_cell(
+    fn aggregate_partial_signatures_to_consume_funding_cell(
         &self,
         partial_signatures: [PartialSignature; 2],
         tx: &TransactionView,
@@ -4883,7 +4831,7 @@ impl ChannelActorState {
             .build())
     }
 
-    pub fn sign_tx_to_consume_funding_cell(
+    fn sign_tx_to_consume_funding_cell(
         &self,
         psct: &PartiallySignedCommitmentTransaction,
     ) -> Result<TransactionView, ProcessingChannelError> {
@@ -4896,7 +4844,7 @@ impl ChannelActorState {
         )
     }
 
-    pub fn maybe_transition_to_shutdown(
+    fn maybe_transition_to_shutdown(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
@@ -5048,7 +4996,7 @@ impl ChannelActorState {
 
     // This is the dual of `handle_tx_collaboration_command`. Any logic error here is likely
     // to present in the other function as well.
-    pub fn handle_tx_collaboration_msg(
+    fn handle_tx_collaboration_msg(
         &mut self,
         msg: TxCollaborationMsg,
         network: &ActorRef<NetworkActorMessage>,
@@ -5824,7 +5772,7 @@ impl ChannelActorState {
         Ok(())
     }
 
-    pub fn fill_in_channel_id(&mut self) {
+    fn fill_in_channel_id(&mut self) {
         let local = &self.get_local_channel_public_keys().tlc_base_key;
         let remote = &self.get_remote_channel_public_keys().tlc_base_key;
         let channel_id = derive_channel_id_from_tlc_keys(local, remote);
