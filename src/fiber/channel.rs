@@ -732,8 +732,6 @@ where
         );
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
-
-        // TODO: encrypt the error to backward
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
