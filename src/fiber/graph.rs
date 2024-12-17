@@ -454,20 +454,37 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        self.channels.values().filter_map(move |channel| {
-            if let Some(info) = channel.node1_to_node2.as_ref() {
-                if info.enabled && channel.node2() == node_id {
-                    return Some((channel.node1(), channel.node2(), channel, info));
+        let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+            .channels
+            .values()
+            .filter_map(move |channel| {
+                if let Some(info) = channel.node1_to_node2.as_ref() {
+                    if info.enabled && channel.node2() == node_id {
+                        return Some((channel.node1(), channel.node2(), channel, info));
+                    }
                 }
-            }
 
-            if let Some(info) = channel.node2_to_node1.as_ref() {
-                if info.enabled && channel.node1() == node_id {
-                    return Some((channel.node2(), channel.node1(), channel, info));
+                if let Some(info) = channel.node2_to_node1.as_ref() {
+                    if info.enabled && channel.node1() == node_id {
+                        return Some((channel.node2(), channel.node1(), channel, info));
+                    }
                 }
-            }
-            None
-        })
+                None
+            })
+            .collect();
+
+        // Iterating over HashMap's values is not guaranteed to be in order,
+        // which may introduce randomness in the path finding.
+        // the weight algorithm in find_path does not considering capacity,
+        // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
+        // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
+        channels.sort_by(|(_, _, a, _), (_, _, b, _)| {
+            b.capacity().cmp(&a.capacity()).then(
+                b.channel_last_update_time()
+                    .cmp(&a.channel_last_update_time()),
+            )
+        });
+        channels.into_iter()
     }
 
     pub fn get_source_pubkey(&self) -> Pubkey {
