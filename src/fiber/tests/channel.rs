@@ -4375,14 +4375,73 @@ async fn test_send_payment_with_disable_channel() {
 
     assert_eq!(res.status, PaymentSessionStatus::Failed);
     eprintln!("failed_error: {:?}", res.failed_error);
-    assert!(res
-        .failed_error
-        .unwrap()
-        .contains("TemporaryChannelFailure"));
+    assert!(res.failed_error.unwrap().contains("Failed to build route"));
 
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
-    // TODO: we should only try once
-    assert_eq!(payment_session.retried_times, 5);
+    assert_eq!(payment_session.retried_times, 2);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_multiple_edges_in_middle_hops() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_1 and node_2, the find_path may use the first channel which is not valid for the payment
+    // because we only have the capacity of channels in middle hops
+    // the send payment should try another channel and success
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (4200000000 + 900, 4200000000)),
+            ((1, 2), (4200000000 + 1000, 4200000000)),
+            ((2, 3), (100000000000, 100000000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    eprintln!("failed_error: {:?}", res);
 }

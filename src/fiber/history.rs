@@ -185,6 +185,7 @@ impl InternalResult {
             return need_to_retry;
         };
 
+        eprintln!("record_payment_fail: index: {}, nodes: {:?}", index, nodes);
         let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
@@ -200,24 +201,6 @@ impl InternalResult {
                 }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
-                }
-            }
-        } else if index == 1 {
-            match error_code {
-                // we received an error from the first node, we trust our own node
-                // so we need to penalize the first node
-                TlcErrorCode::InvalidOnionVersion
-                | TlcErrorCode::InvalidOnionHmac
-                | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(nodes, 1);
-                }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
-                    need_to_retry = false;
-                }
-                _ => {
-                    // we can not penalize our own node, the whole payment session need to retry
-                    debug!("first hop failed with error: {:?}", tlc_err);
                 }
             }
         } else if index == len - 1 {
@@ -262,10 +245,10 @@ impl InternalResult {
                     }
                 }
                 TlcErrorCode::UnknownNextPeer => {
-                    self.fail_pair(nodes, index);
+                    self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::PermanentChannelFailure => {
-                    self.fail_pair(nodes, index);
+                    self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
@@ -279,8 +262,8 @@ impl InternalResult {
                     }
                 }
                 TlcErrorCode::TemporaryChannelFailure => {
-                    self.fail_pair_balanced(nodes, index);
-                    self.succeed_range_pairs(nodes, 0, index - 1);
+                    self.fail_pair_balanced(nodes, index + 1);
+                    self.succeed_range_pairs(nodes, 0, index);
                 }
                 TlcErrorCode::ExpiryTooSoon => {
                     if index == 1 {

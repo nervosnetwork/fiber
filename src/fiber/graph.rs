@@ -807,6 +807,13 @@ where
                         channel_info.capacity(),
                     );
 
+                eprintln!(
+                    "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
+                    probability,
+                    channel_info.out_point(),
+                    from,
+                    to
+                );
                 if probability < DEFAULT_MIN_PROBABILITY {
                     continue;
                 }

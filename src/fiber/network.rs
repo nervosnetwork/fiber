@@ -2431,6 +2431,11 @@ where
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
 
+            eprintln!(
+                "retry: {:?} hops_info: {:?}",
+                payment_session.retried_times, hops_info
+            );
+
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await

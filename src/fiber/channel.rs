@@ -4234,7 +4234,7 @@ impl ChannelActorState {
             debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                debug!(
+                eprintln!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
                     tlc.tlc_id,
                     tlc.amount,
