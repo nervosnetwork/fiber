@@ -127,13 +127,12 @@ pub enum ChannelCommand {
     // TODO: maybe we should automatically send commitment_signed message after receiving
     // tx_complete event.
     CommitmentSigned(),
-    AddTlc(
-        AddTlcCommand,
-        RpcReplyPort<Result<AddTlcResponse, TlcErrPacket>>,
-    ),
+    AddTlc(AddTlcCommand, RpcReplyPort<Result<AddTlcResponse, TlcErr>>),
     RemoveTlc(RemoveTlcCommand, RpcReplyPort<Result<(), String>>),
     Shutdown(ShutdownCommand, RpcReplyPort<Result<(), String>>),
     Update(UpdateCommand, RpcReplyPort<Result<(), String>>),
+    #[cfg(test)]
+    ReloadState(),
 }
 
 #[derive(Debug)]
@@ -269,7 +268,7 @@ pub struct ChannelActor<S> {
 
 impl<S> ChannelActor<S>
 where
-    S: InvoiceStore,
+    S: InvoiceStore + ChannelActorStateStore,
 {
     pub fn new(
         local_pubkey: Pubkey,
@@ -567,7 +566,7 @@ where
         }
     }
 
-    async fn get_tlc_detail_error(
+    async fn get_tlc_error(
         &self,
         state: &mut ChannelActorState,
         error: &ProcessingChannelError,
@@ -617,13 +616,16 @@ where
                 // otherwise, channel maybe not ready
                 _ => TlcErrorCode::TemporaryChannelFailure,
             },
-            ProcessingChannelError::RepeatedProcessing(_)
-            | ProcessingChannelError::SpawnErr(_)
+            ProcessingChannelError::RepeatedProcessing(_) => TlcErrorCode::TemporaryChannelFailure,
+            ProcessingChannelError::SpawnErr(_)
             | ProcessingChannelError::Musig2SigningError(_)
             | ProcessingChannelError::Musig2VerifyError(_)
             | ProcessingChannelError::CapacityError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidParameter(_) => {
                 TlcErrorCode::IncorrectOrUnknownPaymentDetails
+            }
+            ProcessingChannelError::TlcForwardingError(_) => {
+                unreachable!("TlcForwardingError should be handled before this point")
             }
         };
 
@@ -662,28 +664,36 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        let error_detail = self.get_tlc_detail_error(state, &e.source).await;
+                        let tlc_err = match e.source {
+                            // If we already have TlcErr, we can directly use it to send back to the peer.
+                            ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
+                            _ => {
+                                let error_detail = self.get_tlc_error(state, &e.source).await;
+                                self.network
+                                    .clone()
+                                    .send_message(NetworkActorMessage::new_notification(
+                                        NetworkServiceEvent::AddTlcFailed(
+                                            state.get_local_peer_id(),
+                                            add_tlc.payment_hash,
+                                            error_detail.clone(),
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                error_detail
+                            }
+                        };
+                        let error_packet = TlcErrPacket::new(
+                            tlc_err,
+                            // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
+                            &e.shared_secret,
+                        );
                         self.register_retryable_tlc_remove(
                             myself,
                             state,
                             add_tlc.tlc_id,
-                            RemoveTlcReason::RemoveTlcFail(TlcErrPacket::new(
-                                error_detail.clone(),
-                                // There's no shared secret stored in the received TLC, use the one found in the peeled onion packet.
-                                &e.shared_secret,
-                            )),
+                            RemoveTlcReason::RemoveTlcFail(error_packet),
                         )
                         .await;
-                        self.network
-                            .clone()
-                            .send_message(NetworkActorMessage::new_notification(
-                                NetworkServiceEvent::AddTlcFailed(
-                                    state.get_local_peer_id(),
-                                    add_tlc.payment_hash,
-                                    error_detail,
-                                ),
-                            ))
-                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                     }
                 }
                 TlcKind::RemoveTlc(remove_tlc) => {
@@ -719,8 +729,6 @@ where
         );
 
         let remove_reason = remove_reason.clone().backward(&tlc_info.shared_secret);
-
-        // TODO: encrypt the error to backward
         self.register_retryable_relay_tlc_remove(
             myself,
             state,
@@ -1040,7 +1048,7 @@ where
         peeled_onion_packet: PeeledPaymentOnionPacket,
         added_tlc_id: u64,
     ) -> Result<(), ProcessingChannelError> {
-        let (send, recv) = oneshot::channel::<Result<u64, TlcErrPacket>>();
+        let (send, recv) = oneshot::channel::<Result<u64, TlcErr>>();
         let rpc_reply = RpcReplyPort::from(send);
         self.network
             .send_message(NetworkActorMessage::Command(
@@ -1056,10 +1064,8 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         // If we failed to forward the onion packet, we should remove the tlc.
-        if let Err(_res) = recv.await.expect("expect command replied") {
-            return Err(ProcessingChannelError::PeelingOnionPacketError(
-                "failed to forward".to_string(),
-            ));
+        if let Err(res) = recv.await.expect("expect command replied") {
+            return Err(ProcessingChannelError::TlcForwardingError(res));
         }
         Ok(())
     }
@@ -1585,16 +1591,15 @@ where
             }
             ChannelCommand::CommitmentSigned() => self.handle_commitment_signed_command(state),
             ChannelCommand::AddTlc(command, reply) => {
-                let shared_secret = command.shared_secret.clone();
                 match self.handle_add_tlc_command(state, command) {
                     Ok(tlc_id) => {
                         let _ = reply.send(Ok(AddTlcResponse { tlc_id }));
                         Ok(())
                     }
                     Err(err) => {
-                        eprintln!("Error processing AddTlc command: {:?}", &err);
-                        let error_detail = self.get_tlc_detail_error(state, &err).await;
-                        let _ = reply.send(Err(TlcErrPacket::new(error_detail, &shared_secret)));
+                        debug!("Error processing AddTlc command: {:?}", &err);
+                        let tlc_err = self.get_tlc_error(state, &err).await;
+                        let _ = reply.send(Err(tlc_err));
                         Err(err)
                     }
                 }
@@ -1638,6 +1643,14 @@ where
                         Err(err)
                     }
                 }
+            }
+            #[cfg(test)]
+            ChannelCommand::ReloadState() => {
+                *state = self
+                    .store
+                    .get_channel_actor_state(&state.get_id())
+                    .expect("load channel state failed");
+                Ok(())
             }
         }
     }
@@ -2052,9 +2065,10 @@ where
         trace!(
             "Channel actor processing message: id: {:?}, state: {:?}, message: {:?}",
             &state.get_id(),
-            &message,
-            &state.state
+            &state.state,
+            message,
         );
+
         match message {
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(&myself, state, message).await {
@@ -2918,6 +2932,8 @@ pub enum ProcessingChannelError {
     TlcExpirySoon,
     #[error("The tlc expiry too far")]
     TlcExpiryTooFar,
+    #[error("Tlc forwarding error")]
+    TlcForwardingError(TlcErr),
 }
 
 /// ProcessingChannelError which brings the shared secret used in forwarding onion packet.
@@ -4208,7 +4224,7 @@ impl ChannelActorState {
             .all_tlcs()
             .find(|tlc| tlc.payment_hash == payment_hash)
         {
-            return Err(ProcessingChannelError::InvalidParameter(format!(
+            return Err(ProcessingChannelError::RepeatedProcessing(format!(
                 "Trying to insert tlc with duplicate payment hash {:?} with tlc {:?}",
                 payment_hash, tlc
             )));
@@ -4218,24 +4234,26 @@ impl ChannelActorState {
             debug!("Value of local sent tlcs: {}", sent_tlc_value);
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
+                debug!(
                     "Adding tlc {:?} with amount {} exceeds local balance {}",
                     tlc.tlc_id,
                     tlc.amount,
                     self.to_local_amount - sent_tlc_value
-                )));
+                );
+                return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
             let received_tlc_value = self.get_received_tlc_balance();
             debug!("Value of remote received tlcs: {}", received_tlc_value);
             debug_assert!(self.to_remote_amount >= received_tlc_value);
             if received_tlc_value + tlc.amount > self.to_remote_amount {
-                return Err(ProcessingChannelError::InvalidParameter(format!(
+                debug!(
                     "Adding tlc {:?} with amount {} exceeds remote balance {}",
                     tlc.tlc_id,
                     tlc.amount,
                     self.to_remote_amount - received_tlc_value
-                )));
+                );
+                return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         }
         debug!(

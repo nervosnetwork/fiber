@@ -760,7 +760,33 @@ fn test_history_direct_probability() {
     };
     history.add_result(channel_outpoint.clone(), direction, result);
     let prob = history.get_direct_probability(&channel_outpoint, direction);
-    assert_eq!(prob, 0.0);
+    assert_eq!(prob, 1.0);
+
+    let result = TimedResult {
+        success_time: 3,
+        success_amount: 5,
+        fail_time: now_timestamp_as_millis_u64() - 1000 * 20,
+        fail_amount: 10,
+    };
+    history.add_result(channel_outpoint.clone(), direction, result);
+    let prob = history.get_direct_probability(&channel_outpoint, direction);
+    assert!(prob < 0.001);
+
+    // if the fail_time is more near, the probability will be lower
+    let mut prev_prob = 1.0;
+    for i in (1..=10000).rev() {
+        let result = TimedResult {
+            success_time: 3,
+            success_amount: 5,
+            fail_time: now_timestamp_as_millis_u64() - 1000 * 60 * i,
+            fail_amount: 10,
+        };
+        history.add_result(channel_outpoint.clone(), direction, result);
+        let prob = history.get_direct_probability(&channel_outpoint, direction);
+        assert!(prob < prev_prob);
+        prev_prob = prob;
+    }
+    assert!(prev_prob < 0.01);
 }
 
 #[test]
@@ -855,7 +881,7 @@ fn test_history_eval_probability_range() {
 
     let mut prev_prob = prob2;
     for _i in 0..3 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         let prob =
             history.eval_probability(from, target, &channel_outpoint, 50000000 - 10, 100000000);
         assert!(prob > prev_prob);
