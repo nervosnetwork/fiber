@@ -4412,9 +4412,9 @@ impl ChannelActorState {
         FundingRequest {
             script: self.get_funding_lock_script(),
             udt_type_script: self.funding_udt_type_script.clone(),
-            local_amount: self.to_local_amount as u64,
+            local_amount: self.to_local_amount,
             funding_fee_rate: self.funding_fee_rate,
-            remote_amount: self.to_remote_amount as u64,
+            remote_amount: self.to_remote_amount,
             local_reserved_ckb_amount: self.local_reserved_ckb_amount,
             remote_reserved_ckb_amount: self.remote_reserved_ckb_amount,
         }

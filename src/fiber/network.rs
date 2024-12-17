@@ -1172,9 +1172,9 @@ where
                                     FundingRequest {
                                         script,
                                         udt_type_script: udt_funding_script,
-                                        local_amount: local as u64,
+                                        local_amount: local,
                                         funding_fee_rate,
-                                        remote_amount: remote as u64,
+                                        remote_amount: remote,
                                         local_reserved_ckb_amount,
                                         remote_reserved_ckb_amount,
                                     },
