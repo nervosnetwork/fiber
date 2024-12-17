@@ -1293,6 +1293,84 @@ async fn test_send_payment_with_3_nodes() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_rev_3_nodes() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        vec![
+            ((2, 1), (100000000000, 100000000000)),
+            ((1, 0), (100000000000, 100000000000)),
+        ]
+        .as_slice(),
+        3,
+        true,
+    )
+    .await;
+
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    let [channel_1, channel_2] = channels.try_into().expect("2 channels");
+
+    let node_c_local = node_c.get_local_balance_from_channel(channel_1);
+    let node_b_local_right = node_b.get_local_balance_from_channel(channel_1);
+    let node_b_local_left = node_b.get_local_balance_from_channel(channel_2);
+    let node_a_local = node_a.get_local_balance_from_channel(channel_2);
+
+    // sleep for 2 seconds to make sure the channel is established
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let sent_amount = 1000000 + 5;
+    let node_a_pubkey = node_a.pubkey.clone();
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_a_pubkey),
+                amount: Some(sent_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                tlc_expiry_limit: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_c.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let res = res.unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Inflight);
+    assert!(res.fee > 0);
+    // sleep for 2 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
+    };
+    let res = call!(node_c.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    assert_eq!(res.failed_error, None);
+
+    let new_node_c_local = node_c.get_local_balance_from_channel(channel_1);
+    let new_node_b_right = node_b.get_local_balance_from_channel(channel_1);
+    let new_node_b_left = node_b.get_local_balance_from_channel(channel_2);
+    let new_node_a_local = node_a.get_local_balance_from_channel(channel_2);
+
+    let node_c_sent = node_c_local - new_node_c_local;
+    assert_eq!(node_c_sent, sent_amount + res.fee);
+    let node_b_sent = node_b_local_left - new_node_b_left;
+    let node_b_received = new_node_b_right - node_b_local_right;
+    let node_b_got = node_b_received - node_b_sent;
+    assert_eq!(node_b_got, res.fee);
+    let node_a_got = new_node_a_local - node_a_local;
+    assert_eq!(node_a_got, sent_amount);
+}
+
+#[tokio::test]
 async fn test_send_payment_with_max_nodes() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
@@ -2216,6 +2294,7 @@ async fn create_3_nodes_with_established_channel(
     (node_a, node_b, node_c, channels[0], channels[1])
 }
 
+// make a network like A -> B -> C -> D
 async fn create_n_nodes_with_established_channel(
     amounts: &[(u128, u128)],
     n: usize,
@@ -2223,22 +2302,43 @@ async fn create_n_nodes_with_established_channel(
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
     assert!(n >= 2);
     assert_eq!(amounts.len(), n - 1);
+
+    let nodes_index_map: Vec<((usize, usize), (u128, u128))> = (0..n - 1)
+        .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
+        .collect();
+
+    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
+        .await
+}
+
+async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+    amounts: &[((usize, usize), (u128, u128))],
+    n: usize,
+    public: bool,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    assert!(n >= 2);
     let mut nodes = NetworkNode::new_interconnected_nodes(n).await;
     let mut channels = vec![];
 
-    for i in 0..n - 1 {
+    for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
                 // avoid borrow nodes as mutbale more than once
-                let (left, right) = nodes.split_at_mut(i + 1);
-                (&mut left[i], &mut right[0])
+                assert_ne!(i, j);
+                if i < j {
+                    let (left, right) = nodes.split_at_mut(i + 1);
+                    (&mut left[i], &mut right[j - i - 1])
+                } else {
+                    let (left, right) = nodes.split_at_mut(j + 1);
+                    (&mut right[i - j - 1], &mut left[j])
+                }
             };
             establish_channel_between_nodes(
                 node_a,
                 node_b,
                 public,
-                amounts[i].0,
-                amounts[i].1,
+                node_a_amount,
+                node_b_amount,
                 None,
                 None,
                 None,
@@ -2254,11 +2354,9 @@ async fn create_n_nodes_with_established_channel(
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
-        for j in 0..n {
-            if j != i {
-                let res = nodes[j].submit_tx(funding_tx.clone()).await;
-                assert_eq!(res, Status::Committed);
-            }
+        for k in 0..n {
+            let res = nodes[k].submit_tx(funding_tx.clone()).await;
+            assert_eq!(res, Status::Committed);
         }
     }
     (nodes, channels)
