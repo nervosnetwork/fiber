@@ -26,6 +26,7 @@ pub(crate) const CKB_INVOICE_PREFIX: u8 = 32;
 pub(crate) const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
 pub(crate) const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
 pub(crate) const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
+pub(crate) const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
 pub(crate) const CHANNEL_INFO_PREFIX: u8 = 96;
 pub(crate) const CHANNEL_ANNOUNCEMENT_INDEX_PREFIX: u8 = 97;
 pub(crate) const CHANNEL_UPDATE_INDEX_PREFIX: u8 = 98;

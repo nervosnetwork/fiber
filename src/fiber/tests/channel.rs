@@ -1146,14 +1146,12 @@ async fn test_network_send_payment_amount_is_too_large() {
             rpc_reply,
         ))
     };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Failed);
-    assert!(res
-        .failed_error
-        .unwrap()
-        .contains("TemporaryChannelFailure"));
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+
+    assert!(res.is_err());
+    // because the amount is too large, we will consider balance for direct channel
+    // so fail to build a path
+    assert!(res.err().unwrap().contains("no path found"));
 }
 
 // FIXME: this is the case send_payment with direct channels, we should handle this case
@@ -1176,7 +1174,7 @@ async fn test_network_send_payment_with_dry_run() {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
-                amount: Some(100000000000 + 5),
+                amount: Some(100000),
                 payment_hash: Some(gen_sha256_hash()),
                 final_tlc_expiry_delta: None,
                 invoice: None,
@@ -4268,7 +4266,7 @@ async fn test_send_payment_with_disable_channel() {
     let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))

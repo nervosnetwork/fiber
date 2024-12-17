@@ -178,6 +178,7 @@ enum KeyValue {
     CkbInvoicePreimage(Hash256, Hash256),
     CkbInvoiceStatus(Hash256, CkbInvoiceStatus),
     PeerIdChannelId((PeerId, Hash256), ChannelState),
+    OutPointChannelId(OutPoint, Hash256),
     NodeInfo(Pubkey, NodeInfo),
     NodeTimestampIndex(Pubkey, u64),
     ChannelInfo(OutPoint, ChannelInfo),
@@ -229,6 +230,9 @@ impl StoreKeyValue for KeyValue {
             KeyValue::ChannelInfo(channel_id, _) => {
                 [&[CHANNEL_INFO_PREFIX], channel_id.as_slice()].concat()
             }
+            KeyValue::OutPointChannelId(outpoint, _) => {
+                [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat()
+            }
             KeyValue::PaymentSession(payment_hash, _) => {
                 [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat()
             }
@@ -276,6 +280,7 @@ impl StoreKeyValue for KeyValue {
             KeyValue::CkbInvoiceStatus(_, status) => serialize_to_vec(status, "CkbInvoiceStatus"),
             KeyValue::PeerIdChannelId(_, state) => serialize_to_vec(state, "ChannelState"),
             KeyValue::ChannelInfo(_, channel) => serialize_to_vec(channel, "ChannelInfo"),
+            KeyValue::OutPointChannelId(_, channel_id) => serialize_to_vec(channel_id, "ChannelId"),
             KeyValue::PaymentSession(_, payment_session) => {
                 serialize_to_vec(payment_session, "PaymentSession")
             }
@@ -345,6 +350,9 @@ impl ChannelActorStateStore for Store {
             (state.get_remote_peer_id(), state.id),
             state.state,
         ));
+        if let Some(outpoint) = state.get_funding_transaction_outpoint() {
+            batch.put_kv(KeyValue::OutPointChannelId(outpoint, state.id));
+        }
         batch.commit();
     }
 
@@ -357,6 +365,13 @@ impl ChannelActorStateStore for Store {
                     &[PEER_ID_CHANNEL_ID_PREFIX],
                     state.get_remote_peer_id().as_bytes(),
                     id.as_ref(),
+                ]
+                .concat(),
+            );
+            batch.delete(
+                [
+                    &[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX],
+                    state.must_get_funding_transaction_outpoint().as_slice(),
                 ]
                 .concat(),
             );
@@ -393,6 +408,13 @@ impl ChannelActorStateStore for Store {
                 (peer_id, channel_id.into(), state)
             })
             .collect()
+    }
+
+    fn get_channel_state_by_outpoint(&self, outpoint: &OutPoint) -> Option<ChannelActorState> {
+        let key = [&[CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX], outpoint.as_slice()].concat();
+        self.get(key)
+            .map(|channel_id| deserialize_from(channel_id.as_ref(), "Hash256"))
+            .and_then(|channel_id: Hash256| self.get_channel_actor_state(&channel_id))
     }
 }
 

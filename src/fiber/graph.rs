@@ -1,3 +1,4 @@
+use super::channel::ChannelActorStateStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
 use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
@@ -181,7 +182,7 @@ pub struct PathEdge {
 
 impl<S> NetworkGraph<S>
 where
-    S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore + ChannelActorStateStore + Clone + Send + Sync + 'static,
 {
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
@@ -772,6 +773,18 @@ where
                 }
                 if amount_to_send < channel_update.tlc_minimum_value {
                     continue;
+                }
+
+                // if this is a direct channel, try to load the channel actor state for balance
+                if from == self.source {
+                    if let Some(state) = self
+                        .store
+                        .get_channel_state_by_outpoint(&channel_info.out_point())
+                    {
+                        if amount_to_send > state.to_local_amount {
+                            continue;
+                        }
+                    }
                 }
 
                 let expiry_delta = if from == source {

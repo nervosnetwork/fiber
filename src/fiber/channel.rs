@@ -6319,6 +6319,7 @@ pub trait ChannelActorStateStore {
             .filter(|(_, _, state)| !state.is_closed())
             .collect()
     }
+    fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

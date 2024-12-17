@@ -272,9 +272,9 @@ fn test_channel_actor_state_store() {
             channel_announcement: None,
             channel_update: None,
         }),
-        local_pubkey: generate_pubkey().into(),
-        remote_pubkey: generate_pubkey().into(),
-        funding_tx: None,
+        local_pubkey: gen_rand_public_key(),
+        remote_pubkey: gen_rand_public_key(),
+        funding_tx: Some(Transaction::default()),
         funding_tx_confirmed_at: Some((1.into(), 1)),
         is_acceptor: true,
         funding_udt_type_script: Some(Script::default()),
@@ -320,6 +320,7 @@ fn test_channel_actor_state_store() {
     let store = Store::new(tempdir().unwrap().path().join("store")).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
+
     let get_state = store.get_channel_actor_state(&state.id);
     assert!(get_state.is_some());
     assert_eq!(
@@ -331,8 +332,24 @@ fn test_channel_actor_state_store() {
             .enabled,
         false
     );
+
+    let remote_peer_id = state.get_remote_peer_id();
+    assert_eq!(
+        store.get_channel_ids_by_peer(&remote_peer_id),
+        vec![state.id.clone()]
+    );
+    let channel_point = state.must_get_funding_transaction_outpoint();
+    assert!(store
+        .get_channel_state_by_outpoint(&channel_point)
+        .is_some());
+
     store.delete_channel_actor_state(&state.id);
     assert!(store.get_channel_actor_state(&state.id).is_none());
+    assert_eq!(store.get_channel_ids_by_peer(&remote_peer_id), vec![]);
+    let channel_point = state.must_get_funding_transaction_outpoint();
+    assert!(store
+        .get_channel_state_by_outpoint(&channel_point)
+        .is_none());
 }
 
 #[test]
