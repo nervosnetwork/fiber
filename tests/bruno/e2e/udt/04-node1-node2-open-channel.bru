@@ -1,5 +1,5 @@
 meta {
-  name: Node1 open a channel to Node2
+  name: Node1 open a channel to Node2, make funding_amount is larger to check overflow issue
   type: http
   seq: 4
 }
@@ -24,7 +24,7 @@ body:json {
     "params": [
       {
         "peer_id": "{{NODE2_PEERID}}",
-          "funding_amount": "0x4b0",
+          "funding_amount": "0xfffffffffffffffffffffffffffff",
           "funding_udt_type_script": {
             "code_hash": "{{UDT_CODE_HASH}}",
             "hash_type": "data1",

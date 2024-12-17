@@ -58,11 +58,11 @@ pub struct FundingRequest {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<packed::Script>,
     /// Assets amount to be provided by the local party
-    pub local_amount: u64,
+    pub local_amount: u128,
     /// Fee to be provided by the local party
     pub funding_fee_rate: u64,
     /// Assets amount to be provided by the remote party
-    pub remote_amount: u64,
+    pub remote_amount: u128,
     /// CKB amount to be provided by the local party.
     pub local_reserved_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
@@ -180,16 +180,17 @@ impl FundingTxBuilder {
             }
             None => {
                 let mut ckb_amount =
-                    self.request.local_amount + self.request.local_reserved_ckb_amount;
+                    self.request.local_amount as u64 + self.request.local_reserved_ckb_amount;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
-                            self.request.remote_amount + self.request.remote_reserved_ckb_amount,
+                            self.request.remote_amount as u64
+                                + self.request.remote_reserved_ckb_amount,
                         )
                         .ok_or(FundingError::InvalidChannel)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
+                    .capacity(Capacity::shannons(ckb_amount as u64).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
                 debug!("build_funding_cell debug ckb_output: {:?}", ckb_output);

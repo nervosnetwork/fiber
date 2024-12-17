@@ -326,7 +326,7 @@ impl Actor for MockChainActor {
                             return Ok(());
                         }
                         let current_capacity: u64 = output.capacity().unpack();
-                        let capacity = request.local_amount
+                        let capacity = request.local_amount as u64
                             + request.local_reserved_ckb_amount
                             + current_capacity;
                         let mut outputs_builder = outputs.as_builder();
@@ -336,7 +336,10 @@ impl Actor for MockChainActor {
                         outputs_builder.build()
                     }
                     None => [CellOutput::new_builder()
-                        .capacity((request.local_amount + request.local_reserved_ckb_amount).pack())
+                        .capacity(
+                            (request.local_amount as u64 + request.local_reserved_ckb_amount)
+                                .pack(),
+                        )
                         .lock(request.script.clone())
                         .build()]
                     .pack(),

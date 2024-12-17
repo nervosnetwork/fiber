@@ -331,8 +331,15 @@ fn genrate_nodes_config() {
 fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
     let udt_owner = get_nodes_info("deployer");
     for udt in UDT_KINDS {
-        init_or_send_udt(udt, &udt_owner.0, &udt_owner, None, 1000000000000, true)
-            .expect("init udt");
+        init_or_send_udt(
+            udt,
+            &udt_owner.0,
+            &udt_owner,
+            None,
+            0xfffffffffffffffffffffffffffffff,
+            true,
+        )
+        .expect("init udt");
         generate_blocks(8).expect("ok");
         std::thread::sleep(std::time::Duration::from_millis(1000));
         for i in 0..3 {
@@ -342,7 +349,7 @@ fn init_udt_accounts() -> Result<(), Box<dyn StdErr>> {
                 &udt_owner.0,
                 &udt_owner,
                 Some(&wallet.0),
-                200000000000,
+                0xffffffffffffffffffffffffffffff,
                 true,
             )?;
             generate_blocks(8).expect("ok");
