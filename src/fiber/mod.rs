@@ -10,7 +10,6 @@ pub mod graph;
 pub mod history;
 
 mod fee;
-mod graph_syncer;
 mod key;
 mod path;
 
@@ -20,6 +19,8 @@ pub mod gen;
 pub mod hash_algorithm;
 pub mod serde_utils;
 pub mod types;
+
+pub(crate) mod gossip;
 
 #[cfg(test)]
 pub mod tests;

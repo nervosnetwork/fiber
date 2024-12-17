@@ -31,8 +31,11 @@ assert {
   res.status: eq 200
 }
 
+script:pre-request {
+  await new Promise(r => setTimeout(r, 2000));
+}
+
 script:post-response {
-  await new Promise(r => setTimeout(r, 1000));
   console.log("step 11 list graph channels: ", res.body.result.channels);
   if (res.body.result.channels.length != 2) {
     throw new Error("graph channels length is not right");

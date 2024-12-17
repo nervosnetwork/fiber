@@ -1,4 +1,5 @@
 mod channel;
+mod gossip;
 mod graph;
 mod hash_algorithm;
 mod history;

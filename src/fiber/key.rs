@@ -13,6 +13,8 @@ use tentacle::secio::SecioKeyPair;
 use rand::{thread_rng, Rng};
 use std::io::{Error, ErrorKind, Read, Write};
 
+use super::types::Privkey;
+
 impl KeyPair {
     pub fn generate_random_key() -> Self {
         loop {
@@ -92,6 +94,12 @@ impl TryFrom<&[u8]> for KeyPair {
             ));
         }
         Ok(Self(key))
+    }
+}
+
+impl Into<Privkey> for KeyPair {
+    fn into(self) -> Privkey {
+        Privkey::from(self.0)
     }
 }
 

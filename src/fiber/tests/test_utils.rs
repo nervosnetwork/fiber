@@ -1,17 +1,11 @@
-use crate::fiber::channel::ChannelActorState;
-use crate::fiber::channel::ChannelActorStateStore;
-use crate::fiber::channel::ChannelCommand;
-use crate::fiber::channel::ChannelCommandWithId;
-use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::graph::PaymentSession;
-use crate::fiber::types::EcdsaSignature;
-use crate::fiber::types::Pubkey;
-use ckb_types::{core::TransactionView, packed::Byte32};
-use ractor::{Actor, ActorRef};
+use ckb_jsonrpc_types::Status;
+use ckb_types::{
+    core::TransactionView,
+    packed::{Byte32, OutPoint},
+};
+use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
-use rand::Rng;
-use secp256k1::Keypair;
-use secp256k1::{rand, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, Secp256k1};
 use std::{
     env,
     ffi::OsStr,
@@ -29,6 +23,16 @@ use tokio::{
     time::sleep,
 };
 
+use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::graph::ChannelInfo;
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
+use crate::fiber::types::Pubkey;
+use crate::fiber::types::{EcdsaSignature, Privkey};
+use crate::fiber::{channel::ChannelActorStateStore, graph::NodeInfo};
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -44,7 +48,6 @@ use crate::{
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
-use tentacle::secio::SecioKeyPair;
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 
@@ -105,39 +108,19 @@ pub fn init_tracing() {
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
-    Actor::spawn(
-        Some("test root actor".to_string()),
-        RootActor {},
-        (new_tokio_task_tracker(), new_tokio_cancellation_token()),
-    )
-    .await
-    .expect("start test root actor")
-    .0
-}
-
-pub fn generate_keypair() -> (SecretKey, PublicKey) {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    (secret_key, public_key)
-}
-
-pub fn generate_seckey() -> SecretKey {
-    SecretKey::new(&mut rand::thread_rng())
-}
-
-pub fn generate_pubkey() -> Pubkey {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    public_key.into()
-}
-
-pub fn gen_sha256_hash() -> Hash256 {
-    let mut rng = rand::thread_rng();
-    let mut result = [0u8; 32];
-    rng.fill(&mut result[..]);
-    result.into()
+    use futures::FutureExt;
+    // Only one actor with the same name can be created.
+    ROOT_ACTOR
+        .get_or_init(|| {
+            Actor::spawn(
+                Some("test root actor".to_string()),
+                RootActor {},
+                (new_tokio_task_tracker(), new_tokio_cancellation_token()),
+            )
+            .map(|r| r.expect("start test root actor").0)
+        })
+        .await
+        .clone()
 }
 
 pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) -> FiberConfig {
@@ -148,6 +131,12 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
+        // This config is needed for the timely processing of gossip messages.
+        // Without this, some tests may fail due to the delay in processing gossip messages.
+        gossip_network_maintenance_interval_ms: Some(50),
+        // This config is needed for the timely processing of gossip messages.
+        // Without this, some tests may fail due to the delay in processing gossip messages.
+        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
         announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
@@ -179,7 +168,9 @@ pub struct NetworkNode {
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
     pub pubkey: Pubkey,
@@ -258,9 +249,221 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+pub async fn establish_channel_between_nodes(
+    node_a: &mut NetworkNode,
+    node_b: &mut NetworkNode,
+    public: bool,
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    a_max_tlc_number_in_flight: Option<u64>,
+    a_max_tlc_value_in_flight: Option<u128>,
+    a_tlc_expiry_delta: Option<u64>,
+    a_tlc_min_value: Option<u128>,
+    a_tlc_fee_proportional_millionths: Option<u128>,
+    b_max_tlc_number_in_flight: Option<u64>,
+    b_max_tlc_value_in_flight: Option<u128>,
+    b_tlc_expiry_delta: Option<u64>,
+    b_tlc_min_value: Option<u128>,
+    b_tlc_fee_proportional_millionths: Option<u128>,
+) -> (Hash256, TransactionView) {
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public,
+                shutdown_script: None,
+                funding_amount: node_a_funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: a_tlc_expiry_delta,
+                tlc_min_value: a_tlc_min_value,
+                tlc_fee_proportional_millionths: a_tlc_fee_proportional_millionths,
+                max_tlc_number_in_flight: a_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: a_max_tlc_value_in_flight,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: node_b_funding_amount,
+                shutdown_script: None,
+                max_tlc_number_in_flight: b_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: b_max_tlc_value_in_flight,
+                min_tlc_value: b_tlc_min_value,
+                tlc_fee_proportional_millionths: b_tlc_fee_proportional_millionths,
+                tlc_expiry_delta: b_tlc_expiry_delta,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let new_channel_id = accept_channel_result.new_channel_id;
+
+    let funding_tx_outpoint = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                Some(funding_tx_outpoint.clone())
+            }
+            _ => None,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    let funding_tx = node_a
+        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
+        .await
+        .expect("tx found");
+
+    (new_channel_id, funding_tx)
+}
+
+pub async fn create_nodes_with_established_channel(
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    public: bool,
+) -> (NetworkNode, NetworkNode, Hash256) {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        public,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    (node_a, node_b, channel_id)
+}
+
+pub async fn create_3_nodes_with_established_channel(
+    (channel_1_amount_a, channel_1_amount_b): (u128, u128),
+    (channel_2_amount_b, channel_2_amount_c): (u128, u128),
+    public: bool,
+) -> (NetworkNode, NetworkNode, NetworkNode, Hash256, Hash256) {
+    let (nodes, channels) = create_n_nodes_with_established_channel(
+        &[
+            (channel_1_amount_a, channel_1_amount_b),
+            (channel_2_amount_b, channel_2_amount_c),
+        ],
+        3,
+        public,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    (node_a, node_b, node_c, channels[0], channels[1])
+}
+
+pub async fn create_n_nodes_with_established_channel(
+    amounts: &[(u128, u128)],
+    n: usize,
+    public: bool,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    assert!(n >= 2);
+    assert_eq!(amounts.len(), n - 1);
+    let mut nodes = NetworkNode::new_interconnected_nodes(n).await;
+    let mut channels = vec![];
+
+    for i in 0..n - 1 {
+        let (channel_id, funding_tx) = {
+            let (node_a, node_b) = {
+                // avoid borrow nodes as mutbale more than once
+                let (left, right) = nodes.split_at_mut(i + 1);
+                (&mut left[i], &mut right[0])
+            };
+            establish_channel_between_nodes(
+                node_a,
+                node_b,
+                public,
+                amounts[i].0,
+                amounts[i].1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        };
+        channels.push(channel_id);
+        // all the other nodes submit_tx
+        for j in 0..n {
+            if j != i {
+                let res = nodes[j].submit_tx(funding_tx.clone()).await;
+                assert_eq!(res, Status::Committed);
+            }
+        }
+    }
+    (nodes, channels)
+}
+
 impl NetworkNode {
     pub async fn new() -> Self {
         Self::new_with_node_name_opt(None).await
+    }
+
+    pub fn get_private_key(&self) -> &Privkey {
+        &self.private_key
+    }
+
+    pub fn get_public_key(&self) -> Pubkey {
+        self.private_key.pubkey()
     }
 
     pub fn get_node_address(&self) -> &MultiAddr {
@@ -345,7 +548,7 @@ impl NetworkNode {
 
         let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
 
-        let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
+        let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
@@ -353,23 +556,24 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
-        let kp = fiber_config
+        let secret_key: Privkey = fiber_config
             .read_or_generate_secret_key()
-            .expect("read or generate secret key");
-        let secio_kp = SecioKeyPair::from(kp);
-        let public_key: Pubkey = secio_kp.public_key().into();
+            .expect("must generate key")
+            .into();
+        let public_key = secret_key.pubkey();
 
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
             public_key.clone(),
         )));
+
         let network_actor = Actor::spawn_linked(
             Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
                 store.clone(),
-                network_graph,
+                network_graph.clone(),
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
@@ -408,7 +612,9 @@ impl NetworkNode {
             fiber_config,
             listening_addrs: announced_addrs,
             network_actor,
+            network_graph,
             chain_actor,
+            private_key: secret_key.into(),
             peer_id,
             event_emitter: event_receiver,
             pubkey: public_key.into(),
@@ -478,6 +684,35 @@ impl NetworkNode {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
         }
+    }
+
+    pub async fn new_2_nodes_with_established_channel(
+        node_a_funding_amount: u128,
+        node_b_funding_amount: u128,
+        public: bool,
+    ) -> (NetworkNode, NetworkNode, Hash256, TransactionView) {
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+        let (channel_id, funding_tx) = establish_channel_between_nodes(
+            &mut node_a,
+            &mut node_b,
+            public,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        (node_a, node_b, channel_id, funding_tx)
     }
 
     // Create n nodes and connect them. The config_gen function
@@ -572,34 +807,45 @@ impl NetworkNode {
     ) -> Result<TransactionView, anyhow::Error> {
         get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
     }
-}
 
-pub(crate) fn rand_sha256_hash() -> Hash256 {
-    let mut rng = rand::thread_rng();
-    let mut result = [0u8; 32];
-    rng.fill(&mut result[..]);
-    result.into()
-}
+    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
+        &self.network_graph
+    }
 
-pub(crate) fn gen_rand_public_key() -> Pubkey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair).into()
-}
+    pub async fn with_network_graph<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&NetworkGraph<Store>) -> T,
+    {
+        let graph = self.get_network_graph().read().await;
+        f(&*graph)
+    }
 
-pub(crate) fn gen_rand_private_key() -> SecretKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    SecretKey::from_keypair(&key_pair)
-}
+    pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
+        self.with_network_graph(|graph| graph.nodes().into_iter().cloned().collect())
+            .await
+    }
 
-pub(crate) fn gen_rand_keypair() -> (PublicKey, SecretKey) {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    (
-        PublicKey::from_keypair(&key_pair),
-        SecretKey::from_keypair(&key_pair),
-    )
+    pub async fn get_network_graph_node(&self, pubkey: &Pubkey) -> Option<NodeInfo> {
+        self.with_network_graph(|graph| graph.get_node(pubkey).cloned())
+            .await
+    }
+
+    pub async fn get_network_graph_channels(&self) -> Vec<ChannelInfo> {
+        self.with_network_graph(|graph| graph.channels().into_iter().cloned().collect())
+            .await
+    }
+
+    pub async fn get_network_graph_channel(&self, channel_id: &OutPoint) -> Option<ChannelInfo> {
+        self.with_network_graph(|graph| {
+            tracing::debug!("Getting channel info for {:?}", channel_id);
+            tracing::debug!(
+                "Channels: {:?}",
+                graph.channels().into_iter().collect::<Vec<_>>()
+            );
+            graph.get_channel(channel_id).cloned()
+        })
+        .await
+    }
 }
 
 #[tokio::test]

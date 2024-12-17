@@ -78,9 +78,6 @@ pub(crate) struct NodeInfoResult {
     #[serde_as(as = "U32Hex")]
     peers_count: u32,
 
-    /// The synchronization status of the node within the network.
-    network_sync_status: String,
-
     /// Configuration information for User-Defined Tokens (UDT) associated with the node.
     udt_cfg_infos: UdtCfgInfos,
 }
@@ -134,7 +131,6 @@ where
             channel_count: response.channel_count,
             pending_channel_count: response.pending_channel_count,
             peers_count: response.peers_count,
-            network_sync_status: response.network_sync_status,
             udt_cfg_infos: response.udt_cfg_infos.into(),
         })
     }

@@ -49,6 +49,18 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+
+/// Maximal number of inbound connections.
+pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
+
+/// Minimal number of outbound connections.
+pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
+
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
 
@@ -181,6 +193,47 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
 
+    /// Gossip network maintenance interval, in milli-seconds. [default: 1000]
+    /// This is the interval to maintain the gossip network, including connecting to more peers, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-network-maintenance-interval-ms",
+        env,
+        help = "Gossip network maintenance interval, in milli-seconds. [default: 1000]"
+    )]
+    pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
+
+    /// Maximal number of inbound connections. The node will disconnect inbound connections
+    /// when the number of inbound connection exceeds this number. [default: 16]
+    #[arg(
+        name = "FIBER_MAX_INBOUND_PEERS",
+        long = "fiber-max-inbound-peers",
+        env,
+        help = "Maximal number of inbound connections. The node will disconnect inbound connections when the number of inbound connection exceeds this number. [default: 16]"
+    )]
+    pub(crate) max_inbound_peers: Option<usize>,
+
+    /// Minimal number of outbound connections. The node will try to connect to more peers
+    /// when the number of outbound connection is less than this number. [default: 8]
+    #[arg(
+        name = "FIBER_MIN_OUTBOUND_PEERS",
+        long = "fiber-min-outbound-peers",
+        env,
+        help = "Minimal number of outbound connections. The node will try to connect to more peers when the number of outbound connection is less than this number. [default: 8]"
+    )]
+    pub(crate) min_outbound_peers: Option<usize>,
+
+    /// Gossip store maintenance interval, in milli-seconds. [default: 1000]
+    /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
+    /// are available, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-store-maintenance-interval-ms",
+        env,
+        help = "Gossip store maintenance interval, in milli-seconds. [default: 1000]"
+    )]
+    pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
+
     /// Whether to sync the network graph from the network. [default: true]
     #[arg(
         name = "FIBER_SYNC_NETWORK_GRAPH",
@@ -200,7 +253,10 @@ pub struct FiberConfig {
     pub watchtower_check_interval_seconds: Option<u64>,
 }
 
-#[derive(PartialEq, Copy, Clone, Default)]
+/// Must be a valid utf-8 string of length maximal length 32 bytes.
+/// If the length is less than 32 bytes, it will be padded with 0.
+/// If the length is more than 32 bytes, it should be truncated.
+#[derive(Eq, PartialEq, Copy, Clone, Default, Hash)]
 pub struct AnnouncedNodeName(pub [u8; 32]);
 
 impl AnnouncedNodeName {
@@ -364,6 +420,25 @@ impl FiberConfig {
             .expect("read or generate secret key")
             .into();
         secio_kp.public_key()
+    }
+
+    pub fn gossip_network_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_network_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS)
+    }
+
+    pub fn max_inbound_peers(&self) -> usize {
+        self.max_inbound_peers.unwrap_or(DEFAULT_MAX_INBOUND_PEERS)
+    }
+
+    pub fn min_outbound_peers(&self) -> usize {
+        self.min_outbound_peers
+            .unwrap_or(DEFAULT_MIN_OUTBOUND_PEERS)
+    }
+
+    pub fn gossip_store_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_store_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS)
     }
 
     pub fn sync_network_graph(&self) -> bool {

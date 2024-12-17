@@ -2,70 +2,71 @@ use crate::fiber::channel::*;
 use crate::fiber::config::AnnouncedNodeName;
 use crate::fiber::config::DEFAULT_TLC_EXPIRY_DELTA;
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
+use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
+use crate::gen_rand_fiber_public_key;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::*;
-use crate::store::schema::*;
+use crate::now_timestamp_as_millis_u64;
 use crate::store::Store;
 use crate::watchtower::*;
 use ckb_hash::new_blake2b;
-use ckb_jsonrpc_types::JsonBytes;
 use ckb_types::packed::*;
 use ckb_types::prelude::*;
 use core::cmp::Ordering;
 use musig2::secp::MaybeScalar;
 use musig2::CompactSignature;
 use musig2::SecNonce;
+use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::time::SystemTime;
 use tempfile::tempdir;
 
-fn mock_node() -> (Pubkey, NodeInfo) {
-    let node_id: Pubkey = gen_rand_public_key();
-    let node = NodeInfo {
-        node_id,
-        anouncement_msg: NodeAnnouncement::new_unsigned(
-            AnnouncedNodeName::from_str("node1").expect("invalid name"),
-            vec![],
-            node_id,
-            1,
-            0,
-        ),
-        timestamp: 0,
-    };
-    (node_id, node)
+fn gen_rand_key_pair() -> Keypair {
+    let secp = Secp256k1::new();
+    Keypair::new(&secp, &mut rand::thread_rng())
 }
 
-fn mock_channel() -> ChannelInfo {
-    let node1: Pubkey = gen_rand_public_key();
-    let node2: Pubkey = gen_rand_public_key();
-    let secp = Secp256k1::new();
-    let keypair = Keypair::new(&secp, &mut rand::thread_rng());
-    let (xonly, _parity) = keypair.x_only_public_key();
-    let rand_hash256 = gen_sha256_hash();
-    ChannelInfo {
-        funding_tx_block_number: 0,
-        funding_tx_index: 0,
-        timestamp: 0,
-        node1_to_node2: None,
-        node2_to_node1: None,
-        announcement_msg: ChannelAnnouncement::new_unsigned(
-            &node1,
-            &node2,
-            OutPoint::new_builder()
-                .tx_hash(rand_hash256.into())
-                .index(0u32.pack())
-                .build(),
-            Hash256::default(),
-            &xonly,
+fn gen_rand_private_key() -> SecretKey {
+    gen_rand_key_pair().secret_key()
+}
+
+fn mock_node() -> (Privkey, NodeAnnouncement) {
+    let sk: Privkey = gen_rand_private_key().into();
+    (
+        sk.clone(),
+        NodeAnnouncement::new(
+            AnnouncedNodeName::from_str("node1").expect("invalid name"),
+            vec![],
+            &sk,
+            now_timestamp_as_millis_u64(),
             0,
-            None,
         ),
-    }
+    )
+}
+
+fn mock_channel() -> ChannelAnnouncement {
+    let sk1: Privkey = gen_rand_private_key().into();
+    let sk2: Privkey = gen_rand_private_key().into();
+    let keypair = gen_rand_key_pair();
+    let (xonly, _parity) = keypair.x_only_public_key();
+    let rand_hash256 = gen_rand_sha256_hash();
+    ChannelAnnouncement::new_unsigned(
+        &sk1.pubkey(),
+        &sk2.pubkey(),
+        OutPoint::new_builder()
+            .tx_hash(rand_hash256.into())
+            .index(0u32.pack())
+            .build(),
+        &xonly,
+        0,
+        None,
+    )
 }
 
 #[test]
@@ -74,7 +75,7 @@ fn test_store_invoice() {
     let path = dir.path().join("invoice_store");
     let store = Store::new(path).expect("created store failed");
 
-    let preimage = gen_sha256_hash();
+    let preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_preimage(preimage)
@@ -90,11 +91,11 @@ fn test_store_invoice() {
     assert_eq!(store.get_invoice(hash), Some(invoice.clone()));
     assert_eq!(store.get_invoice_preimage(hash), Some(preimage));
 
-    let invalid_hash = gen_sha256_hash();
+    let invalid_hash = gen_rand_sha256_hash();
     assert_eq!(store.get_invoice_preimage(&invalid_hash), None);
 
     assert_eq!(store.get_invoice_status(hash), Some(CkbInvoiceStatus::Open));
-    assert_eq!(store.get_invoice_status(&gen_sha256_hash()), None);
+    assert_eq!(store.get_invoice_status(&gen_rand_sha256_hash()), None);
 
     let status = CkbInvoiceStatus::Paid;
     store.update_invoice_status(hash, status).unwrap();
@@ -102,81 +103,129 @@ fn test_store_invoice() {
 }
 
 #[test]
-fn test_store_channels() {
+fn test_store_get_broadcast_messages_iter() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("invoice_store");
+    let path = dir.path().join("gossip_store");
     let store = Store::new(path).expect("created store failed");
 
-    let mut channels = vec![];
-    for _ in 0..10 {
-        let channel = mock_channel();
-        store.insert_channel(channel.clone());
-        channels.push(channel);
-    }
-
-    // sort by out_point
-    channels.sort_by_key(|a| a.out_point());
-
-    let outpoint_0 = channels[0].out_point();
+    let timestamp = now_timestamp_as_millis_u64();
+    let channel_announcement = mock_channel();
+    let outpoint = channel_announcement.out_point().clone();
+    store.save_channel_announcement(timestamp, channel_announcement.clone());
+    let default_cursor = Cursor::default();
+    let mut iter = store
+        .get_broadcast_messages_iter(&default_cursor)
+        .into_iter();
     assert_eq!(
-        store.get_channels(Some(outpoint_0)),
-        vec![channels[0].clone()]
+        iter.next(),
+        Some(BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            timestamp,
+            channel_announcement
+        )),
     );
-    let (res, last_cursor) = store.get_channels_with_params(1, None, None);
-    assert_eq!(res, vec![channels[0].clone()]);
-    assert_eq!(res.len(), 1);
-
-    let mut key = Vec::with_capacity(37);
-    key.push(CHANNEL_INFO_PREFIX);
-    key.extend_from_slice(channels[0].out_point().as_slice());
-    assert_eq!(last_cursor, JsonBytes::from_bytes(key.to_vec().into()));
-
-    let (res, _last_cursor) = store.get_channels_with_params(3, Some(last_cursor), None);
-    assert_eq!(res, channels[1..=3]);
+    assert_eq!(iter.next(), None);
+    let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
+    let mut iter = store.get_broadcast_messages_iter(&cursor).into_iter();
+    assert_eq!(iter.next(), None);
 }
 
 #[test]
-fn test_store_nodes() {
+fn test_store_get_broadcast_messages() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("invoice_store");
+    let path = dir.path().join("gossip_store");
     let store = Store::new(path).expect("created store failed");
 
-    let mut nodes = vec![];
-    for _ in 0..10 {
-        let (_, node) = mock_node();
-        store.insert_node(node.clone());
-        nodes.push(node);
-    }
-
-    // sort by node pubkey
-    nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
-
-    let node_id = nodes[0].node_id;
-    assert_eq!(store.get_nodes(Some(node_id)), vec![nodes[0].clone()]);
-    let (res, last_cursor) = store.get_nodes_with_params(1, None, None);
-    assert_eq!(res, vec![nodes[0].clone()]);
-    assert_eq!(res.len(), 1);
-    let mut key = Vec::with_capacity(34);
-    key.push(NODE_INFO_PREFIX);
-    key.extend_from_slice(nodes[0].node_id.serialize().as_ref());
-    assert_eq!(last_cursor, JsonBytes::from_bytes(key.to_vec().into()));
-
-    let (res, _last_cursor) = store.get_nodes_with_params(3, Some(last_cursor), None);
-    assert_eq!(res, nodes[1..=3]);
+    let timestamp = now_timestamp_as_millis_u64();
+    let channel_announcement = mock_channel();
+    let outpoint = channel_announcement.out_point().clone();
+    store.save_channel_announcement(timestamp, channel_announcement.clone());
+    let default_cursor = Cursor::default();
+    let result = store.get_broadcast_messages(&default_cursor, None);
+    assert_eq!(
+        result,
+        vec![BroadcastMessageWithTimestamp::ChannelAnnouncement(
+            timestamp,
+            channel_announcement
+        )],
+    );
+    let cursor = Cursor::new(timestamp, BroadcastMessageID::ChannelAnnouncement(outpoint));
+    let result = store.get_broadcast_messages(&cursor, None);
+    assert_eq!(result, vec![]);
 }
 
 #[test]
-fn test_compact_signature() {
-    let revocation_data = RevocationData {
-        commitment_number: 0,
-        x_only_aggregated_pubkey: [0u8; 32],
-        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
-        output: CellOutput::default(),
-        output_data: Bytes::default(),
-    };
-    let bincode_encoded = bincode::serialize(&revocation_data).unwrap();
-    let revocation_data: RevocationData = bincode::deserialize(&bincode_encoded).unwrap();
-    assert_eq!(revocation_data, revocation_data);
+fn test_store_save_channel_announcement() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gossip_store");
+    let store = Store::new(path).expect("created store failed");
+
+    let timestamp = now_timestamp_as_millis_u64();
+    let channel_announcement = mock_channel();
+    store.save_channel_announcement(timestamp, channel_announcement.clone());
+    let new_channel_announcement =
+        store.get_latest_channel_announcement(channel_announcement.out_point());
+    assert_eq!(
+        new_channel_announcement,
+        Some((timestamp, channel_announcement))
+    );
+}
+
+#[test]
+fn test_store_save_channel_update() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gossip_store");
+    let store = Store::new(path).expect("created store failed");
+
+    let flags_for_update_of_node1 = 0;
+    let channel_update_of_node1 = ChannelUpdate::new_unsigned(
+        OutPoint::new_builder()
+            .tx_hash(gen_rand_sha256_hash().into())
+            .index(0u32.pack())
+            .build(),
+        now_timestamp_as_millis_u64(),
+        flags_for_update_of_node1,
+        0,
+        0,
+        0,
+        0,
+    );
+    let out_point = channel_update_of_node1.channel_outpoint.clone();
+    store.save_channel_update(channel_update_of_node1.clone());
+    assert_eq!(
+        store.get_latest_channel_update(&out_point, true).as_ref(),
+        Some(&channel_update_of_node1)
+    );
+    assert_eq!(store.get_latest_channel_update(&out_point, false), None);
+
+    let mut channel_update_of_node2 = channel_update_of_node1.clone();
+    let flags_for_update_of_node2 = 1;
+    channel_update_of_node2.message_flags = flags_for_update_of_node2;
+    // Note that per discussion in Notion, we don't handle the rare case of two channel updates having the same timestamp.
+    // In the current implementation, channel update from one side with the same timestamp will not overwrite the existing one
+    // from the other side. So we have to set the timestamp to be different.
+    channel_update_of_node2.timestamp = 2;
+    store.save_channel_update(channel_update_of_node2.clone());
+    assert_eq!(
+        store.get_latest_channel_update(&out_point, false).as_ref(),
+        Some(&channel_update_of_node2)
+    );
+    assert_eq!(
+        store.get_latest_channel_update(&out_point, true).as_ref(),
+        Some(&channel_update_of_node1)
+    );
+}
+
+#[test]
+fn test_store_save_node_announcement() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("gossip_store");
+    let store = Store::new(path).expect("created store failed");
+
+    let (sk, node_announcement) = mock_node();
+    let pk = sk.pubkey();
+    store.save_node_announcement(node_announcement.clone());
+    let new_node_announcement = store.get_latest_node_announcement(&pk);
+    assert_eq!(new_node_announcement, Some(node_announcement));
 }
 
 #[test]
@@ -185,7 +234,7 @@ fn test_store_wacthtower() {
     let path = dir.path().join("watchtower_store");
     let store = Store::new(path).expect("created store failed");
 
-    let channel_id = gen_sha256_hash();
+    let channel_id = gen_rand_sha256_hash();
     let funding_tx_lock = Script::default();
 
     let settlement_data = SettlementData {
@@ -286,8 +335,8 @@ fn test_channel_actor_state_store() {
             channel_announcement: None,
             channel_update: None,
         }),
-        local_pubkey: generate_pubkey().into(),
-        remote_pubkey: generate_pubkey().into(),
+        local_pubkey: gen_rand_fiber_public_key(),
+        remote_pubkey: gen_rand_fiber_public_key(),
         funding_tx: None,
         funding_tx_confirmed_at: Some((1.into(), 1)),
         is_acceptor: true,
@@ -297,25 +346,25 @@ fn test_channel_actor_state_store() {
         commitment_fee_rate: 100,
         commitment_delay_epoch: 100,
         funding_fee_rate: 100,
-        id: gen_sha256_hash(),
+        id: gen_rand_sha256_hash(),
         tlc_state: Default::default(),
         local_shutdown_script: Script::default(),
         local_channel_public_keys: ChannelBasePublicKeys {
-            funding_pubkey: generate_pubkey().into(),
-            tlc_base_key: generate_pubkey().into(),
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
         },
         signer,
         remote_channel_public_keys: Some(ChannelBasePublicKeys {
-            funding_pubkey: generate_pubkey().into(),
-            tlc_base_key: generate_pubkey().into(),
+            funding_pubkey: gen_rand_fiber_public_key(),
+            tlc_base_key: gen_rand_fiber_public_key(),
         }),
         commitment_numbers: Default::default(),
         remote_shutdown_script: Some(Script::default()),
         last_used_nonce_in_commitment_signed: None,
         remote_nonces: vec![(0, pub_nonce.clone())],
         remote_commitment_points: vec![
-            (0, generate_pubkey().into()),
-            (1, generate_pubkey().into()),
+            (0, gen_rand_fiber_public_key()),
+            (1, gen_rand_fiber_public_key()),
         ],
         local_shutdown_info: None,
         remote_shutdown_info: None,
@@ -354,9 +403,9 @@ fn test_store_payment_session() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("payment_history_store");
     let store = Store::new(path).expect("created store failed");
-    let payment_hash = gen_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
     let payment_data = SendPaymentData {
-        target_pubkey: gen_rand_public_key(),
+        target_pubkey: gen_rand_fiber_public_key(),
         amount: 100,
         payment_hash,
         invoice: None,
@@ -421,7 +470,7 @@ fn test_store_payment_history() {
     assert_eq!(r1, r2);
 
     let outpoint_3 = OutPoint::new_builder()
-        .tx_hash(gen_sha256_hash().into())
+        .tx_hash(gen_rand_sha256_hash().into())
         .index(1u32.pack())
         .build();
     let direction_3 = Direction::Forward;
