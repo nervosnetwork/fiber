@@ -311,6 +311,16 @@ impl NetworkNode {
         self.update_channel_actor_state(channel_actor_state).await;
     }
 
+    pub async fn update_channel_remote_balance(
+        &mut self,
+        channel_id: Hash256,
+        new_to_remote_amount: u128,
+    ) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.to_remote_amount = new_to_remote_amount;
+        self.update_channel_actor_state(channel_actor_state).await;
+    }
+
     pub async fn disable_channel(&mut self, channel_id: Hash256) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         let mut public_info = channel_actor_state.public_channel_info.unwrap();

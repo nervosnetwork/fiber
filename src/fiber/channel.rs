@@ -1,9 +1,5 @@
-use bitflags::bitflags;
-use ckb_jsonrpc_types::BlockNumber;
-use futures::future::OptionFuture;
-use secp256k1::XOnlyPublicKey;
-use tracing::{debug, error, info, trace, warn};
-
+#[cfg(debug_assertions)]
+use crate::fiber::network::DebugEvent;
 use crate::fiber::serde_utils::U64Hex;
 use crate::{
     fiber::{
@@ -15,7 +11,9 @@ use crate::{
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
     now_timestamp_as_millis_u64,
 };
+use bitflags::bitflags;
 use ckb_hash::{blake2b_256, new_blake2b};
+use ckb_jsonrpc_types::BlockNumber;
 use ckb_sdk::{Since, SinceType};
 use ckb_types::{
     core::{
@@ -25,6 +23,9 @@ use ckb_types::{
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
+use futures::future::OptionFuture;
+use secp256k1::XOnlyPublicKey;
+use tracing::{debug, error, info, trace, warn};
 
 use molecule::prelude::{Builder, Entity};
 use musig2::{
@@ -669,14 +670,15 @@ where
                             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
                             _ => {
                                 let error_detail = self.get_tlc_error(state, &e.source).await;
+                                #[cfg(debug_assertions)]
                                 self.network
                                     .clone()
                                     .send_message(NetworkActorMessage::new_notification(
-                                        NetworkServiceEvent::AddTlcFailed(
+                                        NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
                                             state.get_local_peer_id(),
                                             add_tlc.payment_hash,
                                             error_detail.clone(),
-                                        ),
+                                        )),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                                 error_detail
@@ -2073,6 +2075,16 @@ where
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(&myself, state, message).await {
                     error!("Error while processing channel message: {:?}", error);
+                    #[cfg(debug_assertions)]
+                    self.network
+                        .clone()
+                        .send_message(NetworkActorMessage::new_notification(
+                            NetworkServiceEvent::DebugEvent(DebugEvent::Common(format!(
+                                "{:?}",
+                                error
+                            ))),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
             }
             ChannelActorMessage::Command(command) => {

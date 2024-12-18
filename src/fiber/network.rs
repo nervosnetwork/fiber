@@ -504,6 +504,15 @@ impl NetworkActorMessage {
     }
 }
 
+#[cfg(debug_assertions)]
+#[derive(Debug)]
+pub enum DebugEvent {
+    // A AddTlc peer message processed with failure
+    AddTlcFailed(PeerId, Hash256, TlcErr),
+    // Common event with string
+    Common(String),
+}
+
 #[derive(Debug)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
@@ -514,8 +523,6 @@ pub enum NetworkServiceEvent {
     ChannelCreated(PeerId, Hash256),
     // A outgoing channel is pending to be accepted.
     ChannelPendingToBeAccepted(PeerId, Hash256),
-    // A AddTlc peer message processed with failure
-    AddTlcFailed(PeerId, Hash256, TlcErr),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -546,6 +553,9 @@ pub enum NetworkServiceEvent {
     RemoteCommitmentSigned(PeerId, Hash256, u64, TransactionView),
     // The syncing of network information has completed.
     SyncingCompleted,
+    // Some other debug event for assertion.
+    #[cfg(debug_assertions)]
+    DebugEvent(DebugEvent),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
