@@ -3285,12 +3285,7 @@ impl ChannelActorState {
             // We have not created a channel announcement yet.
             None => {
                 let channel_outpoint = self.must_get_funding_transaction_outpoint();
-                let capacity = if self.funding_udt_type_script.is_some() {
-                    self.get_total_udt_amount()
-                } else {
-                    self.get_total_ckb_amount() as u128
-                };
-
+                let capacity = self.get_liquid_capacity();
                 let (node1_id, node2_id) = if self.local_is_node1() {
                     (self.local_pubkey, self.remote_pubkey)
                 } else {
@@ -3978,6 +3973,17 @@ impl ChannelActorState {
 
     fn get_total_udt_amount(&self) -> u128 {
         self.to_local_amount + self.to_remote_amount
+    }
+
+    // Get the total liquid capacity of the channel, which will exclude the reserved ckb amount.
+    // This is the capacity used for gossiping channel information.
+    fn get_liquid_capacity(&self) -> u128 {
+        let capacity = if self.funding_udt_type_script.is_some() {
+            self.get_total_udt_amount()
+        } else {
+            self.to_local_amount as u128 + self.to_remote_amount as u128
+        };
+        capacity
     }
 
     // Send RevokeAndAck message to the counterparty, and update the
