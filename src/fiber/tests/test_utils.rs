@@ -4,9 +4,13 @@ use crate::fiber::channel::ChannelCommand;
 use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
+use crate::invoice::CkbInvoice;
+use crate::invoice::InvoiceStore;
 use ckb_types::{core::TransactionView, packed::Byte32};
+use ractor::call;
 use ractor::{Actor, ActorRef};
 use rand::rngs::OsRng;
 use rand::Rng;
@@ -285,6 +289,32 @@ impl NetworkNode {
         self.store
             .get_channel_actor_state(&channel_id)
             .expect("get channel")
+    }
+
+    pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
+        self.store
+            .insert_invoice(invoice, preimage)
+            .expect("insert success");
+    }
+
+    pub async fn assert_payment_status(
+        &self,
+        payment_hash: Hash256,
+        expected_status: PaymentSessionStatus,
+        expected_retried: Option<u32>,
+    ) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        };
+        let res = call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap();
+
+        assert_eq!(res.status, expected_status);
+        if let Some(expected_retried) = expected_retried {
+            let payment_session = self.get_payment_session(payment_hash).unwrap();
+            assert_eq!(payment_session.retried_times, expected_retried);
+        }
     }
 
     pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
