@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - run: |
           cargo check
           make check-dirty-rpc-doc
@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -43,8 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -52,8 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - run: |
           make clippy
 
@@ -63,8 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Install Grcov
         run: make coverage-install-tools
       - name: Generate Code Coverage Report of Unit Tests
@@ -91,8 +91,8 @@ jobs:
         profile: [dev, release]
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
       - uses: dsherret/rust-toolchain-file@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Install Dependencies (Windows)
         if: contains(matrix.os, 'windows')
         run: |
