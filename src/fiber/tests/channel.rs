@@ -5084,29 +5084,25 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
         .await;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(999),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: None,
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: Some(true),
-                udt_type_script: None,
-                allow_self_payment: false,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(999),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
 
     // expect send payment to failed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
 
     node_3
@@ -5161,29 +5157,25 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
 
     eprintln!("invoice {}", invoice);
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(100),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: Some(invoice.clone()),
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(100),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: Some(invoice.clone()),
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: None,
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
 
     // expect send payment to succeed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
@@ -5229,29 +5221,25 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
 
     node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(100),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: Some(ckb_invoice.to_string()),
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(100),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: Some(ckb_invoice.to_string()),
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: None,
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
 
     // expect send payment to succeed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
@@ -5304,29 +5292,25 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     // insert invoice without preimage
     node_3.insert_invoice(ckb_invoice.clone(), None);
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(100),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: Some(ckb_invoice.to_string()),
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(100),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: Some(ckb_invoice.to_string()),
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: None,
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
 
     // expect send payment to failed because we can not find preimage
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
@@ -5382,31 +5366,25 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
     // sleep for a while
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let message = |rpc_reply| -> NetworkActorMessage {
-        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
-            SendPaymentCommand {
-                target_pubkey: Some(target_pubkey.clone()),
-                amount: Some(100),
-                payment_hash: None,
-                final_tlc_expiry_delta: None,
-                tlc_expiry_limit: None,
-                invoice: Some(ckb_invoice.to_string()),
-                timeout: None,
-                max_fee_amount: None,
-                max_parts: None,
-                keysend: None,
-                udt_type_script: None,
-                allow_self_payment: false,
-                dry_run: false,
-            },
-            rpc_reply,
-        ))
-    };
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(100),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: Some(ckb_invoice.to_string()),
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: None,
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
 
-    // expect send payment to succeed
-    let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
-
     let payment_hash = res.unwrap().payment_hash;
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 

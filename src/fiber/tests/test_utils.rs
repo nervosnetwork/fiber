@@ -5,6 +5,8 @@ use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::graph::NetworkGraphStateStore;
 use crate::fiber::graph::PaymentSession;
 use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::network::SendPaymentResponse;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
@@ -306,6 +308,18 @@ impl NetworkNode {
         self.store
             .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
             .expect("cancell success");
+    }
+
+    pub async fn send_payment(
+        &mut self,
+        command: SendPaymentCommand,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        res
     }
 
     pub async fn assert_payment_status(
