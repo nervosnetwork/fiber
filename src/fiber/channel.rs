@@ -637,6 +637,7 @@ where
         };
         TlcErr::new_channel_fail(
             error_code,
+            state.local_pubkey,
             state.must_get_funding_transaction_outpoint(),
             channel_update,
         )
@@ -665,6 +666,7 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
+                        eprintln!("apply add_tlc failed with: {:?}", e);
                         let tlc_err = match e.source {
                             // If we already have TlcErr, we can directly use it to send back to the peer.
                             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
