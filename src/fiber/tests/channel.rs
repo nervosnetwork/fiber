@@ -8,7 +8,7 @@ use crate::fiber::tests::test_utils::{
     gen_rand_public_key, gen_sha256_hash, generate_seckey, NetworkNodeConfigBuilder,
 };
 use crate::fiber::types::{PaymentHopData, PeeledOnionPacket, TlcErrorCode, NO_SHARED_SECRET};
-use crate::invoice::{Currency, InvoiceBuilder};
+use crate::invoice::{CkbInvoiceStatus, Currency, InvoiceBuilder};
 use crate::{
     ckb::contracts::{get_cell_deps, Contract},
     fiber::{
@@ -5192,4 +5192,232 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
         .await;
+}
+
+#[tokio::test]
+async fn test_send_payment_will_succeed_with_valid_invoice() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
+            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_3.pubkey.clone();
+    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let preimage = gen_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_preimage(preimage.clone())
+        .payee_pub_key(target_pubkey.into())
+        .expiry_time(Duration::from_secs(100))
+        .build()
+        .expect("build invoice success");
+
+    node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(100),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: Some(ckb_invoice.to_string()),
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+
+    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    assert_eq!(new_amount, old_amount + 100);
+    assert_eq!(
+        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        Some(CkbInvoiceStatus::Paid)
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_will_fail_with_no_invoice_preimage() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
+            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_3.pubkey.clone();
+    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let preimage = gen_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_preimage(preimage.clone())
+        .payee_pub_key(target_pubkey.into())
+        .expiry_time(Duration::from_secs(100))
+        .build()
+        .expect("build invoice success");
+
+    // insert invoice without preimage
+    node_3.insert_invoice(ckb_invoice.clone(), None);
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(100),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: Some(ckb_invoice.to_string()),
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to failed because we can not find preimage
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
+        .await;
+
+    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    assert_eq!(new_amount, old_amount);
+    assert_eq!(
+        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        Some(CkbInvoiceStatus::Received)
+    );
+}
+
+#[tokio::test]
+async fn test_send_payment_will_fail_with_cancelled_invoice() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
+            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, mut node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_3.pubkey.clone();
+    let old_amount = node_3.get_local_balance_from_channel(channels[2]);
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let preimage = gen_sha256_hash();
+    let ckb_invoice = InvoiceBuilder::new(Currency::Fibd)
+        .amount(Some(100))
+        .payment_preimage(preimage.clone())
+        .payee_pub_key(target_pubkey.into())
+        .expiry_time(Duration::from_secs(100))
+        .build()
+        .expect("build invoice success");
+
+    node_3.insert_invoice(ckb_invoice.clone(), Some(preimage));
+    node_3.cancel_invoice(ckb_invoice.payment_hash());
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(100),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: Some(ckb_invoice.to_string()),
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: None,
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
+        .await;
+
+    let new_amount = node_3.get_local_balance_from_channel(channels[2]);
+    assert_eq!(new_amount, old_amount);
+    assert_eq!(
+        node_3.get_invoice_status(ckb_invoice.payment_hash()),
+        Some(CkbInvoiceStatus::Cancelled)
+    );
 }

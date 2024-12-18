@@ -8,6 +8,7 @@ use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
 use crate::invoice::CkbInvoice;
+use crate::invoice::CkbInvoiceStatus;
 use crate::invoice::InvoiceStore;
 use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::call;
@@ -295,6 +296,16 @@ impl NetworkNode {
         self.store
             .insert_invoice(invoice, preimage)
             .expect("insert success");
+    }
+
+    pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
+        self.store.get_invoice_status(payment_hash)
+    }
+
+    pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
+        self.store
+            .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
+            .expect("cancell success");
     }
 
     pub async fn assert_payment_status(
