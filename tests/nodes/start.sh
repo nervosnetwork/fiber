@@ -37,7 +37,11 @@ ckb run -C "$deploy_dir/node-data" --indexer &
 cd "$nodes_dir" || exit 1
 
 start() {
-    cargo run -- "$@"
+    if [ -n "$FNN" ]; then
+        "$FNN" "$@"
+    else
+        cargo run -- "$@"
+    fi
 }
 
 if [ "$#" -ne 1 ]; then
