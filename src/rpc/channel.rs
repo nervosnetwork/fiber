@@ -378,7 +378,9 @@ pub(crate) struct SendPaymentCommandParams {
     #[serde_as(as = "Option<U64Hex>")]
     final_tlc_expiry_delta: Option<u64>,
 
-    /// the TLC expiry limit for the whole payment, in milliseconds
+    /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
+    /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
+    /// this is also the default value for the payment if this parameter is not provided
     #[serde_as(as = "Option<U64Hex>")]
     tlc_expiry_limit: Option<u64>,
 

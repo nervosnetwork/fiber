@@ -5399,3 +5399,76 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         Some(CkbInvoiceStatus::Cancelled)
     );
 }
+
+#[tokio::test]
+async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // from https://github.com/nervosnetwork/fiber/issues/367
+
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (4200000000 + 2000, 4200000000 + 1000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (100000000000, 100000000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [mut node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &mut node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let expected_minimal_tlc_expiry_limit = (24 * 60 * 60 * 1000) * 3;
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(999),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit - 1),
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
+
+    assert!(res.unwrap_err().contains("Failed to build route"));
+
+    let res = source_node
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(target_pubkey.clone()),
+            amount: Some(999),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: Some(expected_minimal_tlc_expiry_limit),
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: false,
+            dry_run: false,
+        })
+        .await;
+
+    // expect send payment to succeed
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    source_node
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+}
