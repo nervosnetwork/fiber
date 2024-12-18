@@ -4584,3 +4584,375 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
     assert_eq!(payment_session.retried_times, 2);
 }
+
+#[tokio::test]
+async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
+    // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
+    // the send payment should be succeed
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 900, 5200000000)),
+            ((2, 3), (4200000000 + 1000, 5200000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    eprintln!("failed_error: {:?}", res);
+    // because there is only one path for the payment, the payment will fail in the second try
+    // this assertion make sure we didn't do meaningless retry
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_final_all_failed_middle_hops() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_2 and node_3
+    // they liquid capacity is enough for send payment, but actual balance are both not enough
+    // path finding will all try them but all failed, so we assert the payment retry times is 3
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 900, 4200000000 + 1000)),
+            ((2, 3), (4200000000 + 910, 4200000000 + 1000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Failed);
+    eprintln!("failed_error: {:?}", res);
+    // because there is only one path for the payment, the payment will fail in the second try
+    // this assertion make sure we didn't do meaningless retry
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 3);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_2 and node_3, they are all with the same meta information except the later one has more capacity
+    // but even channel_2's capacity is larger, the to_local_amount is not enough for the payment
+    // path finding will retry the first channel and the send payment should be succeed
+    // the payment retry times should be 2
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (100000000000, 100000000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (4200000000 + 1000, 5200000000)),
+            ((2, 3), (4200000000 + 900, 6200000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    eprintln!("failed_error: {:?}", res);
+    // because there is only one path for the payment, the payment will fail in the second try
+    // this assertion make sure we didn't do meaningless retry
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 2);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_first_hop_failed_with_fee() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            // even 1000 > 999, but it's not enough for fee, and this is the direct channel
+            // so we can check the actual balance of channel
+            // the payment will fail
+            ((0, 1), (4200000000 + 1000, 5200000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (100000000000, 100000000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("Failed to build route"));
+}
+
+#[tokio::test]
+async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_0 and node_1, they are all with the same meta information except the later one has more capacity
+    // path finding will try the channel with larger capacity first, so we assert the payment retry times is 1
+    // the send payment should be succeed
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (4200000000 + 900, 5200000000)),
+            ((0, 1), (4200000000 + 1001, 5200000000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (100000000000, 100000000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+    tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+    };
+    let res = call!(source_node.network_actor, message)
+        .expect("node_a alive")
+        .unwrap();
+
+    assert_eq!(res.status, PaymentSessionStatus::Success);
+    eprintln!("failed_error: {:?}", res);
+    // because there is only one path for the payment, the payment will fail in the second try
+    // this assertion make sure we didn't do meaningless retry
+    let payment_session = source_node.get_payment_session(payment_hash).unwrap();
+    assert_eq!(payment_session.retried_times, 1);
+}
+
+#[tokio::test]
+async fn test_send_payment_with_first_hop_all_failed() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // we have two chaneels between node_0 and node_1
+    // they liquid capacity is enough for send payment, but actual balance are both not enough
+    // path finding will fail in the first time of send payment
+    let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (4200000000 + 900, 4200000000 + 1000)),
+            ((0, 1), (4200000000 + 910, 4200000000 + 1000)),
+            ((1, 2), (100000000000, 100000000000)),
+            ((2, 3), (100000000000, 100000000000)),
+        ],
+        4,
+        true,
+    )
+    .await;
+    let [node_0, _node_1, _node_2, node_3] = nodes.try_into().expect("4 nodes");
+    let source_node = &node_0;
+    let target_pubkey = node_3.pubkey.clone();
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    let message = |rpc_reply| -> NetworkActorMessage {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(target_pubkey.clone()),
+                amount: Some(999),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+
+    // expect send payment to succeed
+    let res = call!(source_node.network_actor, message).expect("source_node alive");
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("Failed to build route"));
+}
