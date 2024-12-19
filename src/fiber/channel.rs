@@ -1424,23 +1424,24 @@ where
                             }),
                         ))
                         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-                    let res = recv.await.expect("remove tlc replied");
-                    match res {
-                        Ok(_) => {
-                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
-                        }
-                        Err(err) if err.contains("WaitingTlcAck") => {
-                            error!(
+                    if let Ok(res) = recv.await {
+                        match res {
+                            Ok(_) => {
+                                state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                            }
+                            Err(err) if err.contains("WaitingTlcAck") => {
+                                error!(
                                 "Failed to relay remove tlc: {:?} because of WaitingTlcAck, retry it later",
                                 &retryable_remove
                             );
-                        }
-                        Err(err) => {
-                            error!(
+                            }
+                            Err(err) => {
+                                error!(
                                 "Failed to relay remove tlc: {:?} with reason: {:?}, will not retry",
                                 &retryable_remove, err
                             );
-                            state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                                state.tlc_state.remove_pending_remove_tlc(&retryable_remove);
+                            }
                         }
                     }
                 }
