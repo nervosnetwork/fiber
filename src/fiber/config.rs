@@ -59,7 +59,7 @@ pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
 pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
@@ -223,14 +223,14 @@ pub struct FiberConfig {
     )]
     pub(crate) min_outbound_peers: Option<usize>,
 
-    /// Gossip store maintenance interval, in milli-seconds. [default: 1000]
+    /// Gossip store maintenance interval, in milli-seconds. [default: 20000]
     /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
     /// are available, etc.
     #[arg(
         name = "FIBER_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS",
         long = "fiber-gossip-store-maintenance-interval-ms",
         env,
-        help = "Gossip store maintenance interval, in milli-seconds. [default: 1000]"
+        help = "Gossip store maintenance interval, in milli-seconds. [default: 20000]"
     )]
     pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
 
