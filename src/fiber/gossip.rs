@@ -550,7 +550,7 @@ where
             GossipSyncingActorMessage::NewGetRequest() => {
                 let latest_cursor = state.get_cursor().clone();
                 let request_id = state.get_and_increment_request_id();
-                debug!(
+                trace!(
                     "Sending GetBroadcastMessages request to peers: request_id {}, latest_cursor {:?}",
                     request_id, latest_cursor
                 );
@@ -1231,9 +1231,10 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     .send((id, tx, Arc::clone(&output_port)))
                     .expect("send reply");
                 rx.await.expect("receive notification");
-                debug!(
+                trace!(
                     "Loading messages from store for subscriber {}: subscription cursor {:?}",
-                    id, cursor
+                    id,
+                    cursor
                 );
                 // Since the handling of LoadMessagesFromStore interleaves with the handling of Tick,
                 // we may send the messages in an order that is different from both the dependency order
@@ -1348,6 +1349,9 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
                 // These are the messages that have complete dependencies and can be sent to the subscribers.
                 let complete_messages = state.prune_messages_to_be_saved().await;
+                if complete_messages.is_empty() {
+                    return Ok(());
+                }
                 for (id, subscription) in state.output_ports.iter() {
                     let messages_to_send = complete_messages
                         .iter()
@@ -2417,13 +2421,12 @@ where
 
             GossipActorMessage::TickNetworkMaintenance => {
                 trace!(
-                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}, num of pending queries: {}, peer states: {:?}",
+                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}, num of pending queries: {}",
                     state.peer_states.len(),
                     state.num_finished_active_syncing_peers,
                     state.num_of_active_syncing_peers(),
                     state.num_of_passive_syncing_peers(),
                     state.pending_queries.len(),
-                    &state.peer_states
                 );
                 for peer in state.peers_to_start_active_syncing() {
                     state.start_new_active_syncer(&peer).await;

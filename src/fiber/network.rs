@@ -893,7 +893,6 @@ where
                     ));
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
-                trace!("Network actor received gossip updates, updating graph");
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
             }
