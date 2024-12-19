@@ -250,8 +250,7 @@ pub trait SubscribableGossipMessageStore {
     /// These messages are first processed by the converter. When it is unideal to send messages to
     /// the receiver the converter should return a None, otherwise it can return some message of type
     /// TReceiverMsg, which would then be sent to the receiver actor.
-    /// The cursor here specifies the starting point of the subscription. If it is None, the subscription
-    /// will start from the very latest message in the store.
+    /// The cursor here specifies the starting point of the subscription.
     /// If there are already some messages in the store that are newer than the cursor, the receiver
     /// will receive these messages immediately after the subscription is created.
     /// Note that the messages are not guaranteed to be sent in ascending order of timestamp,
@@ -270,7 +269,7 @@ pub trait SubscribableGossipMessageStore {
         F: Fn(GossipMessageUpdates) -> Option<TReceiverMsg> + Send + 'static,
     >(
         &self,
-        cursor: Option<Cursor>,
+        cursor: Cursor,
         receiver: ActorRef<TReceiverMsg>,
         converter: F,
     ) -> Result<Self::Subscription, Self::Error>;
@@ -281,7 +280,7 @@ pub trait SubscribableGossipMessageStore {
     async fn update_subscription(
         &self,
         subscription: &Self::Subscription,
-        cursor: Option<Cursor>,
+        cursor: Cursor,
     ) -> Result<(), Self::Error>;
 
     // Unsubscribe from the gossip message store updates. The subscription parameter is the return value
@@ -664,12 +663,12 @@ where
 
     async fn pre_start(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         filter_cursor: Cursor,
     ) -> Result<Self::State, ActorProcessingErr> {
         let subscription = self
             .store
-            .subscribe(Some(filter_cursor.clone()), _myself, |m| {
+            .subscribe(filter_cursor, myself, |m| {
                 Some(PeerFilterProcessorMessage::NewStoreUpdates(m))
             })
             .await
@@ -698,7 +697,7 @@ where
             }
             PeerFilterProcessorMessage::UpdateFilter(cursor) => {
                 self.store
-                    .update_subscription(subscription, Some(cursor))
+                    .update_subscription(subscription, cursor)
                     .await
                     .expect("update subscription");
             }
@@ -896,7 +895,7 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
         F: Fn(GossipMessageUpdates) -> Option<TReceiverMsg> + Send + 'static,
     >(
         &self,
-        cursor: Option<Cursor>,
+        cursor: Cursor,
         receiver: ActorRef<TReceiverMsg>,
         converter: F,
     ) -> Result<Self::Subscription, Self::Error> {
@@ -927,7 +926,7 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
     async fn update_subscription(
         &self,
         subscription: &Self::Subscription,
-        cursor: Option<Cursor>,
+        cursor: Cursor,
     ) -> Result<(), Self::Error> {
         const DEFAULT_TIMEOUT: u64 = Duration::from_secs(5).as_millis() as u64;
         call_t!(
@@ -954,16 +953,14 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
 }
 
 struct BroadcastMessageOutput {
-    // The filter that a subscriber has set. We will only send messages that are newer than this filter.
-    // This is normally a cursor that the subscriber is confident that it has received all the messages
-    // before this cursor.
-    filter: Option<Cursor>,
+    // The filter that a subscriber has set.
+    filter: Cursor,
     // A port that from which the subscriber will receive messages and from which we will send messages to the subscriber.
     output_port: Arc<OutputPort<GossipMessageUpdates>>,
 }
 
 impl BroadcastMessageOutput {
-    fn new(filter: Option<Cursor>, output_port: Arc<OutputPort<GossipMessageUpdates>>) -> Self {
+    fn new(filter: Cursor, output_port: Arc<OutputPort<GossipMessageUpdates>>) -> Self {
         Self {
             filter,
             output_port,
@@ -1234,27 +1231,20 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     .send((id, tx, Arc::clone(&output_port)))
                     .expect("send reply");
                 rx.await.expect("receive notification");
-                match &cursor {
-                    Some(cursor) => {
-                        debug!(
-                            "Loading messages from store for subscriber {}: subscription cursor {:?}",
-                            id, cursor
-                        );
-                        // Since the handling of LoadMessagesFromStore interleaves with the handling of Tick,
-                        // we may send the messages in an order that is different from both the dependency order
-                        // and the timestamp order. This means that we may send a ChannelUpdate while handling
-                        // Tick and later we will send the corresponding ChannelAnnouncement.
-                        // So the downstream consumer need to either cache some of the messages and wait for the
-                        // dependent messages to arrive or read the messages from the store directly.
-                        myself.send_message(
-                            ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
-                                id,
-                                cursor.clone(),
-                            ),
-                        )?;
-                    }
-                    _ => {}
-                }
+                debug!(
+                    "Loading messages from store for subscriber {}: subscription cursor {:?}",
+                    id, cursor
+                );
+                // Since the handling of LoadMessagesFromStore interleaves with the handling of Tick,
+                // we may send the messages in an order that is different from both the dependency order
+                // and the timestamp order. This means that we may send a ChannelUpdate while handling
+                // Tick and later we will send the corresponding ChannelAnnouncement.
+                // So the downstream consumer need to either cache some of the messages and wait for the
+                // dependent messages to arrive or read the messages from the store directly.
+                myself.send_message(ExtendedGossipMessageStoreMessage::LoadMessagesFromStore(
+                    id,
+                    cursor.clone(),
+                ))?;
                 state.output_ports.insert(
                     id,
                     BroadcastMessageOutput::new(cursor, Arc::clone(&output_port)),
@@ -1357,14 +1347,11 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 // These are the messages that have complete dependencies and can be sent to the subscribers.
                 let complete_messages = state.prune_messages_to_be_saved().await;
                 for (id, subscription) in state.output_ports.iter() {
-                    let messages_to_send = match subscription.filter {
-                        Some(ref filter) => complete_messages
-                            .iter()
-                            .filter(|m| &m.cursor() > filter)
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        None => complete_messages.clone(),
-                    };
+                    let messages_to_send = complete_messages
+                        .iter()
+                        .filter(|m| &m.cursor() > &subscription.filter)
+                        .cloned()
+                        .collect::<Vec<_>>();
                     trace!(
                         "ExtendedGossipMessageActor sending complete messages to subscriber #{}: number of messages = {}",
                         id, messages_to_send.len()
@@ -1385,16 +1372,16 @@ pub enum ExtendedGossipMessageStoreMessage {
     // A new subscription for gossip message updates. We will send a batch of messages to the subscriber
     // via the returned output port.
     NewSubscription(
-        Option<Cursor>,
+        Cursor,
         RpcReplyPort<(
             u64,
             oneshot::Sender<()>, // A channel to notify the subscriber that the subscription is ready.
             Arc<OutputPort<GossipMessageUpdates>>,
         )>,
     ),
-    // Update the subscription with a new cursor. If the outer Option is None, the subscription will be cancelled.
-    // If the inner Option is None, the subscription will start from the very latest message in the store.
-    UpdateSubscription(u64, Option<Option<Cursor>>, RpcReplyPort<()>),
+    // Update the subscription. If this Option is None, the subscription will be cancelled.
+    // Otherwise the new cursor will be used to filter the messages that are sent to the subscriber.
+    UpdateSubscription(u64, Option<Cursor>, RpcReplyPort<()>),
     // Save a new broadcast message to the store. We will check if the message has any dependencies that are not
     // saved yet. If it has, we will save it to messages_to_be_saved, otherwise we will save it to the store.
     // We may also save the message to lagged_messages if the message is lagged.

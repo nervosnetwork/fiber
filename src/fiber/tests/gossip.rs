@@ -102,10 +102,7 @@ impl GossipTestingContext {
         &self.store_update_subscriber.actor
     }
 
-    async fn subscribe(
-        &self,
-        cursor: Option<Cursor>,
-    ) -> Arc<RwLock<Vec<BroadcastMessageWithTimestamp>>> {
+    async fn subscribe(&self, cursor: Cursor) -> Arc<RwLock<Vec<BroadcastMessageWithTimestamp>>> {
         let (subscriber, messages) = Subscriber::start_actor().await;
         self.get_store_update_subscriber()
             .subscribe(cursor, subscriber, |m| Some(SubscriberMessage::Update(m)))
@@ -312,7 +309,7 @@ async fn test_save_outdated_gossip_message() {
 #[tokio::test]
 async fn test_gossip_store_updates_basic_subscription() {
     let context = GossipTestingContext::new().await;
-    let messages = context.subscribe(None).await;
+    let messages = context.subscribe(Default::default()).await;
     let (_, announcement) = gen_rand_node_announcement();
     context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     tokio::time::sleep(Duration::from_millis(200).into()).await;
@@ -327,7 +324,7 @@ async fn test_gossip_store_updates_basic_subscription() {
 #[tokio::test]
 async fn test_gossip_store_updates_repeated_saving() {
     let context = GossipTestingContext::new().await;
-    let messages = context.subscribe(None).await;
+    let messages = context.subscribe(Default::default()).await;
     let (_, announcement) = gen_rand_node_announcement();
     for _ in 0..10 {
         context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
@@ -344,7 +341,7 @@ async fn test_gossip_store_updates_repeated_saving() {
 #[tokio::test]
 async fn test_gossip_store_updates_saving_multiple_messages() {
     let context = GossipTestingContext::new().await;
-    let messages = context.subscribe(None).await;
+    let messages = context.subscribe(Default::default()).await;
     let announcements = (0..10)
         .into_iter()
         .map(|_| gen_rand_node_announcement().1)
@@ -366,7 +363,7 @@ async fn test_gossip_store_updates_saving_multiple_messages() {
 #[tokio::test]
 async fn test_gossip_store_updates_saving_outdated_message() {
     let context = GossipTestingContext::new().await;
-    let messages = context.subscribe(None).await;
+    let messages = context.subscribe(Default::default()).await;
     let (sk, old_announcement) = gen_rand_node_announcement();
     // Make sure new announcement has a different timestamp
     tokio::time::sleep(Duration::from_millis(2).into()).await;
@@ -395,7 +392,7 @@ async fn check_two_node_announcements_with_one_invalid(
         [&invalid_announcement, &valid_announcement],
     ] {
         let context = GossipTestingContext::new().await;
-        let messages = context.subscribe(None).await;
+        let messages = context.subscribe(Default::default()).await;
         for announcement in announcements {
             context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
         }
@@ -492,7 +489,7 @@ async fn test_our_own_channel_gossip_message_propagated() {
 async fn test_never_miss_any_message() {
     let (_, announcement) = gen_rand_node_announcement();
     let context = GossipTestingContext::new().await;
-    let messages = context.subscribe(None).await;
+    let messages = context.subscribe(Default::default()).await;
     context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
     tokio::time::sleep(Duration::from_secs(1).into()).await;
     let messages = messages.read().await;

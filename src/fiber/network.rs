@@ -2865,7 +2865,7 @@ where
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
         store_update_subscriber
-            .subscribe(Some(graph_subscribing_cursor), myself.clone(), |m| {
+            .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
                 Some(NetworkActorMessage::new_event(
                     NetworkActorEvent::GossipMessageUpdates(m),
                 ))
