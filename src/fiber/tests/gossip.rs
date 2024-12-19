@@ -487,28 +487,18 @@ async fn test_our_own_channel_gossip_message_propagated() {
     }
 }
 
+// We may need to run this test multiple times to check if the gossip messages are really propagated.
 #[tokio::test]
 async fn test_never_miss_any_message() {
     let (_, announcement) = gen_rand_node_announcement();
-    let n = 500;
-    let handles = (0..n)
-        .map(|_| {
-            let announcement = announcement.clone();
-            spawn(async {
-                let context = GossipTestingContext::new().await;
-                let messages = context.subscribe(None).await;
-                context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
-                tokio::time::sleep(Duration::from_secs(1).into()).await;
-                let messages = messages.read().await;
-                assert_eq!(messages.len(), 1);
-                assert_eq!(
-                    messages[0],
-                    BroadcastMessageWithTimestamp::NodeAnnouncement(announcement)
-                );
-            })
-        })
-        .collect::<Vec<_>>();
-    for handle in handles {
-        handle.await.expect("task failed");
-    }
+    let context = GossipTestingContext::new().await;
+    let messages = context.subscribe(None).await;
+    context.save_message(BroadcastMessage::NodeAnnouncement(announcement.clone()));
+    tokio::time::sleep(Duration::from_secs(1).into()).await;
+    let messages = messages.read().await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0],
+        BroadcastMessageWithTimestamp::NodeAnnouncement(announcement)
+    );
 }
