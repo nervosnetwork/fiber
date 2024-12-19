@@ -1,3 +1,4 @@
+use super::channel::ChannelActorStateStore;
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
@@ -143,6 +144,13 @@ impl ChannelInfo {
             None
         }
     }
+
+    pub fn channel_last_update_time(&self) -> Option<u64> {
+        self.update_of_node2
+            .as_ref()
+            .map(|n| n.timestamp)
+            .max(self.update_of_node1.as_ref().map(|n| n.timestamp))
+    }
 }
 
 impl From<(u64, ChannelAnnouncement)> for ChannelInfo {
@@ -230,7 +238,13 @@ pub struct PathEdge {
 
 impl<S> NetworkGraph<S>
 where
-    S: NetworkGraphStateStore + GossipMessageStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore
+        + ChannelActorStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     pub fn new(store: S, source: Pubkey) -> Self {
         let mut network_graph = Self {
@@ -536,20 +550,37 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        self.channels.values().filter_map(move |channel| {
-            if let Some(info) = channel.update_of_node2.as_ref() {
-                if info.enabled && channel.node2() == node_id {
-                    return Some((channel.node1(), channel.node2(), channel, info));
+        let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+            .channels
+            .values()
+            .filter_map(move |channel| {
+                if let Some(info) = channel.update_of_node2.as_ref() {
+                    if info.enabled && channel.node2() == node_id {
+                        return Some((channel.node1(), channel.node2(), channel, info));
+                    }
                 }
-            }
 
-            if let Some(info) = channel.update_of_node1.as_ref() {
-                if info.enabled && channel.node1() == node_id {
-                    return Some((channel.node2(), channel.node1(), channel, info));
+                if let Some(info) = channel.update_of_node1.as_ref() {
+                    if info.enabled && channel.node1() == node_id {
+                        return Some((channel.node2(), channel.node1(), channel, info));
+                    }
                 }
-            }
-            None
-        })
+                None
+            })
+            .collect();
+
+        // Iterating over HashMap's values is not guaranteed to be in order,
+        // which may introduce randomness in the path finding.
+        // the weight algorithm in find_path does not considering capacity,
+        // so the channel with larger capacity maybe have the same weight with the channel with smaller capacity
+        // so we sort by capacity reverse order to make sure we try channel with larger capacity firstly
+        channels.sort_by(|(_, _, a, _), (_, _, b, _)| {
+            b.capacity().cmp(&a.capacity()).then(
+                b.channel_last_update_time()
+                    .cmp(&a.channel_last_update_time()),
+            )
+        });
+        channels.into_iter()
     }
 
     pub fn get_source_pubkey(&self) -> Pubkey {
@@ -868,6 +899,18 @@ where
                     continue;
                 }
 
+                // if this is a direct channel, try to load the channel actor state for balance
+                if from == self.source {
+                    if let Some(state) = self
+                        .store
+                        .get_channel_state_by_outpoint(&channel_info.out_point())
+                    {
+                        if amount_to_send > state.to_local_amount {
+                            continue;
+                        }
+                    }
+                }
+
                 let expiry_delta = if from == source {
                     0
                 } else {
@@ -888,6 +931,13 @@ where
                         channel_info.capacity(),
                     );
 
+                debug!(
+                    "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
+                    probability,
+                    channel_info.out_point(),
+                    from,
+                    to
+                );
                 if probability < DEFAULT_MIN_PROBABILITY {
                     debug!("probability is too low: {:?}", probability);
                     continue;

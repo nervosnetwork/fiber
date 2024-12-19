@@ -502,6 +502,15 @@ impl NetworkActorMessage {
     }
 }
 
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug)]
+pub enum DebugEvent {
+    // A AddTlc peer message processed with failure
+    AddTlcFailed(PeerId, Hash256, TlcErr),
+    // Common event with string
+    Common(String),
+}
+
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
@@ -514,8 +523,6 @@ pub enum NetworkServiceEvent {
     ChannelPendingToBeAccepted(PeerId, Hash256),
     // A funding tx is completed. The watch tower may use this to monitor the channel.
     RemoteTxComplete(PeerId, Hash256, Script, SettlementData),
-    // A AddTlc peer message processed with failure
-    AddTlcFailed(PeerId, Hash256, TlcErr),
     // The channel is ready to use (with funding transaction confirmed
     // and both parties sent ChannelReady messages).
     ChannelReady(PeerId, Hash256, OutPoint),
@@ -532,6 +539,9 @@ pub enum NetworkServiceEvent {
     // and we successfully assemble the partial signature from other party
     // to create a complete commitment transaction and a settlement transaction.
     RemoteCommitmentSigned(PeerId, Hash256, TransactionView, SettlementData),
+    // Some other debug event for assertion.
+    #[cfg(debug_assertions)]
+    DebugEvent(DebugEvent),
 }
 
 /// Events that can be sent to the network actor. Except for NetworkServiceEvent,
@@ -1336,17 +1346,6 @@ where
         debug!("Processing onion packet info: {:?}", info);
 
         let channel_outpoint = OutPoint::new(info.funding_tx_hash.into(), 0);
-        let unknown_next_peer = |reply: RpcReplyPort<Result<u64, TlcErr>>| {
-            let error_detail = TlcErr::new_channel_fail(
-                TlcErrorCode::UnknownNextPeer,
-                channel_outpoint.clone(),
-                None,
-            );
-            reply
-                .send(Err(error_detail))
-                .expect("send add tlc response");
-        };
-
         let channel_id = match state.outpoint_channel_map.get(&channel_outpoint) {
             Some(channel_id) => channel_id,
             None => {
@@ -1354,7 +1353,13 @@ where
                         "Channel id not found in outpoint_channel_map with {:?}, are we connected to the peer?",
                         channel_outpoint
                     );
-                return unknown_next_peer(reply);
+                let tlc_err = TlcErr::new_channel_fail(
+                    TlcErrorCode::UnknownNextPeer,
+                    state.get_public_key(),
+                    channel_outpoint.clone(),
+                    None,
+                );
+                return reply.send(Err(tlc_err)).expect("send add tlc response");
             }
         };
         let (send, recv) = oneshot::channel::<Result<AddTlcResponse, TlcErr>>();
@@ -1375,23 +1380,47 @@ where
         // we have already checked the channel_id is valid,
         match state.send_command_to_channel(*channel_id, command).await {
             Ok(()) => {}
-            Err(Error::ChannelNotFound(_)) => {
-                return unknown_next_peer(reply);
-            }
             Err(err) => {
-                // must be some error from tentacle, set it as temporary node failure
                 error!(
                     "Failed to send onion packet to channel: {:?} with err: {:?}",
                     channel_id, err
                 );
-                let error_detail = TlcErr::new(TlcErrorCode::TemporaryNodeFailure);
-                return reply
-                    .send(Err(error_detail))
-                    .expect("send add tlc response");
+                let tlc_error = self.get_tlc_error(state, &err, &channel_outpoint);
+                return reply.send(Err(tlc_error)).expect("send add tlc response");
             }
         }
         let add_tlc_res = recv.await.expect("recv error").map(|res| res.tlc_id);
         reply.send(add_tlc_res).expect("send error");
+    }
+
+    fn get_tlc_error(
+        &self,
+        state: &mut NetworkActorState<S>,
+        error: &Error,
+        channel_outpoint: &OutPoint,
+    ) -> TlcErr {
+        let node_id = state.get_public_key();
+        match error {
+            Error::ChannelNotFound(_) | Error::PeerNotFound(_) => TlcErr::new_channel_fail(
+                TlcErrorCode::UnknownNextPeer,
+                node_id,
+                channel_outpoint.clone(),
+                None,
+            ),
+            Error::ChannelError(_) => TlcErr::new_channel_fail(
+                TlcErrorCode::TemporaryChannelFailure,
+                node_id,
+                channel_outpoint.clone(),
+                None,
+            ),
+            _ => {
+                error!(
+                    "Failed to send onion packet to channel: {:?} with err: {:?}",
+                    channel_outpoint, error
+                );
+                TlcErr::new_node_fail(TlcErrorCode::TemporaryNodeFailure, state.get_public_key())
+            }
+        }
     }
 
     async fn on_remove_tlc_event(
@@ -1609,7 +1638,6 @@ where
             let hops_info = self
                 .build_payment_route(&mut payment_session, &payment_data)
                 .await?;
-
             match self
                 .send_payment_onion_packet(state, &mut payment_session, &payment_data, hops_info)
                 .await
@@ -3115,6 +3143,7 @@ impl ServiceProtocol for FiberProtocolHandle {
     async fn init(&mut self, _context: &mut ProtocolContext) {}
 
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, _version: &str) {
+        let _session = context.session;
         if let Some(remote_pubkey) = context.session.remote_pubkey.clone() {
             let remote_peer_id = PeerId::from_public_key(&remote_pubkey);
             try_send_actor_message(

@@ -1137,6 +1137,7 @@ pub enum TlcErrData {
         #[serde_as(as = "EntityHex")]
         channel_outpoint: OutPoint,
         channel_update: Option<ChannelUpdate>,
+        node_id: Pubkey,
     },
     NodeFailed {
         node_id: Pubkey,
@@ -1173,12 +1174,14 @@ impl TlcErr {
 
     pub fn new_channel_fail(
         error_code: TlcErrorCode,
+        node_id: Pubkey,
         channel_outpoint: OutPoint,
         channel_update: Option<ChannelUpdate>,
     ) -> Self {
         TlcErr {
             error_code: error_code.into(),
             extra_data: Some(TlcErrData::ChannelFailed {
+                node_id,
                 channel_outpoint,
                 channel_update,
             }),
@@ -1188,6 +1191,7 @@ impl TlcErr {
     pub fn error_node_id(&self) -> Option<Pubkey> {
         match &self.extra_data {
             Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
+            Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
             _ => None,
         }
     }
@@ -1360,8 +1364,6 @@ pub enum TlcErrorCode {
     ChannelDisabled = UPDATE | 20,
     ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
-    MppTimeout = 23,
-    InvalidOnionBlinding = BADONION | PERM | 24,
     InvalidOnionError = BADONION | PERM | 25,
 }
 
@@ -1390,8 +1392,7 @@ impl TlcErrorCode {
             | TlcErrorCode::InvoiceExpired
             | TlcErrorCode::InvoiceCancelled
             | TlcErrorCode::ExpiryTooFar
-            | TlcErrorCode::ExpiryTooSoon
-            | TlcErrorCode::MppTimeout => true,
+            | TlcErrorCode::ExpiryTooSoon => true,
             _ => false,
         }
     }

@@ -1,4 +1,5 @@
 use crate::ckb::config::UdtCfgInfos as ConfigUdtCfgInfos;
+use crate::fiber::channel::ChannelActorStateStore;
 use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::{NetworkGraph, NetworkGraphStateStore};
 use crate::fiber::network::get_chain_hash;
@@ -262,7 +263,13 @@ where
 #[async_trait]
 impl<S> GraphRpcServer for GraphRpcServerImpl<S>
 where
-    S: NetworkGraphStateStore + GossipMessageStore + Clone + Send + Sync + 'static,
+    S: NetworkGraphStateStore
+        + ChannelActorStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     async fn graph_nodes(
         &self,

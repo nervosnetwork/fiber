@@ -315,7 +315,9 @@ Sends a payment to a peer.
 * `amount` - `Option<u128>`, the amount of the payment
 * `payment_hash` - `Option<Hash256>`, the hash to use within the payment's HTLC
 * `final_tlc_expiry_delta` - `Option<u64>`, the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
-* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds
+* `tlc_expiry_limit` - `Option<u64>`, the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
+ suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
+ this is also the default value for the payment if this parameter is not provided
 * `invoice` - `Option<String>`, the encoded invoice to send to the recipient
 * `timeout` - `Option<u64>`, the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
 * `max_fee_amount` - `Option<u128>`, the maximum fee amounts in shannons that the sender is willing to pay

@@ -764,6 +764,79 @@ fn test_graph_build_route_below_min_tlc_value() {
 }
 
 #[test]
+fn test_graph_build_route_select_edge_with_latest_timestamp() {
+    let mut network = MockNetworkGraph::new(3);
+    // Add edges with min_tlc_value set to 50
+    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
+    // sleep 100 ms
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
+    let node2 = network.keys[2];
+
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node2.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        dry_run: false,
+    });
+    assert!(route.is_ok());
+    eprintln!("got route {:?}", route);
+    let route = route.unwrap();
+    assert_eq!(route.len(), 2);
+    // assert we use the second added edge
+    assert_eq!(
+        route[0].funding_tx_hash,
+        network.edges[1].2.tx_hash().into()
+    );
+}
+
+#[test]
+fn test_graph_build_route_select_edge_with_large_capacity() {
+    let mut network = MockNetworkGraph::new(3);
+    // Add edges with min_tlc_value set to 50
+    network.add_edge_with_config(0, 2, Some(501), Some(2), Some(50), None, None);
+    // sleep 100 ms
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    network.add_edge_with_config(0, 2, Some(500), Some(2), Some(50), None, None);
+    let node2 = network.keys[2];
+
+    let route = network.graph.build_route(SendPaymentData {
+        target_pubkey: node2.into(),
+        amount: 100,
+        payment_hash: Hash256::default(),
+        invoice: None,
+        final_tlc_expiry_delta: DEFAULT_TLC_EXPIRY_DELTA,
+        tlc_expiry_limit: MAX_PAYMENT_TLC_EXPIRY_LIMIT,
+        timeout: Some(10),
+        max_fee_amount: Some(1000),
+        max_parts: None,
+        keysend: false,
+        udt_type_script: None,
+        preimage: None,
+        allow_self_payment: false,
+        dry_run: false,
+    });
+    assert!(route.is_ok());
+    let route = route.unwrap();
+    assert_eq!(route.len(), 2);
+    // assert we use the first edge with large capacity
+    assert_eq!(
+        route[0].funding_tx_hash,
+        network.edges[0].2.tx_hash().into()
+    );
+}
+
+#[test]
 fn test_graph_find_path_udt() {
     let mut network = MockNetworkGraph::new(3);
     let udt_type_script = Script::default();

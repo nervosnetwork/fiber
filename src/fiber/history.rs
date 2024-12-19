@@ -175,10 +175,9 @@ impl InternalResult {
     pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
         let mut need_to_retry = true;
 
-        let error_index = nodes.iter().position(|s| {
-            Some(s.channel_outpoint.clone()) == tlc_err.error_channel_outpoint()
-                || Some(s.pubkey) == tlc_err.error_node_id()
-        });
+        let error_index = nodes
+            .iter()
+            .position(|s| Some(s.pubkey) == tlc_err.error_node_id());
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
@@ -195,29 +194,14 @@ impl InternalResult {
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey
                 | TlcErrorCode::InvalidOnionPayload => need_to_retry = false,
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
                 }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
-                }
-            }
-        } else if index == 1 {
-            match error_code {
-                // we received an error from the first node, we trust our own node
-                // so we need to penalize the first node
-                TlcErrorCode::InvalidOnionVersion
-                | TlcErrorCode::InvalidOnionHmac
-                | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(nodes, 1);
-                }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
-                    need_to_retry = false;
-                }
-                _ => {
-                    // we can not penalize our own node, the whole payment session need to retry
-                    debug!("first hop failed with error: {:?}", tlc_err);
                 }
             }
         } else if index == len - 1 {
@@ -227,19 +211,19 @@ impl InternalResult {
                         need_to_retry = false;
                         self.fail_node(nodes, len - 1);
                     } else {
+                        // maybe the previous hop is malicious
                         self.fail_pair(nodes, index - 1);
                         self.succeed_range_pairs(nodes, 0, index - 2);
                     }
                 }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled => {
                     need_to_retry = false;
                     self.succeed_range_pairs(nodes, 0, len - 1);
                 }
-                TlcErrorCode::ExpiryTooSoon => {
+                TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
-                }
-                TlcErrorCode::MppTimeout | TlcErrorCode::InvalidOnionBlinding => {
-                    unimplemented!("not implemented");
                 }
                 _ => {
                     self.fail_node(nodes, len - 1);
@@ -262,10 +246,10 @@ impl InternalResult {
                     }
                 }
                 TlcErrorCode::UnknownNextPeer => {
-                    self.fail_pair(nodes, index);
+                    self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::PermanentChannelFailure => {
-                    self.fail_pair(nodes, index);
+                    self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
@@ -279,8 +263,8 @@ impl InternalResult {
                     }
                 }
                 TlcErrorCode::TemporaryChannelFailure => {
-                    self.fail_pair_balanced(nodes, index);
-                    self.succeed_range_pairs(nodes, 0, index - 1);
+                    self.fail_pair_balanced(nodes, index + 1);
+                    self.succeed_range_pairs(nodes, 0, index);
                 }
                 TlcErrorCode::ExpiryTooSoon => {
                     if index == 1 {
@@ -289,9 +273,13 @@ impl InternalResult {
                         self.fail_range_pairs(nodes, 0, index - 1);
                     }
                 }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectTlcAmount => {
+                    error!("middle hop does not expect to report this error");
                     need_to_retry = false;
-                    self.succeed_range_pairs(nodes, 0, index - 1);
                 }
                 _ => {
                     self.fail_node(nodes, index);

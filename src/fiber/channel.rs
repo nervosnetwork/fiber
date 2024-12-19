@@ -1,3 +1,6 @@
+#[cfg(debug_assertions)]
+use crate::fiber::network::DebugEvent;
+use crate::fiber::serde_utils::U64Hex;
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
@@ -20,7 +23,7 @@ use crate::{
         network::{
             get_chain_hash, sign_network_message, FiberMessageWithPeerId, SendOnionPacketCommand,
         },
-        serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes, U64Hex},
+        serde_utils::{CompactSignatureAsBytes, EntityHex, PubNonceAsBytes},
         types::{
             AcceptChannel, AddTlc, AnnouncementSignatures, BroadcastMessage, BroadcastMessageQuery,
             BroadcastMessageQueryFlags, ChannelAnnouncement, ChannelReady, ChannelUpdate,
@@ -35,7 +38,6 @@ use crate::{
     invoice::{CkbInvoice, CkbInvoiceStatus, InvoiceStore},
     now_timestamp_as_millis_u64, NetworkServiceEvent,
 };
-
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_sdk::{Since, SinceType};
 use ckb_types::{
@@ -46,7 +48,6 @@ use ckb_types::{
     packed::{Bytes, CellInput, CellOutput, OutPoint, Script, Transaction},
     prelude::{AsTransactionBuilder, IntoTransactionView, Pack, Unpack},
 };
-
 use molecule::prelude::{Builder, Entity};
 use musig2::{
     aggregate_partial_signatures,
@@ -59,7 +60,6 @@ use ractor::{
     async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
     OutputPort, RpcReplyPort, SpawnErr,
 };
-
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tentacle::secio::PeerId;
@@ -642,6 +642,7 @@ where
         };
         TlcErr::new_channel_fail(
             error_code,
+            state.local_pubkey,
             state.must_get_funding_transaction_outpoint(),
             channel_update,
         )
@@ -675,14 +676,15 @@ where
                             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
                             _ => {
                                 let error_detail = self.get_tlc_error(state, &e.source).await;
+                                #[cfg(debug_assertions)]
                                 self.network
                                     .clone()
                                     .send_message(NetworkActorMessage::new_notification(
-                                        NetworkServiceEvent::AddTlcFailed(
+                                        NetworkServiceEvent::DebugEvent(DebugEvent::AddTlcFailed(
                                             state.get_local_peer_id(),
                                             add_tlc.payment_hash,
                                             error_detail.clone(),
-                                        ),
+                                        )),
                                     ))
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                                 error_detail
@@ -2049,6 +2051,16 @@ where
             ChannelActorMessage::PeerMessage(message) => {
                 if let Err(error) = self.handle_peer_message(&myself, state, message).await {
                     error!("Error while processing channel message: {:?}", error);
+                    #[cfg(debug_assertions)]
+                    self.network
+                        .clone()
+                        .send_message(NetworkActorMessage::new_notification(
+                            NetworkServiceEvent::DebugEvent(DebugEvent::Common(format!(
+                                "{:?}",
+                                error
+                            ))),
+                        ))
+                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -4237,12 +4249,6 @@ impl ChannelActorState {
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                debug!(
-                    "Adding tlc {:?} with amount {} exceeds local balance {}",
-                    tlc.tlc_id,
-                    tlc.amount,
-                    self.to_local_amount - sent_tlc_value
-                );
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {
@@ -6492,6 +6498,7 @@ pub trait ChannelActorStateStore {
             .filter(|(_, _, state)| !state.is_closed())
             .collect()
     }
+    fn get_channel_state_by_outpoint(&self, id: &OutPoint) -> Option<ChannelActorState>;
 }
 
 /// A wrapper on CommitmentTransaction that has a partial signature along with

@@ -8,6 +8,7 @@
 /// | 33           | Payment_hash         | CkbInvoice Preimage         |
 /// | 34           | Payment_hash         | CkbInvoice Status           |
 /// | 64           | PeerId | Hash256     | ChannelState                |
+/// | 65...........| OutPoint             | ChannelId                   |
 /// | 96           | Cursor               | BroadcastMessage            |
 /// | 97           | BroadcastMessageID   | u64                         |
 /// | 192          | Hash256              | PaymentSession              |
@@ -22,6 +23,7 @@ pub(crate) const CKB_INVOICE_PREFIX: u8 = 32;
 pub(crate) const CKB_INVOICE_PREIMAGE_PREFIX: u8 = 33;
 pub(crate) const CKB_INVOICE_STATUS_PREFIX: u8 = 34;
 pub(crate) const PEER_ID_CHANNEL_ID_PREFIX: u8 = 64;
+pub(crate) const CHANNEL_OUTPOINT_CHANNEL_ID_PREFIX: u8 = 65;
 pub(crate) const BROADCAST_MESSAGE_PREFIX: u8 = 96;
 pub(crate) const BROADCAST_MESSAGE_TIMESTAMP_PREFIX: u8 = 97;
 pub(crate) const PAYMENT_SESSION_PREFIX: u8 = 192;

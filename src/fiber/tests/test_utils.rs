@@ -1,8 +1,20 @@
+use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::network::SendPaymentResponse;
+use crate::fiber::types::EcdsaSignature;
+use crate::fiber::types::Pubkey;
+use crate::invoice::CkbInvoice;
+use crate::invoice::CkbInvoiceStatus;
+use crate::invoice::InvoiceStore;
 use ckb_jsonrpc_types::Status;
-use ckb_types::{
-    core::TransactionView,
-    packed::{Byte32, OutPoint},
-};
+use ckb_types::packed::OutPoint;
+use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
@@ -23,16 +35,10 @@ use tokio::{
     time::sleep,
 };
 
-use crate::fiber::channel::ChannelActorState;
-use crate::fiber::channel::ChannelCommand;
-use crate::fiber::channel::ChannelCommandWithId;
 use crate::fiber::graph::ChannelInfo;
-use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::NodeInfo;
 use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
-use crate::fiber::types::Pubkey;
-use crate::fiber::types::{EcdsaSignature, Privkey};
-use crate::fiber::{channel::ChannelActorStateStore, graph::NodeInfo};
+use crate::fiber::types::Privkey;
 use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
@@ -249,7 +255,7 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
-pub async fn establish_channel_between_nodes(
+pub(crate) async fn establish_channel_between_nodes(
     node_a: &mut NetworkNode,
     node_b: &mut NetworkNode,
     public: bool,
@@ -358,7 +364,7 @@ pub async fn establish_channel_between_nodes(
     (new_channel_id, funding_tx)
 }
 
-pub async fn create_nodes_with_established_channel(
+pub(crate) async fn create_nodes_with_established_channel(
     node_a_funding_amount: u128,
     node_b_funding_amount: u128,
     public: bool,
@@ -387,7 +393,7 @@ pub async fn create_nodes_with_established_channel(
     (node_a, node_b, channel_id)
 }
 
-pub async fn create_3_nodes_with_established_channel(
+pub(crate) async fn create_3_nodes_with_established_channel(
     (channel_1_amount_a, channel_1_amount_b): (u128, u128),
     (channel_2_amount_b, channel_2_amount_c): (u128, u128),
     public: bool,
@@ -405,29 +411,51 @@ pub async fn create_3_nodes_with_established_channel(
     (node_a, node_b, node_c, channels[0], channels[1])
 }
 
-pub async fn create_n_nodes_with_established_channel(
+// make a network like A -> B -> C -> D
+pub(crate) async fn create_n_nodes_with_established_channel(
     amounts: &[(u128, u128)],
     n: usize,
     public: bool,
 ) -> (Vec<NetworkNode>, Vec<Hash256>) {
     assert!(n >= 2);
     assert_eq!(amounts.len(), n - 1);
+
+    let nodes_index_map: Vec<((usize, usize), (u128, u128))> = (0..n - 1)
+        .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
+        .collect();
+
+    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
+        .await
+}
+
+pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+    amounts: &[((usize, usize), (u128, u128))],
+    n: usize,
+    public: bool,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    assert!(n >= 2);
     let mut nodes = NetworkNode::new_interconnected_nodes(n).await;
     let mut channels = vec![];
 
-    for i in 0..n - 1 {
+    for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
         let (channel_id, funding_tx) = {
             let (node_a, node_b) = {
                 // avoid borrow nodes as mutbale more than once
-                let (left, right) = nodes.split_at_mut(i + 1);
-                (&mut left[i], &mut right[0])
+                assert_ne!(i, j);
+                if i < j {
+                    let (left, right) = nodes.split_at_mut(i + 1);
+                    (&mut left[i], &mut right[j - i - 1])
+                } else {
+                    let (left, right) = nodes.split_at_mut(j + 1);
+                    (&mut right[i - j - 1], &mut left[j])
+                }
             };
             establish_channel_between_nodes(
                 node_a,
                 node_b,
                 public,
-                amounts[i].0,
-                amounts[i].1,
+                node_a_amount,
+                node_b_amount,
                 None,
                 None,
                 None,
@@ -443,11 +471,9 @@ pub async fn create_n_nodes_with_established_channel(
         };
         channels.push(channel_id);
         // all the other nodes submit_tx
-        for j in 0..n {
-            if j != i {
-                let res = nodes[j].submit_tx(funding_tx.clone()).await;
-                assert_eq!(res, Status::Committed);
-            }
+        for k in 0..n {
+            let res = nodes[k].submit_tx(funding_tx.clone()).await;
+            assert_eq!(res, Status::Committed);
         }
     }
     (nodes, channels)
@@ -490,6 +516,54 @@ impl NetworkNode {
             .expect("get channel")
     }
 
+    pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
+        self.store
+            .insert_invoice(invoice, preimage)
+            .expect("insert success");
+    }
+
+    pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
+        self.store.get_invoice_status(payment_hash)
+    }
+
+    pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
+        self.store
+            .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
+            .expect("cancell success");
+    }
+
+    pub async fn send_payment(
+        &mut self,
+        command: SendPaymentCommand,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        res
+    }
+
+    pub async fn assert_payment_status(
+        &self,
+        payment_hash: Hash256,
+        expected_status: PaymentSessionStatus,
+        expected_retried: Option<u32>,
+    ) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        };
+        let res = call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap();
+
+        assert_eq!(res.status, expected_status);
+        if let Some(expected_retried) = expected_retried {
+            let payment_session = self.get_payment_session(payment_hash).unwrap();
+            assert_eq!(payment_session.retried_times, expected_retried);
+        }
+    }
+
     pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
         let channel_id = state.id.clone();
         self.store.insert_channel_actor_state(state);
@@ -511,6 +585,16 @@ impl NetworkNode {
     ) {
         let mut channel_actor_state = self.get_channel_actor_state(channel_id);
         channel_actor_state.to_local_amount = new_to_local_amount;
+        self.update_channel_actor_state(channel_actor_state).await;
+    }
+
+    pub async fn update_channel_remote_balance(
+        &mut self,
+        channel_id: Hash256,
+        new_to_remote_amount: u128,
+    ) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.to_remote_amount = new_to_remote_amount;
         self.update_channel_actor_state(channel_actor_state).await;
     }
 

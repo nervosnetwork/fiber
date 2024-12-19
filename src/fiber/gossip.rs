@@ -9,7 +9,7 @@ use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TransactionView, TxStatus};
 use ckb_types::{packed::OutPoint, H256};
 use ractor::{
-    async_trait as rasync_trait, call_t,
+    async_trait as rasync_trait, call, call_t,
     concurrency::{timeout, JoinHandle},
     Actor, ActorCell, ActorProcessingErr, ActorRef, ActorRuntime, MessagingErr, OutputPort,
     RpcReplyPort, SupervisionEvent,
@@ -903,11 +903,9 @@ impl<S: GossipMessageStore + Sync> SubscribableGossipMessageStore
             "Creating a new subscription from cursor {:?} with receiver {:?}",
             &cursor, &receiver
         );
-        const DEFAULT_TIMEOUT: u64 = Duration::from_secs(5).as_millis() as u64;
-        match call_t!(
+        match call!(
             &self.actor,
             ExtendedGossipMessageStoreMessage::NewSubscription,
-            DEFAULT_TIMEOUT,
             cursor
         ) {
             Ok((subscription, tx, output_port)) => {
@@ -1227,9 +1225,13 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 state.next_id += 1;
                 let (tx, rx) = oneshot::channel();
                 let output_port = Arc::new(OutputPort::default());
-                reply
-                    .send((id, tx, Arc::clone(&output_port)))
-                    .expect("send reply");
+                if let Err(error) = reply.send((id, tx, Arc::clone(&output_port))) {
+                    error!(
+                        "Failed to send reply to new subscription (has the caller exited?): {:?}",
+                        error
+                    );
+                    return Ok(());
+                }
                 rx.await.expect("receive notification");
                 trace!(
                     "Loading messages from store for subscriber {}: subscription cursor {:?}",
