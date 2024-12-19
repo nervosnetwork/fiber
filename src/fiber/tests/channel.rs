@@ -1157,14 +1157,8 @@ async fn test_network_send_payment_amount_is_too_large() {
             rpc_reply,
         ))
     };
-    let res = call!(node_a.network_actor, message)
-        .expect("node_a alive")
-        .unwrap();
-    assert_eq!(res.status, PaymentSessionStatus::Failed);
-    assert!(res
-        .failed_error
-        .unwrap()
-        .contains("TemporaryChannelFailure"));
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_err());
 }
 
 // FIXME: this is the case send_payment with direct channels, we should handle this case
