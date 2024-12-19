@@ -15,6 +15,9 @@ pub enum FundingError {
     #[error("Failed to sign CKB tx: {0}")]
     CkbTxUnlockError(#[from] UnlockError),
 
+    #[error("Failed to manage live cells exclusion list")]
+    FundingExclusionError,
+
     #[error("Dead cell found in the tx")]
     DeadCell,
 
