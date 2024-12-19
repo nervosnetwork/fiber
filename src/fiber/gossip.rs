@@ -820,7 +820,7 @@ impl PeerState {
     }
 
     fn change_sync_status(&mut self, new_status: PeerSyncStatus) {
-        println!(
+        debug!(
             "Peer {:?} sync status changed from {:?} to {:?}",
             self.session_id, self.sync_status, new_status
         );
@@ -2674,7 +2674,7 @@ impl ServiceProtocol for GossipProtocolHandle {
     }
 
     async fn connected(&mut self, context: ProtocolContextMutRef<'_>, version: &str) {
-        info!(
+        trace!(
             "proto id [{}] open on session [{}], address: [{}], type: [{:?}], version: {}",
             context.proto_id,
             context.session.id,
@@ -2696,9 +2696,12 @@ impl ServiceProtocol for GossipProtocolHandle {
     }
 
     async fn disconnected(&mut self, context: ProtocolContextMutRef<'_>) {
-        info!(
+        trace!(
             "proto id [{}] close on session [{}], address: [{}], type: [{:?}]",
-            context.proto_id, context.session.id, &context.session.address, &context.session.ty
+            context.proto_id,
+            context.session.id,
+            &context.session.address,
+            &context.session.ty
         );
 
         match context.session.remote_pubkey.as_ref() {

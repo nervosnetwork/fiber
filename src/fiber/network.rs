@@ -2167,7 +2167,6 @@ where
     }
 
     fn get_peer_pubkey(&self, peer_id: &PeerId) -> Option<Pubkey> {
-        debug!("Get pubkey for peer {:?}", peer_id);
         self.state_to_be_persisted.get_peer_pubkey(peer_id)
     }
 
@@ -2445,10 +2444,7 @@ where
     pub(crate) fn get_peer_addresses(&self, peer_id: &PeerId) -> HashSet<Multiaddr> {
         self.get_peer_pubkey(peer_id)
             .and_then(|pk| self.store.get_latest_node_announcement(&pk))
-            .map(|a| {
-                debug!("peer addresses: {:?}", a.addresses);
-                a.addresses
-            })
+            .map(|a| a.addresses)
             .unwrap_or_default()
             .into_iter()
             .chain(self.state_to_be_persisted.get_peer_addresses(peer_id))

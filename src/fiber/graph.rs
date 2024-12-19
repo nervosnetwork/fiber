@@ -264,15 +264,7 @@ where
         if messages.is_empty() {
             return false;
         }
-        debug!("Updating network graph for messages: {:?}", messages);
-        debug!(
-            "Current channels in network graph {:?}",
-            self.channels().into_iter().collect::<Vec<_>>()
-        );
-        debug!(
-            "Current nodes in network graph {:?}",
-            self.channels().into_iter().collect::<Vec<_>>()
-        );
+        debug!("Updating network graph with #{} messages", messages.len());
         for message in messages {
             self.update_lastest_cursor(message.cursor());
             if message.chain_hash() != get_chain_hash() {
@@ -300,14 +292,6 @@ where
                 }
             }
         }
-        debug!(
-            "Current channels in network graph after update {:?}",
-            self.channels().into_iter().collect::<Vec<_>>()
-        );
-        debug!(
-            "Current nodes in network graph after update {:?}",
-            self.nodes().into_iter().collect::<Vec<_>>()
-        );
         return true;
     }
 

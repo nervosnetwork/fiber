@@ -367,7 +367,6 @@ where
         for (channel, direction, result) in results.into_iter() {
             self.inner.insert((channel, direction), result);
         }
-        return;
     }
 
     pub(crate) fn apply_pair_result(
