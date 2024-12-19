@@ -2015,8 +2015,10 @@ where
                             )));
                         }
                         let capacity: u128 = u64::from(output.capacity).into();
+                        // channel_announcement's capacity is liquid capacity, while on-chain tx's capacity is total capacity
+                        // total capacity = liquid capacity + reserved_ckb_amount
                         if channel_announcement.udt_type_script.is_none()
-                            && capacity != channel_announcement.capacity
+                            && capacity < channel_announcement.capacity
                         {
                             return Err(Error::InvalidParameter(format!(
                                 "On-chain transaction found but capacity mismatched: on chain capacity {:?}, channel capacity {:?}",

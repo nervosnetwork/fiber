@@ -1116,8 +1116,8 @@ async fn test_network_send_payment_amount_is_too_large() {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
-    let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_a_funding_amount = 100000000000 + 4200000000;
+    let node_b_funding_amount = 4200000000 + 2;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -1130,7 +1130,7 @@ async fn test_network_send_payment_amount_is_too_large() {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_b_pubkey),
-                amount: Some(100000000000 + 5),
+                amount: Some(100000000000 + 1),
                 payment_hash: Some(gen_sha256_hash()),
                 final_tlc_expiry_delta: None,
                 tlc_expiry_limit: None,
@@ -1163,7 +1163,7 @@ async fn test_network_send_payment_with_dry_run() {
 
     let _span = tracing::info_span!("node", node = "test").entered();
     let node_a_funding_amount = 100000000000;
-    let node_b_funding_amount = 6200000000;
+    let node_b_funding_amount = 62000000000;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)

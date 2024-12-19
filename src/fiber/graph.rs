@@ -740,6 +740,11 @@ where
 
                 let next_hop_received_amount = cur_hop.amount_received;
                 if next_hop_received_amount > channel_info.capacity() {
+                    debug!(
+                        "next_hop_received_amount: {} > channel_info.capacity {}",
+                        next_hop_received_amount,
+                        channel_info.capacity()
+                    );
                     continue;
                 }
 
