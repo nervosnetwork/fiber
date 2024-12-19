@@ -1,12 +1,14 @@
-use super::test_utils::generate_seckey;
-use crate::fiber::{
-    gen::fiber as molecule_fiber,
-    hash_algorithm::HashAlgorithm,
-    tests::test_utils::generate_pubkey,
-    types::{
-        secp256k1_instance, AddTlc, Hash256, PaymentHopData, PeeledOnionPacket, Privkey, Pubkey,
-        TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+use crate::{
+    fiber::{
+        gen::{fiber as molecule_fiber, gossip},
+        hash_algorithm::HashAlgorithm,
+        types::{
+            secp256k1_instance, AddTlc, BroadcastMessageID, Cursor, Hash256, PaymentHopData,
+            PeeledOnionPacket, Privkey, Pubkey, TlcErr, TlcErrPacket, TlcErrorCode,
+            NO_SHARED_SECRET,
+        },
     },
+    gen_rand_channel_outpoint, gen_rand_fiber_private_key, gen_rand_fiber_public_key,
 };
 use fiber_sphinx::OnionSharedSecretIter;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -23,6 +25,76 @@ fn test_serde_public_key() {
     );
     let pubkey: Pubkey = serde_json::from_str(&pk_str).unwrap();
     assert_eq!(pubkey, public_key)
+}
+
+#[test]
+fn test_serde_cursor_node_announcement() {
+    let now = 0u64;
+    let node_id = gen_rand_fiber_public_key();
+    let cursor = Cursor::new(now, BroadcastMessageID::NodeAnnouncement(node_id));
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_serde_cursor_channel_announcement() {
+    let now = 0u64;
+    let channel_announcement_id = gen_rand_channel_outpoint();
+    let cursor = Cursor::new(
+        now,
+        BroadcastMessageID::ChannelAnnouncement(channel_announcement_id),
+    );
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_serde_cursor_channel_update() {
+    let now = 0u64;
+    let channel_update_id = gen_rand_channel_outpoint();
+    let cursor = Cursor::new(now, BroadcastMessageID::ChannelUpdate(channel_update_id));
+    let moleculed_cursor: gossip::Cursor = cursor.clone().into();
+    let unmoleculed_cursor: Cursor = moleculed_cursor.try_into().expect("decode");
+    assert_eq!(cursor, unmoleculed_cursor);
+}
+
+#[test]
+fn test_cursor_timestamp() {
+    let node_id = gen_rand_fiber_public_key();
+    // 255 is larger than 256 in little endian.
+    assert!(
+        Cursor::new(255, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+            < Cursor::new(256, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
+}
+
+#[test]
+fn test_cursor_types() {
+    let node_id = gen_rand_fiber_public_key();
+    let channel_outpoint = gen_rand_channel_outpoint();
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint.clone())
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint.clone())
+        ) < Cursor::new(
+            0,
+            BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
+        )
+    );
+    assert!(
+        Cursor::new(
+            0,
+            BroadcastMessageID::ChannelUpdate(channel_outpoint.clone())
+        ) < Cursor::new(0, BroadcastMessageID::NodeAnnouncement(node_id.clone()))
+    );
 }
 
 #[test]
@@ -44,7 +116,7 @@ fn test_add_tlc_serialization() {
 #[test]
 fn test_peeled_onion_packet() {
     let secp = Secp256k1::new();
-    let keys: Vec<Privkey> = std::iter::repeat_with(|| generate_seckey().into())
+    let keys: Vec<Privkey> = std::iter::repeat_with(|| gen_rand_fiber_private_key())
         .take(3)
         .collect();
     let hops_infos = vec![
@@ -73,9 +145,13 @@ fn test_peeled_onion_packet() {
             payment_preimage: None,
         },
     ];
-    let packet =
-        PeeledOnionPacket::create(generate_seckey().into(), hops_infos.clone(), None, &secp)
-            .expect("create peeled packet");
+    let packet = PeeledOnionPacket::create(
+        gen_rand_fiber_private_key(),
+        hops_infos.clone(),
+        None,
+        &secp,
+    )
+    .expect("create peeled packet");
 
     let serialized = packet.serialize();
     let deserialized = PeeledOnionPacket::deserialize(&serialized).expect("deserialize");
@@ -105,8 +181,10 @@ fn test_tlc_fail_error() {
     let convert_back: TlcErr = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");
     assert_eq!(tlc_fail_detail, convert_back);
 
-    let node_fail =
-        TlcErr::new_node_fail(TlcErrorCode::PermanentNodeFailure, generate_pubkey().into());
+    let node_fail = TlcErr::new_node_fail(
+        TlcErrorCode::PermanentNodeFailure,
+        gen_rand_fiber_public_key(),
+    );
     assert!(node_fail.error_code.is_node());
     let tlc_fail = TlcErrPacket::new(node_fail.clone(), &NO_SHARED_SECRET);
     let convert_back = tlc_fail.decode(&[0u8; 32], vec![]).expect("decoded fail");

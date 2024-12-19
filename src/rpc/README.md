@@ -447,7 +447,6 @@ Get the node information.
 * `channel_count` - u32, The number of channels associated with the node, serialized as a hexadecimal string.
 * `pending_channel_count` - u32, The number of pending channels associated with the node, serialized as a hexadecimal string.
 * `peers_count` - u32, The number of peers connected to the node, serialized as a hexadecimal string.
-* `network_sync_status` - String, The synchronization status of the node within the network.
 * `udt_cfg_infos` - UdtCfgInfos, Configuration information for User-Defined Tokens (UDT) associated with the node.
 
 
@@ -688,14 +687,14 @@ The Channel information.
 #### Fields
 
 * `channel_outpoint` - OutPoint, The outpoint of the channel.
-* `funding_tx_block_number` - u64, The block number of the funding transaction.
-* `funding_tx_index` - u32, The index of the funding transaction.
 * `node1` - Pubkey, The node ID of the first node.
 * `node2` - Pubkey, The node ID of the second node.
-* `last_updated_timestamp` - `Option<u64>`, The last updated timestamp of the channel, milliseconds since UNIX epoch.
-* `created_timestamp` - u64, The created timestamp of the channel, milliseconds since UNIX epoch.
-* `node1_to_node2_fee_rate` - `Option<u64>`, The fee rate from node 1 to node 2.
-* `node2_to_node1_fee_rate` - `Option<u64>`, The fee rate from node 2 to node 1.
+* `created_timestamp` - u64, The created timestamp of the channel, which is the block header timestamp of the block
+ that contains the channel funding transaction.
+* `last_updated_timestamp_of_node1` - `Option<u64>`, The timestamp of the last update to channel by node 1 (e.g. updating fee rate).
+* `last_updated_timestamp_of_node2` - `Option<u64>`, The timestamp of the last update to channel by node 2 (e.g. updating fee rate).
+* `fee_rate_of_node1` - `Option<u64>`, The fee rate set by node 1. This is the fee rate for node 1 to forward tlcs sent from node 2 to node 1.
+* `fee_rate_of_node2` - `Option<u64>`, The fee rate set by node 2. This is the fee rate for node 2 to forward tlcs sent from node 1 to node 2.
 * `capacity` - u128, The capacity of the channel.
 * `chain_hash` - Hash256, The chain hash of the channel.
 * `udt_type_script` - `Option<Script>`, The UDT type script of the channel.

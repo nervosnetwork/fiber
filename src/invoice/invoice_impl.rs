@@ -5,6 +5,7 @@ use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::Hash256;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
@@ -650,7 +651,7 @@ impl InvoiceBuilder {
             payment_hash
         } else {
             // generate a random payment hash if not provided
-            rand_sha256_hash()
+            gen_rand_sha256_hash()
         };
 
         self.check_attrs_valid()?;

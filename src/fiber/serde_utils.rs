@@ -12,10 +12,17 @@ where
     String::deserialize(deserializer)
         .and_then(|string| {
             if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
-                return Err(Error::custom("hex string should start with 0x"));
+                return Err(Error::custom(format!(
+                    "hex string does not start with 0x: {}",
+                    &string
+                )));
             };
-            hex::decode(&string[2..])
-                .map_err(|err| Error::custom(format!("failed to decode hex: {:?}", err)))
+            hex::decode(&string[2..]).map_err(|err| {
+                Error::custom(format!(
+                    "failed to decode hex string {}: {:?}",
+                    &string, err
+                ))
+            })
         })
         .and_then(|vec| {
             vec.try_into().map_err(|err| {
@@ -95,13 +102,13 @@ macro_rules! uint_as_hex {
             |hex: &str| -> Result<$ty, String> {
                 let bytes = hex.as_bytes();
                 if bytes.len() < 3 || &bytes[..2] != b"0x" {
-                    return Err("hex string should start with 0x".to_string());
+                    return Err(format!("uint hex string does not start with 0x: {}", hex));
                 }
                 if bytes.len() > 3 && &bytes[2..3] == b"0" {
-                    return Err("hex string should not start with redundant leading zeros".to_string());
+                    return Err(format!("uint hex string starts with redundant leading zeros: {}", hex));
                 };
                 <$ty>::from_str_radix(&hex[2..], 16)
-                    .map_err(|err| format!("failed to parse hex: {:?}", err))
+                    .map_err(|err| format!("failed to parse uint hex {}: {:?}", hex, err))
             }
         );
     };

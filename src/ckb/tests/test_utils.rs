@@ -6,14 +6,19 @@ use ckb_types::{
     core::{DepType, TransactionView},
     packed::{CellDep, CellOutput, OutPoint, Script, Transaction},
     prelude::{Builder, Entity, IntoTransactionView, Pack, PackVec, Unpack},
+    H256,
 };
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use std::{collections::HashMap, sync::Arc, sync::RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
-use crate::ckb::{
-    config::UdtCfgInfos,
-    contracts::{Contract, ContractsContext, ContractsInfo},
-    TraceTxRequest, TraceTxResponse,
+use crate::{
+    ckb::{
+        config::UdtCfgInfos,
+        contracts::{Contract, ContractsContext, ContractsInfo},
+        TraceTxRequest, TraceTxResponse,
+    },
+    now_timestamp_as_millis_u64,
 };
 
 use crate::ckb::CkbChainMessage;
@@ -308,9 +313,6 @@ impl Actor for MockChainActor {
         debug!("MockChainActor received message: {:?}", message);
         use CkbChainMessage::*;
         match message {
-            GetCurrentBlockNumber(_, reply) => {
-                let _ = reply.send(Ok(0));
-            }
             Fund(tx, request, reply_port) => {
                 let mut fulfilled_tx = tx.clone();
                 let outputs = fulfilled_tx
@@ -492,6 +494,33 @@ impl Actor for MockChainActor {
                         .await;
                     }
                 };
+            }
+            GetBlockTimestamp(request, rpc_reply_port) => {
+                // The problem of channel announcement is that each nodes will query the block timestamp
+                // and use it as the channel announcement timestamp.
+                // Guaranteeing the block timestamp is the same across all nodes is important
+                // because if a node A has a greater channel announcement timestamp than node B, then when
+                // A tries to get broadcast messages after this channel announcement timestamp, B will return
+                // the channel announcement. But for A, it is not a later broadcast message. This process will
+                // cause an infinite loop.
+                // So here we create an static lock which is shared across all nodes, and we use this lock to
+                // guarantee that the block timestamp is the same across all nodes.
+                static BLOCK_TIMESTAMP: OnceCell<TokioRwLock<HashMap<H256, u64>>> = OnceCell::new();
+                BLOCK_TIMESTAMP.get_or_init(|| TokioRwLock::new(HashMap::new()));
+                let timestamp = *BLOCK_TIMESTAMP
+                    .get()
+                    .unwrap()
+                    .write()
+                    .await
+                    .entry(request.block_hash())
+                    .or_insert(now_timestamp_as_millis_u64());
+
+                debug!(
+                    "Get block timestamp: block_hash: {:?}, timestamp: {}",
+                    request.block_hash(),
+                    timestamp
+                );
+                let _ = rpc_reply_port.send(Ok(Some(timestamp)));
             }
         }
         Ok(())
