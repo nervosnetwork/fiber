@@ -7,13 +7,12 @@ use nom::{
     bytes::{complete::take_while1, streaming::tag},
     IResult,
 };
-use rand::Rng;
+
 use std::io::{Cursor, Result as IoResult};
+use std::str::FromStr;
 
 use super::invoice_impl::Currency;
 use super::InvoiceError;
-use crate::fiber::types::Hash256;
-use std::str::FromStr;
 
 /// Encodes bytes and returns the compressed form
 /// This is used for encoding the invoice data, to make the final Invoice encoded address shorter
@@ -209,12 +208,7 @@ pub(crate) fn bytes_to_u8_array(array: &molecule::bytes::Bytes) -> [u8; 32] {
     res.copy_from_slice(array);
     res
 }
-pub(crate) fn rand_sha256_hash() -> Hash256 {
-    let mut rng = rand::thread_rng();
-    let mut result = [0u8; 32];
-    rng.fill(&mut result[..]);
-    result.into()
-}
+
 #[test]
 fn test_parse_hrp() {
     let res = parse_hrp("fibb1280");

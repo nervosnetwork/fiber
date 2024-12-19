@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 fn gen_path() -> std::path::PathBuf {
     let tmp_dir = tempfile::Builder::new()
-        .prefix("test_fiber_")
+        .prefix("test-store")
         .tempdir()
         .unwrap();
     tmp_dir.as_ref().to_path_buf()

@@ -9,7 +9,6 @@ use ckb_types::{
     prelude::Pack,
 };
 use molecule::prelude::Entity;
-use tracing::debug;
 
 fn commitment_tx_size(udt_type_script: &Option<Script>) -> usize {
     // when there is pending htlcs, the commitment lock args will be 56 bytes, otherwise 46 bytes.

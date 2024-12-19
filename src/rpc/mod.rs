@@ -8,6 +8,9 @@ mod info;
 mod invoice;
 mod peer;
 mod utils;
+
+use crate::fiber::gossip::GossipMessageStore;
+use crate::rpc::info::InfoRpcServer;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -28,7 +31,6 @@ pub use config::RpcConfig;
 #[cfg(debug_assertions)]
 use dev::{DevRpcServer, DevRpcServerImpl};
 use graph::{GraphRpcServer, GraphRpcServerImpl};
-use info::InfoRpcServer;
 use info::InfoRpcServerImpl;
 use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
 use jsonrpsee::server::{Server, ServerHandle};
@@ -74,7 +76,14 @@ async fn build_server(addr: &str) -> Server {
 }
 
 pub async fn start_rpc<
-    S: ChannelActorStateStore + InvoiceStore + NetworkGraphStateStore + Clone + Send + Sync + 'static,
+    S: ChannelActorStateStore
+        + InvoiceStore
+        + NetworkGraphStateStore
+        + GossipMessageStore
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 >(
     config: RpcConfig,
     fiber_config: Option<FiberConfig>,
