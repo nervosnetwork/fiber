@@ -6,6 +6,8 @@ fiber:
   auto_announce_node: true
   announce_private_addr: true
   watchtower_check_interval_seconds: 1
+  gossip_store_maintenance_interval_ms: 1000
+  gossip_network_maintenance_interval_ms: 1000
 
 rpc:
   listening_addr: 127.0.0.1:41716
