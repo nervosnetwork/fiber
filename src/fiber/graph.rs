@@ -276,7 +276,6 @@ where
                 );
                 continue;
             }
-            debug!("Updating network graph for message: {:?}", &message);
             match message {
                 BroadcastMessageWithTimestamp::ChannelAnnouncement(
                     timestamp,
@@ -428,7 +427,6 @@ where
     }
 
     fn process_node_announcement(&mut self, node_announcement: NodeAnnouncement) -> Option<Cursor> {
-        debug!("Processing node announcement: {:?}", &node_announcement);
         let node_info = NodeInfo::from(node_announcement);
         match self.nodes.get(&node_info.node_id) {
             Some(old_node) if old_node.timestamp > node_info.timestamp => {
@@ -444,7 +442,7 @@ where
                     node_info.timestamp,
                     BroadcastMessageID::NodeAnnouncement(node_info.node_id),
                 );
-                debug!("Inserting new node info: {:?}", &node_info);
+                trace!("Saving new node info to the graph: {:?}", &node_info);
                 self.nodes.insert(node_info.node_id, node_info);
                 return Some(cursor);
             }

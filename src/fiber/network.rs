@@ -893,7 +893,7 @@ where
                     ));
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
-                debug!("Updating network graph for gossip message updates");
+                trace!("Network actor received gossip updates, updating graph");
                 let mut graph = self.network_graph.write().await;
                 graph.update_for_messages(gossip_message_updates.messages);
             }
@@ -907,7 +907,6 @@ where
         state: &mut NetworkActorState<S>,
         command: NetworkActorCommand,
     ) -> crate::Result<()> {
-        tracing::trace!("Handling command: {:?}", command);
         match command {
             NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId { peer_id, message }) => {
                 state.send_fiber_message_to_peer(&peer_id, message).await?;
@@ -1862,7 +1861,7 @@ where
             // This is undesirable because we don't want to flood the network with the same message.
             // On the other hand, if the message is too old, we need to create a new one.
             Some(ref message) if now - message.timestamp < 3600 * 1000 => {
-                debug!("Node announcement message is still valid: {:?}", &message);
+                debug!("Returning old node announcement message as it is still valid");
             }
             _ => {
                 let alias = self.node_name.unwrap_or_default();

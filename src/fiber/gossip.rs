@@ -1150,7 +1150,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             ));
         }
 
-        trace!("ExtendedGossipMessageActor saving message: {:?}", message);
+        trace!("New gossip message saved to memory: {:?}", message);
         self.messages_to_be_saved.insert(message.clone());
         Ok(message)
     }
@@ -1220,7 +1220,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
         match message {
             ExtendedGossipMessageStoreMessage::NewSubscription(cursor, reply) => {
                 trace!(
-                    "ExtendedGossipMessageActor received message: NewSubscription {:?}",
+                    "Creating subscription to the store updates with cursor {:?}",
                     cursor
                 );
                 let id = state.next_id;
@@ -1253,7 +1253,8 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::UpdateSubscription(id, cursor, reply) => {
                 trace!(
-                    "ExtendedGossipMessageActor received message: UpdateSubscription {:?}",
+                    "Updating subscription to store updates for #{} with cursor {:?}",
+                    id,
                     cursor
                 );
 
@@ -1283,10 +1284,10 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     .into_iter()
                     .collect::<Vec<_>>();
                 trace!(
-                    "ExtendedGossipMessageActor received message: LoadMessagesFromStore {} {:?}, {:?}",
+                    "Loaded messages for subscription #{} with cursor {:?} (number of messages {:?})",
                     id,
                     cursor,
-                    messages
+                    messages.len()
                 );
                 match messages.last() {
                     Some(m) => {
@@ -1297,8 +1298,9 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                             ))
                             .expect("actor alive");
                         debug!(
-                            "ExtendedGossipMessageActor sending messages to subscriber #{}: number of messages = {}, messages {:?}",
-                            id, messages.len(), messages
+                            "Sending messages to subscription #{}: number of messages = {}",
+                            id,
+                            messages.len()
                         );
                         subscription
                             .output_port
@@ -1353,8 +1355,9 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                         .cloned()
                         .collect::<Vec<_>>();
                     trace!(
-                        "ExtendedGossipMessageActor sending complete messages to subscriber #{}: number of messages = {}",
-                        id, messages_to_send.len()
+                        "Sending complete messages in memory to subscription #{}: number of messages = {}",
+                        id,
+                        messages_to_send.len()
                     );
                     for chunk in messages_to_send.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
                         subscription
@@ -2298,8 +2301,6 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        trace!("Gossip actor received message: {:?}", &message);
-
         match message {
             GossipActorMessage::PeerConnected(peer_id, pubkey, session) => {
                 if state.is_peer_connected(&peer_id) {
@@ -2310,7 +2311,7 @@ where
                     return Ok(());
                 }
                 debug!(
-                    "Saving gossip peer pubkey and session: peer {:?}, pubkey {:?}, session {:?}",
+                    "Gossip peer connected: peer {:?}, pubkey {:?}, session {:?}",
                     &peer_id, &pubkey, &session.id
                 );
                 state
@@ -2425,12 +2426,10 @@ where
                     &state.peer_states
                 );
                 for peer in state.peers_to_start_active_syncing() {
-                    debug!("Starting new active syncer for peer {:?}", &peer);
                     state.start_new_active_syncer(&peer).await;
                 }
 
                 for peer in state.peers_to_start_passive_syncing() {
-                    debug!("Starting new passive syncer for peer {:?}", &peer);
                     state.start_passive_syncer(&peer).await;
                 }
 
