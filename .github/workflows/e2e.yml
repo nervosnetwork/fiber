@@ -16,6 +16,7 @@ jobs:
           - cross-chain-hub
           - router-pay
           - udt-router-pay
+          - watchtower
         release:
           - "0.116.1"
         test_env:
@@ -55,12 +56,14 @@ jobs:
 
       - name: Run e2e workflow
         run: |
+          set -euo pipefail
+
           if [ ${{ matrix.workflow }} = "cross-chain-hub" ]; then
             ./tests/deploy/lnd-init/setup-lnd.sh
           fi
 
           # Prebuild the program so that we can run the following script faster
-          cargo build
+          export FNN="$(cargo build --message-format=json-render-diagnostics | jq -js '[.[] | select(.reason == "compiler-artifact") | select(.executable != null)] | last | .executable')"
           cd tests/deploy/udt-init && cargo build && cd -
           if [ ${{ matrix.workflow }} = "router-pay" ]; then
             export START_BOOTNODE=y

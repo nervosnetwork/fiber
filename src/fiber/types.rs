@@ -36,7 +36,7 @@ use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tracing::{debug, error, trace};
+use tracing::{error, trace};
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
@@ -250,26 +250,6 @@ impl Privkey {
             .into()
     }
 
-    // Essentially https://docs.rs/ckb-crypto/latest/ckb_crypto/secp/struct.Privkey.html#method.sign_recoverable
-    // But we don't want to depend on ckb-crypto because ckb-crypto depends on
-    // a different version of secp256k1.
-    pub fn sign_ecdsa_recoverable(&self, message: &[u8; 32]) -> [u8; 65] {
-        tracing::debug!(
-            "Signing message with private key {:?}, public key: {:?}, pubkey hash: {:?},  message {:?}",
-            hex::encode(self.as_ref()),
-            self.pubkey(),
-            hex::encode(ckb_hash::blake2b_256(self.pubkey().serialize())),
-            hex::encode(message)
-        );
-        let (rec_id, data) = secp256k1_instance()
-            .sign_ecdsa_recoverable(&secp256k1::Message::from_digest(*message), &self.0)
-            .serialize_compact();
-        let mut result = [0; 65];
-        result[0..64].copy_from_slice(data.as_slice());
-        result[64] = rec_id.to_i32() as u8;
-        result
-    }
-
     pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
         let message = secp256k1::Message::from_digest(message);
         secp256k1_instance().sign_ecdsa(&message, &self.0).into()
@@ -377,10 +357,6 @@ pub struct EcdsaSignature(pub Secp256k1Signature);
 impl EcdsaSignature {
     pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
         let message = secp256k1::Message::from_digest(*message);
-        debug!(
-            "Verifying message {:?} with pubkey {:?} and signature {:?}",
-            message, pubkey, self
-        );
         secp256k1_instance()
             .verify_ecdsa(&message, &self.0, &pubkey.0)
             .is_ok()
@@ -717,17 +693,7 @@ pub struct CommitmentSigned {
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
-    MByte32::new_builder()
-        .set(
-            partial_signature
-                .serialize()
-                .into_iter()
-                .map(Byte::new)
-                .collect::<Vec<_>>()
-                .try_into()
-                .expect("[Byte; 32] from [u8; 32]"),
-        )
-        .build()
+    MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
 }
 
 impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
@@ -772,7 +738,6 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxSignatures {
     pub channel_id: Hash256,
-    pub tx_hash: Hash256,
     pub witnesses: Vec<Vec<u8>>,
 }
 
@@ -780,7 +745,6 @@ impl From<TxSignatures> for molecule_fiber::TxSignatures {
     fn from(tx_signatures: TxSignatures) -> Self {
         molecule_fiber::TxSignatures::new_builder()
             .channel_id(tx_signatures.channel_id.into())
-            .tx_hash(tx_signatures.tx_hash.into())
             .witnesses(
                 BytesVec::new_builder()
                     .set(
@@ -802,7 +766,6 @@ impl TryFrom<molecule_fiber::TxSignatures> for TxSignatures {
     fn try_from(tx_signatures: molecule_fiber::TxSignatures) -> Result<Self, Self::Error> {
         Ok(TxSignatures {
             channel_id: tx_signatures.channel_id().into(),
-            tx_hash: tx_signatures.tx_hash().into(),
             witnesses: tx_signatures
                 .witnesses()
                 .into_iter()
@@ -870,12 +833,16 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
+    pub commitment_tx_partial_signature: PartialSignature,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
         molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                tx_complete.commitment_tx_partial_signature,
+            ))
             .build()
     }
 }
@@ -886,6 +853,10 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                tx_complete.commitment_tx_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
         })
     }
 }
@@ -1081,7 +1052,8 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
-    pub partial_signature: PartialSignature,
+    pub revocation_partial_signature: PartialSignature,
+    pub commitment_tx_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
 }
 
@@ -1089,8 +1061,11 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
     fn from(revoke_and_ack: RevokeAndAck) -> Self {
         molecule_fiber::RevokeAndAck::new_builder()
             .channel_id(revoke_and_ack.channel_id.into())
-            .partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.partial_signature,
+            .revocation_partial_signature(partial_signature_to_molecule(
+                revoke_and_ack.revocation_partial_signature,
+            ))
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                revoke_and_ack.commitment_tx_partial_signature,
             ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
             .build()
@@ -1103,8 +1078,12 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
         Ok(RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
-            partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.partial_signature().as_slice(),
+            revocation_partial_signature: PartialSignature::from_slice(
+                revoke_and_ack.revocation_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                revoke_and_ack.commitment_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
