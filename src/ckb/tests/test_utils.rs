@@ -310,7 +310,6 @@ impl Actor for MockChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        debug!("MockChainActor received message: {:?}", message);
         use CkbChainMessage::*;
         match message {
             Fund(tx, request, reply_port) => {
@@ -437,10 +436,6 @@ impl Actor for MockChainActor {
                                 let index = index as usize;
                                 let cell = tx.outputs().get(index).unwrap();
                                 let data = tx.outputs_data().get(index).unwrap();
-                                debug!(
-                                    "Creating cell with outpoint: {:?}, cell: {:?}, data: {:?}",
-                                    outpoint, cell, data
-                                );
                                 context.create_cell_with_out_point(
                                     outpoint.clone(),
                                     cell,
@@ -515,11 +510,6 @@ impl Actor for MockChainActor {
                     .entry(request.block_hash())
                     .or_insert(now_timestamp_as_millis_u64());
 
-                debug!(
-                    "Get block timestamp: block_hash: {:?}, timestamp: {}",
-                    request.block_hash(),
-                    timestamp
-                );
                 let _ = rpc_reply_port.send(Ok(Some(timestamp)));
             }
         }
