@@ -672,7 +672,6 @@ where
                 TlcKind::AddTlc(add_tlc) => {
                     assert!(add_tlc.is_received());
                     if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
-                        eprintln!("apply add_tlc failed with: {:?}", e);
                         let tlc_err = match e.source {
                             // If we already have TlcErr, we can directly use it to send back to the peer.
                             ProcessingChannelError::TlcForwardingError(tlc_err) => tlc_err,
@@ -4252,12 +4251,6 @@ impl ChannelActorState {
             let sent_tlc_value = self.get_offered_tlc_balance();
             debug_assert!(self.to_local_amount >= sent_tlc_value);
             if sent_tlc_value + tlc.amount > self.to_local_amount {
-                eprintln!(
-                    "Adding tlc {:?} with amount {} exceeds local balance {}",
-                    tlc.tlc_id,
-                    tlc.amount,
-                    self.to_local_amount - sent_tlc_value
-                );
                 return Err(ProcessingChannelError::TlcAmountExceedLimit);
             }
         } else {

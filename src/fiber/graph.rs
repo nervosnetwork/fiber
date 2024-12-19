@@ -804,7 +804,7 @@ where
                         .get_channel_state_by_outpoint(&channel_info.out_point())
                     {
                         if amount_to_send > state.to_local_amount {
-                            eprintln!(
+                            debug!(
                                 "debug amount_to_send : {:?} > state.to_local_amount: {:?}",
                                 amount_to_send, state.to_local_amount
                             );
@@ -833,7 +833,7 @@ where
                         channel_info.capacity(),
                     );
 
-                eprintln!(
+                debug!(
                     "probability: {} for channel_outpoint: {:?} from: {:?} => to: {:?}",
                     probability,
                     channel_info.out_point(),

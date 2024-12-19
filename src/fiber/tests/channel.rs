@@ -4373,7 +4373,6 @@ async fn test_send_payment_with_disable_channel() {
         .unwrap();
 
     assert_eq!(res.status, PaymentSessionStatus::Failed);
-    eprintln!("failed_error: {:?}", res);
     // because there is only one path for the payment, the payment will fail in the second try
     // this assertion make sure we didn't do meaningless retry
     let payment_session = source_node.get_payment_session(payment_hash).unwrap();
@@ -5046,7 +5045,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
@@ -5156,8 +5155,6 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         .build()
         .expect("build invoice success")
         .to_string();
-
-    eprintln!("invoice {}", invoice);
 
     let res = source_node
         .send_payment(SendPaymentCommand {

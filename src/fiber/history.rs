@@ -184,7 +184,6 @@ impl InternalResult {
             return need_to_retry;
         };
 
-        eprintln!("record_payment_fail: index: {}, nodes: {:?}", index, nodes);
         let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
@@ -222,7 +221,6 @@ impl InternalResult {
                 | TlcErrorCode::InvoiceCancelled => {
                     need_to_retry = false;
                     self.succeed_range_pairs(nodes, 0, len - 1);
-                    eprintln!("record_payment_fail: succeed_range_pairs: {:?}", nodes);
                 }
                 TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
