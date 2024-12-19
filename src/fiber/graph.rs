@@ -804,10 +804,6 @@ where
                         .get_channel_state_by_outpoint(&channel_info.out_point())
                     {
                         if amount_to_send > state.to_local_amount {
-                            debug!(
-                                "debug amount_to_send : {:?} > state.to_local_amount: {:?}",
-                                amount_to_send, state.to_local_amount
-                            );
                             continue;
                         }
                     }
