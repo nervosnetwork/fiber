@@ -32,34 +32,208 @@ impl ::core::default::Default for EcdsaSignature {
     }
 }
 impl EcdsaSignature {
-    const DEFAULT_VALUE: [u8; 4] = [0, 0, 0, 0];
+    const DEFAULT_VALUE: [u8; 64] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
+    ];
+    pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
-    pub fn total_size(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
+    pub const ITEM_COUNT: usize = 64;
+    pub fn nth0(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(0..1))
     }
-    pub fn item_count(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
+    pub fn nth1(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(1..2))
     }
-    pub fn len(&self) -> usize {
-        self.item_count()
+    pub fn nth2(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(2..3))
     }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn nth3(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(3..4))
     }
-    pub fn get(&self, idx: usize) -> Option<Byte> {
-        if idx >= self.len() {
-            None
-        } else {
-            Some(self.get_unchecked(idx))
-        }
+    pub fn nth4(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(4..5))
     }
-    pub fn get_unchecked(&self, idx: usize) -> Byte {
-        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
-        let end = start + Self::ITEM_SIZE;
-        Byte::new_unchecked(self.0.slice(start..end))
+    pub fn nth5(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(5..6))
+    }
+    pub fn nth6(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(6..7))
+    }
+    pub fn nth7(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(7..8))
+    }
+    pub fn nth8(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(8..9))
+    }
+    pub fn nth9(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(9..10))
+    }
+    pub fn nth10(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(10..11))
+    }
+    pub fn nth11(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(11..12))
+    }
+    pub fn nth12(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(12..13))
+    }
+    pub fn nth13(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(13..14))
+    }
+    pub fn nth14(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(14..15))
+    }
+    pub fn nth15(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(15..16))
+    }
+    pub fn nth16(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(16..17))
+    }
+    pub fn nth17(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(17..18))
+    }
+    pub fn nth18(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(18..19))
+    }
+    pub fn nth19(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(19..20))
+    }
+    pub fn nth20(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(20..21))
+    }
+    pub fn nth21(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(21..22))
+    }
+    pub fn nth22(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(22..23))
+    }
+    pub fn nth23(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(23..24))
+    }
+    pub fn nth24(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(24..25))
+    }
+    pub fn nth25(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(25..26))
+    }
+    pub fn nth26(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(26..27))
+    }
+    pub fn nth27(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(27..28))
+    }
+    pub fn nth28(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(28..29))
+    }
+    pub fn nth29(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(29..30))
+    }
+    pub fn nth30(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(30..31))
+    }
+    pub fn nth31(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(31..32))
+    }
+    pub fn nth32(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(32..33))
+    }
+    pub fn nth33(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(33..34))
+    }
+    pub fn nth34(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(34..35))
+    }
+    pub fn nth35(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(35..36))
+    }
+    pub fn nth36(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(36..37))
+    }
+    pub fn nth37(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(37..38))
+    }
+    pub fn nth38(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(38..39))
+    }
+    pub fn nth39(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(39..40))
+    }
+    pub fn nth40(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(40..41))
+    }
+    pub fn nth41(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(41..42))
+    }
+    pub fn nth42(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(42..43))
+    }
+    pub fn nth43(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(43..44))
+    }
+    pub fn nth44(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(44..45))
+    }
+    pub fn nth45(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(45..46))
+    }
+    pub fn nth46(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(46..47))
+    }
+    pub fn nth47(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(47..48))
+    }
+    pub fn nth48(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(48..49))
+    }
+    pub fn nth49(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(49..50))
+    }
+    pub fn nth50(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(50..51))
+    }
+    pub fn nth51(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(51..52))
+    }
+    pub fn nth52(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(52..53))
+    }
+    pub fn nth53(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(53..54))
+    }
+    pub fn nth54(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(54..55))
+    }
+    pub fn nth55(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(55..56))
+    }
+    pub fn nth56(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(56..57))
+    }
+    pub fn nth57(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(57..58))
+    }
+    pub fn nth58(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(58..59))
+    }
+    pub fn nth59(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(59..60))
+    }
+    pub fn nth60(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(60..61))
+    }
+    pub fn nth61(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(61..62))
+    }
+    pub fn nth62(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(62..63))
+    }
+    pub fn nth63(&self) -> Byte {
+        Byte::new_unchecked(self.0.slice(63..64))
     }
     pub fn raw_data(&self) -> molecule::bytes::Bytes {
-        self.0.slice(molecule::NUMBER_SIZE..)
+        self.as_bytes()
     }
     pub fn as_reader<'r>(&'r self) -> EcdsaSignatureReader<'r> {
         EcdsaSignatureReader::new_unchecked(self.as_slice())
@@ -87,7 +261,72 @@ impl molecule::prelude::Entity for EcdsaSignature {
         ::core::default::Default::default()
     }
     fn as_builder(self) -> Self::Builder {
-        Self::new_builder().extend(self.into_iter())
+        Self::new_builder().set([
+            self.nth0(),
+            self.nth1(),
+            self.nth2(),
+            self.nth3(),
+            self.nth4(),
+            self.nth5(),
+            self.nth6(),
+            self.nth7(),
+            self.nth8(),
+            self.nth9(),
+            self.nth10(),
+            self.nth11(),
+            self.nth12(),
+            self.nth13(),
+            self.nth14(),
+            self.nth15(),
+            self.nth16(),
+            self.nth17(),
+            self.nth18(),
+            self.nth19(),
+            self.nth20(),
+            self.nth21(),
+            self.nth22(),
+            self.nth23(),
+            self.nth24(),
+            self.nth25(),
+            self.nth26(),
+            self.nth27(),
+            self.nth28(),
+            self.nth29(),
+            self.nth30(),
+            self.nth31(),
+            self.nth32(),
+            self.nth33(),
+            self.nth34(),
+            self.nth35(),
+            self.nth36(),
+            self.nth37(),
+            self.nth38(),
+            self.nth39(),
+            self.nth40(),
+            self.nth41(),
+            self.nth42(),
+            self.nth43(),
+            self.nth44(),
+            self.nth45(),
+            self.nth46(),
+            self.nth47(),
+            self.nth48(),
+            self.nth49(),
+            self.nth50(),
+            self.nth51(),
+            self.nth52(),
+            self.nth53(),
+            self.nth54(),
+            self.nth55(),
+            self.nth56(),
+            self.nth57(),
+            self.nth58(),
+            self.nth59(),
+            self.nth60(),
+            self.nth61(),
+            self.nth62(),
+            self.nth63(),
+        ])
     }
 }
 #[derive(Clone, Copy)]
@@ -114,33 +353,203 @@ impl<'r> ::core::fmt::Display for EcdsaSignatureReader<'r> {
     }
 }
 impl<'r> EcdsaSignatureReader<'r> {
+    pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
-    pub fn total_size(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.item_count()
+    pub const ITEM_COUNT: usize = 64;
+    pub fn nth0(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[0..1])
     }
-    pub fn item_count(&self) -> usize {
-        molecule::unpack_number(self.as_slice()) as usize
+    pub fn nth1(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[1..2])
     }
-    pub fn len(&self) -> usize {
-        self.item_count()
+    pub fn nth2(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[2..3])
     }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn nth3(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[3..4])
     }
-    pub fn get(&self, idx: usize) -> Option<ByteReader<'r>> {
-        if idx >= self.len() {
-            None
-        } else {
-            Some(self.get_unchecked(idx))
-        }
+    pub fn nth4(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[4..5])
     }
-    pub fn get_unchecked(&self, idx: usize) -> ByteReader<'r> {
-        let start = molecule::NUMBER_SIZE + Self::ITEM_SIZE * idx;
-        let end = start + Self::ITEM_SIZE;
-        ByteReader::new_unchecked(&self.as_slice()[start..end])
+    pub fn nth5(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[5..6])
+    }
+    pub fn nth6(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[6..7])
+    }
+    pub fn nth7(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[7..8])
+    }
+    pub fn nth8(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[8..9])
+    }
+    pub fn nth9(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[9..10])
+    }
+    pub fn nth10(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[10..11])
+    }
+    pub fn nth11(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[11..12])
+    }
+    pub fn nth12(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[12..13])
+    }
+    pub fn nth13(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[13..14])
+    }
+    pub fn nth14(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[14..15])
+    }
+    pub fn nth15(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[15..16])
+    }
+    pub fn nth16(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[16..17])
+    }
+    pub fn nth17(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[17..18])
+    }
+    pub fn nth18(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[18..19])
+    }
+    pub fn nth19(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[19..20])
+    }
+    pub fn nth20(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[20..21])
+    }
+    pub fn nth21(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[21..22])
+    }
+    pub fn nth22(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[22..23])
+    }
+    pub fn nth23(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[23..24])
+    }
+    pub fn nth24(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[24..25])
+    }
+    pub fn nth25(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[25..26])
+    }
+    pub fn nth26(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[26..27])
+    }
+    pub fn nth27(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[27..28])
+    }
+    pub fn nth28(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[28..29])
+    }
+    pub fn nth29(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[29..30])
+    }
+    pub fn nth30(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[30..31])
+    }
+    pub fn nth31(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[31..32])
+    }
+    pub fn nth32(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[32..33])
+    }
+    pub fn nth33(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[33..34])
+    }
+    pub fn nth34(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[34..35])
+    }
+    pub fn nth35(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[35..36])
+    }
+    pub fn nth36(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[36..37])
+    }
+    pub fn nth37(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[37..38])
+    }
+    pub fn nth38(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[38..39])
+    }
+    pub fn nth39(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[39..40])
+    }
+    pub fn nth40(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[40..41])
+    }
+    pub fn nth41(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[41..42])
+    }
+    pub fn nth42(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[42..43])
+    }
+    pub fn nth43(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[43..44])
+    }
+    pub fn nth44(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[44..45])
+    }
+    pub fn nth45(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[45..46])
+    }
+    pub fn nth46(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[46..47])
+    }
+    pub fn nth47(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[47..48])
+    }
+    pub fn nth48(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[48..49])
+    }
+    pub fn nth49(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[49..50])
+    }
+    pub fn nth50(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[50..51])
+    }
+    pub fn nth51(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[51..52])
+    }
+    pub fn nth52(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[52..53])
+    }
+    pub fn nth53(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[53..54])
+    }
+    pub fn nth54(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[54..55])
+    }
+    pub fn nth55(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[55..56])
+    }
+    pub fn nth56(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[56..57])
+    }
+    pub fn nth57(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[57..58])
+    }
+    pub fn nth58(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[58..59])
+    }
+    pub fn nth59(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[59..60])
+    }
+    pub fn nth60(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[60..61])
+    }
+    pub fn nth61(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[61..62])
+    }
+    pub fn nth62(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[62..63])
+    }
+    pub fn nth63(&self) -> ByteReader<'r> {
+        ByteReader::new_unchecked(&self.as_slice()[63..64])
     }
     pub fn raw_data(&self) -> &'r [u8] {
-        &self.as_slice()[molecule::NUMBER_SIZE..]
+        self.as_slice()
     }
 }
 impl<'r> molecule::prelude::Reader<'r> for EcdsaSignatureReader<'r> {
@@ -158,58 +567,425 @@ impl<'r> molecule::prelude::Reader<'r> for EcdsaSignatureReader<'r> {
     fn verify(slice: &[u8], _compatible: bool) -> molecule::error::VerificationResult<()> {
         use molecule::verification_error as ve;
         let slice_len = slice.len();
-        if slice_len < molecule::NUMBER_SIZE {
-            return ve!(Self, HeaderIsBroken, molecule::NUMBER_SIZE, slice_len);
-        }
-        let item_count = molecule::unpack_number(slice) as usize;
-        if item_count == 0 {
-            if slice_len != molecule::NUMBER_SIZE {
-                return ve!(Self, TotalSizeNotMatch, molecule::NUMBER_SIZE, slice_len);
-            }
-            return Ok(());
-        }
-        let total_size = molecule::NUMBER_SIZE + Self::ITEM_SIZE * item_count;
-        if slice_len != total_size {
-            return ve!(Self, TotalSizeNotMatch, total_size, slice_len);
+        if slice_len != Self::TOTAL_SIZE {
+            return ve!(Self, TotalSizeNotMatch, Self::TOTAL_SIZE, slice_len);
         }
         Ok(())
     }
 }
-#[derive(Clone, Debug, Default)]
-pub struct EcdsaSignatureBuilder(pub(crate) Vec<Byte>);
+#[derive(Clone)]
+pub struct EcdsaSignatureBuilder(pub(crate) [Byte; 64]);
+impl ::core::fmt::Debug for EcdsaSignatureBuilder {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
+        write!(f, "{}({:?})", Self::NAME, &self.0[..])
+    }
+}
+impl ::core::default::Default for EcdsaSignatureBuilder {
+    fn default() -> Self {
+        EcdsaSignatureBuilder([
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+            Byte::default(),
+        ])
+    }
+}
 impl EcdsaSignatureBuilder {
+    pub const TOTAL_SIZE: usize = 64;
     pub const ITEM_SIZE: usize = 1;
-    pub fn set(mut self, v: Vec<Byte>) -> Self {
+    pub const ITEM_COUNT: usize = 64;
+    pub fn set(mut self, v: [Byte; 64]) -> Self {
         self.0 = v;
         self
     }
-    pub fn push(mut self, v: Byte) -> Self {
-        self.0.push(v);
+    pub fn nth0(mut self, v: Byte) -> Self {
+        self.0[0] = v;
         self
     }
-    pub fn extend<T: ::core::iter::IntoIterator<Item = Byte>>(mut self, iter: T) -> Self {
-        for elem in iter {
-            self.0.push(elem);
-        }
+    pub fn nth1(mut self, v: Byte) -> Self {
+        self.0[1] = v;
         self
     }
-    pub fn replace(&mut self, index: usize, v: Byte) -> Option<Byte> {
-        self.0
-            .get_mut(index)
-            .map(|item| ::core::mem::replace(item, v))
+    pub fn nth2(mut self, v: Byte) -> Self {
+        self.0[2] = v;
+        self
+    }
+    pub fn nth3(mut self, v: Byte) -> Self {
+        self.0[3] = v;
+        self
+    }
+    pub fn nth4(mut self, v: Byte) -> Self {
+        self.0[4] = v;
+        self
+    }
+    pub fn nth5(mut self, v: Byte) -> Self {
+        self.0[5] = v;
+        self
+    }
+    pub fn nth6(mut self, v: Byte) -> Self {
+        self.0[6] = v;
+        self
+    }
+    pub fn nth7(mut self, v: Byte) -> Self {
+        self.0[7] = v;
+        self
+    }
+    pub fn nth8(mut self, v: Byte) -> Self {
+        self.0[8] = v;
+        self
+    }
+    pub fn nth9(mut self, v: Byte) -> Self {
+        self.0[9] = v;
+        self
+    }
+    pub fn nth10(mut self, v: Byte) -> Self {
+        self.0[10] = v;
+        self
+    }
+    pub fn nth11(mut self, v: Byte) -> Self {
+        self.0[11] = v;
+        self
+    }
+    pub fn nth12(mut self, v: Byte) -> Self {
+        self.0[12] = v;
+        self
+    }
+    pub fn nth13(mut self, v: Byte) -> Self {
+        self.0[13] = v;
+        self
+    }
+    pub fn nth14(mut self, v: Byte) -> Self {
+        self.0[14] = v;
+        self
+    }
+    pub fn nth15(mut self, v: Byte) -> Self {
+        self.0[15] = v;
+        self
+    }
+    pub fn nth16(mut self, v: Byte) -> Self {
+        self.0[16] = v;
+        self
+    }
+    pub fn nth17(mut self, v: Byte) -> Self {
+        self.0[17] = v;
+        self
+    }
+    pub fn nth18(mut self, v: Byte) -> Self {
+        self.0[18] = v;
+        self
+    }
+    pub fn nth19(mut self, v: Byte) -> Self {
+        self.0[19] = v;
+        self
+    }
+    pub fn nth20(mut self, v: Byte) -> Self {
+        self.0[20] = v;
+        self
+    }
+    pub fn nth21(mut self, v: Byte) -> Self {
+        self.0[21] = v;
+        self
+    }
+    pub fn nth22(mut self, v: Byte) -> Self {
+        self.0[22] = v;
+        self
+    }
+    pub fn nth23(mut self, v: Byte) -> Self {
+        self.0[23] = v;
+        self
+    }
+    pub fn nth24(mut self, v: Byte) -> Self {
+        self.0[24] = v;
+        self
+    }
+    pub fn nth25(mut self, v: Byte) -> Self {
+        self.0[25] = v;
+        self
+    }
+    pub fn nth26(mut self, v: Byte) -> Self {
+        self.0[26] = v;
+        self
+    }
+    pub fn nth27(mut self, v: Byte) -> Self {
+        self.0[27] = v;
+        self
+    }
+    pub fn nth28(mut self, v: Byte) -> Self {
+        self.0[28] = v;
+        self
+    }
+    pub fn nth29(mut self, v: Byte) -> Self {
+        self.0[29] = v;
+        self
+    }
+    pub fn nth30(mut self, v: Byte) -> Self {
+        self.0[30] = v;
+        self
+    }
+    pub fn nth31(mut self, v: Byte) -> Self {
+        self.0[31] = v;
+        self
+    }
+    pub fn nth32(mut self, v: Byte) -> Self {
+        self.0[32] = v;
+        self
+    }
+    pub fn nth33(mut self, v: Byte) -> Self {
+        self.0[33] = v;
+        self
+    }
+    pub fn nth34(mut self, v: Byte) -> Self {
+        self.0[34] = v;
+        self
+    }
+    pub fn nth35(mut self, v: Byte) -> Self {
+        self.0[35] = v;
+        self
+    }
+    pub fn nth36(mut self, v: Byte) -> Self {
+        self.0[36] = v;
+        self
+    }
+    pub fn nth37(mut self, v: Byte) -> Self {
+        self.0[37] = v;
+        self
+    }
+    pub fn nth38(mut self, v: Byte) -> Self {
+        self.0[38] = v;
+        self
+    }
+    pub fn nth39(mut self, v: Byte) -> Self {
+        self.0[39] = v;
+        self
+    }
+    pub fn nth40(mut self, v: Byte) -> Self {
+        self.0[40] = v;
+        self
+    }
+    pub fn nth41(mut self, v: Byte) -> Self {
+        self.0[41] = v;
+        self
+    }
+    pub fn nth42(mut self, v: Byte) -> Self {
+        self.0[42] = v;
+        self
+    }
+    pub fn nth43(mut self, v: Byte) -> Self {
+        self.0[43] = v;
+        self
+    }
+    pub fn nth44(mut self, v: Byte) -> Self {
+        self.0[44] = v;
+        self
+    }
+    pub fn nth45(mut self, v: Byte) -> Self {
+        self.0[45] = v;
+        self
+    }
+    pub fn nth46(mut self, v: Byte) -> Self {
+        self.0[46] = v;
+        self
+    }
+    pub fn nth47(mut self, v: Byte) -> Self {
+        self.0[47] = v;
+        self
+    }
+    pub fn nth48(mut self, v: Byte) -> Self {
+        self.0[48] = v;
+        self
+    }
+    pub fn nth49(mut self, v: Byte) -> Self {
+        self.0[49] = v;
+        self
+    }
+    pub fn nth50(mut self, v: Byte) -> Self {
+        self.0[50] = v;
+        self
+    }
+    pub fn nth51(mut self, v: Byte) -> Self {
+        self.0[51] = v;
+        self
+    }
+    pub fn nth52(mut self, v: Byte) -> Self {
+        self.0[52] = v;
+        self
+    }
+    pub fn nth53(mut self, v: Byte) -> Self {
+        self.0[53] = v;
+        self
+    }
+    pub fn nth54(mut self, v: Byte) -> Self {
+        self.0[54] = v;
+        self
+    }
+    pub fn nth55(mut self, v: Byte) -> Self {
+        self.0[55] = v;
+        self
+    }
+    pub fn nth56(mut self, v: Byte) -> Self {
+        self.0[56] = v;
+        self
+    }
+    pub fn nth57(mut self, v: Byte) -> Self {
+        self.0[57] = v;
+        self
+    }
+    pub fn nth58(mut self, v: Byte) -> Self {
+        self.0[58] = v;
+        self
+    }
+    pub fn nth59(mut self, v: Byte) -> Self {
+        self.0[59] = v;
+        self
+    }
+    pub fn nth60(mut self, v: Byte) -> Self {
+        self.0[60] = v;
+        self
+    }
+    pub fn nth61(mut self, v: Byte) -> Self {
+        self.0[61] = v;
+        self
+    }
+    pub fn nth62(mut self, v: Byte) -> Self {
+        self.0[62] = v;
+        self
+    }
+    pub fn nth63(mut self, v: Byte) -> Self {
+        self.0[63] = v;
+        self
     }
 }
 impl molecule::prelude::Builder for EcdsaSignatureBuilder {
     type Entity = EcdsaSignature;
     const NAME: &'static str = "EcdsaSignatureBuilder";
     fn expected_length(&self) -> usize {
-        molecule::NUMBER_SIZE + Self::ITEM_SIZE * self.0.len()
+        Self::TOTAL_SIZE
     }
     fn write<W: molecule::io::Write>(&self, writer: &mut W) -> molecule::io::Result<()> {
-        writer.write_all(&molecule::pack_number(self.0.len() as molecule::Number))?;
-        for inner in &self.0[..] {
-            writer.write_all(inner.as_slice())?;
-        }
+        writer.write_all(self.0[0].as_slice())?;
+        writer.write_all(self.0[1].as_slice())?;
+        writer.write_all(self.0[2].as_slice())?;
+        writer.write_all(self.0[3].as_slice())?;
+        writer.write_all(self.0[4].as_slice())?;
+        writer.write_all(self.0[5].as_slice())?;
+        writer.write_all(self.0[6].as_slice())?;
+        writer.write_all(self.0[7].as_slice())?;
+        writer.write_all(self.0[8].as_slice())?;
+        writer.write_all(self.0[9].as_slice())?;
+        writer.write_all(self.0[10].as_slice())?;
+        writer.write_all(self.0[11].as_slice())?;
+        writer.write_all(self.0[12].as_slice())?;
+        writer.write_all(self.0[13].as_slice())?;
+        writer.write_all(self.0[14].as_slice())?;
+        writer.write_all(self.0[15].as_slice())?;
+        writer.write_all(self.0[16].as_slice())?;
+        writer.write_all(self.0[17].as_slice())?;
+        writer.write_all(self.0[18].as_slice())?;
+        writer.write_all(self.0[19].as_slice())?;
+        writer.write_all(self.0[20].as_slice())?;
+        writer.write_all(self.0[21].as_slice())?;
+        writer.write_all(self.0[22].as_slice())?;
+        writer.write_all(self.0[23].as_slice())?;
+        writer.write_all(self.0[24].as_slice())?;
+        writer.write_all(self.0[25].as_slice())?;
+        writer.write_all(self.0[26].as_slice())?;
+        writer.write_all(self.0[27].as_slice())?;
+        writer.write_all(self.0[28].as_slice())?;
+        writer.write_all(self.0[29].as_slice())?;
+        writer.write_all(self.0[30].as_slice())?;
+        writer.write_all(self.0[31].as_slice())?;
+        writer.write_all(self.0[32].as_slice())?;
+        writer.write_all(self.0[33].as_slice())?;
+        writer.write_all(self.0[34].as_slice())?;
+        writer.write_all(self.0[35].as_slice())?;
+        writer.write_all(self.0[36].as_slice())?;
+        writer.write_all(self.0[37].as_slice())?;
+        writer.write_all(self.0[38].as_slice())?;
+        writer.write_all(self.0[39].as_slice())?;
+        writer.write_all(self.0[40].as_slice())?;
+        writer.write_all(self.0[41].as_slice())?;
+        writer.write_all(self.0[42].as_slice())?;
+        writer.write_all(self.0[43].as_slice())?;
+        writer.write_all(self.0[44].as_slice())?;
+        writer.write_all(self.0[45].as_slice())?;
+        writer.write_all(self.0[46].as_slice())?;
+        writer.write_all(self.0[47].as_slice())?;
+        writer.write_all(self.0[48].as_slice())?;
+        writer.write_all(self.0[49].as_slice())?;
+        writer.write_all(self.0[50].as_slice())?;
+        writer.write_all(self.0[51].as_slice())?;
+        writer.write_all(self.0[52].as_slice())?;
+        writer.write_all(self.0[53].as_slice())?;
+        writer.write_all(self.0[54].as_slice())?;
+        writer.write_all(self.0[55].as_slice())?;
+        writer.write_all(self.0[56].as_slice())?;
+        writer.write_all(self.0[57].as_slice())?;
+        writer.write_all(self.0[58].as_slice())?;
+        writer.write_all(self.0[59].as_slice())?;
+        writer.write_all(self.0[60].as_slice())?;
+        writer.write_all(self.0[61].as_slice())?;
+        writer.write_all(self.0[62].as_slice())?;
+        writer.write_all(self.0[63].as_slice())?;
         Ok(())
     }
     fn build(&self) -> Self::Entity {
@@ -219,42 +995,117 @@ impl molecule::prelude::Builder for EcdsaSignatureBuilder {
         EcdsaSignature::new_unchecked(inner.into())
     }
 }
-pub struct EcdsaSignatureIterator(EcdsaSignature, usize, usize);
-impl ::core::iter::Iterator for EcdsaSignatureIterator {
-    type Item = Byte;
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.1 >= self.2 {
-            None
-        } else {
-            let ret = self.0.get_unchecked(self.1);
-            self.1 += 1;
-            Some(ret)
-        }
+impl From<[Byte; 64usize]> for EcdsaSignature {
+    fn from(value: [Byte; 64usize]) -> Self {
+        Self::new_builder().set(value).build()
     }
 }
-impl ::core::iter::ExactSizeIterator for EcdsaSignatureIterator {
-    fn len(&self) -> usize {
-        self.2 - self.1
+impl ::core::convert::TryFrom<&[Byte]> for EcdsaSignature {
+    type Error = ::core::array::TryFromSliceError;
+    fn try_from(value: &[Byte]) -> Result<Self, ::core::array::TryFromSliceError> {
+        Ok(Self::new_builder()
+            .set(<&[Byte; 64usize]>::try_from(value)?.clone())
+            .build())
     }
 }
-impl ::core::iter::IntoIterator for EcdsaSignature {
-    type Item = Byte;
-    type IntoIter = EcdsaSignatureIterator;
-    fn into_iter(self) -> Self::IntoIter {
-        let len = self.len();
-        EcdsaSignatureIterator(self, 0, len)
+impl From<EcdsaSignature> for [Byte; 64usize] {
+    #[track_caller]
+    fn from(value: EcdsaSignature) -> Self {
+        [
+            value.nth0(),
+            value.nth1(),
+            value.nth2(),
+            value.nth3(),
+            value.nth4(),
+            value.nth5(),
+            value.nth6(),
+            value.nth7(),
+            value.nth8(),
+            value.nth9(),
+            value.nth10(),
+            value.nth11(),
+            value.nth12(),
+            value.nth13(),
+            value.nth14(),
+            value.nth15(),
+            value.nth16(),
+            value.nth17(),
+            value.nth18(),
+            value.nth19(),
+            value.nth20(),
+            value.nth21(),
+            value.nth22(),
+            value.nth23(),
+            value.nth24(),
+            value.nth25(),
+            value.nth26(),
+            value.nth27(),
+            value.nth28(),
+            value.nth29(),
+            value.nth30(),
+            value.nth31(),
+            value.nth32(),
+            value.nth33(),
+            value.nth34(),
+            value.nth35(),
+            value.nth36(),
+            value.nth37(),
+            value.nth38(),
+            value.nth39(),
+            value.nth40(),
+            value.nth41(),
+            value.nth42(),
+            value.nth43(),
+            value.nth44(),
+            value.nth45(),
+            value.nth46(),
+            value.nth47(),
+            value.nth48(),
+            value.nth49(),
+            value.nth50(),
+            value.nth51(),
+            value.nth52(),
+            value.nth53(),
+            value.nth54(),
+            value.nth55(),
+            value.nth56(),
+            value.nth57(),
+            value.nth58(),
+            value.nth59(),
+            value.nth60(),
+            value.nth61(),
+            value.nth62(),
+            value.nth63(),
+        ]
     }
 }
-impl ::core::iter::FromIterator<Byte> for EcdsaSignature {
-    fn from_iter<T: IntoIterator<Item = Byte>>(iter: T) -> Self {
-        Self::new_builder().extend(iter).build()
+impl From<[u8; 64usize]> for EcdsaSignature {
+    fn from(value: [u8; 64usize]) -> Self {
+        EcdsaSignatureReader::new_unchecked(&value).to_entity()
     }
 }
-impl ::core::iter::FromIterator<u8> for EcdsaSignature {
-    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
-        Self::new_builder()
-            .extend(iter.into_iter().map(Into::into))
-            .build()
+impl ::core::convert::TryFrom<&[u8]> for EcdsaSignature {
+    type Error = ::core::array::TryFromSliceError;
+    fn try_from(value: &[u8]) -> Result<Self, ::core::array::TryFromSliceError> {
+        Ok(<[u8; 64usize]>::try_from(value)?.into())
+    }
+}
+impl From<EcdsaSignature> for [u8; 64usize] {
+    #[track_caller]
+    fn from(value: EcdsaSignature) -> Self {
+        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
+    }
+}
+impl<'a> From<EcdsaSignatureReader<'a>> for &'a [u8; 64usize] {
+    #[track_caller]
+    fn from(value: EcdsaSignatureReader<'a>) -> Self {
+        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
+    }
+}
+impl<'a> From<&'a EcdsaSignatureReader<'a>> for &'a [u8; 64usize] {
+    #[track_caller]
+    fn from(value: &'a EcdsaSignatureReader<'a>) -> Self {
+        ::core::convert::TryFrom::try_from(value.as_slice()).unwrap()
     }
 }
 #[derive(Clone)]
@@ -8168,8 +9019,10 @@ impl ::core::default::Default for AnnouncementSignatures {
     }
 }
 impl AnnouncementSignatures {
-    const DEFAULT_VALUE: [u8; 124] = [
-        124, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 88, 0, 0, 0, 92, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    const DEFAULT_VALUE: [u8; 184] = [
+        184, 0, 0, 0, 20, 0, 0, 0, 52, 0, 0, 0, 88, 0, 0, 0, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

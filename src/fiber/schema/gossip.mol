@@ -80,7 +80,7 @@ table ChannelAnnouncement {
 
 // A ChannelUpdate is a update to the public channel. Newer channel information may be updated with
 // a ChannelUpdate with a larger timestamp.
-table ChannelUpdate {
+struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     signature: EcdsaSignature,
     chain_hash: Byte32,

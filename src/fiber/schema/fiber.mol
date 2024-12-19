@@ -1,6 +1,6 @@
 import blockchain;
 
-vector EcdsaSignature <byte>;
+array EcdsaSignature [byte; 64];
 array PubNonce [byte; 66]; // PubNonce used by musig2 crate.
 option PubNonceOpt (PubNonce);
 array Pubkey [byte; 33];
