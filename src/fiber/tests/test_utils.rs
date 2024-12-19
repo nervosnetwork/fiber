@@ -55,7 +55,7 @@ static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
 pub struct TempDir(ManuallyDrop<OldTempDir>);
 
 impl TempDir {
-    fn new<S: AsRef<OsStr>>(prefix: S) -> Self {
+    pub fn new<S: AsRef<OsStr>>(prefix: S) -> Self {
         Self(ManuallyDrop::new(
             OldTempDir::with_prefix(prefix).expect("create temp directory"),
         ))
@@ -154,7 +154,7 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
 }
 
 pub fn generate_store() -> Store {
-    let temp_dir = TempDir::new("fnn-test");
+    let temp_dir = TempDir::new("test-fnn-node");
     let store = Store::new(temp_dir.as_ref());
     store.expect("create store")
 }
@@ -232,7 +232,7 @@ impl NetworkNodeConfigBuilder {
         let base_dir = self
             .base_dir
             .clone()
-            .unwrap_or_else(|| Arc::new(TempDir::new("fnn-test")));
+            .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
         let store = generate_store();
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
@@ -671,7 +671,7 @@ impl NetworkNode {
             let new = Self::new_with_config(
                 NetworkNodeConfigBuilder::new()
                     .node_name(Some(format!("node-{}", i)))
-                    .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+                    .base_dir_prefix(&format!("test-fnn-node-{}-", i))
                     .build(),
             )
             .await;

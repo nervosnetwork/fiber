@@ -20,6 +20,8 @@ use secp256k1::{PublicKey, SecretKey, XOnlyPublicKey};
 
 use crate::gen_rand_secp256k1_keypair_tuple;
 
+use super::test_utils::TempDir;
+
 fn generate_key_pairs(num: usize) -> Vec<(SecretKey, PublicKey)> {
     let mut keys = vec![];
     for _ in 0..num {
@@ -37,8 +39,8 @@ struct MockNetworkGraph {
 
 impl MockNetworkGraph {
     pub fn new(node_num: usize) -> Self {
-        let temp_path = tempfile::tempdir().unwrap();
-        let store = Store::new(temp_path.path()).expect("create store failed");
+        let temp_path = TempDir::new("test-network-graph");
+        let store = Store::new(temp_path).expect("create store failed");
         let keypairs = generate_key_pairs(node_num + 1);
         let (secret_key1, public_key1) = keypairs[0];
         store.save_node_announcement(NodeAnnouncement::new(

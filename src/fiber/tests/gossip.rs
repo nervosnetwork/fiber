@@ -6,7 +6,6 @@ use ckb_types::packed::Bytes;
 use ckb_types::prelude::{Builder, Entity};
 use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use tempfile::tempdir;
 use tentacle::{
     builder::ServiceBuilder,
     context::ServiceContext,
@@ -36,7 +35,7 @@ use crate::{
     store::Store,
 };
 
-use super::test_utils::get_test_root_actor;
+use super::test_utils::{get_test_root_actor, TempDir};
 
 struct DummyServiceHandle;
 
@@ -63,9 +62,8 @@ struct GossipTestingContext {
 
 impl GossipTestingContext {
     async fn new() -> Self {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("gossip_store");
-        let store = Store::new(path).expect("created store failed");
+        let dir = TempDir::new("test-gossip-store");
+        let store = Store::new(dir).expect("created store failed");
         let chain_actor = create_mock_chain_actor().await;
         let root_actor = get_test_root_actor().await;
         let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(

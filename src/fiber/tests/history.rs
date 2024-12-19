@@ -3,11 +3,10 @@ use crate::fiber::history::output_direction;
 use crate::fiber::history::{Direction, DEFAULT_BIMODAL_DECAY_TIME};
 use crate::fiber::history::{InternalPairResult, InternalResult};
 use crate::fiber::history::{PaymentHistory, TimedResult};
-use crate::fiber::tests::test_utils::generate_store;
+use crate::fiber::tests::test_utils::{generate_store, TempDir};
 use crate::store::Store;
 use crate::{gen_rand_channel_outpoint, gen_rand_fiber_public_key, now_timestamp_as_millis_u64};
 use ckb_types::packed::OutPoint;
-use tempfile::tempdir;
 
 trait Round {
     fn round_to_2(self) -> f64;
@@ -929,9 +928,8 @@ fn test_history_eval_probability_range() {
 
 #[test]
 fn test_history_load_store() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("test_history_load_store");
-    let store = Store::new(path).expect("created store failed");
+    let temp_path = TempDir::new("test-history-store");
+    let store = Store::new(temp_path).expect("created store failed");
     let mut history = PaymentHistory::new(gen_rand_fiber_public_key().into(), None, store.clone());
     let from = gen_rand_fiber_public_key();
     let target = gen_rand_fiber_public_key();

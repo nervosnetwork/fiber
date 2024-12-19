@@ -3770,7 +3770,7 @@ async fn test_accept_channel_with_large_size_shutdown_script_should_fail() {
     let mut nodes = NetworkNode::new_n_interconnected_nodes_with_config(2, |i| {
         NetworkNodeConfigBuilder::new()
             .node_name(Some(format!("node-{}", i)))
-            .base_dir_prefix(&format!("fnn-test-node-{}-", i))
+            .base_dir_prefix(&format!("test-fnn-node-{}-", i))
             .fiber_config_updater(|config| {
                 // enable auto accept channel with default value
                 config.auto_accept_channel_ckb_funding_amount = Some(6200000000);

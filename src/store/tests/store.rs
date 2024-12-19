@@ -25,7 +25,6 @@ use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
 use std::time::SystemTime;
-use tempfile::tempdir;
 
 fn gen_rand_key_pair() -> Keypair {
     let secp = Secp256k1::new();
@@ -71,8 +70,8 @@ fn mock_channel() -> ChannelAnnouncement {
 
 #[test]
 fn test_store_invoice() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("invoice_store");
+    let path = TempDir::new("invoice_store");
+
     let store = Store::new(path).expect("created store failed");
 
     let preimage = gen_rand_sha256_hash();
@@ -104,8 +103,7 @@ fn test_store_invoice() {
 
 #[test]
 fn test_store_get_broadcast_messages_iter() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("gossip_store");
+    let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
     let timestamp = now_timestamp_as_millis_u64();
@@ -131,8 +129,7 @@ fn test_store_get_broadcast_messages_iter() {
 
 #[test]
 fn test_store_get_broadcast_messages() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("gossip_store");
+    let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
     let timestamp = now_timestamp_as_millis_u64();
@@ -155,8 +152,7 @@ fn test_store_get_broadcast_messages() {
 
 #[test]
 fn test_store_save_channel_announcement() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("gossip_store");
+    let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
     let timestamp = now_timestamp_as_millis_u64();
@@ -172,8 +168,7 @@ fn test_store_save_channel_announcement() {
 
 #[test]
 fn test_store_save_channel_update() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("gossip_store");
+    let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
     let flags_for_update_of_node1 = 0;
@@ -217,8 +212,7 @@ fn test_store_save_channel_update() {
 
 #[test]
 fn test_store_save_node_announcement() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("gossip_store");
+    let path = TempDir::new("test-gossip-store");
     let store = Store::new(path).expect("created store failed");
 
     let (sk, node_announcement) = mock_node();
@@ -230,8 +224,7 @@ fn test_store_save_node_announcement() {
 
 #[test]
 fn test_store_wacthtower() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("watchtower_store");
+    let path = TempDir::new("test-watchtower-store");
     let store = Store::new(path).expect("created store failed");
 
     let channel_id = gen_rand_sha256_hash();
@@ -380,7 +373,9 @@ fn test_channel_actor_state_store() {
     let bincode_encoded = bincode::serialize(&state).unwrap();
     let _new_state: ChannelActorState = bincode::deserialize(&bincode_encoded).unwrap();
 
-    let store = Store::new(tempdir().unwrap().path().join("store")).expect("create store failed");
+    let path = TempDir::new("channel_actore_store");
+
+    let store = Store::new(path).expect("create store failed");
     assert!(store.get_channel_actor_state(&state.id).is_none());
     store.insert_channel_actor_state(state.clone());
     let get_state = store.get_channel_actor_state(&state.id);
@@ -400,8 +395,7 @@ fn test_channel_actor_state_store() {
 
 #[test]
 fn test_store_payment_session() {
-    let dir = tempdir().unwrap();
-    let path = dir.path().join("payment_history_store");
+    let path = TempDir::new("payment-history-store-test");
     let store = Store::new(path).expect("created store failed");
     let payment_hash = gen_rand_sha256_hash();
     let payment_data = SendPaymentData {
