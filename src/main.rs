@@ -13,10 +13,16 @@ use fnn::store::Store;
 use fnn::tasks::{
     cancel_tasks_and_wait_for_completion, new_tokio_cancellation_token, new_tokio_task_tracker,
 };
-use fnn::watchtower::{WatchtowerActor, WatchtowerMessage};
+use fnn::watchtower::{
+    WatchtowerActor, WatchtowerMessage, DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS,
+};
+#[cfg(debug_assertions)]
+use fnn::NetworkServiceEvent;
 use fnn::{start_cch, start_network, start_rpc, Config};
 use ractor::Actor;
 use secp256k1::Secp256k1;
+#[cfg(debug_assertions)]
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
@@ -76,7 +82,16 @@ pub async fn main() -> Result<(), ExitMessage> {
     let root_actor = RootActor::start(tracker, token).await;
     let subscribers = ChannelSubscribers::default();
 
-    let (fiber_command_sender, network_graph) = match config.fiber.clone() {
+    #[cfg(debug_assertions)]
+    let rpc_dev_module_commitment_txs = config.rpc.as_ref().and_then(|rpc_config| {
+        if rpc_config.is_module_enabled("dev") {
+            Some(Arc::new(RwLock::new(HashMap::new())))
+        } else {
+            None
+        }
+    });
+
+    let (network_actor, ckb_chain_actor, network_graph) = match config.fiber.clone() {
         Some(fiber_config) => {
             // TODO: this is not a super user friendly error message which has actionable information
             // for the user to fix the error and start the node.
@@ -107,7 +122,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             )
             .map_err(|err| ExitMessage(format!("failed to init contracts context: {}", err)))?;
 
-            let ckb_actor = Actor::spawn_linked(
+            let ckb_chain_actor = Actor::spawn_linked(
                 Some("ckb".to_string()),
                 CkbChainActor {},
                 ckb_config.clone(),
@@ -138,8 +153,8 @@ pub async fn main() -> Result<(), ExitMessage> {
 
             info!("Starting fiber");
             let network_actor = start_network(
-                fiber_config,
-                ckb_actor,
+                fiber_config.clone(),
+                ckb_chain_actor.clone(),
                 event_sender,
                 new_tokio_task_tracker(),
                 root_actor.get_cell(),
@@ -160,11 +175,17 @@ pub async fn main() -> Result<(), ExitMessage> {
             .map_err(|err| ExitMessage(format!("failed to start watchtower actor: {}", err)))?
             .0;
 
-            // every 60 seconds, check if there are any channels that submitted a commitment transaction
-            // TODO: move interval to config file
-            watchtower_actor
-                .send_interval(Duration::from_secs(60), || WatchtowerMessage::PeriodicCheck);
+            watchtower_actor.send_interval(
+                Duration::from_secs(
+                    fiber_config
+                        .watchtower_check_interval_seconds
+                        .unwrap_or(DEFAULT_WATCHTOWER_CHECK_INTERVAL_SECONDS),
+                ),
+                || WatchtowerMessage::PeriodicCheck,
+            );
 
+            #[cfg(debug_assertions)]
+            let rpc_dev_module_commitment_txs_clone = rpc_dev_module_commitment_txs.clone();
             new_tokio_task_tracker().spawn(async move {
                 let token = new_tokio_cancellation_token();
                 loop {
@@ -176,6 +197,17 @@ pub async fn main() -> Result<(), ExitMessage> {
                                     break;
                                 }
                                 Some(event) => {
+                                    // we may forward more events to the rpc dev module in the future for integration testing
+                                    // for now, we only forward RemoteCommitmentSigned events, which are used for submitting outdated commitment transactions
+                                    #[cfg(debug_assertions)]
+                                    if let Some(rpc_dev_module_commitment_txs) = rpc_dev_module_commitment_txs_clone.as_ref() {
+                                        if let NetworkServiceEvent::RemoteCommitmentSigned(_, channel_id, commitment_tx, _) = event.clone() {
+                                            let lock_args = commitment_tx.outputs().get(0).unwrap().lock().args().raw_data();
+                                            let version = u64::from_be_bytes(lock_args[28..36].try_into().unwrap());
+                                            rpc_dev_module_commitment_txs.write().await.insert((channel_id, version), commitment_tx);
+                                        }
+                                    }
+                                    // forward the event to the watchtower actor
                                     let _ = watchtower_actor.send_message(WatchtowerMessage::NetworkServiceEvent(event));
                                 }
                             }
@@ -189,9 +221,13 @@ pub async fn main() -> Result<(), ExitMessage> {
                 debug!("Event processing service exited");
             });
 
-            (Some(network_actor), Some(network_graph))
+            (
+                Some(network_actor),
+                Some(ckb_chain_actor),
+                Some(network_graph),
+            )
         }
-        None => (None, None),
+        None => (None, None, None),
     };
 
     let cch_actor = match config.cch {
@@ -203,7 +239,7 @@ pub async fn main() -> Result<(), ExitMessage> {
                 new_tokio_task_tracker(),
                 new_tokio_cancellation_token(),
                 root_actor.get_cell(),
-                fiber_command_sender.clone(),
+                network_actor.clone(),
             )
             .await
             {
@@ -245,10 +281,12 @@ pub async fn main() -> Result<(), ExitMessage> {
             let handle = start_rpc(
                 rpc_config,
                 config.fiber,
-                fiber_command_sender,
+                network_actor,
                 cch_actor,
                 store,
-                network_graph
+                network_graph,
+                #[cfg(debug_assertions)] ckb_chain_actor,
+                #[cfg(debug_assertions)] rpc_dev_module_commitment_txs,
             )
             .await;
             Some(handle)

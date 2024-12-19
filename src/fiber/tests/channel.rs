@@ -1991,10 +1991,10 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node b.
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
                 println!(
-                    "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                    num, &tx, peer_id, channel_id
+                    "Commitment tx {:?} from {:?} for channel {:?} received",
+                    &tx, peer_id, channel_id
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
@@ -2028,10 +2028,10 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
     // to be received by node a.
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
                 println!(
-                    "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                    num, &tx, peer_id, channel_id
+                    "Commitment tx {:?} from {:?} for channel {:?} received",
+                    &tx, peer_id, channel_id
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
@@ -3439,10 +3439,10 @@ async fn test_revoke_old_commitment_transaction() {
 
     let commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
                 println!(
-                    "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                    num, &tx, peer_id, channel_id
+                    "Commitment tx {:?} from {:?} for channel {:?} received",
+                    &tx, peer_id, channel_id
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
@@ -3492,26 +3492,18 @@ async fn test_revoke_old_commitment_transaction() {
         ))
         .expect("node_a alive");
 
-    let (x_only_aggregated_pubkey, signature, output, output_data) = node_a
+    let revocation_data = node_a
         .expect_to_process_event(|event| match event {
             NetworkServiceEvent::RevokeAndAckReceived(
                 peer_id,
                 channel_id,
-                commitment_number,
-                x_only_aggregated_pubkey,
-                signature,
-                output,
-                output_data,
+                revocation_data,
+                _settlement_data,
             ) => {
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
-                assert_eq!(*commitment_number, 1u64);
-                Some((
-                    x_only_aggregated_pubkey.clone(),
-                    signature.clone(),
-                    output.clone(),
-                    output_data.clone(),
-                ))
+                assert_eq!(revocation_data.commitment_number, 0u64);
+                Some(revocation_data.clone())
             }
             _ => None,
         })
@@ -3532,17 +3524,17 @@ async fn test_revoke_old_commitment_transaction() {
                 .previous_output(commitment_tx.output_pts().get(0).unwrap().clone())
                 .build(),
         )
-        .output(output)
-        .output_data(output_data)
+        .output(revocation_data.output)
+        .output_data(revocation_data.output_data)
         .build();
 
     let empty_witness_args = [16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0, 16, 0, 0, 0];
     let witness = [
         empty_witness_args.to_vec(),
         vec![0xFF],
-        1u64.to_be_bytes().to_vec(),
-        x_only_aggregated_pubkey.to_vec(),
-        signature.serialize().to_vec(),
+        0u64.to_be_bytes().to_vec(),
+        revocation_data.x_only_aggregated_pubkey.to_vec(),
+        revocation_data.aggregated_signature.serialize().to_vec(),
     ]
     .concat();
 
@@ -3621,10 +3613,10 @@ async fn test_create_channel() {
 
     let node_a_commitment_tx = node_a
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
                 println!(
-                    "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                    num, &tx, peer_id, channel_id
+                    "Commitment tx {:?} from {:?} for channel {:?} received",
+                    &tx, peer_id, channel_id
                 );
                 assert_eq!(peer_id, &node_b.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
@@ -3636,10 +3628,10 @@ async fn test_create_channel() {
 
     let node_b_commitment_tx = node_b
         .expect_to_process_event(|event| match event {
-            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, num, tx) => {
+            NetworkServiceEvent::RemoteCommitmentSigned(peer_id, channel_id, tx, _) => {
                 println!(
-                    "Commitment tx (#{}) {:?} from {:?} for channel {:?} received",
-                    num, &tx, peer_id, channel_id
+                    "Commitment tx {:?} from {:?} for channel {:?} received",
+                    &tx, peer_id, channel_id
                 );
                 assert_eq!(peer_id, &node_a.peer_id);
                 assert_eq!(channel_id, &new_channel_id);
@@ -4268,7 +4260,7 @@ async fn test_send_payment_with_disable_channel() {
     let res = call!(source_node.network_actor, message).expect("source_node alive");
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))

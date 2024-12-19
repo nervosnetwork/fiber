@@ -20,6 +20,8 @@ use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
     packed::OutPoint,
+    prelude::{IntoTransactionView, Unpack},
+    H256,
 };
 use jsonrpsee::{
     core::async_trait,
@@ -157,6 +159,8 @@ pub(crate) struct ListChannelsParams {
     /// The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
     #[serde_as(as = "Option<DisplayFromStr>")]
     peer_id: Option<PeerId>,
+    /// Whether to include closed channels in the list, an optional parameter, default value is false
+    include_closed: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
@@ -248,6 +252,8 @@ pub(crate) struct Channel {
     /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
     received_tlc_balance: u128,
+    /// The hash of the latest commitment transaction
+    latest_commitment_transaction_hash: Option<H256>,
     /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
     created_at: u64,
@@ -555,9 +561,12 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let mut channels: Vec<_> = self
-            .store
-            .get_active_channel_states(params.peer_id)
+        let channel_states = if params.include_closed.unwrap_or_default() {
+            self.store.get_channel_states(params.peer_id)
+        } else {
+            self.store.get_active_channel_states(params.peer_id)
+        };
+        let mut channels: Vec<_> = channel_states
             .into_iter()
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store
@@ -576,6 +585,10 @@ where
                         remote_balance: state.get_remote_balance(),
                         offered_tlc_balance: state.get_offered_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
+                        latest_commitment_transaction_hash: state
+                            .latest_commitment_transaction
+                            .as_ref()
+                            .map(|tx| tx.clone().into_view().hash().unpack()),
                         created_at: state.get_created_at_in_millis(),
                     })
             })

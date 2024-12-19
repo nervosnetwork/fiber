@@ -193,7 +193,6 @@ impl FundingTxBuilder {
                     .capacity(Capacity::shannons(ckb_amount as u64).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
-                debug!("build_funding_cell debug ckb_output: {:?}", ckb_output);
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
@@ -298,10 +297,6 @@ impl FundingTxBuilder {
             .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
 
-        debug!(
-            "request.funding_fee_rate: {}",
-            self.request.funding_fee_rate
-        );
         let balancer = CapacityBalancer::new_simple(
             sender.clone(),
             placeholder_witness,

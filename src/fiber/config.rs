@@ -189,6 +189,15 @@ pub struct FiberConfig {
         help = "Whether to sync the network graph from the network. [default: true]"
     )]
     pub(crate) sync_network_graph: Option<bool>,
+
+    /// The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]
+    #[arg(
+        name = "FIBER_WATCHTOWER_CHECK_INTERVAL_SECONDS",
+        long = "fiber-watchtower-check-interval-seconds",
+        env,
+        help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
+    )]
+    pub watchtower_check_interval_seconds: Option<u64>,
 }
 
 #[derive(PartialEq, Copy, Clone, Default)]

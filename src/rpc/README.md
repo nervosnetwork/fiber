@@ -27,6 +27,8 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `update_channel`](#channel-update_channel)
         * [Method `send_payment`](#channel-send_payment)
         * [Method `get_payment`](#channel-get_payment)
+    * [Module Dev](#module-dev)
+        * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
     * [Module Graph](#module-graph)
         * [Method `graph_nodes`](#graph-graph_nodes)
         * [Method `graph_channels`](#graph-graph_channels)
@@ -210,6 +212,7 @@ Lists all channels.
 ##### Params
 
 * `peer_id` - `Option<PeerId>`, The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
+* `include_closed` - `Option<bool>`, Whether to include closed channels in the list, an optional parameter, default value is false
 
 ##### Returns
 
@@ -351,6 +354,27 @@ Retrieves a payment.
 * `last_updated_at` - u64, The time the payment was last updated at, in milliseconds from UNIX epoch
 * `failed_error` - `Option<String>`, The error message if the payment failed
 * `fee` - u128, fee paid for the payment
+
+
+<a id="dev"></a>
+### Module `Dev`
+RPC module for development purposes, this module is not intended to be used in production.
+ This module will be disabled in release build.
+
+
+<a id="dev-submit_commitment_transaction"></a>
+#### Method `submit_commitment_transaction`
+
+Submit a commitment transaction to the chain
+
+##### Params
+
+* `channel_id` - Hash256, Channel ID
+* `commitment_number` - u64, Commitment number
+
+##### Returns
+
+* `tx_hash` - Hash256, Submitted commitment transaction hash
 
 
 <a id="graph"></a>
@@ -576,6 +600,7 @@ The channel data structure
 * `offered_tlc_balance` - u128, The offered balance of the channel
 * `remote_balance` - u128, The remote balance of the channel
 * `received_tlc_balance` - u128, The received balance of the channel
+* `latest_commitment_transaction_hash` - `Option<H256>`, The hash of the latest commitment transaction
 * `created_at` - u64, The time the channel was created at, in milliseconds from UNIX epoch
 
 <a id="#type-removetlcreason"></a>

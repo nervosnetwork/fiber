@@ -16,6 +16,7 @@ jobs:
           - cross-chain-hub
           - router-pay
           - udt-router-pay
+          - watchtower
         release:
           - "0.116.1"
         test_env:

@@ -187,13 +187,25 @@ fn test_store_wacthtower() {
 
     let channel_id = gen_sha256_hash();
     let funding_tx_lock = Script::default();
-    store.insert_watch_channel(channel_id, funding_tx_lock.clone());
+
+    let settlement_data = SettlementData {
+        x_only_aggregated_pubkey: [0u8; 32],
+        aggregated_signature: CompactSignature::from_bytes(&[0u8; 64]).unwrap(),
+        to_local_output: CellOutput::default(),
+        to_local_output_data: Bytes::default(),
+        to_remote_output: CellOutput::default(),
+        to_remote_output_data: Bytes::default(),
+    };
+
+    store.insert_watch_channel(channel_id, funding_tx_lock.clone(), settlement_data.clone());
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
             channel_id,
             funding_tx_lock: funding_tx_lock.clone(),
-            revocation_data: None
+            revocation_data: None,
+            local_settlement_data: None,
+            remote_settlement_data: settlement_data.clone(),
         }]
     );
 
@@ -205,13 +217,15 @@ fn test_store_wacthtower() {
         output_data: Bytes::default(),
     };
 
-    store.update_revocation(channel_id, revocation_data.clone());
+    store.update_revocation(channel_id, revocation_data.clone(), settlement_data.clone());
     assert_eq!(
         store.get_watch_channels(),
         vec![ChannelData {
             channel_id,
             funding_tx_lock,
-            revocation_data: Some(revocation_data)
+            local_settlement_data: None,
+            revocation_data: Some(revocation_data),
+            remote_settlement_data: settlement_data,
         }]
     );
 
