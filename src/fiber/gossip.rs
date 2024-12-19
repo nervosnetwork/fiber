@@ -2040,10 +2040,10 @@ async fn verify_channel_announcement<S: GossipMessageStore>(
             }
             let capacity: u128 = u64::from(output.capacity).into();
             if channel_announcement.udt_type_script.is_none()
-                && capacity != channel_announcement.capacity
+                && channel_announcement.capacity > capacity
             {
                 return Err(Error::InvalidParameter(format!(
-                    "On-chain transaction found but capacity mismatched: on chain capacity {:?}, channel capacity {:?}",
+                    "On-chain transaction found but capacity mismatched: on chain capacity {:?} smaller than annoucned channel capacity {:?}",
                     &output.capacity, &channel_announcement.capacity
                 )));
             }
