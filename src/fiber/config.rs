@@ -50,7 +50,7 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
 
 /// The interval to maintain the gossip network, in milli-seconds.
-pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000;
+pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
 
 /// Maximal number of inbound connections.
 pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
@@ -193,13 +193,13 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
 
-    /// Gossip network maintenance interval, in milli-seconds. [default: 1000]
+    /// Gossip network maintenance interval, in milli-seconds. [default: 60000]
     /// This is the interval to maintain the gossip network, including connecting to more peers, etc.
     #[arg(
         name = "FIBER_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS",
         long = "fiber-gossip-network-maintenance-interval-ms",
         env,
-        help = "Gossip network maintenance interval, in milli-seconds. [default: 1000]"
+        help = "Gossip network maintenance interval, in milli-seconds. [default: 60000]"
     )]
     pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
 
