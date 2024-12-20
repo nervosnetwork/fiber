@@ -4,11 +4,7 @@ use crate::fiber::channel::{
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
-use crate::fiber::tests::test_utils::create_n_nodes_with_index_and_amounts_with_established_channel;
-use crate::fiber::tests::test_utils::{
-    create_3_nodes_with_established_channel, create_n_nodes_with_established_channel,
-    create_nodes_with_established_channel, NetworkNodeConfigBuilder,
-};
+use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::{
     Hash256, PaymentHopData, PeeledOnionPacket, TlcErrorCode, NO_SHARED_SECRET,
 };
@@ -1134,8 +1130,8 @@ async fn test_network_send_payment_amount_is_too_large() {
     init_tracing();
 
     let _span = tracing::info_span!("node", node = "test").entered();
-    let node_a_funding_amount = 100000000000 + 4200000000;
-    let node_b_funding_amount = 4200000000 + 2;
+    let node_a_funding_amount = 100000000000 + MIN_RESERVED_CKB;
+    let node_b_funding_amount = MIN_RESERVED_CKB + 2;
 
     let (node_a, node_b, _new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
@@ -4189,8 +4185,8 @@ async fn test_send_payment_with_multiple_edges_in_middle_hops() {
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (4200000000 + 900, 5200000000)),
-            ((1, 2), (4200000000 + 1000, 5200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 900, 5200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
@@ -4256,8 +4252,8 @@ async fn test_send_payment_with_all_failed_middle_hops() {
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (4200000000 + 900, 4200000000 + 1000)),
-            ((1, 2), (4200000000 + 910, 4200000000 + 1000)),
+            ((1, 2), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
+            ((1, 2), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
@@ -4323,8 +4319,8 @@ async fn test_send_payment_with_multiple_edges_can_succeed_in_retry() {
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
             ((0, 1), (100000000000, 100000000000)),
-            ((1, 2), (4200000000 + 1000, 5200000000)),
-            ((1, 2), (4200000000 + 900, 6200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 1000, 5200000000)),
+            ((1, 2), (MIN_RESERVED_CKB + 900, 6200000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
         4,
@@ -4391,8 +4387,8 @@ async fn test_send_payment_with_final_hop_multiple_edges_in_middle_hops() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 900, 5200000000)),
-            ((2, 3), (4200000000 + 1000, 5200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 900, 5200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
         ],
         4,
         true,
@@ -4458,8 +4454,8 @@ async fn test_send_payment_with_final_all_failed_middle_hops() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 900, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 910, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -4516,8 +4512,8 @@ async fn test_send_payment_with_final_multiple_edges_can_succeed_in_retry() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 1000, 5200000000)),
-            ((2, 3), (4200000000 + 900, 6200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1000, 5200000000)),
+            ((2, 3), (MIN_RESERVED_CKB + 900, 6200000000)),
         ],
         4,
         true,
@@ -4571,7 +4567,7 @@ async fn test_send_payment_with_first_hop_failed_with_fee() {
             // even 1000 > 999, but it's not enough for fee, and this is the direct channel
             // so we can check the actual balance of channel
             // the payment will fail
-            ((0, 1), (4200000000 + 1000, 5200000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 1000, 5200000000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
@@ -4622,8 +4618,8 @@ async fn test_send_payment_succeed_with_multiple_edges_in_first_hop() {
     // the send payment should be succeed
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (4200000000 + 900, 5200000000)),
-            ((0, 1), (4200000000 + 1001, 5200000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 900, 5200000000)),
+            ((0, 1), (MIN_RESERVED_CKB + 1001, 5200000000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
@@ -4679,8 +4675,8 @@ async fn test_send_payment_with_first_hop_all_failed() {
     // path finding will fail in the first time of send payment
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (4200000000 + 900, 4200000000 + 1000)),
-            ((0, 1), (4200000000 + 910, 4200000000 + 1000)),
+            ((0, 1), (MIN_RESERVED_CKB + 900, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (MIN_RESERVED_CKB + 910, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
@@ -4733,8 +4729,8 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     // so it will try the channel with smaller capacity and the payment will succeed
     let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (4200000000 + 2000, 4200000000 + 1000)),
-            ((0, 1), (4200000000 + 1005, 4200000000 + 1000)),
+            ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((0, 1), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
@@ -4801,8 +4797,8 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -4865,8 +4861,8 @@ async fn test_send_payment_will_fail_with_last_hop_info_in_add_tlc_peer() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -4933,8 +4929,8 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -4994,8 +4990,8 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -5064,8 +5060,8 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -5136,8 +5132,8 @@ async fn test_send_payment_will_fail_with_cancelled_invoice() {
         &[
             ((0, 1), (100000000000, 100000000000)),
             ((1, 2), (100000000000, 100000000000)),
-            ((2, 3), (4200000000 + 2000, 4200000000 + 1000)),
-            ((2, 3), (4200000000 + 1005, 4200000000 + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
+            ((2, 3), (MIN_RESERVED_CKB + 1005, MIN_RESERVED_CKB + 1000)),
         ],
         4,
         true,
@@ -5207,7 +5203,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
 
     let (nodes, _channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
         &[
-            ((0, 1), (4200000000 + 2000, 4200000000 + 1000)),
+            ((0, 1), (MIN_RESERVED_CKB + 2000, MIN_RESERVED_CKB + 1000)),
             ((1, 2), (100000000000, 100000000000)),
             ((2, 3), (100000000000, 100000000000)),
         ],
