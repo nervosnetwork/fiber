@@ -466,6 +466,10 @@ impl NetworkNode {
         self.private_key.pubkey()
     }
 
+    pub fn get_peer_id(&self) -> PeerId {
+        self.private_key.pubkey().tentacle_peer_id()
+    }
+
     pub fn get_node_address(&self) -> &MultiAddr {
         &self.listening_addrs[0]
     }

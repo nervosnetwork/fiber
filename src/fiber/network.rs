@@ -2889,9 +2889,25 @@ where
         if config.announce_listening_addr() {
             announced_addrs.push(listening_addr.clone());
         }
-        for listen_addr in &config.announced_addrs {
+        for announced_addr in &config.announced_addrs {
             let mut multiaddr =
-                MultiAddr::from_str(listen_addr.as_str()).expect("valid announced listen addr");
+                MultiAddr::from_str(announced_addr.as_str()).expect("valid announced listen addr");
+            match multiaddr.pop() {
+                Some(Protocol::P2P(c)) => {
+                    // If the announced listen addr has a peer id, it must match our peer id.
+                    if c.as_ref() != my_peer_id.as_bytes() {
+                        panic!("Announced listen addr is using invalid peer id: announced addr {}, actual peer id {:?}", announced_addr, my_peer_id);
+                    }
+                }
+                Some(component) => {
+                    // Push this unrecognized component back to the multiaddr.
+                    multiaddr.push(component);
+                }
+                None => {
+                    // Should never happen
+                }
+            }
+            // Push our peer id to the multiaddr.
             multiaddr.push(Protocol::P2P(Cow::Owned(my_peer_id.clone().into_bytes())));
             announced_addrs.push(multiaddr);
         }
