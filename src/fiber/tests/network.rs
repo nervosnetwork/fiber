@@ -29,7 +29,7 @@ use ckb_types::{
 use musig2::PartialSignature;
 use std::{borrow::Cow, str::FromStr, time::Duration};
 use tentacle::{
-    multiaddr::{MultiAddr, Protocol},
+    multiaddr::{MultiAddr, Multiaddr, Protocol},
     secio::PeerId,
 };
 
@@ -107,6 +107,99 @@ fn create_node_announcement_mesage_with_priv_key(priv_key: &Privkey) -> NodeAnno
 fn create_fake_node_announcement_mesage() -> NodeAnnouncement {
     let priv_key = get_test_priv_key();
     create_node_announcement_mesage_with_priv_key(&priv_key)
+}
+
+#[tokio::test]
+async fn test_save_our_own_node_announcement_to_graph() {
+    let mut node = NetworkNode::new().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+    let nodes = node.get_network_graph_nodes().await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+}
+
+#[tokio::test]
+#[should_panic]
+async fn test_set_announced_addrs_with_invalid_peer_id() {
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(|config| {
+                config.announced_addrs = vec![
+                    "/ip4/1.1.1.1/tcp/8346/p2p/QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"
+                        .to_string(),
+                ];
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+    let nodes = node.get_network_graph_nodes().await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+}
+
+#[tokio::test]
+async fn test_set_announced_addrs_with_valid_peer_id() {
+    let mut node = NetworkNode::new().await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+
+    let peer_id = node.get_peer_id();
+    let addr = format!("/ip4/1.1.1.1/tcp/8346/p2p/{}", peer_id);
+    let multiaddr = Multiaddr::from_str(&addr).expect("valid multiaddr");
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .base_dir(node.base_dir.clone())
+            .fiber_config_updater(move |config| {
+                config.announced_addrs = vec![addr.clone()];
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+    let nodes = node.get_network_graph_nodes().await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+    assert_eq!(
+        nodes[0].addresses.iter().find(|x| *x == &multiaddr),
+        Some(&multiaddr)
+    );
+}
+
+#[tokio::test]
+async fn test_set_announced_addrs_without_p2p() {
+    let addr = "/ip4/1.1.1.1/tcp/8346".to_string();
+    let cloned_addr = addr.clone();
+    let mut node = NetworkNode::new_with_config(
+        NetworkNodeConfigBuilder::new()
+            .fiber_config_updater(move |config| {
+                config.announced_addrs = vec![cloned_addr];
+            })
+            .build(),
+    )
+    .await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    node.stop().await;
+    let peer_id = node.get_peer_id();
+    let peer_id_bytes = peer_id.clone().into_bytes();
+    let multiaddr =
+        Multiaddr::from_str(&format!("{}/p2p/{}", addr, peer_id)).expect("valid multiaddr");
+    let nodes = node.get_network_graph_nodes().await;
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].node_id, node.get_public_key());
+    assert!(nodes[0].addresses.clone().iter_mut().all(|multiaddr| {
+        match multiaddr.pop() {
+            Some(Protocol::P2P(peer_id)) => peer_id.as_ref() == peer_id_bytes.as_slice(),
+            _ => false,
+        }
+    }));
+    assert_eq!(
+        nodes[0].addresses.iter().find(|x| *x == &multiaddr),
+        Some(&multiaddr)
+    );
 }
 
 #[tokio::test]
