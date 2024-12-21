@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     marker::PhantomData,
+    mem::take,
     sync::Arc,
     time::Duration,
 };
@@ -1017,83 +1018,30 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     // We will also change the relevant state (e.g. update the latest cursor).
     // The returned list may be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
-        let complete_messages = self
-            .messages_to_be_saved
-            .iter()
-            .filter(|m| self.has_dependencies_available(m))
-            .cloned()
-            .collect::<HashSet<_>>();
-        self.messages_to_be_saved
-            .retain(|v| !complete_messages.contains(v));
+        let messages_to_be_saved = take(&mut self.messages_to_be_saved);
+        let (complete_messages, uncomplete_messages) = messages_to_be_saved
+            .into_iter()
+            .partition(|m| self.has_dependencies_available(m));
+        self.messages_to_be_saved = uncomplete_messages;
 
-        let mut sorted_messages = Vec::with_capacity(complete_messages.len());
-
-        // Save all the messages to a map so that we can easily order messages by their dependencies.
-        let mut messages_map: HashMap<
-            (BroadcastMessageID, bool),
-            VecDeque<BroadcastMessageWithTimestamp>,
-        > = HashMap::new();
-
-        for new_message in complete_messages {
-            let key = (
-                new_message.message_id(),
-                match &new_message {
-                    // Message id alone is not enough to differentiate channel updates.
-                    // We need a flag to indicate if the message is an update of node 1.
-                    BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
-                        channel_update.is_update_of_node_1()
-                    }
-                    _ => true,
-                },
-            );
-            let messages = messages_map.entry(key).or_default();
-            let index = messages.partition_point(|m| m.cursor() < new_message.cursor());
-            match messages.get(index + 1) {
-                Some(message) if message == &new_message => {
-                    // The same message is already saved.
-                    continue;
-                }
-                _ => {
-                    messages.insert(index, new_message);
-                }
-            }
-        }
-
-        loop {
-            let key = match messages_map.keys().next() {
-                None => break,
-                Some(key) => key.clone(),
-            };
-            let messages = messages_map.remove(&key).expect("key exists");
-            if let BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) = &messages[0] {
-                let outpoint = channel_update.channel_outpoint.clone();
-                if let Some(message) =
-                    messages_map.remove(&(BroadcastMessageID::ChannelAnnouncement(outpoint), true))
-                {
-                    for message in message {
-                        sorted_messages.push(message);
-                    }
-                }
-            }
-            for message in messages {
-                sorted_messages.push(message);
-            }
-        }
+        let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
+        sorted_messages.sort_unstable();
 
         let mut verified_sorted_messages = Vec::with_capacity(sorted_messages.len());
-
         for message in sorted_messages {
-            if let Err(error) =
-                verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
+            match verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
             {
-                warn!(
-                    "Failed to verify and save message {:?}: {:?}",
-                    message, error
-                );
-                continue;
+                Ok(_) => {
+                    self.update_last_cursor(message.cursor());
+                    verified_sorted_messages.push(message);
+                }
+                Err(error) => {
+                    warn!(
+                        "Failed to verify and save message {:?}: {:?}",
+                        message, error
+                    );
+                }
             }
-            self.update_last_cursor(message.cursor());
-            verified_sorted_messages.push(message);
         }
 
         verified_sorted_messages
