@@ -523,7 +523,11 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    Some(channel_info)
+                    if channel_info.is_explicitly_disabled() {
+                        None
+                    } else {
+                        Some(channel_info)
+                    }
                 }
                 _ => None,
             })
@@ -550,7 +554,7 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+        let mut channels: Vec<_> = self
             .channels
             .values()
             .filter_map(move |channel| {

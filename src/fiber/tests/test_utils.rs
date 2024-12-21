@@ -719,6 +719,20 @@ impl NetworkNode {
         }
     }
 
+    pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_channels_with_params(1000, None)
+    }
+
+    pub async fn get_network_nodes(&self) -> Vec<NodeInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_nodes_with_params(1000, None)
+    }
+
     pub async fn start(&mut self) {
         let config = self.get_node_config();
         let new = Self::new_with_config(config).await;

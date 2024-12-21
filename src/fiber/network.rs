@@ -2566,18 +2566,18 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
     ) {
-        self.remove_channel(channel_id);
-        if let Some(session) = self.get_peer_session(peer_id) {
-            if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(channel_id);
-            }
-        }
         self.send_message_to_channel_actor(
             *channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
         )
         .await;
+        self.remove_channel(channel_id);
+        if let Some(session) = self.get_peer_session(peer_id) {
+            if let Some(set) = self.session_channels_map.get_mut(&session) {
+                set.remove(channel_id);
+            }
+        }
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(
