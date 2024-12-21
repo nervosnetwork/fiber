@@ -32,16 +32,13 @@ echo "Initializing finished, begin to start services ...."
 sleep 1
 
 ckb run -C "$deploy_dir/node-data" --indexer &
+cargo build
 
 # Start the dev node in the background.
 cd "$nodes_dir" || exit 1
 
 start() {
-    if [ -n "$FNN" ]; then
-        "$FNN" "$@"
-    else
-        cargo run -- "$@"
-    fi
+    ../../target/debug/fnn "$@"
 }
 
 if [ "$#" -ne 1 ]; then
