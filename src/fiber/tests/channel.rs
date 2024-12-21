@@ -4024,6 +4024,90 @@ async fn test_shutdown_channel_with_different_size_shutdown_script() {
 }
 
 #[tokio::test]
+async fn test_shutdown_channel_network_graph_will_not_sync_private_channel() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, _channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, false)
+            .await;
+
+    // sleep for 1 second
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let network_nodes = node_a.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_nodes = node_b.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_channels = node_a.get_network_channels().await;
+    assert_eq!(network_channels.len(), 0);
+
+    let network_channels = node_b.get_network_channels().await;
+    assert_eq!(network_channels.len(), 0);
+}
+
+#[tokio::test]
+async fn test_shutdown_channel_network_graph_with_sync_up() {
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (node_a, node_b, channel_id) =
+        create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
+            .await;
+
+    // sleep for 1 second
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let network_nodes = node_a.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_nodes = node_b.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_channels = node_a.get_network_channels().await;
+    assert_eq!(network_channels.len(), 1);
+
+    let network_channels = node_b.get_network_channels().await;
+    assert_eq!(network_channels.len(), 1);
+
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: channel_id,
+                command: ChannelCommand::Shutdown(
+                    ShutdownCommand {
+                        close_script: Script::new_builder().args(vec![0u8; 19].pack()).build(),
+                        fee_rate: FeeRate::from_u64(DEFAULT_COMMITMENT_FEE_RATE),
+                        force: false,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    };
+
+    call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("successfully shutdown channel");
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+
+    let network_nodes = node_a.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_nodes = node_b.get_network_nodes().await;
+    assert_eq!(network_nodes.len(), 2);
+
+    let network_channels = node_a.get_network_channels().await;
+    assert_eq!(network_channels.len(), 0);
+
+    let network_channels = node_b.get_network_channels().await;
+    assert_eq!(network_channels.len(), 0);
+}
+
+#[tokio::test]
 async fn test_send_payment_with_channel_balance_error() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
