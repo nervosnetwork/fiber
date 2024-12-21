@@ -2161,6 +2161,69 @@ impl TLCId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum OutboundTlcStatus {
+    LocalAnnounced,
+    Committed,
+    RemoteRemoved,
+    AwaitingRemoteRevokeToRemove,
+    AwaitingRemovedRemoteRevoke,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum InboundTlctatus {
+    RemoteAnnounced,
+    AwaitingRemoteRevokeToAnnounce,
+    AwaitingAnnouncedRemoteRevoke,
+    Committed,
+    LocalRemoved,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum TlcStatus {
+    Outbound(OutboundTlcStatus),
+    Inbound(InboundTlctatus),
+}
+
+impl TlcStatus {
+    fn as_outbound_status(&self) -> OutboundTlcStatus {
+        match self {
+            TlcStatus::Outbound(status) => status.clone(),
+            _ => {
+                unreachable!("unexpected status")
+            }
+        }
+    }
+
+    fn as_inbound_status(&self) -> InboundTlctatus {
+        match self {
+            TlcStatus::Inbound(status) => status.clone(),
+            _ => {
+                unreachable!("unexpected status ")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub enum TlcKindV2 {
+    AddTlc(AddTlcInfoV2),
+    RemoveTlc(RemoveTlcInfo),
+}
+
+impl TlcKindV2 {
+    pub fn log(&self) -> String {
+        match self {
+            TlcKindV2::AddTlc(add_tlc) => {
+                format!("{:?}", &add_tlc.tlc_id)
+            }
+            TlcKindV2::RemoveTlc(remove_tlc) => {
+                format!("RemoveTlc({:?})", &remove_tlc.tlc_id)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TlcKind {
     AddTlc(AddTlcInfo),
     RemoveTlc(RemoveTlcInfo),
@@ -2176,6 +2239,63 @@ impl TlcKind {
                 format!("RemoveTlc({:?})", &remove_tlc.tlc_id)
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct AddTlcInfoV2 {
+    pub channel_id: Hash256,
+    pub status: TlcStatus,
+    pub tlc_id: TLCId,
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub expiry: u64,
+    pub hash_algorithm: HashAlgorithm,
+    // the onion packet for multi-hop payment
+    pub onion_packet: Option<PaymentOnionPacket>,
+    /// Shared secret used in forwarding.
+    ///
+    /// Save it to backward errors. Use all zeros when no shared secrets are available.
+    pub shared_secret: [u8; 32],
+    pub created_at: CommitmentNumbers,
+    pub removed_at: Option<(CommitmentNumbers, RemoveTlcReason)>,
+    pub payment_preimage: Option<Hash256>,
+
+    /// Note: `previous_tlc` is used to track the tlc chain for a multi-tlc payment,
+    ///       we need to know previous when removing tlc backwardly.
+    ///
+    /// Node A ---------> Node B ------------> Node C ----------> Node D
+    ///  tlc_1 <---> (tlc_1) (tlc_2) <---> (tlc_2) (tlc_3) <----> tlc_3
+    ///                ^^^^                 ^^^^
+    ///
+    pub previous_tlc: Option<(Hash256, TLCId)>,
+}
+
+impl AddTlcInfoV2 {
+    pub fn is_offered(&self) -> bool {
+        self.tlc_id.is_offered()
+    }
+
+    pub fn is_received(&self) -> bool {
+        !self.is_offered()
+    }
+
+    pub fn get_commitment_numbers(&self) -> CommitmentNumbers {
+        self.created_at
+    }
+
+    pub fn flip_mut(&mut self) {
+        self.tlc_id.flip_mut();
+    }
+
+    /// Get the value for the field `htlc_type` in commitment lock witness.
+    /// - Lowest 1 bit: 0 if the tlc is offered by the remote party, 1 otherwise.
+    /// - High 7 bits:
+    ///     - 0: ckb hash
+    ///     - 1: sha256
+    pub fn get_htlc_type(&self) -> u8 {
+        let offered_flag = if self.is_offered() { 0u8 } else { 1u8 };
+        ((self.hash_algorithm as u8) << 1) + offered_flag
     }
 }
 
@@ -2383,6 +2503,138 @@ pub enum RetryableRemoveTlc {
     RelayRemoveTlc(Hash256, u64, RemoveTlcReason),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Default)]
+pub struct PendingTlcsV2 {
+    pub tlcs: Vec<TlcKindV2>,
+    pub next_tlc_id: u64,
+}
+
+impl PendingTlcsV2 {
+    pub fn get_next_id(&self) -> u64 {
+        self.next_tlc_id
+    }
+
+    pub fn increment_next_id(&mut self) {
+        self.next_tlc_id += 1;
+    }
+
+    pub fn add_tlc(&mut self, tlc: TlcKindV2) {
+        self.tlcs.push(tlc);
+    }
+}
+
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+pub struct TlcStateV2 {
+    offered_tlcs: PendingTlcsV2,
+    received_tlcs: PendingTlcsV2,
+    // if the tlc is pending to be removed, the reason will be stored here
+    // this will only used for retrying remove TLC
+    retryable_remove_tlcs: Vec<RetryableRemoveTlc>,
+    waiting_ack: bool,
+}
+
+impl TlcStateV2 {
+    pub fn get_next_offering(&self) -> u64 {
+        self.offered_tlcs.get_next_id()
+    }
+
+    pub fn get_next_received(&self) -> u64 {
+        self.received_tlcs.get_next_id()
+    }
+
+    pub fn increment_offering(&mut self) {
+        self.offered_tlcs.increment_next_id();
+    }
+
+    pub fn increment_received(&mut self) {
+        self.received_tlcs.increment_next_id();
+    }
+
+    pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
+        self.waiting_ack = waiting_ack;
+    }
+
+    pub fn insert_relay_tlc_remove(
+        &mut self,
+        channel_id: Hash256,
+        tlc_id: u64,
+        reason: RemoveTlcReason,
+    ) {
+        self.retryable_remove_tlcs
+            .push(RetryableRemoveTlc::RelayRemoveTlc(
+                channel_id, tlc_id, reason,
+            ));
+    }
+
+    pub fn get_pending_remove(&self) -> Vec<RetryableRemoveTlc> {
+        self.retryable_remove_tlcs.clone()
+    }
+
+    pub fn remove_pending_remove_tlc(&mut self, retryable_remove: &RetryableRemoveTlc) {
+        self.retryable_remove_tlcs
+            .retain(|remove| remove != retryable_remove);
+    }
+
+    pub fn add_offered_tlc(&mut self, tlc: TlcKindV2) {
+        self.offered_tlcs.add_tlc(tlc);
+    }
+
+    pub fn add_received_tlc(&mut self, tlc: TlcKindV2) {
+        self.received_tlcs.add_tlc(tlc);
+    }
+
+    pub fn handle_commitment_signed(&self, local: bool) -> Hash256 {
+        let mut active_tls = vec![];
+        for tlc in self.offered_tlcs.tlcs.iter() {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                let status = add_info.status.as_outbound_status();
+                let include = match status {
+                    OutboundTlcStatus::LocalAnnounced => local,
+                    OutboundTlcStatus::Committed => true,
+                    OutboundTlcStatus::RemoteRemoved => local,
+                    OutboundTlcStatus::AwaitingRemoteRevokeToRemove => local,
+                    OutboundTlcStatus::AwaitingRemovedRemoteRevoke => false,
+                };
+                if include {
+                    active_tls.push(add_info.clone());
+                }
+            }
+        }
+        for tlc in self.received_tlcs.tlcs.iter() {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                let status = add_info.status.as_inbound_status();
+                let include = match status {
+                    InboundTlctatus::RemoteAnnounced => !local,
+                    InboundTlctatus::AwaitingRemoteRevokeToAnnounce => !local,
+                    InboundTlctatus::AwaitingAnnouncedRemoteRevoke => true,
+                    InboundTlctatus::Committed => true,
+                    InboundTlctatus::LocalRemoved => !local,
+                };
+                if include {
+                    active_tls.push(add_info.clone());
+                }
+            }
+        }
+
+        // serialize active_tls to ge a hash
+        let keyparts = active_tls
+            .iter()
+            .map(|tlc| (tlc.amount, tlc.payment_hash))
+            .collect::<Vec<_>>();
+
+        eprintln!("keyparts: {:?}", keyparts);
+        let serialized = serde_json::to_string(&keyparts).expect("Failed to serialize active_tls");
+
+        // Hash the serialized data using SHA-256
+        let mut hasher = new_blake2b();
+        hasher.update(serialized.to_string().as_bytes());
+        let mut result = [0u8; 32];
+        hasher.finalize(&mut result);
+
+        result.into()
+    }
+}
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcState {
     local_pending_tlcs: PendingTlcs,
@@ -2492,22 +2744,6 @@ impl TlcState {
 
     pub fn add_remote_tlc(&mut self, tlc_info: TlcKind) {
         self.remote_pending_tlcs.push(tlc_info);
-    }
-
-    pub fn next_local_tlc_id(&self) -> u64 {
-        self.local_pending_tlcs.next_tlc_id()
-    }
-
-    pub fn increment_local_tlc_id(&mut self) {
-        self.local_pending_tlcs.increment_next_tlc_id();
-    }
-
-    pub fn next_remote_tlc_id(&self) -> u64 {
-        self.remote_pending_tlcs.next_tlc_id()
-    }
-
-    pub fn increment_remote_tlc_id(&mut self) {
-        self.remote_pending_tlcs.increment_next_tlc_id();
     }
 
     fn unify_tlcs<'a>(
