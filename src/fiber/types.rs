@@ -142,16 +142,7 @@ impl AsRef<[u8]> for Hash256 {
 
 impl From<&Hash256> for MByte32 {
     fn from(hash: &Hash256) -> Self {
-        MByte32::new_builder()
-            .set(
-                hash.0
-                    .into_iter()
-                    .map(Byte::new)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .expect("Byte32 from Hash256"),
-            )
-            .build()
+        MByte32::from_slice(hash.0.as_ref()).expect("Byte32 from Hash256")
     }
 }
 
@@ -163,13 +154,7 @@ impl From<Hash256> for MByte32 {
 
 impl From<&MByte32> for Hash256 {
     fn from(value: &MByte32) -> Self {
-        Hash256(
-            value
-                .as_bytes()
-                .to_vec()
-                .try_into()
-                .expect("Hash256 from Byte32"),
-        )
+        Hash256(value.as_slice().try_into().expect("Hash256 from Byte32"))
     }
 }
 
@@ -180,16 +165,7 @@ impl From<MByte32> for Hash256 {
 }
 
 fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
-    MByte32::new_builder()
-        .set(
-            value
-                .iter()
-                .map(|v| Byte::new(*v))
-                .collect::<Vec<_>>()
-                .try_into()
-                .expect("[u8; 32] to Byte32"),
-        )
-        .build()
+    MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
 }
 
 impl ::core::fmt::LowerHex for Hash256 {
