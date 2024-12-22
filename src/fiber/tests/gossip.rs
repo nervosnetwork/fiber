@@ -356,6 +356,92 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
 }
 
 #[tokio::test]
+async fn test_saving_invalid_channel_update() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert_eq!(status, Status::Committed);
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    let new_announcement = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
+    assert_ne!(new_announcement, None);
+    for mut channel_update in [
+        channel_context.create_channel_update_of_node1(0, 42, 42, 42),
+        channel_context.create_channel_update_of_node2(0, 42, 42, 42),
+    ] {
+        channel_update.signature = Some(create_invalid_ecdsa_signature());
+        context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+    }
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    for b in [true, false] {
+        let channel_update = context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), b);
+        assert_eq!(channel_update, None);
+    }
+}
+
+#[tokio::test]
+async fn test_saving_channel_update_independency() {
+    async fn test(node1_has_invalid_signature: bool, node2_has_invalid_signature: bool) {
+        let context = GossipTestingContext::new().await;
+        let channel_context = ChannelTestContext::gen();
+        context.save_message(BroadcastMessage::ChannelAnnouncement(
+            channel_context.channel_announcement.clone(),
+        ));
+        let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+        assert_eq!(status, Status::Committed);
+        tokio::time::sleep(Duration::from_millis(200).into()).await;
+        let new_announcement = context
+            .get_store()
+            .get_latest_channel_announcement(channel_context.channel_outpoint());
+        assert_ne!(new_announcement, None);
+        for mut channel_update in [
+            channel_context.create_channel_update_of_node1(0, 42, 42, 42),
+            channel_context.create_channel_update_of_node2(0, 42, 42, 42),
+        ] {
+            if channel_update.is_update_of_node_1() && node1_has_invalid_signature {
+                channel_update.signature = Some(create_invalid_ecdsa_signature());
+            }
+            if channel_update.is_update_of_node_2() && node2_has_invalid_signature {
+                channel_update.signature = Some(create_invalid_ecdsa_signature());
+            }
+            context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+        }
+        tokio::time::sleep(Duration::from_millis(200).into()).await;
+        for is_channel_update_of_node1 in [true, false] {
+            let channel_update = context.get_store().get_latest_channel_update(
+                channel_context.channel_outpoint(),
+                is_channel_update_of_node1,
+            );
+            if is_channel_update_of_node1 {
+                if node1_has_invalid_signature {
+                    assert_eq!(channel_update, None);
+                } else {
+                    assert_ne!(channel_update, None);
+                }
+            } else {
+                if node2_has_invalid_signature {
+                    assert_eq!(channel_update, None);
+                } else {
+                    assert_ne!(channel_update, None);
+                }
+            }
+        }
+    }
+
+    for node1_has_invalid_signature in [true, false] {
+        for node2_has_invalid_signature in [true, false] {
+            test(node1_has_invalid_signature, node2_has_invalid_signature).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_saving_channel_update_with_invalid_channel_announcement() {
     let context = GossipTestingContext::new().await;
     let channel_context = ChannelTestContext::gen();
