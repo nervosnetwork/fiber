@@ -3,19 +3,27 @@ use crate::fiber::channel::{
     CommitmentNumbers, InboundTlctatus, OutboundTlcStatus, TLCId, TlcKindV2, TlcStateV2, TlcStatus,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::types::PaymentOnionPacket;
 use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
+use ckb_types::packed::Byte32;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 
 fn sign_tlcs(tlcs: &Vec<AddTlcInfoV2>) -> Hash256 {
     // serialize active_tls to ge a hash
-    let keyparts = tlcs
+    let mut keyparts = tlcs
         .iter()
         .map(|tlc| (tlc.amount, tlc.payment_hash))
         .collect::<Vec<_>>();
+
+    keyparts.sort_by(|a, b| {
+        let a: Byte32 = a.1.into();
+        let b: Byte32 = b.1.into();
+        a.cmp(&b)
+    });
 
     eprintln!("keyparts: {:?}", keyparts);
     let serialized = serde_json::to_string(&keyparts).expect("Failed to serialize tls");
@@ -76,21 +84,35 @@ impl TlcActor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AddTlcCommand {
+    pub amount: u128,
+    pub payment_hash: Hash256,
+    pub expiry: u64,
+    pub hash_algorithm: HashAlgorithm,
+    pub onion_packet: Option<PaymentOnionPacket>,
+    pub shared_secret: [u8; 32],
+    #[allow(dead_code)]
+    pub previous_tlc: Option<(Hash256, u64)>,
+}
+
 pub struct NetworkActor {}
 
 #[derive(Debug)]
 pub enum TlcActorMessage {
-    CommandAddTlc(AddTlcInfoV2),
+    Debug,
+    CommandAddTlc(AddTlcCommand),
     //CommandRemoveTlc,
     PeerAddTlc(AddTlcInfoV2),
     PeerCommitmentSigned(Hash256),
+    PeerRevokeAndAck(Hash256),
     //PeerRemoveTlc,
 }
 
 #[derive(Debug)]
 pub enum NetworkActorMessage {
     AddPeer(String),
-    AddTlc(String, AddTlcInfoV2),
+    AddTlc(String, AddTlcCommand),
     PeerMsg(String, TlcActorMessage),
 }
 
@@ -154,11 +176,40 @@ impl Actor for TlcActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            TlcActorMessage::CommandAddTlc(add_tlc) => {
-                eprintln!("TlcActorMessage::Command_AddTlc: {:?}", add_tlc);
+            TlcActorMessage::Debug => {
+                eprintln!("Peer {} Debug", state.peer_id);
+                for tlc in state.tlc_state.offered_tlcs.tlcs.iter() {
+                    eprintln!("offered_tlc: {:?}", tlc.log());
+                }
+                for tlc in state.tlc_state.received_tlcs.tlcs.iter() {
+                    eprintln!("received_tlc: {:?}", tlc.log());
+                }
+            }
+            TlcActorMessage::CommandAddTlc(command) => {
+                eprintln!(
+                    "Peer {} TlcActorMessage::Command_AddTlc: {:?}",
+                    state.peer_id, command
+                );
+                let next_offer_id = state.tlc_state.get_next_offering();
+                let add_tlc = AddTlcInfoV2 {
+                    channel_id: gen_rand_sha256_hash(),
+                    tlc_id: TLCId::Offered(next_offer_id),
+                    amount: command.amount,
+                    payment_hash: command.payment_hash,
+                    expiry: command.expiry,
+                    hash_algorithm: command.hash_algorithm,
+                    created_at: CommitmentNumbers::default(),
+                    payment_preimage: None,
+                    removed_at: None,
+                    onion_packet: command.onion_packet,
+                    shared_secret: command.shared_secret,
+                    previous_tlc: None,
+                    status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+                };
                 state
                     .tlc_state
                     .add_offered_tlc(TlcKindV2::AddTlc(add_tlc.clone()));
+                state.tlc_state.increment_offering();
                 let peer = state.get_peer();
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
@@ -168,7 +219,7 @@ impl Actor for TlcActor {
                     .expect("send ok");
 
                 // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed(true);
+                let tlcs = state.tlc_state.commitment_signed(false);
                 let hash = sign_tlcs(&tlcs);
                 eprintln!("got hash: {:?}", hash);
                 self.network
@@ -179,6 +230,7 @@ impl Actor for TlcActor {
                     .expect("send ok");
             }
             TlcActorMessage::PeerAddTlc(add_tlc) => {
+                eprintln!("Peer {} process peer add_tlc ....", state.peer_id);
                 let mut tlc = add_tlc.clone();
                 tlc.flip_mut();
                 tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
@@ -186,10 +238,92 @@ impl Actor for TlcActor {
                 eprintln!("add peer tlc successfully: {:?}", add_tlc);
             }
             TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
-                let tlcs = state.tlc_state.commitment_signed(false);
+                eprintln!(
+                    "\nPeer {} processed peer commitment_signed ....",
+                    state.peer_id
+                );
+                let tlcs = state.tlc_state.commitment_signed(true);
                 let hash = sign_tlcs(&tlcs);
                 assert_eq!(hash, peer_hash);
-                eprintln!("processed peer commitment_signed ....");
+
+                let peer = state.get_peer();
+
+                for tlc in state.tlc_state.received_tlcs.tlcs.iter_mut() {
+                    if let TlcKindV2::AddTlc(tlc) = tlc {
+                        let out_status = tlc.status.as_inbound_status();
+                        match out_status {
+                            InboundTlctatus::RemoteAnnounced => {
+                                tlc.status = TlcStatus::Inbound(
+                                    InboundTlctatus::AwaitingRemoteRevokeToAnnounce,
+                                )
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                eprintln!("sending peer revoke and ack ....");
+                let tlcs = state.tlc_state.build_ack_transaction(true);
+                let hash = sign_tlcs(&tlcs);
+                self.network
+                    .send_message(NetworkActorMessage::PeerMsg(
+                        peer.clone(),
+                        TlcActorMessage::PeerRevokeAndAck(hash),
+                    ))
+                    .expect("send ok");
+
+                // send commitment signed from our side if necessary
+                if state.tlc_state.need_another_commitment_signed() {
+                    eprintln!("sending another commitment signed ....");
+                    let tlcs = state.tlc_state.commitment_signed(false);
+                    let hash = sign_tlcs(&tlcs);
+                    self.network
+                        .send_message(NetworkActorMessage::PeerMsg(
+                            peer,
+                            TlcActorMessage::PeerCommitmentSigned(hash),
+                        ))
+                        .expect("send ok");
+                }
+            }
+            TlcActorMessage::PeerRevokeAndAck(peer_hash) => {
+                eprintln!("Peer {} processed peer revoke and ack ....", state.peer_id);
+                let tlcs = state.tlc_state.build_ack_transaction(false);
+                let hash = sign_tlcs(&tlcs);
+                assert_eq!(hash, peer_hash);
+
+                for tlc in state.tlc_state.offered_tlcs.tlcs.iter_mut() {
+                    if let TlcKindV2::AddTlc(tlc) = tlc {
+                        let out_status = tlc.status.as_outbound_status();
+                        match out_status {
+                            OutboundTlcStatus::LocalAnnounced => {
+                                tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
+                            }
+                            OutboundTlcStatus::AwaitingRemoteRevokeToRemove => {
+                                tlc.status = TlcStatus::Outbound(
+                                    OutboundTlcStatus::AwaitingRemovedRemoteRevoke,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                for tlc in state.tlc_state.received_tlcs.tlcs.iter_mut() {
+                    if let TlcKindV2::AddTlc(tlc) = tlc {
+                        let in_status = tlc.status.as_inbound_status();
+                        match in_status {
+                            InboundTlctatus::AwaitingRemoteRevokeToAnnounce => {
+                                tlc.status = TlcStatus::Inbound(
+                                    InboundTlctatus::AwaitingAnnouncedRemoteRevoke,
+                                );
+                            }
+                            InboundTlctatus::AwaitingAnnouncedRemoteRevoke => {
+                                tlc.status = TlcStatus::Inbound(InboundTlctatus::Committed);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -228,25 +362,83 @@ async fn test_tlc_actor() {
     network_actor
         .send_message(NetworkActorMessage::AddTlc(
             "peer_a".to_string(),
-            AddTlcInfoV2 {
+            AddTlcCommand {
                 amount: 10000,
-                status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
-                channel_id: gen_rand_sha256_hash(),
                 payment_hash: gen_rand_sha256_hash(),
                 expiry: now_timestamp_as_millis_u64() + 1000,
                 hash_algorithm: HashAlgorithm::Sha256,
                 onion_packet: None,
                 shared_secret: NO_SHARED_SECRET.clone(),
-                tlc_id: TLCId::Offered(0),
-                created_at: CommitmentNumbers::default(),
-                removed_at: None,
-                payment_preimage: None,
                 previous_tlc: None,
             },
         ))
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    network_actor
+        .send_message(NetworkActorMessage::AddTlc(
+            "peer_a".to_string(),
+            AddTlcCommand {
+                amount: 20000,
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: now_timestamp_as_millis_u64() + 1000,
+                hash_algorithm: HashAlgorithm::Sha256,
+                onion_packet: None,
+                shared_secret: NO_SHARED_SECRET.clone(),
+                previous_tlc: None,
+            },
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    network_actor
+        .send_message(NetworkActorMessage::AddTlc(
+            "peer_b".to_string(),
+            AddTlcCommand {
+                amount: 30000,
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: now_timestamp_as_millis_u64() + 1000,
+                hash_algorithm: HashAlgorithm::Sha256,
+                onion_packet: None,
+                shared_secret: NO_SHARED_SECRET.clone(),
+                previous_tlc: None,
+            },
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    network_actor
+        .send_message(NetworkActorMessage::AddTlc(
+            "peer_b".to_string(),
+            AddTlcCommand {
+                amount: 50000,
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: now_timestamp_as_millis_u64() + 1000,
+                hash_algorithm: HashAlgorithm::Sha256,
+                onion_packet: None,
+                shared_secret: NO_SHARED_SECRET.clone(),
+                previous_tlc: None,
+            },
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    network_actor
+        .send_message(NetworkActorMessage::PeerMsg(
+            "peer_a".to_string(),
+            TlcActorMessage::Debug,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    network_actor
+        .send_message(NetworkActorMessage::PeerMsg(
+            "peer_b".to_string(),
+            TlcActorMessage::Debug,
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
 }
 
 #[test]

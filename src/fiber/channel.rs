@@ -2185,7 +2185,7 @@ pub enum TlcStatus {
 }
 
 impl TlcStatus {
-    fn as_outbound_status(&self) -> OutboundTlcStatus {
+    pub fn as_outbound_status(&self) -> OutboundTlcStatus {
         match self {
             TlcStatus::Outbound(status) => status.clone(),
             _ => {
@@ -2194,7 +2194,7 @@ impl TlcStatus {
         }
     }
 
-    fn as_inbound_status(&self) -> InboundTlctatus {
+    pub fn as_inbound_status(&self) -> InboundTlctatus {
         match self {
             TlcStatus::Inbound(status) => status.clone(),
             _ => {
@@ -2214,7 +2214,10 @@ impl TlcKindV2 {
     pub fn log(&self) -> String {
         match self {
             TlcKindV2::AddTlc(add_tlc) => {
-                format!("{:?}", &add_tlc.tlc_id)
+                format!(
+                    "id: {:?} amount: {:?}, status: {:?}",
+                    &add_tlc.tlc_id, &add_tlc.amount, &add_tlc.status
+                )
             }
             TlcKindV2::RemoveTlc(remove_tlc) => {
                 format!("RemoveTlc({:?})", &remove_tlc.tlc_id)
@@ -2510,6 +2513,10 @@ pub struct PendingTlcsV2 {
 }
 
 impl PendingTlcsV2 {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TlcKindV2> {
+        self.tlcs.iter_mut()
+    }
+
     pub fn get_next_id(&self) -> u64 {
         self.next_tlc_id
     }
@@ -2525,12 +2532,12 @@ impl PendingTlcsV2 {
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct TlcStateV2 {
-    offered_tlcs: PendingTlcsV2,
-    received_tlcs: PendingTlcsV2,
+    pub offered_tlcs: PendingTlcsV2,
+    pub received_tlcs: PendingTlcsV2,
     // if the tlc is pending to be removed, the reason will be stored here
     // this will only used for retrying remove TLC
-    retryable_remove_tlcs: Vec<RetryableRemoveTlc>,
-    waiting_ack: bool,
+    pub retryable_remove_tlcs: Vec<RetryableRemoveTlc>,
+    pub waiting_ack: bool,
 }
 
 impl TlcStateV2 {
@@ -2616,6 +2623,44 @@ impl TlcStateV2 {
             }
         }
         return active_tls;
+    }
+
+    pub fn build_ack_transaction(&self, _for_remote: bool) -> Vec<AddTlcInfoV2> {
+        let mut active_tls = vec![];
+        for tlc in self.offered_tlcs.tlcs.iter() {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                active_tls.push(add_info.clone());
+            }
+        }
+        for tlc in self.received_tlcs.tlcs.iter() {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                active_tls.push(add_info.clone());
+            }
+        }
+        return active_tls;
+    }
+
+    pub fn need_another_commitment_signed(&self) -> bool {
+        self.offered_tlcs.tlcs.iter().any(|tlc| {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                let status = add_info.status.as_outbound_status();
+                matches!(status, OutboundTlcStatus::LocalAnnounced)
+            } else {
+                false
+            }
+        }) || self.received_tlcs.tlcs.iter().any(|tlc| {
+            if let TlcKindV2::AddTlc(add_info) = tlc {
+                let status = add_info.status.as_inbound_status();
+                matches!(
+                    status,
+                    InboundTlctatus::RemoteAnnounced
+                        | InboundTlctatus::AwaitingRemoteRevokeToAnnounce
+                        | InboundTlctatus::AwaitingAnnouncedRemoteRevoke
+                )
+            } else {
+                false
+            }
+        })
     }
 }
 
