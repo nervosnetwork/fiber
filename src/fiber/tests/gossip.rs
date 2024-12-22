@@ -245,7 +245,7 @@ async fn test_saving_confirmed_channel_announcement() {
     let new_announcement = context
         .get_store()
         .get_latest_channel_announcement(&announcement.channel_outpoint);
-    assert_eq!(new_announcement, None);
+    assert_ne!(new_announcement, None);
 }
 
 #[tokio::test]

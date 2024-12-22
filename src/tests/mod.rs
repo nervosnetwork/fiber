@@ -1,5 +1,4 @@
 use ckb_hash::blake2b_256;
-use ckb_sdk::{Since, SinceType};
 use ckb_types::core::TransactionView;
 use ckb_types::packed::CellOutput;
 use ckb_types::prelude::{Builder, Entity};
@@ -67,20 +66,11 @@ pub fn gen_node_announcement_from_privkey(sk: &Privkey) -> NodeAnnouncement {
 }
 
 pub fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
-    let version = 0u64;
-    let delay_epoch = 42;
     let capacity = 100u64;
-    let commitment_lock_script_args = [
-        &blake2b_256(x_only.serialize())[0..20],
-        (Since::new(SinceType::EpochNumberWithFraction, delay_epoch, true).value())
-            .to_le_bytes()
-            .as_slice(),
-        version.to_be_bytes().as_slice(),
-    ]
-    .concat();
+    let commitment_lock_script_args = [&blake2b_256(x_only.serialize())[0..20]].concat();
 
     TransactionView::new_advanced_builder()
-        .cell_deps(get_cell_deps_by_contracts(vec![Contract::CommitmentLock]))
+        .cell_deps(get_cell_deps_by_contracts(vec![Contract::Secp256k1Lock]))
         .output(
             CellOutput::new_builder()
                 .capacity(capacity.pack())
