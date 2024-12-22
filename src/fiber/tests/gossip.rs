@@ -356,6 +356,59 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
 }
 
 #[tokio::test]
+async fn test_saving_channel_update_with_invalid_channel_announcement() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let tx = channel_context.funding_tx.clone();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let output = tx.output(0).expect("get output").clone();
+    let invalid_lock = output
+        .lock()
+        .as_builder()
+        .args(
+            Bytes::new_builder()
+                .set(
+                    b"wrong lock args"
+                        .into_iter()
+                        .map(|b| Byte::new(*b))
+                        .collect(),
+                )
+                .build(),
+        )
+        .build();
+    let invalid_output = output.as_builder().lock(invalid_lock).build();
+    let invalid_tx = tx
+        .as_advanced_builder()
+        .set_outputs(vec![invalid_output])
+        .build();
+    let status = context.submit_tx(invalid_tx).await;
+    assert_eq!(status, Status::Committed);
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    let new_announcement = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
+    assert_eq!(new_announcement, None);
+    for channel_update in [
+        channel_context.create_channel_update_of_node1(0, 42, 42, 42),
+        channel_context.create_channel_update_of_node2(0, 42, 42, 42),
+    ] {
+        context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+    }
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    for b in [true, false] {
+        let channel_update = context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), b);
+        assert_eq!(channel_update, None);
+    }
+}
+
+#[tokio::test]
 async fn test_save_outdated_gossip_message() {
     let context = GossipTestingContext::new().await;
     let (sk, old_announcement) = gen_rand_node_announcement();
