@@ -30,7 +30,7 @@ use crate::{
         },
         types::{BroadcastMessage, BroadcastMessageWithTimestamp, Cursor},
     },
-    gen_node_announcement_from_privkey, gen_rand_channel_announcement, gen_rand_node_announcement,
+    gen_node_announcement_from_privkey, gen_rand_node_announcement,
     store::Store,
 };
 use crate::{create_invalid_ecdsa_signature, ChannelTestContext};
@@ -225,34 +225,41 @@ async fn test_save_gossip_message() {
 #[tokio::test]
 async fn test_saving_unconfirmed_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let (_, announcement, _, _, _) = gen_rand_channel_announcement();
-    context.save_message(BroadcastMessage::ChannelAnnouncement(announcement.clone()));
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
     tokio::time::sleep(Duration::from_millis(200).into()).await;
     let new_announcement = context
         .get_store()
-        .get_latest_channel_announcement(&announcement.channel_outpoint);
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
     assert_eq!(new_announcement, None);
 }
 
 #[tokio::test]
 async fn test_saving_confirmed_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let (_, announcement, tx, _, _) = gen_rand_channel_announcement();
-    context.save_message(BroadcastMessage::ChannelAnnouncement(announcement.clone()));
-    let status = context.submit_tx(tx).await;
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
     assert_eq!(status, Status::Committed);
     tokio::time::sleep(Duration::from_millis(200).into()).await;
     let new_announcement = context
         .get_store()
-        .get_latest_channel_announcement(&announcement.channel_outpoint);
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
     assert_ne!(new_announcement, None);
 }
 
 #[tokio::test]
 async fn test_saving_invalid_channel_announcement() {
     let context = GossipTestingContext::new().await;
-    let (_, announcement, tx, _, _) = gen_rand_channel_announcement();
-    context.save_message(BroadcastMessage::ChannelAnnouncement(announcement.clone()));
+    let channel_context = ChannelTestContext::gen();
+    let tx = channel_context.funding_tx.clone();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
     let output = tx.output(0).expect("get output").clone();
     let invalid_lock = output
         .lock()
@@ -278,7 +285,7 @@ async fn test_saving_invalid_channel_announcement() {
     tokio::time::sleep(Duration::from_millis(200).into()).await;
     let new_announcement = context
         .get_store()
-        .get_latest_channel_announcement(&announcement.channel_outpoint);
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
     assert_eq!(new_announcement, None);
 }
 

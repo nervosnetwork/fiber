@@ -85,35 +85,6 @@ pub fn create_funding_tx(x_only: &XOnlyPublicKey) -> TransactionView {
         .build()
 }
 
-pub fn gen_rand_channel_announcement() -> (
-    Privkey,
-    ChannelAnnouncement,
-    TransactionView,
-    Privkey,
-    Privkey,
-) {
-    let sk1: Privkey = gen_rand_fiber_private_key();
-    let sk2: Privkey = gen_rand_fiber_private_key();
-    let sk = gen_rand_fiber_private_key();
-    let xonly = sk.x_only_pub_key();
-    let tx = create_funding_tx(&xonly);
-    let outpoint = tx.output_pts_iter().next().unwrap();
-    let mut channel_announcement = ChannelAnnouncement::new_unsigned(
-        &sk1.pubkey(),
-        &sk2.pubkey(),
-        outpoint.clone(),
-        &xonly,
-        0,
-        None,
-    );
-    let message = channel_announcement.message_to_sign();
-
-    channel_announcement.ckb_signature = Some(sk.sign_schnorr(message));
-    channel_announcement.node1_signature = Some(sk1.sign(message));
-    channel_announcement.node2_signature = Some(sk2.sign(message));
-    (sk, channel_announcement, tx, sk1, sk2)
-}
-
 pub struct ChannelTestContext {
     pub funding_tx_sk: Privkey,
     pub node1_sk: Privkey,
