@@ -1,12 +1,13 @@
 use ckb_hash::blake2b_256;
 use ckb_types::core::TransactionView;
 use ckb_types::packed::CellOutput;
-use ckb_types::prelude::{Builder, Entity};
+use ckb_types::prelude::{Builder, Entity, Unpack};
 use ckb_types::{packed::OutPoint, prelude::Pack};
 use secp256k1::{Keypair, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 
 use crate::ckb::contracts::{get_cell_deps_by_contracts, get_script_by_contract, Contract};
-use crate::fiber::types::EcdsaSignature;
+use crate::fiber::channel::{MESSAGE_OF_NODE1_FLAG, MESSAGE_OF_NODE2_FLAG};
+use crate::fiber::types::{ChannelUpdate, EcdsaSignature};
 use crate::{
     fiber::{
         config::AnnouncedNodeName,
@@ -111,6 +112,95 @@ pub fn gen_rand_channel_announcement() -> (
     channel_announcement.node1_signature = Some(sk1.sign(message));
     channel_announcement.node2_signature = Some(sk2.sign(message));
     (sk, channel_announcement, tx, sk1, sk2)
+}
+
+pub struct ChannelTestContext {
+    pub funding_tx_sk: Privkey,
+    pub node1_sk: Privkey,
+    pub node2_sk: Privkey,
+    pub funding_tx: TransactionView,
+    pub channel_announcement: ChannelAnnouncement,
+}
+
+impl ChannelTestContext {
+    pub fn gen() -> ChannelTestContext {
+        let funding_tx_sk = gen_rand_fiber_private_key();
+        let node1_sk = gen_rand_fiber_private_key();
+        let node2_sk = gen_rand_fiber_private_key();
+        let xonly = funding_tx_sk.x_only_pub_key();
+        let funding_tx = create_funding_tx(&xonly);
+        let outpoint = funding_tx.output_pts_iter().next().unwrap();
+        let capacity: u64 = funding_tx.output(0).unwrap().capacity().unpack();
+        let mut channel_announcement = ChannelAnnouncement::new_unsigned(
+            &node1_sk.pubkey(),
+            &node2_sk.pubkey(),
+            outpoint.clone(),
+            &xonly,
+            capacity as u128,
+            None,
+        );
+        let message = channel_announcement.message_to_sign();
+
+        channel_announcement.ckb_signature = Some(funding_tx_sk.sign_schnorr(message));
+        channel_announcement.node1_signature = Some(node1_sk.sign(message));
+        channel_announcement.node2_signature = Some(node2_sk.sign(message));
+
+        ChannelTestContext {
+            funding_tx_sk,
+            node1_sk,
+            node2_sk,
+            funding_tx,
+            channel_announcement,
+        }
+    }
+
+    pub fn channel_outpoint(&self) -> &OutPoint {
+        &self.channel_announcement.channel_outpoint
+    }
+
+    pub fn create_channel_update_of_node1(
+        &self,
+        channel_flags: u32,
+        tlc_expiry_delta: u64,
+        tlc_minimum_value: u128,
+        tlc_fee_proportional_millionths: u128,
+    ) -> ChannelUpdate {
+        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+            self.channel_announcement.channel_outpoint.clone(),
+            now_timestamp_as_millis_u64(),
+            MESSAGE_OF_NODE1_FLAG,
+            channel_flags,
+            tlc_expiry_delta,
+            tlc_minimum_value,
+            tlc_fee_proportional_millionths,
+        );
+        let message = unsigned_channel_update.message_to_sign();
+        let signature = self.node1_sk.sign(message);
+        unsigned_channel_update.signature = Some(signature);
+        unsigned_channel_update
+    }
+
+    pub fn create_channel_update_of_node2(
+        &self,
+        channel_flags: u32,
+        tlc_expiry_delta: u64,
+        tlc_minimum_value: u128,
+        tlc_fee_proportional_millionths: u128,
+    ) -> ChannelUpdate {
+        let mut unsigned_channel_update = ChannelUpdate::new_unsigned(
+            self.channel_announcement.channel_outpoint.clone(),
+            now_timestamp_as_millis_u64(),
+            MESSAGE_OF_NODE2_FLAG,
+            channel_flags,
+            tlc_expiry_delta,
+            tlc_minimum_value,
+            tlc_fee_proportional_millionths,
+        );
+        let message = unsigned_channel_update.message_to_sign();
+        let signature = self.node2_sk.sign(message);
+        unsigned_channel_update.signature = Some(signature);
+        unsigned_channel_update
+    }
 }
 
 pub fn create_invalid_ecdsa_signature() -> EcdsaSignature {

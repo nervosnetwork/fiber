@@ -16,7 +16,6 @@ use tentacle::{
 };
 use tokio::{spawn, sync::RwLock};
 
-use crate::create_invalid_ecdsa_signature;
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::NodeAnnouncement;
 use crate::{
@@ -34,6 +33,7 @@ use crate::{
     gen_node_announcement_from_privkey, gen_rand_channel_announcement, gen_rand_node_announcement,
     store::Store,
 };
+use crate::{create_invalid_ecdsa_signature, ChannelTestContext};
 
 use super::test_utils::{get_test_root_actor, TempDir};
 
@@ -280,6 +280,72 @@ async fn test_saving_invalid_channel_announcement() {
         .get_store()
         .get_latest_channel_announcement(&announcement.channel_outpoint);
     assert_eq!(new_announcement, None);
+}
+
+#[tokio::test]
+async fn test_saving_channel_update_after_saving_channel_announcement() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen();
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert_eq!(status, Status::Committed);
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    let new_announcement = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
+    assert_ne!(new_announcement, None);
+    for channel_update in [
+        channel_context.create_channel_update_of_node1(0, 42, 42, 42),
+        channel_context.create_channel_update_of_node2(0, 42, 42, 42),
+    ] {
+        context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+    }
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    for b in [true, false] {
+        let channel_update = context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), b);
+        assert_ne!(channel_update, None);
+    }
+}
+
+#[tokio::test]
+async fn test_saving_channel_update_before_saving_channel_announcement() {
+    let context = GossipTestingContext::new().await;
+    let channel_context = ChannelTestContext::gen();
+
+    for channel_update in [
+        channel_context.create_channel_update_of_node1(0, 42, 42, 42),
+        channel_context.create_channel_update_of_node2(0, 42, 42, 42),
+    ] {
+        context.save_message(BroadcastMessage::ChannelUpdate(channel_update.clone()));
+    }
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    for b in [true, false] {
+        let channel_update = context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), b);
+        assert_eq!(channel_update, None);
+    }
+
+    context.save_message(BroadcastMessage::ChannelAnnouncement(
+        channel_context.channel_announcement.clone(),
+    ));
+    let status = context.submit_tx(channel_context.funding_tx.clone()).await;
+    assert_eq!(status, Status::Committed);
+    tokio::time::sleep(Duration::from_millis(200).into()).await;
+    let new_announcement = context
+        .get_store()
+        .get_latest_channel_announcement(channel_context.channel_outpoint());
+    assert_ne!(new_announcement, None);
+    for b in [true, false] {
+        let channel_update = context
+            .get_store()
+            .get_latest_channel_update(channel_context.channel_outpoint(), b);
+        assert_ne!(channel_update, None);
+    }
 }
 
 #[tokio::test]
