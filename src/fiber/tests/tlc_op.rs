@@ -1,0 +1,302 @@
+use crate::fiber::channel::AddTlcInfoV2;
+use crate::fiber::channel::{
+    CommitmentNumbers, InboundTlctatus, OutboundTlcStatus, TLCId, TlcKindV2, TlcStateV2, TlcStatus,
+};
+use crate::fiber::hash_algorithm::HashAlgorithm;
+use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
+use crate::gen_rand_sha256_hash;
+use crate::now_timestamp_as_millis_u64;
+use ckb_hash::new_blake2b;
+use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
+use std::collections::HashMap;
+
+fn sign_tlcs(tlcs: &Vec<AddTlcInfoV2>) -> Hash256 {
+    // serialize active_tls to ge a hash
+    let keyparts = tlcs
+        .iter()
+        .map(|tlc| (tlc.amount, tlc.payment_hash))
+        .collect::<Vec<_>>();
+
+    eprintln!("keyparts: {:?}", keyparts);
+    let serialized = serde_json::to_string(&keyparts).expect("Failed to serialize tls");
+
+    // Hash the serialized data using SHA-256
+    let mut hasher = new_blake2b();
+    hasher.update(serialized.to_string().as_bytes());
+    let mut result = [0u8; 32];
+    hasher.finalize(&mut result);
+
+    result.into()
+}
+
+pub struct TlcActorState {
+    pub tlc_state: TlcStateV2,
+    pub peer_id: String,
+}
+
+impl TlcActorState {
+    pub fn get_peer(&self) -> String {
+        if self.peer_id == "peer_a" {
+            "peer_b".to_string()
+        } else {
+            "peer_a".to_string()
+        }
+    }
+}
+
+pub struct NetworkActorState {
+    network: ActorRef<NetworkActorMessage>,
+    pub peers: HashMap<String, ActorRef<TlcActorMessage>>,
+}
+
+impl NetworkActorState {
+    pub async fn add_peer(&mut self, peer_id: String) {
+        let network = self.network.clone();
+        let actor = Actor::spawn_linked(
+            Some(peer_id.clone()),
+            TlcActor::new(network.clone()),
+            peer_id.clone(),
+            network.clone().get_cell(),
+        )
+        .await
+        .expect("Failed to start tlc actor")
+        .0;
+        self.peers.insert(peer_id.clone(), actor);
+        eprintln!("add_peer: {:?} added successfully ...", peer_id);
+    }
+}
+
+pub struct TlcActor {
+    network: ActorRef<NetworkActorMessage>,
+}
+
+impl TlcActor {
+    pub fn new(network: ActorRef<NetworkActorMessage>) -> Self {
+        Self { network }
+    }
+}
+
+pub struct NetworkActor {}
+
+#[derive(Debug)]
+pub enum TlcActorMessage {
+    CommandAddTlc(AddTlcInfoV2),
+    //CommandRemoveTlc,
+    PeerAddTlc(AddTlcInfoV2),
+    PeerCommitmentSigned(Hash256),
+    //PeerRemoveTlc,
+}
+
+#[derive(Debug)]
+pub enum NetworkActorMessage {
+    AddPeer(String),
+    AddTlc(String, AddTlcInfoV2),
+    PeerMsg(String, TlcActorMessage),
+}
+
+#[rasync_trait]
+impl Actor for NetworkActor {
+    type Msg = NetworkActorMessage;
+    type State = NetworkActorState;
+    type Arguments = ();
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            NetworkActorMessage::AddPeer(peer_id) => {
+                state.add_peer(peer_id).await;
+            }
+            NetworkActorMessage::AddTlc(peer_id, add_tlc) => {
+                eprintln!("NetworkActorMessage::AddTlc");
+                if let Some(actor) = state.peers.get(&peer_id) {
+                    actor
+                        .send_message(TlcActorMessage::CommandAddTlc(add_tlc))
+                        .expect("send ok");
+                }
+            }
+            NetworkActorMessage::PeerMsg(peer_id, peer_msg) => {
+                if let Some(actor) = state.peers.get(&peer_id) {
+                    eprintln!("NetworkActorMessage::PeerMsg: {:?}", peer_msg);
+                    actor.send_message(peer_msg).expect("send ok");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn pre_start(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        eprintln!("NetworkActor pre_start");
+        Ok(NetworkActorState {
+            peers: Default::default(),
+            network: myself.clone(),
+        })
+    }
+}
+
+#[rasync_trait]
+impl Actor for TlcActor {
+    type Msg = TlcActorMessage;
+    type State = TlcActorState;
+    type Arguments = String;
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match message {
+            TlcActorMessage::CommandAddTlc(add_tlc) => {
+                eprintln!("TlcActorMessage::Command_AddTlc: {:?}", add_tlc);
+                state
+                    .tlc_state
+                    .add_offered_tlc(TlcKindV2::AddTlc(add_tlc.clone()));
+                let peer = state.get_peer();
+                self.network
+                    .send_message(NetworkActorMessage::PeerMsg(
+                        peer.clone(),
+                        TlcActorMessage::PeerAddTlc(add_tlc),
+                    ))
+                    .expect("send ok");
+
+                // send commitment signed
+                let tlcs = state.tlc_state.commitment_signed(true);
+                let hash = sign_tlcs(&tlcs);
+                eprintln!("got hash: {:?}", hash);
+                self.network
+                    .send_message(NetworkActorMessage::PeerMsg(
+                        peer,
+                        TlcActorMessage::PeerCommitmentSigned(hash),
+                    ))
+                    .expect("send ok");
+            }
+            TlcActorMessage::PeerAddTlc(add_tlc) => {
+                let mut tlc = add_tlc.clone();
+                tlc.flip_mut();
+                tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
+                state.tlc_state.add_received_tlc(TlcKindV2::AddTlc(tlc));
+                eprintln!("add peer tlc successfully: {:?}", add_tlc);
+            }
+            TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
+                let tlcs = state.tlc_state.commitment_signed(false);
+                let hash = sign_tlcs(&tlcs);
+                assert_eq!(hash, peer_hash);
+                eprintln!("processed peer commitment_signed ....");
+            }
+        }
+        Ok(())
+    }
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        args: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        eprintln!("TlcActor pre_start");
+        match args {
+            peer_id => {
+                eprintln!("peer_id: {:?}", peer_id);
+                Ok(TlcActorState {
+                    tlc_state: Default::default(),
+                    peer_id,
+                })
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_tlc_actor() {
+    let (network_actor, _handle) = Actor::spawn(None, NetworkActor {}, ())
+        .await
+        .expect("Failed to start tlc actor");
+    network_actor
+        .send_message(NetworkActorMessage::AddPeer("peer_a".to_string()))
+        .unwrap();
+    network_actor
+        .send_message(NetworkActorMessage::AddPeer("peer_b".to_string()))
+        .unwrap();
+
+    network_actor
+        .send_message(NetworkActorMessage::AddTlc(
+            "peer_a".to_string(),
+            AddTlcInfoV2 {
+                amount: 10000,
+                status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+                channel_id: gen_rand_sha256_hash(),
+                payment_hash: gen_rand_sha256_hash(),
+                expiry: now_timestamp_as_millis_u64() + 1000,
+                hash_algorithm: HashAlgorithm::Sha256,
+                onion_packet: None,
+                shared_secret: NO_SHARED_SECRET.clone(),
+                tlc_id: TLCId::Offered(0),
+                created_at: CommitmentNumbers::default(),
+                removed_at: None,
+                payment_preimage: None,
+                previous_tlc: None,
+            },
+        ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+}
+
+#[test]
+fn test_tlc_state_v2() {
+    let mut tlc_state = TlcStateV2::default();
+    let mut add_tlc1 = AddTlcInfoV2 {
+        amount: 10000,
+        status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        channel_id: gen_rand_sha256_hash(),
+        payment_hash: gen_rand_sha256_hash(),
+        expiry: now_timestamp_as_millis_u64() + 1000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
+        tlc_id: TLCId::Offered(0),
+        created_at: CommitmentNumbers::default(),
+        removed_at: None,
+        payment_preimage: None,
+        previous_tlc: None,
+    };
+    let mut add_tlc2 = AddTlcInfoV2 {
+        amount: 20000,
+        status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
+        channel_id: gen_rand_sha256_hash(),
+        payment_hash: gen_rand_sha256_hash(),
+        expiry: now_timestamp_as_millis_u64() + 2000,
+        hash_algorithm: HashAlgorithm::Sha256,
+        onion_packet: None,
+        shared_secret: NO_SHARED_SECRET.clone(),
+        tlc_id: TLCId::Offered(1),
+        created_at: CommitmentNumbers::default(),
+        removed_at: None,
+        payment_preimage: None,
+        previous_tlc: None,
+    };
+    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc1.clone()));
+    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc2.clone()));
+
+    let mut tlc_state_2 = TlcStateV2::default();
+    add_tlc1.flip_mut();
+    add_tlc2.flip_mut();
+    add_tlc1.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
+    add_tlc2.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
+    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc1));
+    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc2));
+
+    let hash1 = sign_tlcs(&tlc_state.commitment_signed(true));
+    eprintln!("hash1: {:?}", hash1);
+
+    let hash2 = sign_tlcs(&tlc_state_2.commitment_signed(false));
+    eprintln!("hash2: {:?}", hash2);
+    assert_eq!(hash1, hash2);
+}

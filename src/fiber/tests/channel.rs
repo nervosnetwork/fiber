@@ -1,8 +1,6 @@
 use crate::fiber::channel::{
-    AddTlcInfo, CommitmentNumbers, InboundTlctatus, RemoveTlcInfo, TLCId, TlcKind, TlcState,
-    TlcStateV2, TlcStatus, UpdateCommand,
+    AddTlcInfo, CommitmentNumbers, RemoveTlcInfo, TLCId, TlcKind, TlcState, UpdateCommand,
 };
-use crate::fiber::channel::{AddTlcInfoV2, TlcKindV2};
 use crate::fiber::config::MAX_PAYMENT_TLC_EXPIRY_LIMIT;
 use crate::fiber::graph::PaymentSessionStatus;
 use crate::fiber::network::{DebugEvent, SendPaymentCommand};
@@ -147,58 +145,6 @@ fn test_pending_tlcs() {
     assert_eq!(tlcs.len(), 0);
     let tlcs2 = tlc_state_2.commit_local_tlcs();
     assert_eq!(tlcs2.len(), 0);
-}
-
-#[test]
-fn test_tlc_state_v2() {
-    let mut tlc_state = TlcStateV2::default();
-    let mut add_tlc1 = AddTlcInfoV2 {
-        amount: 10000,
-        status: TlcStatus::Outbound(crate::fiber::channel::OutboundTlcStatus::LocalAnnounced),
-        channel_id: gen_rand_sha256_hash(),
-        payment_hash: gen_rand_sha256_hash(),
-        expiry: now_timestamp_as_millis_u64() + 1000,
-        hash_algorithm: HashAlgorithm::Sha256,
-        onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
-        tlc_id: TLCId::Offered(0),
-        created_at: CommitmentNumbers::default(),
-        removed_at: None,
-        payment_preimage: None,
-        previous_tlc: None,
-    };
-    let mut add_tlc2 = AddTlcInfoV2 {
-        amount: 20000,
-        status: TlcStatus::Outbound(crate::fiber::channel::OutboundTlcStatus::LocalAnnounced),
-        channel_id: gen_rand_sha256_hash(),
-        payment_hash: gen_rand_sha256_hash(),
-        expiry: now_timestamp_as_millis_u64() + 2000,
-        hash_algorithm: HashAlgorithm::Sha256,
-        onion_packet: None,
-        shared_secret: NO_SHARED_SECRET.clone(),
-        tlc_id: TLCId::Offered(1),
-        created_at: CommitmentNumbers::default(),
-        removed_at: None,
-        payment_preimage: None,
-        previous_tlc: None,
-    };
-    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc1.clone()));
-    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc2.clone()));
-
-    let mut tlc_state_2 = TlcStateV2::default();
-    add_tlc1.flip_mut();
-    add_tlc2.flip_mut();
-    add_tlc1.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
-    add_tlc2.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
-    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc1));
-    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc2));
-
-    let hash1 = tlc_state.handle_commitment_signed(true);
-    eprintln!("hash1: {:?}", hash1);
-
-    let hash2 = tlc_state_2.handle_commitment_signed(false);
-    eprintln!("hash2: {:?}", hash2);
-    assert_eq!(hash1, hash2);
 }
 
 #[test]

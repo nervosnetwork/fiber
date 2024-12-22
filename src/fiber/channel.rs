@@ -2583,7 +2583,7 @@ impl TlcStateV2 {
         self.received_tlcs.add_tlc(tlc);
     }
 
-    pub fn handle_commitment_signed(&self, local: bool) -> Hash256 {
+    pub fn commitment_signed(&self, local: bool) -> Vec<AddTlcInfoV2> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
             if let TlcKindV2::AddTlc(add_info) = tlc {
@@ -2615,23 +2615,7 @@ impl TlcStateV2 {
                 }
             }
         }
-
-        // serialize active_tls to ge a hash
-        let keyparts = active_tls
-            .iter()
-            .map(|tlc| (tlc.amount, tlc.payment_hash))
-            .collect::<Vec<_>>();
-
-        eprintln!("keyparts: {:?}", keyparts);
-        let serialized = serde_json::to_string(&keyparts).expect("Failed to serialize active_tls");
-
-        // Hash the serialized data using SHA-256
-        let mut hasher = new_blake2b();
-        hasher.update(serialized.to_string().as_bytes());
-        let mut result = [0u8; 32];
-        hasher.finalize(&mut result);
-
-        result.into()
+        return active_tls;
     }
 }
 
