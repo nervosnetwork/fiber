@@ -1,10 +1,11 @@
-use crate::fiber::channel::AddTlcInfoV2;
+use crate::fiber::channel::TlcInfo;
 use crate::fiber::channel::{
-    CommitmentNumbers, InboundTlctatus, OutboundTlcStatus, TLCId, TlcKindV2, TlcStateV2, TlcStatus,
+    CommitmentNumbers, InboundTlctatus, OutboundTlcStatus, TLCId, TlcState, TlcStatus,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::PaymentOnionPacket;
+use crate::fiber::types::RemoveTlcFulfill;
 use crate::fiber::types::{Hash256, NO_SHARED_SECRET};
+use crate::fiber::types::{PaymentOnionPacket, RemoveTlcReason};
 use crate::gen_rand_sha256_hash;
 use crate::now_timestamp_as_millis_u64;
 use ckb_hash::new_blake2b;
@@ -12,7 +13,7 @@ use ckb_types::packed::Byte32;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 
-fn sign_tlcs(tlcs: &Vec<AddTlcInfoV2>) -> Hash256 {
+fn sign_tlcs(tlcs: &Vec<TlcInfo>) -> Hash256 {
     // serialize active_tls to ge a hash
     let mut keyparts = tlcs
         .iter()
@@ -38,7 +39,7 @@ fn sign_tlcs(tlcs: &Vec<AddTlcInfoV2>) -> Hash256 {
 }
 
 pub struct TlcActorState {
-    pub tlc_state: TlcStateV2,
+    pub tlc_state: TlcState,
     pub peer_id: String,
 }
 
@@ -103,7 +104,7 @@ pub enum TlcActorMessage {
     Debug,
     CommandAddTlc(AddTlcCommand),
     CommandRemoveTlc(u64),
-    PeerAddTlc(AddTlcInfoV2),
+    PeerAddTlc(TlcInfo),
     PeerRemoveTlc(u64),
     PeerCommitmentSigned(Hash256),
     PeerRevokeAndAck(Hash256),
@@ -200,7 +201,7 @@ impl Actor for TlcActor {
                     state.peer_id, command
                 );
                 let next_offer_id = state.tlc_state.get_next_offering();
-                let add_tlc = AddTlcInfoV2 {
+                let add_tlc = TlcInfo {
                     channel_id: gen_rand_sha256_hash(),
                     tlc_id: TLCId::Offered(next_offer_id),
                     amount: command.amount,
@@ -215,9 +216,7 @@ impl Actor for TlcActor {
                     previous_tlc: None,
                     status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
                 };
-                state
-                    .tlc_state
-                    .add_offered_tlc(TlcKindV2::AddTlc(add_tlc.clone()));
+                state.tlc_state.add_offered_tlc(add_tlc.clone());
                 state.tlc_state.increment_offering();
                 let peer = state.get_peer();
                 self.network
@@ -240,7 +239,13 @@ impl Actor for TlcActor {
             }
             TlcActorMessage::CommandRemoveTlc(tlc_id) => {
                 eprintln!("Peer {} process remove tlc ....", state.peer_id);
-                state.tlc_state.set_received_tlc_removed(tlc_id);
+                state.tlc_state.set_received_tlc_removed(
+                    tlc_id,
+                    CommitmentNumbers::default(),
+                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage: Default::default(),
+                    }),
+                );
                 let peer = state.get_peer();
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
@@ -268,7 +273,7 @@ impl Actor for TlcActor {
                 let mut tlc = add_tlc.clone();
                 tlc.flip_mut();
                 tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
-                state.tlc_state.add_received_tlc(TlcKindV2::AddTlc(tlc));
+                state.tlc_state.add_received_tlc(tlc);
                 eprintln!("add peer tlc successfully: {:?}", add_tlc);
             }
             TlcActorMessage::PeerRemoveTlc(tlc_id) => {
@@ -276,7 +281,13 @@ impl Actor for TlcActor {
                     "Peer {} process peer remove tlc .... with tlc_id: {}",
                     state.peer_id, tlc_id
                 );
-                state.tlc_state.set_offered_tlc_removed(tlc_id);
+                state.tlc_state.set_offered_tlc_removed(
+                    tlc_id,
+                    CommitmentNumbers::default(),
+                    RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                        payment_preimage: Default::default(),
+                    }),
+                );
             }
             TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
                 eprintln!(
@@ -446,8 +457,8 @@ async fn test_tlc_actor() {
 
 #[test]
 fn test_tlc_state_v2() {
-    let mut tlc_state = TlcStateV2::default();
-    let mut add_tlc1 = AddTlcInfoV2 {
+    let mut tlc_state = TlcState::default();
+    let mut add_tlc1 = TlcInfo {
         amount: 10000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
@@ -462,7 +473,7 @@ fn test_tlc_state_v2() {
         payment_preimage: None,
         previous_tlc: None,
     };
-    let mut add_tlc2 = AddTlcInfoV2 {
+    let mut add_tlc2 = TlcInfo {
         amount: 20000,
         status: TlcStatus::Outbound(OutboundTlcStatus::LocalAnnounced),
         channel_id: gen_rand_sha256_hash(),
@@ -477,16 +488,16 @@ fn test_tlc_state_v2() {
         payment_preimage: None,
         previous_tlc: None,
     };
-    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc1.clone()));
-    tlc_state.add_offered_tlc(TlcKindV2::AddTlc(add_tlc2.clone()));
+    tlc_state.add_offered_tlc(add_tlc1.clone());
+    tlc_state.add_offered_tlc(add_tlc2.clone());
 
-    let mut tlc_state_2 = TlcStateV2::default();
+    let mut tlc_state_2 = TlcState::default();
     add_tlc1.flip_mut();
     add_tlc2.flip_mut();
     add_tlc1.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
     add_tlc2.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
-    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc1));
-    tlc_state_2.add_received_tlc(TlcKindV2::AddTlc(add_tlc2));
+    tlc_state_2.add_received_tlc(add_tlc1);
+    tlc_state_2.add_received_tlc(add_tlc2);
 
     let hash1 = sign_tlcs(&tlc_state.commitment_signed(true));
     eprintln!("hash1: {:?}", hash1);
