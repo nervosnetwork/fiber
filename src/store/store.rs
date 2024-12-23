@@ -506,8 +506,12 @@ impl InvoiceStore for Store {
 impl NetworkGraphStateStore for Store {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
-        self.get(prefix)
-            .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
+        eprintln!("get payment session: {:?}", prefix);
+        let res = self
+            .get(prefix)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentSession"));
+        eprintln!("got res: {:?}", res);
+        res
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {
