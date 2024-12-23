@@ -2590,6 +2590,38 @@ impl TlcStateV2 {
         self.received_tlcs.add_tlc(tlc);
     }
 
+    pub fn set_received_tlc_removed(&mut self, tlc_id: u64) {
+        for tlc in self.received_tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(add_tlc) = tlc {
+                if Into::<u64>::into(add_tlc.tlc_id) == tlc_id {
+                    add_tlc.removed_at = Some((
+                        add_tlc.created_at,
+                        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: Default::default(),
+                        }),
+                    ));
+                    add_tlc.status = TlcStatus::Inbound(InboundTlctatus::LocalRemoved);
+                }
+            }
+        }
+    }
+
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64) {
+        for tlc in self.offered_tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(add_tlc) = tlc {
+                if Into::<u64>::into(add_tlc.tlc_id) == tlc_id {
+                    add_tlc.removed_at = Some((
+                        add_tlc.created_at,
+                        RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: Default::default(),
+                        }),
+                    ));
+                    add_tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
+                }
+            }
+        }
+    }
+
     pub fn commitment_signed(&mut self, local: bool) -> Vec<AddTlcInfoV2> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
@@ -2629,6 +2661,26 @@ impl TlcStateV2 {
     }
 
     pub fn update_for_peer_commitment_signed(&mut self) {
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(tlc) = tlc {
+                let out_status = tlc.status.as_outbound_status();
+                match out_status {
+                    OutboundTlcStatus::RemoteRemoved => {
+                        let status = if self.waiting_ack {
+                            OutboundTlcStatus::AwaitingRemoteRevokeToRemove
+                        } else {
+                            OutboundTlcStatus::AwaitingRemovedRemoteRevoke
+                        };
+                        tlc.status = TlcStatus::Outbound(status);
+                    }
+                    OutboundTlcStatus::AwaitingRemoteRevokeToRemove => {
+                        tlc.status =
+                            TlcStatus::Outbound(OutboundTlcStatus::AwaitingRemovedRemoteRevoke);
+                    }
+                    _ => {}
+                }
+            }
+        }
         for tlc in self.received_tlcs.tlcs.iter_mut() {
             if let TlcKindV2::AddTlc(tlc) = tlc {
                 let out_status = tlc.status.as_inbound_status();
@@ -2662,7 +2714,7 @@ impl TlcStateV2 {
         return active_tls;
     }
 
-    pub fn handle_reovke_and_ack(&mut self) {
+    pub fn update_for_revoke_and_ack(&mut self) {
         self.set_waiting_ack(false);
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             if let TlcKindV2::AddTlc(tlc) = tlc {

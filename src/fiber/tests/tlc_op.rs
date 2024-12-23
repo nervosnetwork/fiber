@@ -102,8 +102,9 @@ pub struct NetworkActor {}
 pub enum TlcActorMessage {
     Debug,
     CommandAddTlc(AddTlcCommand),
-    //CommandRemoveTlc,
+    CommandRemoveTlc(u64),
     PeerAddTlc(AddTlcInfoV2),
+    PeerRemoveTlc(u64),
     PeerCommitmentSigned(Hash256),
     PeerRevokeAndAck(Hash256),
     //PeerRemoveTlc,
@@ -111,8 +112,9 @@ pub enum TlcActorMessage {
 
 #[derive(Debug)]
 pub enum NetworkActorMessage {
-    AddPeer(String),
+    RegisterPeer(String),
     AddTlc(String, AddTlcCommand),
+    RemoveTlc(String, u64),
     PeerMsg(String, TlcActorMessage),
 }
 
@@ -129,7 +131,7 @@ impl Actor for NetworkActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            NetworkActorMessage::AddPeer(peer_id) => {
+            NetworkActorMessage::RegisterPeer(peer_id) => {
                 state.add_peer(peer_id).await;
             }
             NetworkActorMessage::AddTlc(peer_id, add_tlc) => {
@@ -137,6 +139,13 @@ impl Actor for NetworkActor {
                 if let Some(actor) = state.peers.get(&peer_id) {
                     actor
                         .send_message(TlcActorMessage::CommandAddTlc(add_tlc))
+                        .expect("send ok");
+                }
+            }
+            NetworkActorMessage::RemoveTlc(peer_id, tlc_id) => {
+                if let Some(actor) = state.peers.get(&peer_id) {
+                    actor
+                        .send_message(TlcActorMessage::CommandRemoveTlc(tlc_id))
                         .expect("send ok");
                 }
             }
@@ -229,13 +238,45 @@ impl Actor for TlcActor {
                     ))
                     .expect("send ok");
             }
+            TlcActorMessage::CommandRemoveTlc(tlc_id) => {
+                eprintln!("Peer {} process remove tlc ....", state.peer_id);
+                state.tlc_state.set_received_tlc_removed(tlc_id);
+                let peer = state.get_peer();
+                self.network
+                    .send_message(NetworkActorMessage::PeerMsg(
+                        peer.clone(),
+                        TlcActorMessage::PeerRemoveTlc(tlc_id),
+                    ))
+                    .expect("send ok");
+
+                // send commitment signed
+                let tlcs = state.tlc_state.commitment_signed(false);
+                let hash = sign_tlcs(&tlcs);
+                eprintln!("got hash: {:?}", hash);
+                self.network
+                    .send_message(NetworkActorMessage::PeerMsg(
+                        peer,
+                        TlcActorMessage::PeerCommitmentSigned(hash),
+                    ))
+                    .expect("send ok");
+            }
             TlcActorMessage::PeerAddTlc(add_tlc) => {
-                eprintln!("Peer {} process peer add_tlc ....", state.peer_id);
+                eprintln!(
+                    "Peer {} process peer add_tlc .... with tlc_id: {:?}",
+                    state.peer_id, add_tlc.tlc_id
+                );
                 let mut tlc = add_tlc.clone();
                 tlc.flip_mut();
                 tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
                 state.tlc_state.add_received_tlc(TlcKindV2::AddTlc(tlc));
                 eprintln!("add peer tlc successfully: {:?}", add_tlc);
+            }
+            TlcActorMessage::PeerRemoveTlc(tlc_id) => {
+                eprintln!(
+                    "Peer {} process peer remove tlc .... with tlc_id: {}",
+                    state.peer_id, tlc_id
+                );
+                state.tlc_state.set_offered_tlc_removed(tlc_id);
             }
             TlcActorMessage::PeerCommitmentSigned(peer_hash) => {
                 eprintln!(
@@ -279,7 +320,7 @@ impl Actor for TlcActor {
                 let hash = sign_tlcs(&tlcs);
                 assert_eq!(hash, peer_hash);
 
-                state.tlc_state.handle_reovke_and_ack();
+                state.tlc_state.update_for_revoke_and_ack();
             }
         }
         Ok(())
@@ -309,10 +350,10 @@ async fn test_tlc_actor() {
         .await
         .expect("Failed to start tlc actor");
     network_actor
-        .send_message(NetworkActorMessage::AddPeer("peer_a".to_string()))
+        .send_message(NetworkActorMessage::RegisterPeer("peer_a".to_string()))
         .unwrap();
     network_actor
-        .send_message(NetworkActorMessage::AddPeer("peer_b".to_string()))
+        .send_message(NetworkActorMessage::RegisterPeer("peer_b".to_string()))
         .unwrap();
 
     network_actor
@@ -376,6 +417,12 @@ async fn test_tlc_actor() {
                 previous_tlc: None,
             },
         ))
+        .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    // remove tlc from peer_b
+    network_actor
+        .send_message(NetworkActorMessage::RemoveTlc("peer_b".to_string(), 0))
         .unwrap();
 
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
