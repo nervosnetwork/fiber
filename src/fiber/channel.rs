@@ -2590,7 +2590,7 @@ impl TlcStateV2 {
         self.received_tlcs.add_tlc(tlc);
     }
 
-    pub fn commitment_signed(&self, local: bool) -> Vec<AddTlcInfoV2> {
+    pub fn commitment_signed(&mut self, local: bool) -> Vec<AddTlcInfoV2> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
             if let TlcKindV2::AddTlc(add_info) = tlc {
@@ -2622,7 +2622,29 @@ impl TlcStateV2 {
                 }
             }
         }
+        if !local {
+            self.set_waiting_ack(true);
+        }
         return active_tls;
+    }
+
+    pub fn update_for_peer_commitment_signed(&mut self) {
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(tlc) = tlc {
+                let out_status = tlc.status.as_inbound_status();
+                match out_status {
+                    InboundTlctatus::RemoteAnnounced => {
+                        let status = if self.waiting_ack {
+                            InboundTlctatus::AwaitingRemoteRevokeToAnnounce
+                        } else {
+                            InboundTlctatus::AwaitingAnnouncedRemoteRevoke
+                        };
+                        tlc.status = TlcStatus::Inbound(status)
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn build_ack_transaction(&self, _for_remote: bool) -> Vec<AddTlcInfoV2> {
@@ -2638,6 +2660,41 @@ impl TlcStateV2 {
             }
         }
         return active_tls;
+    }
+
+    pub fn handle_reovke_and_ack(&mut self) {
+        self.set_waiting_ack(false);
+        for tlc in self.offered_tlcs.tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(tlc) = tlc {
+                let out_status = tlc.status.as_outbound_status();
+                match out_status {
+                    OutboundTlcStatus::LocalAnnounced => {
+                        tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
+                    }
+                    OutboundTlcStatus::AwaitingRemoteRevokeToRemove => {
+                        tlc.status =
+                            TlcStatus::Outbound(OutboundTlcStatus::AwaitingRemovedRemoteRevoke);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for tlc in self.received_tlcs.tlcs.iter_mut() {
+            if let TlcKindV2::AddTlc(tlc) = tlc {
+                let in_status = tlc.status.as_inbound_status();
+                match in_status {
+                    InboundTlctatus::AwaitingRemoteRevokeToAnnounce => {
+                        tlc.status =
+                            TlcStatus::Inbound(InboundTlctatus::AwaitingAnnouncedRemoteRevoke);
+                    }
+                    InboundTlctatus::AwaitingAnnouncedRemoteRevoke => {
+                        tlc.status = TlcStatus::Inbound(InboundTlctatus::Committed);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     pub fn need_another_commitment_signed(&self) -> bool {

@@ -248,19 +248,7 @@ impl Actor for TlcActor {
 
                 let peer = state.get_peer();
 
-                for tlc in state.tlc_state.received_tlcs.tlcs.iter_mut() {
-                    if let TlcKindV2::AddTlc(tlc) = tlc {
-                        let out_status = tlc.status.as_inbound_status();
-                        match out_status {
-                            InboundTlctatus::RemoteAnnounced => {
-                                tlc.status = TlcStatus::Inbound(
-                                    InboundTlctatus::AwaitingRemoteRevokeToAnnounce,
-                                )
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                state.tlc_state.update_for_peer_commitment_signed();
 
                 eprintln!("sending peer revoke and ack ....");
                 let tlcs = state.tlc_state.build_ack_transaction(true);
@@ -291,39 +279,7 @@ impl Actor for TlcActor {
                 let hash = sign_tlcs(&tlcs);
                 assert_eq!(hash, peer_hash);
 
-                for tlc in state.tlc_state.offered_tlcs.tlcs.iter_mut() {
-                    if let TlcKindV2::AddTlc(tlc) = tlc {
-                        let out_status = tlc.status.as_outbound_status();
-                        match out_status {
-                            OutboundTlcStatus::LocalAnnounced => {
-                                tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
-                            }
-                            OutboundTlcStatus::AwaitingRemoteRevokeToRemove => {
-                                tlc.status = TlcStatus::Outbound(
-                                    OutboundTlcStatus::AwaitingRemovedRemoteRevoke,
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                for tlc in state.tlc_state.received_tlcs.tlcs.iter_mut() {
-                    if let TlcKindV2::AddTlc(tlc) = tlc {
-                        let in_status = tlc.status.as_inbound_status();
-                        match in_status {
-                            InboundTlctatus::AwaitingRemoteRevokeToAnnounce => {
-                                tlc.status = TlcStatus::Inbound(
-                                    InboundTlctatus::AwaitingAnnouncedRemoteRevoke,
-                                );
-                            }
-                            InboundTlctatus::AwaitingAnnouncedRemoteRevoke => {
-                                tlc.status = TlcStatus::Inbound(InboundTlctatus::Committed);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                state.tlc_state.handle_reovke_and_ack();
             }
         }
         Ok(())
