@@ -845,6 +845,7 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
+                    eprintln!("update invoice status to paid: {:?}", tlc.payment_hash);
                     self.store
                         .update_invoice_status(&tlc.payment_hash, CkbInvoiceStatus::Paid)
                         .expect("update invoice status error");
@@ -2658,7 +2659,6 @@ impl TlcState {
                 OutboundTlcStatus::RemoteRemoved => {
                     let status = if self.waiting_ack {
                         need_another_commitment_signed = true;
-                        eprintln!("hahah !!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         OutboundTlcStatus::RemoveWaitPrevAck
                     } else {
                         OutboundTlcStatus::RemoveWaitAck
