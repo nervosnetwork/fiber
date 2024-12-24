@@ -2455,46 +2455,6 @@ impl TlcState {
             })
     }
 
-    pub fn get_local_active_offered_tlcs(&self) -> impl Iterator<Item = TlcInfo> + '_ {
-        self.offered_tlcs.tlcs.iter().filter_map(move |tlc| {
-            if tlc.removed_at.is_none() {
-                Some(tlc.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn get_remote_active_offered_tlcs(&self) -> impl Iterator<Item = TlcInfo> + '_ {
-        self.received_tlcs.tlcs.iter().filter_map(move |tlc| {
-            if tlc.removed_at.is_none() {
-                Some(tlc.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn get_active_received_tlcs(&self) -> impl Iterator<Item = TlcInfo> + '_ {
-        self.received_tlcs.tlcs.iter().filter_map(move |tlc| {
-            if tlc.removed_at.is_none() {
-                Some(tlc.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn get_remote_received_tlcs(&self) -> impl Iterator<Item = TlcInfo> + '_ {
-        self.offered_tlcs.tlcs.iter().filter_map(move |tlc| {
-            if tlc.removed_at.is_none() {
-                Some(tlc.clone())
-            } else {
-                None
-            }
-        })
-    }
-
     pub fn get_committed_received_tlcs(&self) -> Vec<TlcInfo> {
         self.received_tlcs.get_committed_tlcs()
     }
@@ -2617,7 +2577,7 @@ impl TlcState {
         }
     }
 
-    pub fn commitment_signed(&mut self, local: bool) -> Vec<TlcInfo> {
+    pub fn commitment_signed(&self, local: bool) -> Vec<TlcInfo> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
             let status = tlc.status.as_outbound_status();
@@ -2642,7 +2602,7 @@ impl TlcState {
                 InboundTlctatus::AnnounceWaitAck => true,
                 InboundTlctatus::Committed => true,
                 InboundTlctatus::LocalRemoved => !local,
-                InboundTlctatus::RemoveAckConfirmed => !local,
+                InboundTlctatus::RemoveAckConfirmed => false,
                 InboundTlctatus::RemoveSettled => false,
             };
             if include {
@@ -2673,7 +2633,6 @@ impl TlcState {
                 InboundTlctatus::RemoteAnnounced => {
                     let status = if self.waiting_ack {
                         need_another_commitment_signed = true;
-                        eprintln!("remote anounced .....................");
                         InboundTlctatus::AnnounceWaitPrevAck
                     } else {
                         InboundTlctatus::AnnounceWaitAck
@@ -4555,32 +4514,20 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    fn get_active_received_tlcs(&self, local_commitment: bool) -> Vec<TlcInfo> {
-        if local_commitment {
-            self.tlc_state
-                .get_local_active_offered_tlcs()
-                .filter(|tlc| tlc.is_received())
-                .collect()
-        } else {
-            self.tlc_state
-                .get_remote_active_offered_tlcs()
-                .filter(|tlc| tlc.is_received())
-                .collect()
-        }
+    fn get_active_received_tlcs(&self, local: bool) -> Vec<TlcInfo> {
+        self.tlc_state
+            .commitment_signed(local)
+            .into_iter()
+            .filter(|tlc| tlc.is_received())
+            .collect()
     }
 
-    fn get_active_offered_tlcs(&self, local_commitment: bool) -> Vec<TlcInfo> {
-        if local_commitment {
-            self.tlc_state
-                .get_local_active_offered_tlcs()
-                .filter(|tlc| tlc.is_offered())
-                .collect()
-        } else {
-            self.tlc_state
-                .get_remote_active_offered_tlcs()
-                .filter(|tlc| tlc.is_offered())
-                .collect()
-        }
+    fn get_active_offered_tlcs(&self, local: bool) -> Vec<TlcInfo> {
+        self.tlc_state
+            .commitment_signed(local)
+            .into_iter()
+            .filter(|tlc| tlc.is_offered())
+            .collect()
     }
 
     // Get the total amount of pending tlcs that are fulfilled
@@ -4695,6 +4642,11 @@ impl ChannelActorState {
             [a, b].concat()
         };
         //eprintln!("active tlcs: {:?}", tlcs);
+        eprintln!("active tlcs count: {}", tlcs.len());
+        for tlc in &tlcs {
+            eprintln!("tlc {}", tlc.0.log());
+        }
+        eprintln!("==========================");
         if tlcs.is_empty() {
             Vec::new()
         } else {
