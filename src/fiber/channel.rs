@@ -2256,6 +2256,7 @@ pub enum OutboundTlcStatus {
     RemoveWaitPrevAck,
     RemoveWaitAck,
     RemoveAckConfirmed,
+    RemoveSettled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2566,7 +2567,7 @@ impl TlcState {
             .iter_mut()
             .find(|tlc| tlc.tlc_id == tlc_id)
             .map(|tlc| {
-                tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoveSettled);
+                tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveSettled);
             });
         self.received_tlcs
             .tlcs
@@ -2645,6 +2646,7 @@ impl TlcState {
                 OutboundTlcStatus::RemoveWaitPrevAck => local,
                 OutboundTlcStatus::RemoveWaitAck => false,
                 OutboundTlcStatus::RemoveAckConfirmed => false,
+                OutboundTlcStatus::RemoveSettled => false,
             };
             if include {
                 active_tls.push(tlc.clone());
