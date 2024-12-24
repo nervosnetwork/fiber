@@ -56,6 +56,7 @@ use crate::{
 };
 
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
+pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
@@ -717,6 +718,20 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_channels_with_params(1000, None)
+    }
+
+    pub async fn get_network_nodes(&self) -> Vec<NodeInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_nodes_with_params(1000, None)
     }
 
     pub async fn start(&mut self) {

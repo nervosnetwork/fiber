@@ -523,7 +523,11 @@ where
                 ) => {
                     let mut channel_info = ChannelInfo::from((timestamp, channel_announcement));
                     self.load_channel_updates_from_store(&mut channel_info);
-                    Some(channel_info)
+                    if channel_info.is_explicitly_disabled() {
+                        None
+                    } else {
+                        Some(channel_info)
+                    }
                 }
                 _ => None,
             })
@@ -550,7 +554,7 @@ where
         &self,
         node_id: Pubkey,
     ) -> impl Iterator<Item = (Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> {
-        let mut channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+        let mut channels: Vec<_> = self
             .channels
             .values()
             .filter_map(move |channel| {
@@ -900,12 +904,17 @@ where
                 }
 
                 // if this is a direct channel, try to load the channel actor state for balance
-                if from == self.source {
+                if from == self.source || to == self.source {
                     if let Some(state) = self
                         .store
                         .get_channel_state_by_outpoint(&channel_info.out_point())
                     {
-                        if amount_to_send > state.to_local_amount {
+                        let balance = if from == self.source {
+                            state.to_local_amount
+                        } else {
+                            state.to_remote_amount
+                        };
+                        if amount_to_send > balance {
                             continue;
                         }
                     }

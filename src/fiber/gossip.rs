@@ -2262,9 +2262,6 @@ where
             .expect("receive control");
         debug!("Gossip actor received service control");
 
-        let _ = myself.send_after(Duration::from_millis(500), || {
-            GossipActorMessage::TickNetworkMaintenance
-        });
         let _ = myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });

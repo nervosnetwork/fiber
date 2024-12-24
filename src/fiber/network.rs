@@ -1481,19 +1481,16 @@ where
         // https://github.com/lightning/bolts/blob/master/04-onion-routing.md#rationale-6
         // we now still update the graph, maybe we need to remove it later?
         if error_code.is_update() {
-            if let Some(extra_data) = &tcl_error_detail.extra_data {
-                match extra_data {
-                    TlcErrData::ChannelFailed { channel_update, .. } => {
-                        if let Some(channel_update) = channel_update {
-                            let _ = network.send_message(NetworkActorMessage::new_command(
-                                NetworkActorCommand::ProcessBroadcastMessage(
-                                    BroadcastMessage::ChannelUpdate(channel_update.clone()),
-                                ),
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
+            if let Some(TlcErrData::ChannelFailed {
+                channel_update: Some(channel_update),
+                ..
+            }) = &tcl_error_detail.extra_data
+            {
+                let _ = network.send_message(NetworkActorMessage::new_command(
+                    NetworkActorCommand::ProcessBroadcastMessage(BroadcastMessage::ChannelUpdate(
+                        channel_update.clone(),
+                    )),
+                ));
             }
         }
         match tcl_error_detail.error_code() {
@@ -2566,18 +2563,18 @@ where
         channel_id: &Hash256,
         tx_hash: Byte32,
     ) {
-        self.remove_channel(channel_id);
-        if let Some(session) = self.get_peer_session(peer_id) {
-            if let Some(set) = self.session_channels_map.get_mut(&session) {
-                set.remove(channel_id);
-            }
-        }
         self.send_message_to_channel_actor(
             *channel_id,
             None,
             ChannelActorMessage::Event(ChannelEvent::ClosingTransactionConfirmed),
         )
         .await;
+        self.remove_channel(channel_id);
+        if let Some(session) = self.get_peer_session(peer_id) {
+            if let Some(set) = self.session_channels_map.get_mut(&session) {
+                set.remove(channel_id);
+            }
+        }
         // Notify outside observers.
         self.network
             .send_message(NetworkActorMessage::new_notification(

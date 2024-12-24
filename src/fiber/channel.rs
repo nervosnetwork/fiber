@@ -1873,8 +1873,7 @@ where
 
                 // TODO: we may reject the channel opening request here
                 // if the peer want to open a public channel, but we don't want to.
-                if public && channel_announcement_nonce.is_none()
-                    || public && public_channel_info.is_none()
+                if public && (channel_announcement_nonce.is_none() || public_channel_info.is_none())
                 {
                     return Err(Box::new(ProcessingChannelError::InvalidParameter(
                         "Public channel should have channel announcement nonce and public channel info".to_string(),
