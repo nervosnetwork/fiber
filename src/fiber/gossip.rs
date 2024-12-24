@@ -330,7 +330,7 @@ pub enum GossipActorMessage {
     // This is an internal command used by both TryBroadcastMessages and ProcessBroadcastMessage,
     // in which we will normally enrich the BroadcastMessage and check their dependencies,
     // and then broadcast them to the network.
-    BroadcastMessageImmediately(BroadcastMessageWithTimestamp),
+    BroadcastMessagesImmediately(Vec<BroadcastMessageWithTimestamp>),
     // Send gossip message to a peer.
     SendGossipMessage(GossipMessageWithPeerId),
     // Received GossipMessage from a peer
@@ -531,13 +531,14 @@ where
                         }
                     }
 
-                    for message in messages {
-                        let _ = state
-                            .store
-                            .actor
-                            .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
-                            .expect("store actor alive");
-                    }
+                    state
+                        .store
+                        .actor
+                        .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                            Some(state.peer_id.clone()),
+                            messages,
+                        ))
+                        .expect("store actor alive");
                     debug!("Sending new GetBroadcastMessages request after receiving response: peer_id {:?}", &state.peer_id);
                     myself
                         .send_message(GossipSyncingActorMessage::NewGetRequest())
@@ -1291,30 +1292,39 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                 }
             }
 
-            ExtendedGossipMessageStoreMessage::SaveMessage(message) => {
-                if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
-                    error!(
-                        "Failed to save message to the store: {:?}, error: {:?}",
-                        message, error
-                    );
+            ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
+                for message in messages {
+                    if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
+                        error!(
+                            "Failed to save message to the store: {:?} (from peer {:?}), error: {:?}",
+                            message, &peer, error
+                        );
+                    }
                 }
             }
 
-            ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(message) => {
-                match state.insert_message_to_be_saved_list(&message).await {
-                    Err(error) => error!(
-                        "Failed to save message to the store: {:?}, error: {:?}",
-                        message, error
-                    ),
-                    Ok(message) => {
-                        // Normally we will need to check if the message has any dependencies that are not saved yet.
-                        // But this is not necessary for the messages that we are proactively broadcasting.
-                        // These are our own channel announcements, channel updates and node announcements.
-                        let _ = state
-                            .gossip_actor
-                            .send_message(GossipActorMessage::BroadcastMessageImmediately(message));
+            ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(messages) => {
+                let mut good_messages = Vec::with_capacity(messages.len());
+                for message in messages {
+                    match state.insert_message_to_be_saved_list(&message).await {
+                        Err(error) => error!(
+                            "Failed to save message to the store: {:?}, error: {:?}",
+                            message, error
+                        ),
+                        Ok(message) => {
+                            good_messages.push(message);
+                        }
                     }
                 }
+                // Normally we will need to check if the message has any dependencies that are not saved yet.
+                // But this is not necessary for the messages that we are proactively broadcasting.
+                // These are our own channel announcements, channel updates and node announcements.
+                state
+                    .gossip_actor
+                    .send_message(GossipActorMessage::BroadcastMessagesImmediately(
+                        good_messages,
+                    ))
+                    .expect("gossip actor alive");
             }
 
             ExtendedGossipMessageStoreMessage::Tick => {
@@ -1367,15 +1377,14 @@ pub enum ExtendedGossipMessageStoreMessage {
     // Update the subscription. If this Option is None, the subscription will be cancelled.
     // Otherwise the new cursor will be used to filter the messages that are sent to the subscriber.
     UpdateSubscription(u64, Option<Cursor>, RpcReplyPort<()>),
-    // Save a new broadcast message to the store. We will check if the message has any dependencies that are not
-    // saved yet. If it has, we will save it to messages_to_be_saved, otherwise we will save it to the store.
-    // We may also save the message to lagged_messages if the message is lagged.
-    // We may pass a bool parameter to indicate if a output port to wait for the message to be saved should be
-    // returned. If there is any error while saving the message, we will send an error message to the output port.
-    SaveMessage(BroadcastMessage),
+    // Save broadcast messages originated from the peer to the store.
+    // (If the optional peer is None, the messages are our own messages.)
+    // We will check if there are any dependencies to the messages that are unsaved yet.
+    // If there are, we will save the message temporarily and send a query to the peer.
+    SaveMessages(Option<PeerId>, Vec<BroadcastMessage>),
     // Save a new message to the store. If the message's dependencies are all met, then we will
     // broadcast the message to the network. Otherwise, we will ignore the broadcasting.
-    SaveAndBroadcastMessage(BroadcastMessage),
+    SaveAndBroadcastMessage(Vec<BroadcastMessage>),
     // Send broadcast messages after the cursor to the subscriber specified in the u64 id.
     // This is normally called immediately after a new subscription is created. This is the time when
     // we need to send existing messages to the subscriber.
@@ -1639,18 +1648,16 @@ where
             .go_back_for_some_time(MAX_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT)
     }
 
-    async fn try_to_verify_and_save_broadcast_message(&mut self, message: BroadcastMessage) {
-        // If there is any messages related to this message that we haven't obtained yet, we will
-        // add them to pending_queries, which would be processed later.
-        // TODO: It is possible the message here comes from a malicious peer. We should check bookkeep
-        // the origin of the message and check if queries constructed here go nowhere.
-        let queries = get_dependent_message_queries(&message, self.get_store());
-        self.pending_queries.extend(queries);
-
-        let _ = self
-            .store
+    async fn try_to_verify_and_save_broadcast_messages(
+        &mut self,
+        originator: Option<PeerId>,
+        messages: Vec<BroadcastMessage>,
+    ) {
+        self.store
             .actor
-            .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
+            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                originator, messages,
+            ))
             .expect("store actor alive");
     }
 
@@ -2318,7 +2325,7 @@ where
             }
             GossipActorMessage::ProcessBroadcastMessage(message) => {
                 state
-                    .try_to_verify_and_save_broadcast_message(message.clone())
+                    .try_to_verify_and_save_broadcast_messages(None, vec![message.clone()])
                     .await;
             }
             GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
@@ -2335,38 +2342,49 @@ where
                     .await?;
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
-                debug!("Trying to broadcast message: {:?}", &messages);
-                for message in messages {
-                    state
-                        .store
-                        .actor
-                        .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(
-                            message.clone(),
-                        ))
-                        .expect("store actor alive");
-                }
+                trace!("Trying to broadcast message: {:?}", &messages);
+                state
+                    .store
+                    .actor
+                    .send_message(ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(
+                        messages,
+                    ))
+                    .expect("store actor alive");
             }
-            GossipActorMessage::BroadcastMessageImmediately(message) => {
+            GossipActorMessage::BroadcastMessagesImmediately(messages) => {
                 for (peer, peer_state) in &state.peer_states {
                     let session = peer_state.session_id;
                     match &peer_state.filter_processor {
-                        Some(filter_processor)
-                            if filter_processor.get_filter() < &message.cursor() =>
-                        {
-                            trace!("Broadcasting message to peer {:?}: {:?}", &peer, &message);
-                            state
-                                .send_message_to_session(
-                                    session,
-                                    GossipMessage::BroadcastMessagesFilterResult(
-                                        message.create_broadcast_messages_filter_result(),
-                                    ),
-                                )
-                                .await?;
+                        Some(filter_processor) => {
+                            let messages = messages
+                                .iter()
+                                .filter_map(|message| {
+                                    (filter_processor.get_filter() < &message.cursor())
+                                        .then_some(message.clone().into())
+                                })
+                                .collect::<Vec<_>>();
+                            trace!("Broadcasting message to peer {:?}: {:?}", &peer, &messages);
+                            if !messages.is_empty() {
+                                if let Err(error) = state
+                                    .send_message_to_session(
+                                        session,
+                                        GossipMessage::BroadcastMessagesFilterResult(
+                                            BroadcastMessagesFilterResult { messages },
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        "Failed to broadcast messages to session {}: error {:?}",
+                                        session, error
+                                    )
+                                }
+                            }
                         }
                         _ => {
                             debug!(
-                                "Ignoring broadcast message for peer {:?}: {:?} as its filter processor is {:?}",
-                                peer, &message, &peer_state.filter_processor
+                                "Ignoring broadcast messages for peer {:?}: {:?} we don't have filter processor for it",
+                                peer, &messages
                             );
                         }
                     }
@@ -2536,11 +2554,9 @@ where
                     GossipMessage::BroadcastMessagesFilterResult(
                         BroadcastMessagesFilterResult { messages },
                     ) => {
-                        for message in messages {
-                            state
-                                .try_to_verify_and_save_broadcast_message(message)
-                                .await;
-                        }
+                        state
+                            .try_to_verify_and_save_broadcast_messages(Some(peer_id), messages)
+                            .await;
                     }
                     GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
                         check_chain_hash(&get_broadcast_messages.chain_hash)?;
@@ -2619,11 +2635,9 @@ where
                         missing_queries,
                     }) => {
                         let _is_finished = missing_queries.is_empty();
-                        for message in messages {
-                            state
-                                .try_to_verify_and_save_broadcast_message(message)
-                                .await;
-                        }
+                        state
+                            .try_to_verify_and_save_broadcast_messages(Some(peer_id), messages)
+                            .await;
                         // TODO: mark requests corresponding to id as finished
                         // TODO: if not finished, send another QueryBroadcastMessages to other peers.
                         // Must be careful since some queries may be initiated by malformed messages

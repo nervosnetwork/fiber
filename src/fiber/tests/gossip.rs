@@ -114,7 +114,10 @@ impl GossipTestingContext {
 
     fn save_message(&self, message: BroadcastMessage) {
         self.get_store_actor()
-            .send_message(ExtendedGossipMessageStoreMessage::SaveMessage(message))
+            .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
+                None,
+                vec![message],
+            ))
             .expect("send message");
     }
 
