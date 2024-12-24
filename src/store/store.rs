@@ -97,6 +97,7 @@ impl Store {
         let mut options = Options::default();
         options.create_if_missing(true);
         options.set_compression_type(DBCompressionType::Lz4);
+        // dump trace log to /tmp/rocksdb.log
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
         Ok(db)
     }
@@ -506,12 +507,8 @@ impl InvoiceStore for Store {
 impl NetworkGraphStateStore for Store {
     fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
         let prefix = [&[PAYMENT_SESSION_PREFIX], payment_hash.as_ref()].concat();
-        eprintln!("get payment session: {:?}", prefix);
-        let res = self
-            .get(prefix)
-            .map(|v| deserialize_from(v.as_ref(), "PaymentSession"));
-        eprintln!("got res: {:?}", res);
-        res
+        self.get(prefix)
+            .map(|v| deserialize_from(v.as_ref(), "PaymentSession"))
     }
 
     fn insert_payment_session(&self, session: PaymentSession) {

@@ -888,7 +888,6 @@ where
             }
             NetworkActorEvent::TlcRemoveReceived(payment_hash, remove_tlc_reason) => {
                 // When a node is restarted, RemoveTLC will also be resent if necessary
-                eprintln!("got message RemoveTLC for payment_hash: {:?}", payment_hash);
                 self.on_remove_tlc_event(myself, state, payment_hash, remove_tlc_reason)
                     .await;
             }
@@ -1432,7 +1431,6 @@ where
         reason: RemoveTlcReason,
     ) {
         if let Some(mut payment_session) = self.store.get_payment_session(payment_hash) {
-            eprintln!("got remove tlc event: {:?}", reason);
             if payment_session.status == PaymentSessionStatus::Inflight {
                 match reason {
                     RemoveTlcReason::RemoveTlcFulfill(_) => {
@@ -1471,8 +1469,6 @@ where
                     }
                 }
             }
-        } else {
-            eprintln!("payment session not found: {:?}", payment_hash);
         }
     }
 
@@ -1522,10 +1518,7 @@ where
 
     fn on_get_payment(&self, payment_hash: &Hash256) -> Result<SendPaymentResponse, Error> {
         match self.store.get_payment_session(*payment_hash) {
-            Some(payment_session) => {
-                eprintln!("hahah got payment session: {:?}", payment_session);
-                Ok(payment_session.into())
-            }
+            Some(payment_session) => Ok(payment_session.into()),
             None => Err(Error::InvalidParameter(format!(
                 "Payment session not found: {:?}",
                 payment_hash
@@ -1727,7 +1720,6 @@ where
 
         let payment_session = PaymentSession::new(payment_data, 5);
         self.store.insert_payment_session(payment_session.clone());
-        eprintln!("payment session created: {:?}", payment_session);
         let session = self
             .try_payment_session(myself, state, payment_session.payment_hash())
             .await?;

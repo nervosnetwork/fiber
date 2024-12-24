@@ -300,7 +300,7 @@ impl Actor for TlcActor {
 
                 let peer = state.get_peer();
 
-                state.tlc_state.update_for_peer_commitment_signed();
+                state.tlc_state.update_for_commitment_signed();
 
                 eprintln!("sending peer revoke and ack ....");
                 let tlcs = state.tlc_state.build_ack_transaction(true);
