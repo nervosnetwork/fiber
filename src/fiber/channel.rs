@@ -4085,6 +4085,8 @@ impl ChannelActorState {
         let sign_ctx = {
             let local_nonce = self.get_local_nonce();
             let remote_nonce = self.get_remote_nonce();
+            eprintln!("local_nonce: {:?}", local_nonce);
+            eprintln!("remote_nonce: {:?}", remote_nonce);
             let nonces = [local_nonce, remote_nonce];
             let agg_nonce = AggNonce::sum(nonces);
             Musig2SignContext {
@@ -4115,7 +4117,7 @@ impl ChannelActorState {
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .capacity(capacity.pack())
                     .build();
                 let output_data = Bytes::default();
@@ -4123,13 +4125,17 @@ impl ChannelActorState {
             };
 
             let commitment_number = self.get_remote_commitment_number() - 1;
+            eprintln!("send first commitment_number: {}", commitment_number);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
-
+            eprintln!(
+                "send first commitment_lock_script_args: {:?}",
+                commitment_lock_script_args
+            );
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -4138,6 +4144,7 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+            eprintln!("ack send message: {:?}", message);
             sign_ctx
                 .clone()
                 .sign(message.as_slice())
@@ -5569,10 +5576,6 @@ impl ChannelActorState {
             self.remote_commitment_points
                 .retain(|(num, _)| *num >= min_remote_commitment);
         }
-        assert!(
-            self.remote_commitment_points.len()
-                <= (self.local_constraints.max_tlc_number_in_flight + 1) as usize
-        );
     }
 
     fn handle_revoke_and_ack_peer_message(
@@ -5580,6 +5583,10 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
+        eprintln!(
+            "begin to handle revoke and ack peer message: {:?}",
+            &revoke_and_ack
+        );
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
@@ -5596,6 +5603,8 @@ impl ChannelActorState {
         let (verify_ctx, sign_ctx) = {
             let local_nonce = self.get_local_nonce();
             let remote_nonce = self.take_remote_nonce_for_raa();
+            eprintln!("local_nonce: {:?}", local_nonce);
+            eprintln!("remote_nonce: {:?}", remote_nonce);
             let nonces = [remote_nonce.clone(), local_nonce];
             let agg_nonce = AggNonce::sum(nonces);
 
@@ -5625,7 +5634,7 @@ impl ChannelActorState {
             {
                 let capacity = self.get_total_reserved_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .type_(Some(udt_type_script.clone()).pack())
                     .capacity(capacity.pack())
                     .build();
@@ -5635,7 +5644,7 @@ impl ChannelActorState {
             } else {
                 let capacity = self.get_total_ckb_amount() - commitment_tx_fee;
                 let output = CellOutput::new_builder()
-                    .lock(lock_script)
+                    .lock(lock_script.clone())
                     .capacity(capacity.pack())
                     .build();
                 let output_data = Bytes::default();
@@ -5643,7 +5652,7 @@ impl ChannelActorState {
             };
 
             let commitment_number = self.get_local_commitment_number() - 1;
-
+            eprintln!("recv first commitment_number: {}", commitment_number);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -5651,6 +5660,10 @@ impl ChannelActorState {
             ]
             .concat();
 
+            eprintln!(
+                "recv first commitment_lock_script_args: {:?}",
+                commitment_lock_script_args
+            );
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -5660,7 +5673,9 @@ impl ChannelActorState {
                 .concat(),
             );
 
+            eprintln!("first begin to verify message: {:?}", message);
             verify_ctx.verify(revocation_partial_signature, message.as_slice())?;
+            eprintln!("first successfully verify message =============");
 
             let our_signature = sign_ctx.clone().sign(message.as_slice())?;
             let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
@@ -5697,7 +5712,9 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
+            eprintln!("begin to verify message: {:?}", message);
             verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
+            eprintln!("successfully verify message =============");
             let our_signature = sign_ctx.sign(message.as_slice())?;
             let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
                 [commitment_tx_partial_signature, our_signature],

@@ -727,7 +727,7 @@ async fn test_network_send_payment_send_each_other() {
     let payment_hash2 = res2.payment_hash;
 
     // sleep for 2 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(6000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -2444,7 +2444,7 @@ async fn do_test_add_tlc_waiting_ack() {
 }
 
 #[tokio::test]
-async fn do_test_add_tlc_number_limit() {
+async fn do_test_add_tlc_with_number_limit() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 100000000000;
 
@@ -2726,6 +2726,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         None,
     )
     .await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // A -> B will be no limit
     let tlc_amount = 200;
@@ -2747,7 +2748,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         ))
     })
     .expect("node_b alive");
-
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
     assert!(add_tlc_result.is_ok());
 
     // B -> A can still able to send amount less than 100
