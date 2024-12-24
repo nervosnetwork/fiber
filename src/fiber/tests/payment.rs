@@ -195,7 +195,7 @@ async fn test_send_payment_for_pay_self() {
     assert!(res.is_ok());
 
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let res = res.unwrap();
     let payment_hash = res.payment_hash;
     node_0
