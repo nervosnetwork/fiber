@@ -707,7 +707,7 @@ where
                 }
             }
         }
-        for (tlc_id, reason) in settled_tlcs.iter() {
+        for (tlc_id, _reason) in settled_tlcs.iter() {
             let tlc = state.tlc_state.get_mut(tlc_id).expect("tlc");
             tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoveAckConfirmed);
         }
@@ -1087,10 +1087,6 @@ where
         if tlc_info.previous_tlc.is_none() {
             // only the original sender of the TLC should send `TlcRemoveReceived` event
             // because only the original sender cares about the TLC event to settle the payment
-            eprintln!(
-                "hahaha sending TlcRemoveReceived ...: {:?} tlc_id: {:?}",
-                tlc_info.payment_hash, tlc_info.tlc_id
-            );
             if tlc_info.is_offered() {
                 eprintln!("sending TlcRemoveReceived ...: {:?}", tlc_info.payment_hash);
                 self.network
@@ -2556,26 +2552,12 @@ impl TlcState {
             })
     }
 
-    pub fn apply_remove_tlc(
-        &mut self,
-        tlc_id: TLCId,
-        remove_at: CommitmentNumbers,
-        reason: RemoveTlcReason,
-    ) {
-        self.offered_tlcs
-            .tlcs
-            .iter_mut()
-            .find(|tlc| tlc.tlc_id == tlc_id)
-            .map(|tlc| {
-                tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveSettled);
-            });
-        self.received_tlcs
-            .tlcs
-            .iter_mut()
-            .find(|tlc| tlc.tlc_id == tlc_id)
-            .map(|tlc| {
-                tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoveSettled);
-            });
+    pub fn apply_remove_tlc(&mut self, tlc_id: TLCId) {
+        if tlc_id.is_offered() {
+            self.offered_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
+        } else {
+            self.received_tlcs.tlcs.retain(|tlc| tlc.tlc_id != tlc_id);
+        }
     }
 
     pub fn insert_relay_tlc_remove(
@@ -4385,7 +4367,6 @@ impl ChannelActorState {
         tlc_id: TLCId,
         reason: &RemoveTlcReason,
     ) -> Result<TlcInfo, ProcessingChannelError> {
-        let removed_at = self.get_current_commitment_numbers();
         let current = self.tlc_state.get(&tlc_id).expect("TLC exists").clone();
         assert!(matches!(
             current.status,
@@ -4421,8 +4402,7 @@ impl ChannelActorState {
             eprintln!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
         }
-        self.tlc_state
-            .apply_remove_tlc(tlc_id, removed_at, reason.clone());
+        self.tlc_state.apply_remove_tlc(tlc_id);
 
         Ok(current.clone())
     }
@@ -4825,7 +4805,7 @@ impl ChannelActorState {
     fn check_for_tlc_update(
         &self,
         add_tlc_amount: Option<u128>,
-        is_tlc_command_message: bool,
+        _is_tlc_command_message: bool,
         is_sent: bool,
     ) -> ProcessingChannelResult {
         // if is_tlc_command_message {
