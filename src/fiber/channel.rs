@@ -2577,15 +2577,15 @@ impl TlcState {
         }
     }
 
-    pub fn commitment_signed(&self, local: bool) -> Vec<TlcInfo> {
+    pub fn commitment_signed(&self, for_remote: bool) -> Vec<TlcInfo> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
             let status = tlc.status.as_outbound_status();
             let include = match status {
-                OutboundTlcStatus::LocalAnnounced => local,
+                OutboundTlcStatus::LocalAnnounced => for_remote,
                 OutboundTlcStatus::Committed => true,
-                OutboundTlcStatus::RemoteRemoved => local,
-                OutboundTlcStatus::RemoveWaitPrevAck => local,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
+                OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
                 OutboundTlcStatus::RemoveWaitAck => false,
                 OutboundTlcStatus::RemoveAckConfirmed => false,
                 OutboundTlcStatus::RemoveSettled => false,
@@ -2597,11 +2597,11 @@ impl TlcState {
         for tlc in self.received_tlcs.tlcs.iter() {
             let status = tlc.status.as_inbound_status();
             let include = match status {
-                InboundTlctatus::RemoteAnnounced => !local,
-                InboundTlctatus::AnnounceWaitPrevAck => !local,
+                InboundTlctatus::RemoteAnnounced => !for_remote,
+                InboundTlctatus::AnnounceWaitPrevAck => !for_remote,
                 InboundTlctatus::AnnounceWaitAck => true,
                 InboundTlctatus::Committed => true,
-                InboundTlctatus::LocalRemoved => !local,
+                InboundTlctatus::LocalRemoved => !for_remote,
                 InboundTlctatus::RemoveAckConfirmed => false,
                 InboundTlctatus::RemoveSettled => false,
             };
@@ -4514,17 +4514,17 @@ impl ChannelActorState {
         AggNonce::sum(nonces)
     }
 
-    fn get_active_received_tlcs(&self, local: bool) -> Vec<TlcInfo> {
+    fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed(local)
+            .commitment_signed(for_remote)
             .into_iter()
             .filter(|tlc| tlc.is_received())
             .collect()
     }
 
-    fn get_active_offered_tlcs(&self, local: bool) -> Vec<TlcInfo> {
+    fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed(local)
+            .commitment_signed(for_remote)
             .into_iter()
             .filter(|tlc| tlc.is_offered())
             .collect()
@@ -4601,8 +4601,11 @@ impl ChannelActorState {
         }
     }
 
-    fn get_active_received_tlc_with_pubkeys(&self, local: bool) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
-        self.get_active_received_tlcs(local)
+    fn get_active_received_tlc_with_pubkeys(
+        &self,
+        for_remote: bool,
+    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
+        self.get_active_received_tlcs(for_remote)
             .into_iter()
             .map(move |tlc| {
                 let (k1, k2) = self.get_tlc_pubkeys(&tlc);
@@ -4611,8 +4614,11 @@ impl ChannelActorState {
             .collect()
     }
 
-    fn get_active_offered_tlc_with_pubkeys(&self, local: bool) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
-        self.get_active_offered_tlcs(local)
+    fn get_active_offered_tlc_with_pubkeys(
+        &self,
+        for_remote: bool,
+    ) -> Vec<(TlcInfo, Pubkey, Pubkey)> {
+        self.get_active_offered_tlcs(for_remote)
             .into_iter()
             .map(move |tlc| {
                 let (k1, k2) = self.get_tlc_pubkeys(&tlc);
@@ -4621,14 +4627,14 @@ impl ChannelActorState {
             .collect()
     }
 
-    fn get_active_htlcs(&self, local: bool) -> Vec<u8> {
+    fn get_active_htlcs(&self, for_remote: bool) -> Vec<u8> {
         // Build a sorted array of TLC so that both party can generate the same commitment transaction.
         let tlcs = {
             let (mut received_tlcs, mut offered_tlcs) = (
-                self.get_active_received_tlc_with_pubkeys(local),
-                self.get_active_offered_tlc_with_pubkeys(local),
+                self.get_active_received_tlc_with_pubkeys(for_remote),
+                self.get_active_offered_tlc_with_pubkeys(for_remote),
             );
-            let (mut a, mut b) = if local {
+            let (mut a, mut b) = if for_remote {
                 (received_tlcs, offered_tlcs)
             } else {
                 for (tlc, _, _) in received_tlcs.iter_mut().chain(offered_tlcs.iter_mut()) {
@@ -4641,12 +4647,12 @@ impl ChannelActorState {
             b.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
             [a, b].concat()
         };
-        //eprintln!("active tlcs: {:?}", tlcs);
-        eprintln!("active tlcs count: {}", tlcs.len());
-        for tlc in &tlcs {
-            eprintln!("tlc {}", tlc.0.log());
-        }
-        eprintln!("==========================");
+        // //eprintln!("active tlcs: {:?}", tlcs);
+        // eprintln!("active tlcs count: {}, local: {}", tlcs.len(), for_remote);
+        // for tlc in &tlcs {
+        //     eprintln!("tlc {}", tlc.0.log());
+        // }
+        // eprintln!("==========================");
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -4763,12 +4769,12 @@ impl ChannelActorState {
     fn check_for_tlc_update(
         &self,
         add_tlc_amount: Option<u128>,
-        _is_tlc_command_message: bool,
+        is_tlc_command_message: bool,
         is_sent: bool,
     ) -> ProcessingChannelResult {
-        // if is_tlc_command_message {
-        //     return Err(ProcessingChannelError::WaitingTlcAck);
-        // }
+        if is_tlc_command_message && self.tlc_state.waiting_ack {
+            return Err(ProcessingChannelError::WaitingTlcAck);
+        }
         match self.state {
             ChannelState::ChannelReady() => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
