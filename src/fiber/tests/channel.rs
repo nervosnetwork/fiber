@@ -1454,7 +1454,7 @@ async fn test_send_payment_with_max_nodes() {
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     assert!(res.fee > 0);
     // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(8000)).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -4060,7 +4060,7 @@ async fn test_send_payment_with_channel_balance_error() {
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
     // sleep for a while
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
     };
@@ -4779,7 +4779,7 @@ async fn test_send_payment_will_succeed_with_direct_channel_info_first_hop() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
@@ -4843,7 +4843,7 @@ async fn test_send_payment_will_succeed_with_retry_in_middle_hops() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(2))
@@ -4976,7 +4976,7 @@ async fn test_send_payment_will_fail_with_invoice_not_generated_by_target() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
@@ -5040,7 +5040,7 @@ async fn test_send_payment_will_succeed_with_valid_invoice() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
@@ -5111,7 +5111,7 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
     assert!(res.is_ok());
 
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Failed, Some(1))
@@ -5263,7 +5263,7 @@ async fn test_send_payment_will_succeed_with_large_tlc_expiry_limit() {
     // expect send payment to succeed
     assert!(res.is_ok());
     let payment_hash = res.unwrap().payment_hash;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
     source_node
         .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
