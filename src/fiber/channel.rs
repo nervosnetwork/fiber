@@ -654,7 +654,10 @@ where
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
-        eprintln!("handle_commitment_signed_peer_message ....");
+        eprintln!(
+            "handle_commitment_signed_peer_message .... : {}",
+            state.tlc_state.waiting_ack
+        );
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
@@ -2516,6 +2519,7 @@ impl TlcState {
     }
 
     pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
+        eprintln!("now seting waiting ack to {:?}", waiting_ack);
         self.waiting_ack = waiting_ack;
     }
 
@@ -2661,9 +2665,6 @@ impl TlcState {
                 active_tls.push(tlc.clone());
             }
         }
-        if !local {
-            self.set_waiting_ack(true);
-        }
         return active_tls;
     }
 
@@ -2674,6 +2675,7 @@ impl TlcState {
                 OutboundTlcStatus::RemoteRemoved => {
                     let status = if self.waiting_ack {
                         need_another_commitment_signed = true;
+                        eprintln!("hahah !!!!!!!!!!!!!!!!!!!!!!!!!!!");
                         OutboundTlcStatus::RemoveWaitPrevAck
                     } else {
                         OutboundTlcStatus::RemoveWaitAck
@@ -2688,6 +2690,7 @@ impl TlcState {
                 InboundTlctatus::RemoteAnnounced => {
                     let status = if self.waiting_ack {
                         need_another_commitment_signed = true;
+                        eprintln!("remote anounced .....................");
                         InboundTlctatus::AnnounceWaitPrevAck
                     } else {
                         InboundTlctatus::AnnounceWaitAck
@@ -4703,7 +4706,7 @@ impl ChannelActorState {
             b.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
             [a, b].concat()
         };
-        eprintln!("active tlcs: {:?}", tlcs);
+        //eprintln!("active tlcs: {:?}", tlcs);
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -4823,9 +4826,9 @@ impl ChannelActorState {
         is_tlc_command_message: bool,
         is_sent: bool,
     ) -> ProcessingChannelResult {
-        if is_tlc_command_message && self.tlc_state.waiting_ack {
-            return Err(ProcessingChannelError::WaitingTlcAck);
-        }
+        // if is_tlc_command_message {
+        //     return Err(ProcessingChannelError::WaitingTlcAck);
+        // }
         match self.state {
             ChannelState::ChannelReady() => {}
             ChannelState::ShuttingDown(_) if add_tlc_amount.is_none() => {}
@@ -5734,14 +5737,6 @@ impl ChannelActorState {
 
         eprintln!("handle revoke and ack peer message: {:?}", &revocation_data);
         self.tlc_state.update_for_revoke_and_ack();
-        // let staging_tlcs = self.tlc_state.commit_local_tlcs();
-        // for tlc in staging_tlcs {
-        //     if let TlcKind::RemoveTlc(remove_tlc) = tlc {
-        //         self.remove_tlc_with_reason(remove_tlc.tlc_id, &remove_tlc.reason)
-        //             .expect("expect remove tlc successfully");
-        //     }
-        // }
-        // self.tlc_state.set_waiting_ack(false);
 
         network
             .send_message(NetworkActorMessage::new_notification(

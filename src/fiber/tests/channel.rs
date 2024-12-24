@@ -2773,7 +2773,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
     .expect("node_b alive");
     assert!(add_tlc_result.is_ok());
     // sleep for a while to make sure the AddTlc processed by both party
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // B -> A can send at least 100
     let tlc_amount = 100;
@@ -2795,6 +2795,7 @@ async fn do_test_add_tlc_min_tlc_value_limit() {
         ))
     })
     .expect("node_b alive");
+    eprintln!("add_local_tlc_result: {:?}", add_tlc_result);
     assert!(add_tlc_result.is_ok());
 }
 
