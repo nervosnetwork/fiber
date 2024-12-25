@@ -1183,13 +1183,7 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.save_remote_nonce_for_raa();
-        if state
-            .tlc_state
-            .all_tlcs()
-            .filter(|tlc| tlc.is_offered())
-            .count()
-            > 0
-        {
+        if state.tlc_state.all_tlcs().count() > 0 {
             state.tlc_state.set_waiting_ack(true);
         }
         eprintln!("finished sent commitment_signed");
