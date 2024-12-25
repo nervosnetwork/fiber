@@ -5567,7 +5567,7 @@ impl ChannelActorState {
             next_per_commitment_point,
         } = revoke_and_ack;
 
-        let sign_ctx = self.get_sign_context_for_revoke_and_ack_message();
+        let sign_ctx = self.get_sign_context_for_revoke_and_ack_message()?;
         let x_only_aggregated_pubkey = sign_ctx.common_ctx.x_only_aggregated_pubkey();
 
         let revocation_data = {
@@ -6111,15 +6111,20 @@ impl ChannelActorState {
     // As explained in the documentation of `last_used_remote_nonce` field, we need to
     // use a saved remote nonce because the latest remote nonce may be different from the
     // one we used while sending CommitmentSigned message.
-    fn get_sign_context_for_revoke_and_ack_message(&self) -> Musig2SignContext {
+    fn get_sign_context_for_revoke_and_ack_message(
+        &self,
+    ) -> Result<Musig2SignContext, ProcessingChannelError> {
         let common_ctx = {
             let local_pubkey = self.get_local_channel_public_keys().funding_pubkey;
             let remote_pubkey = self.get_remote_channel_public_keys().funding_pubkey;
             let pubkeys = [local_pubkey, remote_pubkey];
             let key_agg_ctx = KeyAggContext::new(pubkeys).expect("Valid pubkeys");
-            let remote_nonce = self
-                .get_last_used_remote_nonce()
-                .expect("TODO: handle receive revoke and ack without sending commitment signed");
+            let remote_nonce =
+                self.get_last_used_remote_nonce()
+                    .ok_or(ProcessingChannelError::InvalidState(
+                        "No last used remote nonce found, has the peer sent a RevokeAndAck without us sending CommitmentSigned"
+                            .to_string(),
+                    ))?;
             let local_nonce = self.get_local_musig2_pubnonce();
             let agg_nonce = AggNonce::sum([local_nonce, remote_nonce]);
             Musig2CommonContext {
@@ -6129,11 +6134,11 @@ impl ChannelActorState {
             }
         };
 
-        Musig2SignContext {
+        Ok(Musig2SignContext {
             common_ctx,
             seckey: self.signer.funding_key.clone(),
             secnonce: self.get_local_musig2_secnonce(),
-        }
+        })
     }
 
     // Should the local send tx_signatures first?
