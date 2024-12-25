@@ -438,7 +438,7 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
+                state.handle_revoke_and_ack_peer_message(&self.network, myself, revoke_and_ack)?;
                 self.flush_tlc_operations(myself, state).await;
                 Ok(())
             }
@@ -663,8 +663,12 @@ where
         let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
         if need_commitment_signed {
-            eprintln!("sending commitment_signed after first ack");
-            self.handle_commitment_signed_command(state)?;
+            if !state.tlc_state.waiting_ack {
+                eprintln!("sending commitment_signed after first ack");
+                self.handle_commitment_signed_command(state)?;
+            } else {
+                eprintln!("waiting ack for commitment_signed .............");
+            }
         }
 
         // flush remove tlc for received tlcs after replying ack for peer
@@ -2646,8 +2650,9 @@ impl TlcState {
         res
     }
 
-    pub fn update_for_revoke_and_ack(&mut self) {
+    pub fn update_for_revoke_and_ack(&mut self) -> bool {
         self.set_waiting_ack(false);
+        let mut need_another_commitment_signed = false;
         for tlc in self.offered_tlcs.tlcs.iter_mut() {
             let out_status = tlc.status.as_outbound_status();
             match out_status {
@@ -2655,6 +2660,7 @@ impl TlcState {
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::Committed);
                 }
                 OutboundTlcStatus::RemoveWaitPrevAck => {
+                    need_another_commitment_signed = true;
                     tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck);
                 }
                 OutboundTlcStatus::RemoveWaitAck => {
@@ -2668,6 +2674,7 @@ impl TlcState {
             let in_status = tlc.status.as_inbound_status();
             match in_status {
                 InboundTlctatus::AnnounceWaitPrevAck => {
+                    need_another_commitment_signed = true;
                     tlc.status = TlcStatus::Inbound(InboundTlctatus::AnnounceWaitAck);
                 }
                 InboundTlctatus::AnnounceWaitAck => {
@@ -2676,6 +2683,7 @@ impl TlcState {
                 _ => {}
             }
         }
+        need_another_commitment_signed || self.need_another_commitment_signed()
     }
 
     pub fn build_ack_transaction(&self, _for_remote: bool) -> Vec<TlcInfo> {
@@ -5538,6 +5546,7 @@ impl ChannelActorState {
     fn handle_revoke_and_ack_peer_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
+        myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> ProcessingChannelResult {
         eprintln!(
@@ -5692,7 +5701,14 @@ impl ChannelActorState {
         self.append_remote_commitment_point(next_per_commitment_point);
 
         eprintln!("handle revoke and ack peer message: {:?}", &revocation_data);
-        self.tlc_state.update_for_revoke_and_ack();
+        let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
+        if need_commitment_signed {
+            myself
+                .send_message(ChannelActorMessage::Command(
+                    ChannelCommand::CommitmentSigned(),
+                ))
+                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        }
 
         network
             .send_message(NetworkActorMessage::new_notification(
