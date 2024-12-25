@@ -97,7 +97,6 @@ impl Store {
         let mut options = Options::default();
         options.create_if_missing(true);
         options.set_compression_type(DBCompressionType::Lz4);
-        // dump trace log to /tmp/rocksdb.log
         let db = Arc::new(DB::open(&options, path).map_err(|e| e.to_string())?);
         Ok(db)
     }

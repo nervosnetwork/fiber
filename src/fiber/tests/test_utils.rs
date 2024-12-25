@@ -162,7 +162,6 @@ pub fn mock_ecdsa_signature() -> EcdsaSignature {
 
 pub fn generate_store() -> Store {
     let temp_dir = TempDir::new("test-fnn-node");
-    eprintln!("Store directory: {:?}", temp_dir.as_ref());
     let store = Store::new(temp_dir.as_ref());
     store.expect("create store")
 }

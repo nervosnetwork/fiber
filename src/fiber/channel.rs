@@ -443,7 +443,7 @@ where
                 if need_commitment_signed {
                     self.handle_commitment_signed_command(state)?;
                 }
-                self.flush_tlc_operations(myself, state).await;
+                self.update_tlc_status_on_ack(myself, state).await;
                 Ok(())
             }
             FiberChannelMessage::ChannelReady(_channel_ready) => {
@@ -710,7 +710,7 @@ where
         }
     }
 
-    async fn flush_tlc_operations(
+    async fn update_tlc_status_on_ack(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
