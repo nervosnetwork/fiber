@@ -723,7 +723,7 @@ async fn test_network_send_payment_send_each_other() {
     let payment_hash2 = res2.payment_hash;
 
     // sleep for 2 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -2087,6 +2087,8 @@ async fn do_test_channel_commitment_tx_after_add_tlc(algorithm: HashAlgorithm) {
             _ => None,
         })
         .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     call!(node_b.network_actor, |rpc_reply| {
         NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(

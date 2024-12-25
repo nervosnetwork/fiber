@@ -438,7 +438,14 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                state.handle_revoke_and_ack_peer_message(&self.network, myself, revoke_and_ack)?;
+                let need_commitment_signed = state.handle_revoke_and_ack_peer_message(
+                    &self.network,
+                    myself,
+                    revoke_and_ack,
+                )?;
+                if need_commitment_signed {
+                    self.handle_commitment_signed_command(state)?;
+                }
                 self.flush_tlc_operations(myself, state).await;
                 Ok(())
             }
@@ -1208,6 +1215,9 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.save_remote_nonce_for_raa();
+        if state.tlc_state.all_tlcs().count() > 0 {
+            state.tlc_state.set_waiting_ack(true);
+        }
         eprintln!("finished sent commitment_signed");
 
         match flags {
@@ -1257,7 +1267,6 @@ where
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
         self.handle_commitment_signed_command(state)?;
-        state.tlc_state.set_waiting_ack(true);
         Ok(tlc.tlc_id.into())
     }
 
@@ -1290,7 +1299,6 @@ where
 
         state.maybe_transition_to_shutdown(&self.network)?;
         self.handle_commitment_signed_command(state)?;
-        state.tlc_state.set_waiting_ack(true);
         Ok(())
     }
 
@@ -4555,6 +4563,7 @@ impl ChannelActorState {
                         include = for_remote;
                     }
                     TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck)
+                    | TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitAck)
                     | TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved) => {
                         include = !for_remote;
                     }
@@ -5548,7 +5557,7 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
-    ) -> ProcessingChannelResult {
+    ) -> Result<bool, ProcessingChannelError> {
         eprintln!(
             "begin to handle revoke and ack peer message: {:?}",
             &revoke_and_ack
@@ -5702,14 +5711,13 @@ impl ChannelActorState {
 
         eprintln!("handle revoke and ack peer message: {:?}", &revocation_data);
         let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
-        if need_commitment_signed {
-            myself
-                .send_message(ChannelActorMessage::Command(
-                    ChannelCommand::CommitmentSigned(),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        }
-
+        // if need_commitment_signed {
+        //     myself
+        //         .send_message(ChannelActorMessage::Command(
+        //             ChannelCommand::CommitmentSigned(),
+        //         ))
+        //         .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+        // }
         network
             .send_message(NetworkActorMessage::new_notification(
                 NetworkServiceEvent::RevokeAndAckReceived(
@@ -5720,7 +5728,7 @@ impl ChannelActorState {
                 ),
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
-        Ok(())
+        Ok(need_commitment_signed)
     }
 
     fn handle_reestablish_channel_message(
