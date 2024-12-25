@@ -5769,6 +5769,9 @@ impl ChannelActorState {
                             }
                         }
                     }
+                    // previous waiting_ack maybe true, reset it after reestablish the channel
+                    // if we need to resend CommitmentSigned message, it will be set to proper status again
+                    self.tlc_state.set_waiting_ack(false);
                     if need_resend_commitment_signed {
                         debug!("Resend CommitmentSigned message");
                         network
