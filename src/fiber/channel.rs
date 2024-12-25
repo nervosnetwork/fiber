@@ -2554,35 +2554,31 @@ impl TlcState {
         }
     }
 
-    pub fn commitment_signed(&self, for_remote: bool) -> Vec<TlcInfo> {
-        let mut active_tls = vec![];
-        for tlc in self.offered_tlcs.tlcs.iter() {
-            let include = match tlc.outbound_status() {
+    pub fn commitment_signed_tcls(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
+        self.offered_tlcs
+            .tlcs
+            .iter()
+            .filter(move |tlc| match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => for_remote,
                 OutboundTlcStatus::Committed => true,
                 OutboundTlcStatus::RemoteRemoved => for_remote,
                 OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
                 OutboundTlcStatus::RemoveWaitAck => false,
                 OutboundTlcStatus::RemoveAckConfirmed => false,
-            };
-            if include {
-                active_tls.push(tlc.clone());
-            }
-        }
-        for tlc in self.received_tlcs.tlcs.iter() {
-            let include = match tlc.inbound_status() {
-                InboundTlctatus::RemoteAnnounced => !for_remote,
-                InboundTlctatus::AnnounceWaitPrevAck => !for_remote,
-                InboundTlctatus::AnnounceWaitAck => true,
-                InboundTlctatus::Committed => true,
-                InboundTlctatus::LocalRemoved => !for_remote,
-                InboundTlctatus::RemoveAckConfirmed => false,
-            };
-            if include {
-                active_tls.push(tlc.clone());
-            }
-        }
-        return active_tls;
+            })
+            .chain(
+                self.received_tlcs
+                    .tlcs
+                    .iter()
+                    .filter(move |tlc| match tlc.inbound_status() {
+                        InboundTlctatus::RemoteAnnounced => !for_remote,
+                        InboundTlctatus::AnnounceWaitPrevAck => !for_remote,
+                        InboundTlctatus::AnnounceWaitAck => true,
+                        InboundTlctatus::Committed => true,
+                        InboundTlctatus::LocalRemoved => !for_remote,
+                        InboundTlctatus::RemoveAckConfirmed => false,
+                    }),
+            )
     }
 
     pub fn update_for_commitment_signed(&mut self) -> bool {
@@ -4498,17 +4494,17 @@ impl ChannelActorState {
 
     fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed(for_remote)
-            .into_iter()
+            .commitment_signed_tcls(for_remote)
             .filter(|tlc| tlc.is_received())
+            .map(|tlc| tlc.clone())
             .collect()
     }
 
     fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed(for_remote)
-            .into_iter()
+            .commitment_signed_tcls(for_remote)
             .filter(|tlc| tlc.is_offered())
+            .map(|tlc| tlc.clone())
             .collect()
     }
 

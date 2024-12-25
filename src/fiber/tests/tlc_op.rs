@@ -13,10 +13,9 @@ use ckb_types::packed::Byte32;
 use ractor::{async_trait as rasync_trait, Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 
-fn sign_tlcs(tlcs: &Vec<TlcInfo>) -> Hash256 {
+fn sign_tlcs<'a>(tlcs: impl Iterator<Item = &'a TlcInfo>) -> Hash256 {
     // serialize active_tls to ge a hash
     let mut keyparts = tlcs
-        .iter()
         .map(|tlc| (tlc.amount, tlc.payment_hash))
         .collect::<Vec<_>>();
 
@@ -227,8 +226,8 @@ impl Actor for TlcActor {
                     .expect("send ok");
 
                 // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed(false);
-                let hash = sign_tlcs(&tlcs);
+                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let hash = sign_tlcs(tlcs);
                 eprintln!("got hash: {:?}", hash);
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
@@ -255,8 +254,8 @@ impl Actor for TlcActor {
                     .expect("send ok");
 
                 // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed(false);
-                let hash = sign_tlcs(&tlcs);
+                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let hash = sign_tlcs(tlcs);
                 eprintln!("got hash: {:?}", hash);
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
@@ -294,8 +293,8 @@ impl Actor for TlcActor {
                     "\nPeer {} processed peer commitment_signed ....",
                     state.peer_id
                 );
-                let tlcs = state.tlc_state.commitment_signed(true);
-                let hash = sign_tlcs(&tlcs);
+                let tlcs = state.tlc_state.commitment_signed_tcls(true);
+                let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
                 let peer = state.get_peer();
@@ -303,8 +302,8 @@ impl Actor for TlcActor {
                 state.tlc_state.update_for_commitment_signed();
 
                 eprintln!("sending peer revoke and ack ....");
-                let tlcs = state.tlc_state.commitment_signed(false);
-                let hash = sign_tlcs(&tlcs);
+                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let hash = sign_tlcs(tlcs);
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
                         peer.clone(),
@@ -315,8 +314,8 @@ impl Actor for TlcActor {
                 // send commitment signed from our side if necessary
                 if state.tlc_state.need_another_commitment_signed() {
                     eprintln!("sending another commitment signed ....");
-                    let tlcs = state.tlc_state.commitment_signed(false);
-                    let hash = sign_tlcs(&tlcs);
+                    let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                    let hash = sign_tlcs(tlcs);
                     self.network
                         .send_message(NetworkActorMessage::PeerMsg(
                             peer,
@@ -327,8 +326,8 @@ impl Actor for TlcActor {
             }
             TlcActorMessage::PeerRevokeAndAck(peer_hash) => {
                 eprintln!("Peer {} processed peer revoke and ack ....", state.peer_id);
-                let tlcs = state.tlc_state.commitment_signed(true);
-                let hash = sign_tlcs(&tlcs);
+                let tlcs = state.tlc_state.commitment_signed_tcls(true);
+                let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
                 state.tlc_state.update_for_revoke_and_ack();
@@ -499,10 +498,10 @@ fn test_tlc_state_v2() {
     tlc_state_2.add_received_tlc(add_tlc1);
     tlc_state_2.add_received_tlc(add_tlc2);
 
-    let hash1 = sign_tlcs(&tlc_state.commitment_signed(true));
+    let hash1 = sign_tlcs(tlc_state.commitment_signed_tcls(true));
     eprintln!("hash1: {:?}", hash1);
 
-    let hash2 = sign_tlcs(&tlc_state_2.commitment_signed(false));
+    let hash2 = sign_tlcs(tlc_state_2.commitment_signed_tcls(false));
     eprintln!("hash2: {:?}", hash2);
     assert_eq!(hash1, hash2);
 }

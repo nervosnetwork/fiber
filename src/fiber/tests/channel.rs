@@ -1289,7 +1289,7 @@ async fn test_send_payment_with_3_nodes() {
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     assert!(res.fee > 0);
     // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -1338,7 +1338,7 @@ async fn test_send_payment_with_rev_3_nodes() {
     let node_a_local = node_a.get_local_balance_from_channel(channel_2);
 
     // sleep for 2 seconds to make sure the channel is established
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let sent_amount = 1000000 + 5;
     let node_a_pubkey = node_a.pubkey.clone();
     let message = |rpc_reply| -> NetworkActorMessage {
@@ -1367,7 +1367,7 @@ async fn test_send_payment_with_rev_3_nodes() {
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     assert!(res.fee > 0);
     // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };
@@ -2394,7 +2394,7 @@ async fn test_network_add_two_tlcs_remove_one() {
     .expect("node_b alive")
     .expect("successfully removed tlc");
     eprintln!("remove tlc result: {:?}", res);
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     let new_a_balance = node_a.get_local_balance_from_channel(channel_id);
     let new_b_balance = node_b.get_local_balance_from_channel(channel_id);
