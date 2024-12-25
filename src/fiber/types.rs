@@ -30,6 +30,7 @@ use secp256k1::{
 use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::str::FromStr;
@@ -2407,6 +2408,20 @@ impl BroadcastMessageWithTimestamp {
     }
 }
 
+impl Ord for BroadcastMessageWithTimestamp {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.message_id()
+            .cmp(&other.message_id())
+            .then(self.timestamp().cmp(&other.timestamp()))
+    }
+}
+
+impl PartialOrd for BroadcastMessageWithTimestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl From<BroadcastMessageWithTimestamp> for BroadcastMessage {
     fn from(broadcast_message_with_timestamp: BroadcastMessageWithTimestamp) -> Self {
         match broadcast_message_with_timestamp {
@@ -2592,6 +2607,42 @@ pub enum BroadcastMessageID {
     NodeAnnouncement(Pubkey),
 }
 
+// We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
+// so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
+impl Ord for BroadcastMessageID {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (
+                BroadcastMessageID::ChannelAnnouncement(outpoint1),
+                BroadcastMessageID::ChannelAnnouncement(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::ChannelUpdate(outpoint1),
+                BroadcastMessageID::ChannelUpdate(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::NodeAnnouncement(pubkey1),
+                BroadcastMessageID::NodeAnnouncement(pubkey2),
+            ) => pubkey1.cmp(pubkey2),
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Less,
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Greater,
+            (
+                BroadcastMessageID::ChannelAnnouncement(_),
+                BroadcastMessageID::NodeAnnouncement(_),
+            ) => Ordering::Less,
+            (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
+                Ordering::Greater
+            }
+        }
+    }
+}
+
+impl PartialOrd for BroadcastMessageID {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 // 1 byte for message type, 36 bytes for message id
 const MESSAGE_ID_SIZE: usize = 1 + 36;
 // 8 bytes for timestamp, MESSAGE_ID_SIZE bytes for message id
@@ -2717,13 +2768,13 @@ impl Cursor {
 }
 
 impl Ord for Cursor {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.to_bytes().cmp(&other.to_bytes())
     }
 }
 
 impl PartialOrd for Cursor {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
