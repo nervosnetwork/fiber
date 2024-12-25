@@ -354,8 +354,8 @@ fn test_channel_actor_state_store() {
         }),
         commitment_numbers: Default::default(),
         remote_shutdown_script: Some(Script::default()),
-        last_used_nonce_in_commitment_signed: None,
-        remote_nonces: vec![(0, pub_nonce.clone())],
+        last_committed_remote_nonce: None,
+        last_used_remote_nonce: None,
         remote_commitment_points: vec![
             (0, gen_rand_fiber_public_key()),
             (1, gen_rand_fiber_public_key()),
