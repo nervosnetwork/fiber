@@ -659,11 +659,13 @@ async fn test_network_send_payment_send_each_other() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (node_a, node_b, _new_channel_id) =
+    let (node_a, node_b, new_channel_id) =
         create_nodes_with_established_channel(node_a_funding_amount, node_b_funding_amount, true)
             .await;
     // Wait for the channel announcement to be broadcasted
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+    let node_a_old_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_old_balance = node_b.get_local_balance_from_channel(new_channel_id);
 
     let node_a_pubkey = node_a.pubkey.clone();
     let node_b_pubkey = node_b.pubkey.clone();
@@ -699,7 +701,7 @@ async fn test_network_send_payment_send_each_other() {
         NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
             SendPaymentCommand {
                 target_pubkey: Some(node_a_pubkey),
-                amount: Some(10000),
+                amount: Some(9999),
                 payment_hash: None,
                 final_tlc_expiry_delta: None,
                 invoice: None,
@@ -723,7 +725,7 @@ async fn test_network_send_payment_send_each_other() {
     let payment_hash2 = res2.payment_hash;
 
     // sleep for 2 seconds to make sure the payment is processed
-    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash1, rpc_reply))
@@ -743,6 +745,15 @@ async fn test_network_send_payment_send_each_other() {
 
     assert_eq!(res.status, PaymentSessionStatus::Success);
     assert_eq!(res.failed_error, None);
+
+    let node_a_new_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_new_balance = node_b.get_local_balance_from_channel(new_channel_id);
+
+    // assert the balance is right,
+    // node_a send 10000 to node_b, and node_b send 9999 to node_a
+    // so the balance should be node_a_old_balance - 1, node_b_old_balance + 1
+    assert_eq!(node_a_new_balance, node_a_old_balance - 1);
+    assert_eq!(node_b_new_balance, node_b_old_balance + 1);
 }
 
 #[tokio::test]

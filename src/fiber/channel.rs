@@ -438,11 +438,8 @@ where
                 Ok(())
             }
             FiberChannelMessage::RevokeAndAck(revoke_and_ack) => {
-                let need_commitment_signed = state.handle_revoke_and_ack_peer_message(
-                    &self.network,
-                    myself,
-                    revoke_and_ack,
-                )?;
+                let need_commitment_signed =
+                    state.handle_revoke_and_ack_peer_message(&self.network, revoke_and_ack)?;
                 if need_commitment_signed {
                     self.handle_commitment_signed_command(state)?;
                 }
@@ -1215,11 +1212,16 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.save_remote_nonce_for_raa();
-        if state.tlc_state.all_tlcs().count() > 0 {
+        if state
+            .tlc_state
+            .all_tlcs()
+            .filter(|tlc| tlc.is_offered())
+            .count()
+            > 0
+        {
             state.tlc_state.set_waiting_ack(true);
         }
         eprintln!("finished sent commitment_signed");
-
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
@@ -2264,7 +2266,6 @@ pub enum OutboundTlcStatus {
     RemoveWaitPrevAck,
     RemoveWaitAck,
     RemoveAckConfirmed,
-    RemoveSettled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2275,7 +2276,6 @@ pub enum InboundTlctatus {
     Committed,
     LocalRemoved,
     RemoveAckConfirmed,
-    RemoveSettled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2592,30 +2592,26 @@ impl TlcState {
     pub fn commitment_signed(&self, for_remote: bool) -> Vec<TlcInfo> {
         let mut active_tls = vec![];
         for tlc in self.offered_tlcs.tlcs.iter() {
-            let status = tlc.status.as_outbound_status();
-            let include = match status {
+            let include = match tlc.status.as_outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => for_remote,
                 OutboundTlcStatus::Committed => true,
                 OutboundTlcStatus::RemoteRemoved => for_remote,
                 OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
                 OutboundTlcStatus::RemoveWaitAck => false,
                 OutboundTlcStatus::RemoveAckConfirmed => false,
-                OutboundTlcStatus::RemoveSettled => false,
             };
             if include {
                 active_tls.push(tlc.clone());
             }
         }
         for tlc in self.received_tlcs.tlcs.iter() {
-            let status = tlc.status.as_inbound_status();
-            let include = match status {
+            let include = match tlc.status.as_inbound_status() {
                 InboundTlctatus::RemoteAnnounced => !for_remote,
                 InboundTlctatus::AnnounceWaitPrevAck => !for_remote,
                 InboundTlctatus::AnnounceWaitAck => true,
                 InboundTlctatus::Committed => true,
                 InboundTlctatus::LocalRemoved => !for_remote,
                 InboundTlctatus::RemoveAckConfirmed => false,
-                InboundTlctatus::RemoveSettled => false,
             };
             if include {
                 active_tls.push(tlc.clone());
@@ -4664,12 +4660,7 @@ impl ChannelActorState {
             b.sort_by(|x, y| u64::from(x.0.tlc_id).cmp(&u64::from(y.0.tlc_id)));
             [a, b].concat()
         };
-        // //eprintln!("active tlcs: {:?}", tlcs);
-        // eprintln!("active tlcs count: {}, local: {}", tlcs.len(), for_remote);
-        // for tlc in &tlcs {
-        //     eprintln!("tlc {}", tlc.0.log());
-        // }
-        // eprintln!("==========================");
+
         if tlcs.is_empty() {
             Vec::new()
         } else {
@@ -5555,7 +5546,6 @@ impl ChannelActorState {
     fn handle_revoke_and_ack_peer_message(
         &mut self,
         network: &ActorRef<NetworkActorMessage>,
-        myself: &ActorRef<ChannelActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
         eprintln!(
