@@ -1182,17 +1182,16 @@ where
             ))
             .expect(ASSUME_NETWORK_ACTOR_ALIVE);
         state.save_remote_nonce_for_raa();
-        if state.tlc_state.all_tlcs().count() > 0 {
-            state.tlc_state.set_waiting_ack(true);
-        }
-        eprintln!("finished sent commitment_signed");
+
         match flags {
             CommitmentSignedFlags::SigningCommitment(flags) => {
                 let flags = flags | SigningCommitmentFlags::OUR_COMMITMENT_SIGNED_SENT;
                 state.update_state(ChannelState::SigningCommitment(flags));
                 state.maybe_transition_to_tx_signatures(flags, &self.network)?;
             }
-            CommitmentSignedFlags::ChannelReady() => {}
+            CommitmentSignedFlags::ChannelReady() => {
+                state.tlc_state.set_waiting_ack(true);
+            }
             CommitmentSignedFlags::PendingShutdown() => {
                 state.maybe_transition_to_shutdown(&self.network)?;
             }

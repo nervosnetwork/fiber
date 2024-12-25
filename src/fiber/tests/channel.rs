@@ -2581,6 +2581,7 @@ async fn do_test_add_tlc_waiting_ack() {
         }
     }
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     // send from b to a
     for i in 1..=2 {
         let add_tlc_command = AddTlcCommand {
@@ -2607,6 +2608,7 @@ async fn do_test_add_tlc_waiting_ack() {
             let code = add_tlc_result.unwrap_err();
             assert_eq!(code.error_code, TlcErrorCode::TemporaryChannelFailure);
         } else {
+            eprintln!("add_tlc_result: {:?}", add_tlc_result);
             assert!(add_tlc_result.is_ok());
         }
     }
