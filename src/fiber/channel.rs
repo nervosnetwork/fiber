@@ -689,22 +689,19 @@ where
             state.tlc_state.offered_tlcs.tlcs.iter_mut()
         };
         let settled_tlcs: Vec<_> = pending_tlcs
-            .filter_map(|tlc| {
-                if let Some((_removed_at, reason)) = &tlc.removed_at {
-                    if matches!(
+            .filter(|tlc| {
+                tlc.removed_at.is_some()
+                    && matches!(
                         tlc.status,
                         TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                             | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
-                    ) {
-                        return Some((tlc.tlc_id, reason.clone()));
-                    }
-                }
-                None
+                    )
             })
+            .map(|tlc| tlc.tlc_id)
             .collect();
 
-        for (tlc_id, reason) in settled_tlcs {
-            self.apply_remove_tlc_operation(myself, state, tlc_id, reason)
+        for tlc_id in settled_tlcs {
+            self.apply_remove_tlc_operation(myself, state, tlc_id)
                 .await
                 .expect("expect remove tlc success");
         }
@@ -716,7 +713,6 @@ where
         state: &mut ChannelActorState,
     ) {
         let apply_tlcs = state.tlc_state.get_committed_received_tlcs();
-        eprintln!("flushing {} tlcs", apply_tlcs.len());
         for add_tlc in apply_tlcs {
             if add_tlc.removed_at.is_some() {
                 continue;
@@ -760,7 +756,6 @@ where
 
         // flush outbound tlcs
         self.apply_settled_remvoe_tlcs(myself, state, false).await;
-        eprintln!("end flusing now ...................");
     }
 
     async fn try_to_relay_remove_tlc(
@@ -1045,11 +1040,9 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
-        remove_reason: RemoveTlcReason,
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
-
-        let tlc_info = state.remove_tlc_with_reason(tlc_id, &remove_reason)?;
+        let (tlc_info, remove_reason) = state.remove_tlc_with_reason(tlc_id)?;
         if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
             && self.store.get_invoice(&tlc_info.payment_hash).is_some()
         {
@@ -1060,15 +1053,14 @@ where
 
         if let (
             Some(ref udt_type_script),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { .. }),
         ) = (state.funding_udt_type_script.clone(), &remove_reason)
         {
-            let mut tlc = tlc_info.clone();
-            tlc.payment_preimage = Some(*payment_preimage);
+            assert!(tlc_info.payment_preimage.is_some());
             self.subscribers
                 .settled_tlcs_subscribers
                 .send(TlcNotification {
-                    tlc,
+                    tlc: tlc_info.clone(),
                     channel_id,
                     script: udt_type_script.clone(),
                 });
@@ -4306,16 +4298,16 @@ impl ChannelActorState {
     pub fn remove_tlc_with_reason(
         &mut self,
         tlc_id: TLCId,
-        reason: &RemoveTlcReason,
-    ) -> Result<TlcInfo, ProcessingChannelError> {
-        let current = self.tlc_state.get(&tlc_id).expect("TLC exists").clone();
+    ) -> Result<(TlcInfo, RemoveTlcReason), ProcessingChannelError> {
+        let mut current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
+        let (_remove_at, reason) = current.removed_at.clone().expect("expect remove_at exist");
         assert!(matches!(
             current.status,
             TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                 | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
         ));
 
-        if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
+        if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = &reason {
             let filled_payment_hash: Hash256 =
                 current.hash_algorithm.hash(fulfill.payment_preimage).into();
             if current.payment_hash != filled_payment_hash {
@@ -4339,13 +4331,14 @@ impl ChannelActorState {
 
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
+            current.payment_preimage = Some(fulfill.payment_preimage);
 
             eprintln!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
         }
         self.tlc_state.apply_remove_tlc(tlc_id);
 
-        Ok(current.clone())
+        Ok((current.clone(), reason))
     }
 
     pub fn get_local_channel_public_keys(&self) -> &ChannelBasePublicKeys {
