@@ -24,6 +24,7 @@ use tentacle::{
     secio::PeerId,
     service::{ProtocolHandle, ProtocolMeta, ServiceAsyncControl, SessionType},
     traits::ServiceProtocol,
+    utils::{is_reachable, multiaddr_to_socketaddr},
     SessionId,
 };
 use tokio::sync::oneshot;
@@ -858,6 +859,7 @@ where
 {
     async fn new(
         maintenance_interval: Duration,
+        announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
@@ -871,6 +873,7 @@ where
             ExtendedGossipMessageStoreActor::new(),
             (
                 maintenance_interval,
+                announce_private_addr,
                 store.clone(),
                 gossip_actor,
                 chain_actor,
@@ -982,6 +985,7 @@ pub enum GossipMessageProcessingError {
 }
 
 pub struct ExtendedGossipMessageStoreState<S> {
+    announce_private_addr: bool,
     store: S,
     gossip_actor: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
@@ -993,11 +997,13 @@ pub struct ExtendedGossipMessageStoreState<S> {
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     fn new(
+        announce_private_addr: bool,
         store: S,
         gossip_actor: ActorRef<GossipActorMessage>,
         chain_actor: ActorRef<CkbChainMessage>,
     ) -> Self {
         Self {
+            announce_private_addr,
             store,
             gossip_actor,
             chain_actor,
@@ -1096,6 +1102,20 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             ));
         }
 
+        if !self.announce_private_addr {
+            if let BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) = &message {
+                if !node_announcement.addresses.iter().any(|addr| {
+                    multiaddr_to_socketaddr(addr)
+                        .map(|socket_addr| is_reachable(socket_addr.ip()))
+                        .unwrap_or_default()
+                }) {
+                    return Err(GossipMessageProcessingError::ProcessingError(
+                        "private address node announcement".to_string(),
+                    ));
+                }
+            }
+        }
+
         trace!("New gossip message saved to memory: {:?}", message);
         self.messages_to_be_saved.insert(message.clone());
         Ok(message)
@@ -1137,6 +1157,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
     type State = ExtendedGossipMessageStoreState<S>;
     type Arguments = (
         Duration,
+        bool,
         S,
         ActorRef<GossipActorMessage>,
         ActorRef<CkbChainMessage>,
@@ -1145,12 +1166,19 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (gossip_store_maintenance_interval, store, gossip_actor, chain_actor): Self::Arguments,
+        (
+            gossip_store_maintenance_interval,
+            announce_private_addr,
+            store,
+            gossip_actor,
+            chain_actor,
+        ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         myself.send_interval(gossip_store_maintenance_interval, || {
             ExtendedGossipMessageStoreMessage::Tick
         });
         Ok(ExtendedGossipMessageStoreState::new(
+            announce_private_addr,
             store,
             gossip_actor,
             chain_actor,
@@ -2123,6 +2151,7 @@ impl GossipProtocolHandle {
         name: Option<String>,
         gossip_network_maintenance_interval: Duration,
         gossip_store_maintenance_interval: Duration,
+        announce_private_addr: bool,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
@@ -2141,6 +2170,7 @@ impl GossipProtocolHandle {
                 store_sender,
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
+                announce_private_addr,
                 store,
                 chain_actor,
             ),
@@ -2184,6 +2214,7 @@ where
         oneshot::Sender<ExtendedGossipMessageStore<S>>,
         Duration,
         Duration,
+        bool,
         S,
         ActorRef<CkbChainMessage>,
     );
@@ -2191,10 +2222,19 @@ where
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        (rx, tx, network_maintenance_interval, store_maintenance_interval, store, chain_actor): Self::Arguments,
+        (
+            rx,
+            tx,
+            network_maintenance_interval,
+            store_maintenance_interval,
+            announce_private_addr,
+            store,
+            chain_actor,
+        ): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         let store = ExtendedGossipMessageStore::new(
             store_maintenance_interval,
+            announce_private_addr,
             store,
             myself.clone(),
             chain_actor.clone(),

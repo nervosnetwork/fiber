@@ -138,6 +138,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
                 node_public_key.clone().into(),
+                fiber_config.announce_private_addr(),
             )));
 
             let secret_key = ckb_config.read_secret_key().map_err(|err| {
