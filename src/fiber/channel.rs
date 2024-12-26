@@ -2062,14 +2062,12 @@ where
                     remote_commitment_number: channel.get_current_commitment_number(false),
                 };
 
-                let command = FiberMessageWithPeerId::new(
-                    self.get_remote_peer_id(),
-                    FiberMessage::reestablish_channel(reestablish_channel),
-                );
-
                 self.network
                     .send_message(NetworkActorMessage::new_command(
-                        NetworkActorCommand::SendFiberMessage(command),
+                        NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
+                            self.get_remote_peer_id(),
+                            FiberMessage::reestablish_channel(reestablish_channel),
+                        )),
                     ))
                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
@@ -4007,8 +4005,6 @@ impl ChannelActorState {
         let sign_ctx = {
             let local_nonce = self.get_local_nonce();
             let remote_nonce = self.get_remote_nonce();
-            eprintln!("local_nonce: {:?}", local_nonce);
-            eprintln!("remote_nonce: {:?}", remote_nonce);
             let nonces = [local_nonce, remote_nonce];
             let agg_nonce = AggNonce::sum(nonces);
             Musig2SignContext {
@@ -4047,17 +4043,13 @@ impl ChannelActorState {
             };
 
             let commitment_number = self.get_remote_commitment_number() - 1;
-            eprintln!("send first commitment_number: {}", commitment_number);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
                 commitment_number.to_be_bytes().as_slice(),
             ]
             .concat();
-            eprintln!(
-                "send first commitment_lock_script_args: {:?}",
-                commitment_lock_script_args
-            );
+
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -5530,6 +5522,7 @@ impl ChannelActorState {
             "begin to handle revoke and ack peer message: {:?}",
             &revoke_and_ack
         );
+        self.tlc_state.debug();
         let RevokeAndAck {
             channel_id: _,
             revocation_partial_signature,
@@ -5698,8 +5691,8 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
     ) -> ProcessingChannelResult {
         debug!(
-            "Handling reestablish channel message: {:?}, our commitment_numbers {:?}",
-            reestablish_channel, self.commitment_numbers,
+            "Handling reestablish channel message: {:?}, our commitment_numbers {:?} in channel state {:?}",
+            reestablish_channel, self.commitment_numbers, self.state
         );
         self.reestablishing = false;
         match self.state {
@@ -5763,6 +5756,10 @@ impl ChannelActorState {
                     // previous waiting_ack maybe true, reset it after reestablish the channel
                     // if we need to resend CommitmentSigned message, it will be set to proper status again
                     self.tlc_state.set_waiting_ack(false);
+                    debug!(
+                        "Resend AddTlc and RemoveTlc messages if needed: {}",
+                        need_resend_commitment_signed
+                    );
                     if need_resend_commitment_signed {
                         debug!("Resend CommitmentSigned message");
                         network
@@ -5776,6 +5773,7 @@ impl ChannelActorState {
                     }
                 } else if acutal_local_commitment_number == expected_local_commitment_number + 1 {
                     // wait for remote to resend the RevokeAndAck message, do nothing here
+                    warn!("wait for remote to resend the RevokeAndAck message, do nothing here");
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(
@@ -5793,6 +5791,17 @@ impl ChannelActorState {
                     // and resend the RevokeAndAck message.
                     self.set_remote_commitment_number(acutal_remote_commitment_number);
                     self.send_revoke_and_ack_message(network)?;
+                    let need_commitment_signed = self.tlc_state.update_for_commitment_signed();
+                    if need_commitment_signed {
+                        network
+                            .send_message(NetworkActorMessage::new_command(
+                                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                                    channel_id: self.get_id(),
+                                    command: ChannelCommand::CommitmentSigned(),
+                                }),
+                            ))
+                            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    }
                 } else {
                     // unreachable state, just log an error for potential bugs
                     error!(

@@ -226,7 +226,7 @@ impl Actor for TlcActor {
                     .expect("send ok");
 
                 // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
                 let hash = sign_tlcs(tlcs);
                 eprintln!("got hash: {:?}", hash);
                 self.network
@@ -254,7 +254,7 @@ impl Actor for TlcActor {
                     .expect("send ok");
 
                 // send commitment signed
-                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
                 let hash = sign_tlcs(tlcs);
                 eprintln!("got hash: {:?}", hash);
                 self.network
@@ -293,7 +293,7 @@ impl Actor for TlcActor {
                     "\nPeer {} processed peer commitment_signed ....",
                     state.peer_id
                 );
-                let tlcs = state.tlc_state.commitment_signed_tcls(true);
+                let tlcs = state.tlc_state.commitment_signed_tlcs(true);
                 let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
@@ -302,7 +302,7 @@ impl Actor for TlcActor {
                 state.tlc_state.update_for_commitment_signed();
 
                 eprintln!("sending peer revoke and ack ....");
-                let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                let tlcs = state.tlc_state.commitment_signed_tlcs(false);
                 let hash = sign_tlcs(tlcs);
                 self.network
                     .send_message(NetworkActorMessage::PeerMsg(
@@ -314,7 +314,7 @@ impl Actor for TlcActor {
                 // send commitment signed from our side if necessary
                 if state.tlc_state.need_another_commitment_signed() {
                     eprintln!("sending another commitment signed ....");
-                    let tlcs = state.tlc_state.commitment_signed_tcls(false);
+                    let tlcs = state.tlc_state.commitment_signed_tlcs(false);
                     let hash = sign_tlcs(tlcs);
                     self.network
                         .send_message(NetworkActorMessage::PeerMsg(
@@ -326,7 +326,7 @@ impl Actor for TlcActor {
             }
             TlcActorMessage::PeerRevokeAndAck(peer_hash) => {
                 eprintln!("Peer {} processed peer revoke and ack ....", state.peer_id);
-                let tlcs = state.tlc_state.commitment_signed_tcls(true);
+                let tlcs = state.tlc_state.commitment_signed_tlcs(true);
                 let hash = sign_tlcs(tlcs);
                 assert_eq!(hash, peer_hash);
 
