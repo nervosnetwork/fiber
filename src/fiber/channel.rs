@@ -935,9 +935,6 @@ where
                 if invoice_status != CkbInvoiceStatus::Open {
                     return Err(ProcessingChannelError::FinalInvoiceInvalid(invoice_status));
                 }
-                self.store
-                    .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
-                    .expect("update invoice status failed");
             }
 
             // if this is the last hop, store the preimage.
@@ -952,6 +949,12 @@ where
                 let filled_payment_hash: Hash256 = add_tlc.hash_algorithm.hash(preimage).into();
                 if add_tlc.payment_hash != filled_payment_hash {
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
+                }
+                // update invoice status to received only all the error checking passed
+                if let Some(_invoice) = self.store.get_invoice(&payment_hash) {
+                    self.store
+                        .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
+                        .expect("update invoice status failed");
                 }
                 state.set_received_tlc_preimage(add_tlc.tlc_id.into(), Some(preimage));
             } else {
@@ -1044,10 +1047,9 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
         tlc_id: TLCId,
-        reason: RemoveTlcReason,
+        remove_reason: RemoveTlcReason,
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
-        let remove_reason = reason.clone();
 
         let tlc_info = state
             .remove_tlc_with_reason(tlc_id, &remove_reason)

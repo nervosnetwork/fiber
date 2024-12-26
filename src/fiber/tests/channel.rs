@@ -5375,9 +5375,11 @@ async fn test_send_payment_will_fail_with_no_invoice_preimage() {
 
     let new_amount = node_3.get_local_balance_from_channel(channels[2]);
     assert_eq!(new_amount, old_amount);
+
+    // we should never update the invoice status if there is an error
     assert_eq!(
         node_3.get_invoice_status(ckb_invoice.payment_hash()),
-        Some(CkbInvoiceStatus::Received)
+        Some(CkbInvoiceStatus::Open)
     );
 }
 
