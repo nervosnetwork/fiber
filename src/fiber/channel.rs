@@ -830,10 +830,8 @@ where
                     error!("invoice already paid, ignore");
                 }
                 _ => {
-                    eprintln!("update invoice status to paid: {:?}", tlc.payment_hash);
-                    self.store
-                        .update_invoice_status(&tlc.payment_hash, CkbInvoiceStatus::Paid)
-                        .expect("update invoice status error");
+                    // do nothing
+                    // invoice status will be updated to paid after apply remove tlc operation
                 }
             }
         }
@@ -1051,9 +1049,14 @@ where
     ) -> Result<(), ProcessingChannelError> {
         let channel_id = state.get_id();
 
-        let tlc_info = state
-            .remove_tlc_with_reason(tlc_id, &remove_reason)
-            .expect("expect remove tlc successfully");
+        let tlc_info = state.remove_tlc_with_reason(tlc_id, &remove_reason)?;
+        if matches!(remove_reason, RemoveTlcReason::RemoveTlcFulfill(_))
+            && self.store.get_invoice(&tlc_info.payment_hash).is_some()
+        {
+            self.store
+                .update_invoice_status(&tlc_info.payment_hash, CkbInvoiceStatus::Paid)
+                .expect("update invoice status failed");
+        }
 
         if let (
             Some(ref udt_type_script),
