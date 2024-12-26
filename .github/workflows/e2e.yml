@@ -110,14 +110,15 @@ jobs:
               break
             else
               count=$((count + 1))
+              if [ $count -eq $try_number ]; then
+                echo "Reached maximum number of tries ($try_number), exiting with status 1"
+                exit 1
+              fi
               echo "Not all ports are open, waiting 3 seconds before retrying"
               sleep 3
             fi
           done
-          if [ $count -eq $try_number ]; then
-            echo "Reached maximum number of tries ($try_number), exiting with status 1"
-            exit 1
-          fi
+
 
           (cd ./tests/bruno; npm exec -- @usebruno/cli@1.20.0 run e2e/${{ matrix.workflow }} -r --env ${{ matrix.test_env }} ${{ matrix.extra_bru_args }} ) &
 
