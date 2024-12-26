@@ -1,6 +1,6 @@
 use crate::fiber::channel::TlcInfo;
 use crate::fiber::channel::{
-    CommitmentNumbers, InboundTlctatus, OutboundTlcStatus, TLCId, TlcState, TlcStatus,
+    CommitmentNumbers, InboundTlcStatus, OutboundTlcStatus, TLCId, TlcState, TlcStatus,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::types::RemoveTlcFulfill;
@@ -271,7 +271,7 @@ impl Actor for TlcActor {
                 );
                 let mut tlc = add_tlc.clone();
                 tlc.flip_mut();
-                tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
+                tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced);
                 state.tlc_state.add_received_tlc(tlc);
                 eprintln!("add peer tlc successfully: {:?}", add_tlc);
             }
@@ -493,8 +493,8 @@ fn test_tlc_state_v2() {
     let mut tlc_state_2 = TlcState::default();
     add_tlc1.flip_mut();
     add_tlc2.flip_mut();
-    add_tlc1.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
-    add_tlc2.status = TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced);
+    add_tlc1.status = TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced);
+    add_tlc2.status = TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced);
     tlc_state_2.add_received_tlc(add_tlc1);
     tlc_state_2.add_received_tlc(add_tlc2);
 

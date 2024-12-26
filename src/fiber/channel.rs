@@ -693,7 +693,7 @@ where
                 if let Some((_removed_at, reason)) = &tlc.removed_at {
                     if matches!(
                         tlc.status,
-                        TlcStatus::Inbound(InboundTlctatus::RemoveAckConfirmed)
+                        TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                             | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
                     ) {
                         return Some((tlc.tlc_id, reason.clone()));
@@ -2234,7 +2234,7 @@ pub enum OutboundTlcStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-pub enum InboundTlctatus {
+pub enum InboundTlcStatus {
     RemoteAnnounced,
     AnnounceWaitPrevAck,
     AnnounceWaitAck,
@@ -2246,7 +2246,7 @@ pub enum InboundTlctatus {
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum TlcStatus {
     Outbound(OutboundTlcStatus),
-    Inbound(InboundTlctatus),
+    Inbound(InboundTlcStatus),
 }
 
 impl TlcStatus {
@@ -2259,7 +2259,7 @@ impl TlcStatus {
         }
     }
 
-    pub fn as_inbound_status(&self) -> InboundTlctatus {
+    pub fn as_inbound_status(&self) -> InboundTlcStatus {
         match self {
             TlcStatus::Inbound(status) => status.clone(),
             _ => {
@@ -2323,7 +2323,7 @@ impl TlcInfo {
         self.status.as_outbound_status()
     }
 
-    pub fn inbound_status(&self) -> InboundTlctatus {
+    pub fn inbound_status(&self) -> InboundTlcStatus {
         self.status.as_inbound_status()
     }
 
@@ -2384,7 +2384,7 @@ impl PendingTlcs {
                     }
                 } else {
                     match tlc.inbound_status() {
-                        InboundTlctatus::Committed => true,
+                        InboundTlcStatus::Committed => true,
                         _ => false,
                     }
                 }
@@ -2487,7 +2487,7 @@ impl TlcState {
                 if tlc.is_offered() {
                     matches!(tlc.outbound_status(), OutboundTlcStatus::Committed)
                 } else {
-                    matches!(tlc.inbound_status(), InboundTlctatus::Committed)
+                    matches!(tlc.inbound_status(), InboundTlcStatus::Committed)
                 }
             })
     }
@@ -2536,8 +2536,9 @@ impl TlcState {
         reason: RemoveTlcReason,
     ) {
         if let Some(tlc) = self.get_mut(&TLCId::Received(tlc_id)) {
+            assert_eq!(tlc.inbound_status(), InboundTlcStatus::Committed);
             tlc.removed_at = Some((remove_at, reason.clone()));
-            tlc.status = TlcStatus::Inbound(InboundTlctatus::LocalRemoved);
+            tlc.status = TlcStatus::Inbound(InboundTlcStatus::LocalRemoved);
         }
     }
 
@@ -2548,6 +2549,7 @@ impl TlcState {
         reason: RemoveTlcReason,
     ) {
         if let Some(tlc) = self.get_mut(&TLCId::Offered(tlc_id)) {
+            assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
             tlc.removed_at = Some((remove_at, reason.clone()));
             tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
         }
@@ -2570,12 +2572,12 @@ impl TlcState {
                     .tlcs
                     .iter()
                     .filter(move |tlc| match tlc.inbound_status() {
-                        InboundTlctatus::RemoteAnnounced => !for_remote,
-                        InboundTlctatus::AnnounceWaitPrevAck => !for_remote,
-                        InboundTlctatus::AnnounceWaitAck => true,
-                        InboundTlctatus::Committed => true,
-                        InboundTlctatus::LocalRemoved => !for_remote,
-                        InboundTlctatus::RemoveAckConfirmed => false,
+                        InboundTlcStatus::RemoteAnnounced => !for_remote,
+                        InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
+                        InboundTlcStatus::AnnounceWaitAck => true,
+                        InboundTlcStatus::Committed => true,
+                        InboundTlcStatus::LocalRemoved => !for_remote,
+                        InboundTlcStatus::RemoveAckConfirmed => false,
                     }),
             )
     }
@@ -2598,12 +2600,12 @@ impl TlcState {
         }
         for tlc in self.received_tlcs.tlcs.iter_mut() {
             match tlc.inbound_status() {
-                InboundTlctatus::RemoteAnnounced => {
+                InboundTlcStatus::RemoteAnnounced => {
                     let status = if self.waiting_ack {
                         need_another_commitment_signed = true;
-                        InboundTlctatus::AnnounceWaitPrevAck
+                        InboundTlcStatus::AnnounceWaitPrevAck
                     } else {
-                        InboundTlctatus::AnnounceWaitAck
+                        InboundTlcStatus::AnnounceWaitAck
                     };
                     tlc.status = TlcStatus::Inbound(status)
                 }
@@ -2635,15 +2637,15 @@ impl TlcState {
 
         for tlc in self.received_tlcs.tlcs.iter_mut() {
             match tlc.inbound_status() {
-                InboundTlctatus::AnnounceWaitPrevAck => {
+                InboundTlcStatus::AnnounceWaitPrevAck => {
                     need_another_commitment_signed = true;
-                    tlc.status = TlcStatus::Inbound(InboundTlctatus::AnnounceWaitAck);
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::AnnounceWaitAck);
                 }
-                InboundTlctatus::AnnounceWaitAck => {
-                    tlc.status = TlcStatus::Inbound(InboundTlctatus::Committed);
+                InboundTlcStatus::AnnounceWaitAck => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::Committed);
                 }
-                InboundTlctatus::LocalRemoved => {
-                    tlc.status = TlcStatus::Inbound(InboundTlctatus::RemoveAckConfirmed);
+                InboundTlcStatus::LocalRemoved => {
+                    tlc.status = TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed);
                 }
                 _ => {}
             }
@@ -2665,9 +2667,9 @@ impl TlcState {
             let status = tlc.inbound_status();
             matches!(
                 status,
-                InboundTlctatus::RemoteAnnounced
-                    | InboundTlctatus::AnnounceWaitPrevAck
-                    | InboundTlctatus::AnnounceWaitAck
+                InboundTlcStatus::RemoteAnnounced
+                    | InboundTlcStatus::AnnounceWaitPrevAck
+                    | InboundTlcStatus::AnnounceWaitAck
             )
         })
     }
@@ -4312,7 +4314,7 @@ impl ChannelActorState {
         let current = self.tlc_state.get(&tlc_id).expect("TLC exists").clone();
         assert!(matches!(
             current.status,
-            TlcStatus::Inbound(InboundTlctatus::RemoveAckConfirmed)
+            TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed)
                 | TlcStatus::Outbound(OutboundTlcStatus::RemoveAckConfirmed)
         ));
 
@@ -4520,8 +4522,8 @@ impl ChannelActorState {
             if let Some(remove_at) = &tlc.removed_at {
                 let mut include = false;
                 match tlc.status {
-                    TlcStatus::Inbound(InboundTlctatus::LocalRemoved)
-                    | TlcStatus::Inbound(InboundTlctatus::RemoveAckConfirmed) => {
+                    TlcStatus::Inbound(InboundTlcStatus::LocalRemoved)
+                    | TlcStatus::Inbound(InboundTlcStatus::RemoveAckConfirmed) => {
                         include = for_remote;
                     }
                     TlcStatus::Outbound(OutboundTlcStatus::RemoveWaitPrevAck)
@@ -4724,10 +4726,20 @@ impl ChannelActorState {
                     "TLC is already removed".to_string(),
                 ));
             }
+            if (tlc.is_offered() && tlc.outbound_status() != OutboundTlcStatus::Committed)
+                || (tlc.is_received() && tlc.inbound_status() != InboundTlcStatus::Committed)
+            {
+                return Err(ProcessingChannelError::InvalidState(
+                    "TLC is not in Committed status".to_string(),
+                ));
+            }
             if let RemoveTlcReason::RemoveTlcFulfill(fulfill) = reason {
                 let filled_payment_hash: Hash256 =
                     tlc.hash_algorithm.hash(fulfill.payment_preimage).into();
                 if tlc.payment_hash != filled_payment_hash {
+                    // actually this branch should never be reached in normal case
+                    // `FinalIncorrectPreimage` will be returned in `apply_add_tlc_operation_with_peeled_onion_packet`
+                    // when the preimage is incorrect
                     return Err(ProcessingChannelError::FinalIncorrectPreimage);
                 }
             }
@@ -4839,7 +4851,7 @@ impl ChannelActorState {
     fn create_inbounding_tlc(&self, message: AddTlc) -> Result<TlcInfo, ProcessingChannelError> {
         let tlc_info = TlcInfo {
             tlc_id: TLCId::Received(message.tlc_id),
-            status: TlcStatus::Inbound(InboundTlctatus::RemoteAnnounced),
+            status: TlcStatus::Inbound(InboundTlcStatus::RemoteAnnounced),
             channel_id: self.get_id(),
             amount: message.amount,
             payment_hash: message.payment_hash,
