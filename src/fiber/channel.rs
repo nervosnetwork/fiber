@@ -2555,7 +2555,7 @@ impl TlcState {
         }
     }
 
-    pub fn commitment_signed_tcls(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
+    pub fn commitment_signed_tlcs(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
         self.offered_tlcs
             .tlcs
             .iter()
@@ -4495,7 +4495,7 @@ impl ChannelActorState {
 
     fn get_active_received_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed_tcls(for_remote)
+            .commitment_signed_tlcs(for_remote)
             .filter(|tlc| tlc.is_received())
             .map(|tlc| tlc.clone())
             .collect()
@@ -4503,7 +4503,7 @@ impl ChannelActorState {
 
     fn get_active_offered_tlcs(&self, for_remote: bool) -> Vec<TlcInfo> {
         self.tlc_state
-            .commitment_signed_tcls(for_remote)
+            .commitment_signed_tlcs(for_remote)
             .filter(|tlc| tlc.is_offered())
             .map(|tlc| tlc.clone())
             .collect()

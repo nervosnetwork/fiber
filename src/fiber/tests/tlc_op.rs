@@ -498,10 +498,10 @@ fn test_tlc_state_v2() {
     tlc_state_2.add_received_tlc(add_tlc1);
     tlc_state_2.add_received_tlc(add_tlc2);
 
-    let hash1 = sign_tlcs(tlc_state.commitment_signed_tcls(true));
+    let hash1 = sign_tlcs(tlc_state.commitment_signed_tlcs(true));
     eprintln!("hash1: {:?}", hash1);
 
-    let hash2 = sign_tlcs(tlc_state_2.commitment_signed_tcls(false));
+    let hash2 = sign_tlcs(tlc_state_2.commitment_signed_tlcs(false));
     eprintln!("hash2: {:?}", hash2);
     assert_eq!(hash1, hash2);
 }
