@@ -89,6 +89,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         profile: [dev, release]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
     steps:
       - uses: actions/checkout@v2
       - uses: dsherret/rust-toolchain-file@v1
