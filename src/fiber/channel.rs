@@ -658,10 +658,6 @@ where
         state: &mut ChannelActorState,
         commitment_signed: CommitmentSigned,
     ) -> Result<(), ProcessingChannelError> {
-        eprintln!(
-            "handle_commitment_signed_peer_message .... : {}",
-            state.tlc_state.waiting_ack
-        );
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
 
@@ -833,10 +829,6 @@ where
             }
         }
 
-        eprintln!(
-            "settle down tlc: {:?} with reason: {:?}",
-            tlc_id, remove_reason
-        );
         self.register_retryable_tlc_remove(myself, state, tlc.tlc_id, remove_reason)
             .await;
     }
@@ -1121,7 +1113,6 @@ where
         &self,
         state: &mut ChannelActorState,
     ) -> ProcessingChannelResult {
-        eprintln!("begin to handle commitment_signed command ...");
         let flags = match state.state {
             ChannelState::CollaboratingFundingTx(flags)
                 if !flags.contains(CollaboratingFundingTxFlags::COLLABRATION_COMPLETED) =>
@@ -1171,7 +1162,7 @@ where
             commitment_tx_partial_signature,
             next_local_nonce: state.get_next_local_nonce(),
         };
-        eprintln!("sending commitment_signed ...");
+
         self.network
             .send_message(NetworkActorMessage::new_command(
                 NetworkActorCommand::SendFiberMessage(FiberMessageWithPeerId::new(
@@ -1239,7 +1230,6 @@ where
         state: &mut ChannelActorState,
         command: RemoveTlcCommand,
     ) -> ProcessingChannelResult {
-        eprintln!("removing tlc: {:?}", command);
         state.check_for_tlc_update(None, true, false)?;
         state.check_remove_tlc_with_reason(TLCId::Received(command.id), &command.reason)?;
         state.tlc_state.set_received_tlc_removed(
@@ -2124,7 +2114,6 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
-                eprintln!("channel actor command: {:?}", command);
                 if let Err(err) = self.handle_command(state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
@@ -2460,7 +2449,6 @@ impl TlcState {
     }
 
     pub fn set_waiting_ack(&mut self, waiting_ack: bool) {
-        eprintln!("now seting waiting ack to {:?}", waiting_ack);
         self.waiting_ack = waiting_ack;
     }
 
@@ -4058,7 +4046,7 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            eprintln!("ack send message: {:?}", message);
+
             sign_ctx
                 .clone()
                 .sign(message.as_slice())
@@ -4253,10 +4241,6 @@ impl ChannelActorState {
             self.get_next_received_tlc_id()
         };
         if tlc.tlc_id != next_tlc_id {
-            eprintln!(
-                "Received tlc id {:?} is not the expected next id {:?}",
-                tlc.tlc_id, next_tlc_id
-            );
             return Err(ProcessingChannelError::InvalidParameter(format!(
                 "Received tlc id {:?} is not the expected next id {:?}",
                 tlc.tlc_id, next_tlc_id
@@ -4327,16 +4311,12 @@ impl ChannelActorState {
                 to_local_amount += current.amount;
                 to_remote_amount -= current.amount;
             }
-            eprintln!(
-                "before local balance: {}, remote balance: {}, current tlc amount: {:?}",
-                self.to_local_amount, self.to_remote_amount, current.amount
-            );
 
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
             current.payment_preimage = Some(fulfill.payment_preimage);
 
-            eprintln!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
+            debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
         }
         self.tlc_state.apply_remove_tlc(tlc_id);
@@ -5519,10 +5499,6 @@ impl ChannelActorState {
         network: &ActorRef<NetworkActorMessage>,
         revoke_and_ack: RevokeAndAck,
     ) -> Result<bool, ProcessingChannelError> {
-        eprintln!(
-            "begin to handle revoke and ack peer message: {:?}",
-            &revoke_and_ack
-        );
         self.tlc_state.debug();
         let RevokeAndAck {
             channel_id: _,
@@ -5540,8 +5516,6 @@ impl ChannelActorState {
         let (verify_ctx, sign_ctx) = {
             let local_nonce = self.get_local_nonce();
             let remote_nonce = self.take_remote_nonce_for_raa();
-            eprintln!("local_nonce: {:?}", local_nonce);
-            eprintln!("remote_nonce: {:?}", remote_nonce);
             let nonces = [remote_nonce.clone(), local_nonce];
             let agg_nonce = AggNonce::sum(nonces);
 
@@ -5589,7 +5563,6 @@ impl ChannelActorState {
             };
 
             let commitment_number = self.get_local_commitment_number() - 1;
-            eprintln!("recv first commitment_number: {}", commitment_number);
             let commitment_lock_script_args = [
                 &blake2b_256(x_only_aggregated_pubkey)[0..20],
                 self.get_delay_epoch_as_lock_args_bytes().as_slice(),
@@ -5597,10 +5570,6 @@ impl ChannelActorState {
             ]
             .concat();
 
-            eprintln!(
-                "recv first commitment_lock_script_args: {:?}",
-                commitment_lock_script_args
-            );
             let message = blake2b_256(
                 [
                     output.as_slice(),
@@ -5610,9 +5579,7 @@ impl ChannelActorState {
                 .concat(),
             );
 
-            eprintln!("first begin to verify message: {:?}", message);
             verify_ctx.verify(revocation_partial_signature, message.as_slice())?;
-            eprintln!("first successfully verify message =============");
 
             let our_signature = sign_ctx.clone().sign(message.as_slice())?;
             let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
@@ -5649,9 +5616,7 @@ impl ChannelActorState {
                 ]
                 .concat(),
             );
-            eprintln!("begin to verify message: {:?}", message);
             verify_ctx.verify(commitment_tx_partial_signature, message.as_slice())?;
-            eprintln!("successfully verify message =============");
             let our_signature = sign_ctx.sign(message.as_slice())?;
             let aggregated_signature = verify_ctx.aggregate_partial_signatures_for_msg(
                 [commitment_tx_partial_signature, our_signature],
@@ -5671,7 +5636,6 @@ impl ChannelActorState {
         self.increment_local_commitment_number();
         self.append_remote_commitment_point(next_per_commitment_point);
 
-        eprintln!("handle revoke and ack peer message: {:?}", &revocation_data);
         let need_commitment_signed = self.tlc_state.update_for_revoke_and_ack();
         network
             .send_message(NetworkActorMessage::new_notification(
@@ -6319,16 +6283,9 @@ impl ChannelActorState {
         let offered_fulfilled = self.get_pending_fulfilled_tlcs_amount(for_remote, true);
         let received_fulfilled = self.get_pending_fulfilled_tlcs_amount(for_remote, false);
 
-        eprintln!(
-            "self.to_local_amount: {}, self.to_remote_amount: {}, offered_fulfilled: {}, received_fulfilled: {}, for_remote: {}",
-            self.to_local_amount, self.to_remote_amount, offered_fulfilled, received_fulfilled, for_remote
-        );
         let to_local_value = self.to_local_amount - offered_fulfilled + received_fulfilled;
         let to_remote_value = self.to_remote_amount - received_fulfilled + offered_fulfilled;
-        eprintln!(
-            "debug now to_local_value: {}, to_remote_value: {}",
-            to_local_value, to_remote_value
-        );
+
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
 
