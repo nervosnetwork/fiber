@@ -27,6 +27,8 @@ The whole process is something like:
 21. There are still payment1, payment4 and payment5 waiting for resolution. We remove them payment1 and payment5 by failing them from NODE1, and complete payment4 from NODE3. NODE1 has 101000000000 ckb ready to use, and NODE3 has 49000000000 ckb ready to use.
 22. NODE3 and NODE1 automatically send a `closing_signed` to their counterparty on all tlc finished.
 
+Note that the channel is opened with a delay of 3.5 epochs (14 hours), 3.5 epochs is [presented](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) as 3(E) and 1(I)/2(L): (L << 40) | (I << 24) | E = 0x20001000003,
+
 ## Starting nodes
 
 ```

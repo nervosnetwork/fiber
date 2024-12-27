@@ -1,0 +1,43 @@
+meta {
+  name: get invoice
+  type: http
+  seq: 14
+}
+
+post {
+  url: {{NODE3_RPC_URL}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+}
+
+body:json {
+  {
+    "id": "42",
+    "jsonrpc": "2.0",
+    "method": "get_invoice",
+    "params": [
+      {
+        "payment_hash": "{{payment_hash}}"
+      }
+    ]
+  }
+}
+
+assert {
+  res.body.error: isUndefined
+  res.body.result: isDefined
+}
+
+script:post-response {
+  // Sleep for sometime to make sure current operation finishes before next request starts.
+  await new Promise(r => setTimeout(r, 100));
+  console.log("generated result: ", res.body);
+  if (res.body.result.status != "Paid") {
+    throw new Error("Assertion failed: status expected to be Paid");
+  }
+}

@@ -5,6 +5,7 @@ use crate::fiber::hash_algorithm::HashAlgorithm;
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::serde_utils::U128Hex;
 use crate::fiber::types::Hash256;
+use crate::gen_rand_sha256_hash;
 use crate::invoice::InvoiceError;
 use bech32::{encode, u5, FromBase32, ToBase32, Variant, WriteBase32};
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash as _};
@@ -19,12 +20,41 @@ use secp256k1::{
     ecdsa::{RecoverableSignature, RecoveryId},
     Message, PublicKey, Secp256k1,
 };
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{cmp::Ordering, str::FromStr};
 
 pub(crate) const SIGNATURE_U5_SIZE: usize = 104;
+pub(crate) const MAX_DESCRIPTION_LENGTH: usize = 639;
+
+/// The currency of the invoice, can also used to represent the CKB network chain.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CkbInvoiceStatus {
+    /// The invoice is open and can be paid.
+    Open,
+    /// The invoice is cancelled.
+    Cancelled,
+    /// The invoice is expired.
+    Expired,
+    /// The invoice is received, but not settled yet.
+    Received,
+    /// The invoice is paid.
+    Paid,
+}
+
+impl Display for CkbInvoiceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CkbInvoiceStatus::Open => write!(f, "Open"),
+            CkbInvoiceStatus::Cancelled => write!(f, "Cancelled"),
+            CkbInvoiceStatus::Expired => write!(f, "Expired"),
+            CkbInvoiceStatus::Received => write!(f, "Received"),
+            CkbInvoiceStatus::Paid => write!(f, "Paid"),
+        }
+    }
+}
 
 /// The currency of the invoice, can also used to represent the CKB network chain.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -78,7 +108,7 @@ pub struct CkbScript(#[serde_as(as = "EntityHex")] pub Script);
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Attribute {
     FinalHtlcTimeout(u64),
-    FinalHtlcMinimumCltvExpiry(u64),
+    FinalHtlcMinimumExpiryDelta(u64),
     ExpiryTime(Duration),
     Description(String),
     FallbackAddr(String),
@@ -142,9 +172,11 @@ impl CkbInvoice {
     // To make sure the final encoded invoice address is shorter
     fn data_part(&self) -> Vec<u5> {
         let invoice_data = RawInvoiceData::from(self.data.clone());
-        let compressed = ar_encompress(invoice_data.as_slice()).unwrap();
+        let compressed = ar_encompress(invoice_data.as_slice()).expect("compress invoice data");
         let mut base32 = Vec::with_capacity(compressed.len());
-        compressed.write_base32(&mut base32).unwrap();
+        compressed
+            .write_base32(&mut base32)
+            .expect("encode in base32");
         base32
     }
 
@@ -196,7 +228,7 @@ impl CkbInvoice {
         F: FnOnce(&Message) -> RecoverableSignature,
     {
         let hash = self.hash();
-        let message = Message::from_digest_slice(&hash).unwrap();
+        let message = Message::from_digest_slice(&hash).expect("message from digest slice");
         let signature = sign_function(&message);
         self.signature = Some(InvoiceSignature(signature));
         self.check_signature()?;
@@ -209,8 +241,15 @@ impl CkbInvoice {
             .expect("Hash is 32 bytes long, same as MESSAGE_SIZE");
 
         let res = secp256k1::Secp256k1::new()
-            .recover_ecdsa(&hash, &self.signature.as_ref().unwrap().0)
-            .unwrap();
+            .recover_ecdsa(
+                &hash,
+                &self
+                    .signature
+                    .as_ref()
+                    .expect("signature must be present")
+                    .0,
+            )
+            .expect("payee pub key recovered");
         Ok(res)
     }
 
@@ -225,7 +264,10 @@ impl CkbInvoice {
     pub fn is_expired(&self) -> bool {
         self.expiry_time().map_or(false, |expiry| {
             self.data.timestamp + expiry.as_millis()
-                < std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+                < std::time::UNIX_EPOCH
+                    .elapsed()
+                    .expect("Duration since unix epoch")
+                    .as_millis()
         })
     }
 
@@ -268,10 +310,9 @@ impl CkbInvoice {
     attr_getter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_getter!(expiry_time, ExpiryTime, Duration);
     attr_getter!(description, Description, String);
-    attr_getter!(final_htlc_timeout, FinalHtlcTimeout, u64);
     attr_getter!(
-        final_htlc_minimum_cltv_expiry,
-        FinalHtlcMinimumCltvExpiry,
+        final_tlc_minimum_expiry_delta,
+        FinalHtlcMinimumExpiryDelta,
         u64
     );
     attr_getter!(fallback_address, FallbackAddr, String);
@@ -321,7 +362,7 @@ impl<'de> Deserialize<'de> for InvoiceSignature {
         let signature = InvoiceSignature::from_base32(
             &signature_bytes
                 .iter()
-                .map(|x| u5::try_from_u8(*x).unwrap())
+                .map(|x| u5::try_from_u8(*x).expect("u5 from u8"))
                 .collect::<Vec<u5>>(),
         );
         signature.map_err(serde::de::Error::custom)
@@ -345,12 +386,15 @@ impl InvoiceSignature {
                 "InvoiceSignature::from_base32()".into(),
             ));
         }
-        let recoverable_signature_bytes = Vec::<u8>::from_base32(signature).unwrap();
+        let recoverable_signature_bytes =
+            Vec::<u8>::from_base32(signature).expect("bytes from base32");
         let signature = &recoverable_signature_bytes[0..64];
-        let recovery_id = RecoveryId::from_i32(recoverable_signature_bytes[64] as i32).unwrap();
+        let recovery_id = RecoveryId::from_i32(recoverable_signature_bytes[64] as i32)
+            .expect("Recovery ID from i32");
 
         Ok(InvoiceSignature(
-            RecoverableSignature::from_compact(signature, recovery_id).unwrap(),
+            RecoverableSignature::from_compact(signature, recovery_id)
+                .expect("signature from compact"),
         ))
     }
 }
@@ -366,12 +410,12 @@ impl ToString for CkbInvoice {
         let mut data = self.data_part();
         data.insert(
             0,
-            u5::try_from_u8(if self.signature.is_some() { 1 } else { 0 }).unwrap(),
+            u5::try_from_u8(if self.signature.is_some() { 1 } else { 0 }).expect("u5 from u8"),
         );
         if let Some(signature) = &self.signature {
             data.extend_from_slice(&signature.to_base32());
         }
-        encode(&hrp, data, Variant::Bech32m).unwrap()
+        encode(&hrp, data, Variant::Bech32m).expect("encode invoice using Bech32m")
     }
 }
 
@@ -397,7 +441,7 @@ impl FromStr for CkbInvoice {
         };
         let data_part =
             Vec::<u8>::from_base32(&data[1..data_end]).map_err(InvoiceError::Bech32Error)?;
-        let data_part = ar_decompress(&data_part).unwrap();
+        let data_part = ar_decompress(&data_part).expect("decompress invoice data");
         let invoice_data = RawInvoiceData::from_slice(&data_part)
             .map_err(|err| InvoiceError::MoleculeError(VerificationError(err)))?;
         let signature = if is_signed {
@@ -412,7 +456,7 @@ impl FromStr for CkbInvoice {
             currency,
             amount,
             signature,
-            data: invoice_data.try_into().unwrap(),
+            data: invoice_data.try_into().expect("pack invoice data"),
         };
         invoice.check_signature()?;
         Ok(invoice)
@@ -437,9 +481,9 @@ impl From<Attribute> for InvoiceAttr {
             Attribute::FinalHtlcTimeout(value) => InvoiceAttrUnion::FinalHtlcTimeout(
                 FinalHtlcTimeout::new_builder().value(value.pack()).build(),
             ),
-            Attribute::FinalHtlcMinimumCltvExpiry(value) => {
-                InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(
-                    FinalHtlcMinimumCltvExpiry::new_builder()
+            Attribute::FinalHtlcMinimumExpiryDelta(value) => {
+                InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(
+                    FinalHtlcMinimumExpiryDelta::new_builder()
                         .value(value.pack())
                         .build(),
                 )
@@ -473,7 +517,9 @@ impl From<InvoiceAttr> for Attribute {
         match attr.to_enum() {
             InvoiceAttrUnion::Description(x) => {
                 let value: Vec<u8> = x.value().unpack();
-                Attribute::Description(String::from_utf8(value).unwrap())
+                Attribute::Description(
+                    String::from_utf8(value).expect("decode utf8 string from bytes"),
+                )
             }
             InvoiceAttrUnion::ExpiryTime(x) => {
                 let seconds: u64 = x.value().seconds().unpack();
@@ -485,18 +531,22 @@ impl From<InvoiceAttr> for Attribute {
             InvoiceAttrUnion::FinalHtlcTimeout(x) => {
                 Attribute::FinalHtlcTimeout(x.value().unpack())
             }
-            InvoiceAttrUnion::FinalHtlcMinimumCltvExpiry(x) => {
-                Attribute::FinalHtlcMinimumCltvExpiry(x.value().unpack())
+            InvoiceAttrUnion::FinalHtlcMinimumExpiryDelta(x) => {
+                Attribute::FinalHtlcMinimumExpiryDelta(x.value().unpack())
             }
             InvoiceAttrUnion::FallbackAddr(x) => {
                 let value: Vec<u8> = x.value().unpack();
-                Attribute::FallbackAddr(String::from_utf8(value).unwrap())
+                Attribute::FallbackAddr(
+                    String::from_utf8(value).expect("decode utf8 string from bytes"),
+                )
             }
             InvoiceAttrUnion::Feature(x) => Attribute::Feature(x.value().unpack()),
             InvoiceAttrUnion::UdtScript(x) => Attribute::UdtScript(CkbScript(x.value())),
             InvoiceAttrUnion::PayeePublicKey(x) => {
                 let value: Vec<u8> = x.value().unpack();
-                Attribute::PayeePublicKey(PublicKey::from_slice(&value).unwrap())
+                Attribute::PayeePublicKey(
+                    PublicKey::from_slice(&value).expect("Public key from slice"),
+                )
             }
             InvoiceAttrUnion::HashAlgorithm(x) => {
                 let value = x.value();
@@ -578,7 +628,7 @@ impl InvoiceBuilder {
     attr_setter!(payee_pub_key, PayeePublicKey, PublicKey);
     attr_setter!(expiry_time, ExpiryTime, Duration);
     attr_setter!(fallback_address, FallbackAddr, String);
-    attr_setter!(final_cltv, FinalHtlcMinimumCltvExpiry, u64);
+    attr_setter!(final_expiry_delta, FinalHtlcMinimumExpiryDelta, u64);
 
     pub fn build(self) -> Result<CkbInvoice, InvoiceError> {
         let preimage = self.payment_preimage;
@@ -601,11 +651,14 @@ impl InvoiceBuilder {
             payment_hash
         } else {
             // generate a random payment hash if not provided
-            rand_sha256_hash()
+            gen_rand_sha256_hash()
         };
 
-        self.check_duplicated_attrs()?;
-        let timestamp = std::time::UNIX_EPOCH.elapsed().unwrap().as_millis();
+        self.check_attrs_valid()?;
+        let timestamp = std::time::UNIX_EPOCH
+            .elapsed()
+            .expect("Duration since unix epoch")
+            .as_millis();
         Ok(CkbInvoice {
             currency: self.currency,
             amount: self.amount,
@@ -627,7 +680,7 @@ impl InvoiceBuilder {
         Ok(invoice)
     }
 
-    fn check_duplicated_attrs(&self) -> Result<(), InvoiceError> {
+    fn check_attrs_valid(&self) -> Result<(), InvoiceError> {
         // check is there any duplicate attribute key set
         for (i, attr) in self.attrs.iter().enumerate() {
             for other in self.attrs.iter().skip(i + 1) {
@@ -636,6 +689,14 @@ impl InvoiceBuilder {
                 }
             }
         }
+
+        if let Some(len) = self.attrs.iter().find_map(|attr| match attr {
+            Attribute::Description(desc) if desc.len() > MAX_DESCRIPTION_LENGTH => Some(desc.len()),
+            _ => None,
+        }) {
+            return Err(InvoiceError::DescriptionTooLong(len));
+        }
+
         Ok(())
     }
 }
@@ -645,16 +706,18 @@ impl TryFrom<gen_invoice::RawCkbInvoice> for CkbInvoice {
 
     fn try_from(invoice: gen_invoice::RawCkbInvoice) -> Result<Self, Self::Error> {
         Ok(CkbInvoice {
-            currency: (u8::from(invoice.currency())).try_into().unwrap(),
+            currency: (u8::from(invoice.currency()))
+                .try_into()
+                .expect("currency from u8"),
             amount: invoice.amount().to_opt().map(|x| x.unpack()),
             signature: invoice.signature().to_opt().map(|x| {
                 InvoiceSignature::from_base32(
                     &x.as_bytes()
                         .into_iter()
-                        .map(|x| u5::try_from_u8(x).unwrap())
+                        .map(|x| u5::try_from_u8(x).expect("u5 from u8"))
                         .collect::<Vec<u5>>(),
                 )
-                .unwrap()
+                .expect("signature must be present")
             }),
             data: InvoiceData::try_from(invoice.data()).map_err(InvoiceError::MoleculeError)?,
         })
@@ -681,7 +744,7 @@ impl From<CkbInvoice> for RawCkbInvoice {
                                 .collect::<Vec<_>>()
                                 .as_slice()
                                 .try_into()
-                                .unwrap();
+                                .expect("[Byte; 104] from [Byte] slice");
                             Signature::new_builder().set(bytes).build()
                         })
                     })
@@ -698,7 +761,9 @@ impl From<InvoiceData> for gen_invoice::RawInvoiceData {
             .timestamp(data.timestamp.pack())
             .payment_hash(
                 PaymentHash::new_builder()
-                    .set(u8_slice_to_bytes(data.payment_hash.as_ref()).unwrap())
+                    .set(
+                        u8_slice_to_bytes(data.payment_hash.as_ref()).expect("bytes from u8 slice"),
+                    )
                     .build(),
             )
             .attrs(

@@ -5,6 +5,10 @@ GRCOV_EXCL_START = ^\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)
 GRCOV_EXCL_STOP  = ^\s*\)(;)?$$
 GRCOV_EXCL_LINE = ^\s*(\})*(\))*(;)*$$|\s*((log::|tracing::)?(trace|debug|info|warn|error)|(debug_)?assert(_eq|_ne|_error_eq))!\(.*\)(;)?$$
 
+.PHONY: test
+test:
+	RUST_LOG=off cargo nextest run --no-fail-fast
+
 .PHONY: clippy
 clippy:
 	cargo clippy --all --all-targets --all-features
@@ -16,9 +20,6 @@ bless:
 .PHONY: fmt
 fmt:
 	cargo fmt --all -- --check
-
-test:
-	RUST_LOG=off cargo test
 
 coverage-clean:
 	rm -rf "${CARGO_TARGET_DIR}/*.profraw" "${GRCOV_OUTPUT}" "${GRCOV_OUTPUT:.info=}"
@@ -51,3 +52,16 @@ coverage-generate-report:
 	genhtml --ignore-errors inconsistent --ignore-errors corrupt --ignore-errors range --ignore-errors unmapped -o "${GRCOV_OUTPUT:.info=}" "${GRCOV_OUTPUT}"
 
 coverage: coverage-run-unittests coverage-collect-data coverage-generate-report
+
+.PHONY: gen-rpc-doc
+gen-rpc-doc:
+	cargo install fiber-rpc-gen
+	fiber-rpc-gen ./src/rpc
+	if grep -q "TODO: add desc" ./src/rpc/README.md; then \
+        echo "Warning: There are 'TODO: add desc' in src/rpc/README.md, please add documentation comments to resolve them"; \
+		exit 1; \
+    fi
+
+.PHONY: check-dirty-rpc-doc
+check-dirty-rpc-doc: gen-rpc-doc
+	git diff --exit-code ./src/rpc/README.md

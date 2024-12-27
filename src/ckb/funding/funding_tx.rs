@@ -58,11 +58,11 @@ pub struct FundingRequest {
     #[serde_as(as = "Option<EntityHex>")]
     pub udt_type_script: Option<packed::Script>,
     /// Assets amount to be provided by the local party
-    pub local_amount: u64,
+    pub local_amount: u128,
     /// Fee to be provided by the local party
     pub funding_fee_rate: u64,
     /// Assets amount to be provided by the remote party
-    pub remote_amount: u64,
+    pub remote_amount: u128,
     /// CKB amount to be provided by the local party.
     pub local_reserved_ckb_amount: u64,
     /// CKB amount to be provided by the remote party.
@@ -180,19 +180,19 @@ impl FundingTxBuilder {
             }
             None => {
                 let mut ckb_amount =
-                    self.request.local_amount + self.request.local_reserved_ckb_amount;
+                    self.request.local_amount as u64 + self.request.local_reserved_ckb_amount;
                 if remote_funded {
                     ckb_amount = ckb_amount
                         .checked_add(
-                            self.request.remote_amount + self.request.remote_reserved_ckb_amount,
+                            self.request.remote_amount as u64
+                                + self.request.remote_reserved_ckb_amount,
                         )
                         .ok_or(FundingError::InvalidChannel)?;
                 }
                 let ckb_output = packed::CellOutput::new_builder()
-                    .capacity(Capacity::shannons(ckb_amount).pack())
+                    .capacity(Capacity::shannons(ckb_amount as u64).pack())
                     .lock(self.context.funding_cell_lock_script.clone())
                     .build();
-                debug!("build_funding_cell debug ckb_output: {:?}", ckb_output);
                 Ok((ckb_output, packed::Bytes::default()))
             }
         }
@@ -212,7 +212,9 @@ impl FundingTxBuilder {
             return Ok(());
         }
 
-        let udt_type_script = self.request.udt_type_script.clone().unwrap();
+        let udt_type_script = self.request.udt_type_script.clone().ok_or_else(|| {
+            TxBuilderError::InvalidParameter(anyhow!("UDT type script not configured"))
+        })?;
         let owner = self.context.funding_source_lock_script.clone();
         let mut found_udt_amount = 0;
 
@@ -248,8 +250,11 @@ impl FundingTxBuilder {
                         .type_(Some(udt_type_script.clone()).pack())
                         .build();
                     let required_capacity = dummy_output
-                        .occupied_capacity(Capacity::bytes(change_output_data.len()).unwrap())
-                        .unwrap()
+                        .occupied_capacity(
+                            Capacity::bytes(change_output_data.len())
+                                .map_err(|err| TxBuilderError::Other(err.into()))?,
+                        )
+                        .map_err(|err| TxBuilderError::Other(err.into()))?
                         .pack();
                     let change_output = dummy_output
                         .as_builder()
@@ -261,8 +266,8 @@ impl FundingTxBuilder {
 
                     debug!("find proper UDT owner cells: {:?}", inputs);
                     // we need to filter the cell deps by the contracts_context
-                    let udt_cell_deps =
-                        get_udt_cell_deps(&udt_type_script).expect("get_udt_cell_deps failed");
+                    let udt_cell_deps = get_udt_cell_deps(&udt_type_script)
+                        .ok_or_else(|| TxBuilderError::ResolveCellDepFailed(udt_type_script))?;
                     for cell_dep in udt_cell_deps {
                         cell_deps.insert(cell_dep);
                     }
@@ -292,21 +297,22 @@ impl FundingTxBuilder {
             .lock(Some(molecule::bytes::Bytes::from(vec![0u8; 170])).pack())
             .build();
 
-        debug!(
-            "request.funding_fee_rate: {}",
-            self.request.funding_fee_rate
-        );
         let balancer = CapacityBalancer::new_simple(
-            sender,
+            sender.clone(),
             placeholder_witness,
             self.request.funding_fee_rate,
         );
 
         let ckb_client = CkbRpcClient::new(&self.context.rpc_url);
-        let cell_dep_resolver = {
-            let genesis_block = ckb_client.get_block_by_number(0.into()).unwrap().unwrap();
-            DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).unwrap()
-        };
+        let cell_dep_resolver = ckb_client
+            .get_block_by_number(0.into())
+            .map_err(|err| FundingError::CkbRpcError(err))?
+            .and_then(|genesis_block| {
+                DefaultCellDepResolver::from_genesis(&BlockView::from(genesis_block)).ok()
+            })
+            .ok_or_else(|| {
+                FundingError::CkbTxBuilderError(TxBuilderError::ResolveCellDepFailed(sender))
+            })?;
 
         let header_dep_resolver = DefaultHeaderDepResolver::new(&self.context.rpc_url);
         let mut cell_collector = DefaultCellCollector::new(&self.context.rpc_url);
@@ -372,10 +378,13 @@ impl FundingTx {
         // ```
         //
         // However, ckb-sdk-rust still uses 0.24.
+        //
+        // It's complex to use map_err and return an error as well because secp256k1 used by ckb sdk is not public.
+        // Expect is OK here since the secret key is valid and can be parsed in both versions.
         let signer = SecpCkbRawKeySigner::new_with_secret_keys(vec![std::str::FromStr::from_str(
             hex::encode(secret_key.as_ref()).as_ref(),
         )
-        .unwrap()]);
+        .expect("convert secret key between different secp256k1 versions")]);
         let sighash_unlocker = SecpSighashUnlocker::from(Box::new(signer) as Box<_>);
         let sighash_script_id = ScriptId::new_type(SIGHASH_TYPE_HASH.clone());
         let mut unlockers = HashMap::default();

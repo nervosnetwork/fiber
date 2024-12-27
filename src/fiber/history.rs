@@ -6,211 +6,283 @@ use super::{
     graph::{NetworkGraphStateStore, SessionRouteNode},
     types::{Pubkey, TlcErr},
 };
-use crate::fiber::types::TlcErrorCode;
+use crate::{fiber::types::TlcErrorCode, now_timestamp_as_millis_u64};
+use ckb_types::packed::OutPoint;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimedResult {
-    pub fail_time: u128,
+    pub fail_time: u64,
     pub fail_amount: u128,
-    pub success_time: u128,
+    pub success_time: u64,
     pub success_amount: u128,
 }
 
-const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u128 = 60 * 1000;
+const DEFAULT_MIN_FAIL_RELAX_INTERVAL: u64 = 60 * 1000;
 
 // FIXME: this is a magic number from lnd, it's used to scale the amount to calculate the probability
 // lnd use 300_000_000 mili satoshis, we use shannons as the unit in fiber
 // we need to find a better way to set this value for UDT
 const DEFAULT_BIMODAL_SCALE_SHANNONS: f64 = 800_000_000.0;
-pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u128 = 6 * 60 * 60 * 1000; // 6 hours
-pub(crate) type PairTimedResult = HashMap<Pubkey, TimedResult>;
+pub(crate) const DEFAULT_BIMODAL_DECAY_TIME: u64 = 6 * 60 * 60 * 1000; // 6 hours
+
+// The direction of the channel,
+// Forward means from node_a to node_b
+// Backward means from node_b to node_a
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Direction {
+    Forward,
+    Backward,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct InternalPairResult {
     pub(crate) success: bool,
-    pub(crate) time: u128,
+    pub(crate) time: u64,
     pub(crate) amount: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InternalResult {
-    pub pairs: HashMap<(Pubkey, Pubkey), InternalPairResult>,
+    pub pairs: HashMap<(OutPoint, Direction), InternalPairResult>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     pub fail_node: Option<Pubkey>,
 }
 
-fn current_time() -> u128 {
-    std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+pub(crate) fn output_direction(node1: Pubkey, node2: Pubkey) -> (Direction, Direction) {
+    if node1 < node2 {
+        (Direction::Forward, Direction::Backward)
+    } else {
+        (Direction::Backward, Direction::Forward)
+    }
 }
 
 impl InternalResult {
-    pub fn add(&mut self, from: Pubkey, target: Pubkey, time: u128, amount: u128, success: bool) {
-        let pair = InternalPairResult {
-            success,
-            time,
+    pub fn add(
+        &mut self,
+        node_1: Pubkey,
+        node_2: Pubkey,
+        channel: OutPoint,
+        time: u64,
+        amount: u128,
+        success: bool,
+    ) {
+        let (direction, _) = output_direction(node_1, node_2);
+        self.add_node_channel_map(node_1, channel.clone());
+        self.add_node_channel_map(node_2, channel.clone());
+        self.pairs.insert(
+            (channel, direction),
+            InternalPairResult {
+                success,
+                time,
+                amount,
+            },
+        );
+    }
+
+    fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
+    }
+
+    pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey, channel: OutPoint) {
+        self.add(
+            from,
+            target,
+            channel.clone(),
+            now_timestamp_as_millis_u64(),
+            0,
+            false,
+        );
+        self.add(
+            target,
+            from,
+            channel,
+            now_timestamp_as_millis_u64(),
+            0,
+            false,
+        )
+    }
+
+    pub fn add_fail_pair_balanced(
+        &mut self,
+        from: Pubkey,
+        target: Pubkey,
+        channel: OutPoint,
+        amount: u128,
+    ) {
+        self.add(
+            from,
+            target,
+            channel,
+            now_timestamp_as_millis_u64(),
             amount,
-        };
-        self.pairs.insert((from, target), pair);
+            false,
+        );
     }
 
-    pub fn add_fail_pair(&mut self, from: Pubkey, target: Pubkey) {
-        self.add(from, target, current_time(), 0, false);
-        self.add(target, from, current_time(), 0, false)
-    }
-
-    pub fn add_fail_pair_balanced(&mut self, from: Pubkey, target: Pubkey, amount: u128) {
-        self.add(from, target, current_time(), amount, false);
-    }
-
-    pub fn fail_node(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
-        self.fail_node = Some(route[index].pubkey);
+    pub fn fail_node(&mut self, nodes: &[SessionRouteNode], index: usize) {
+        self.fail_node = Some(nodes[index].pubkey);
         if index > 0 {
-            self.fail_pair(route, index);
+            self.fail_pair(nodes, index);
         }
-        if index + 1 < route.len() {
-            self.fail_pair(route, index + 1);
+        if index + 1 < nodes.len() {
+            self.fail_pair(nodes, index + 1);
         }
     }
 
-    pub fn fail_pair(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_pair(&mut self, route: &[SessionRouteNode], index: usize) {
         if index > 0 {
             let a = route[index - 1].pubkey;
             let b = route[index].pubkey;
-            self.add_fail_pair(a, b);
+            let channel = route[index - 1].channel_outpoint.clone();
+            self.add_fail_pair(a, b, channel);
         }
     }
 
-    pub fn fail_pair_balanced(&mut self, route: &Vec<SessionRouteNode>, index: usize) {
+    pub fn fail_pair_balanced(&mut self, nodes: &[SessionRouteNode], index: usize) {
         if index > 0 {
-            let a = route[index - 1].pubkey;
-            let b = route[index].pubkey;
-            let amount = route[index].amount;
-            self.add_fail_pair_balanced(a, b, amount);
+            let a = nodes[index - 1].pubkey;
+            let b = nodes[index].pubkey;
+            let amount = nodes[index].amount;
+            let channel = nodes[index - 1].channel_outpoint.clone();
+            self.add_fail_pair_balanced(a, b, channel, amount);
         }
     }
 
-    pub fn succeed_range_pairs(&mut self, route: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn succeed_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for i in start..end {
             self.add(
-                route[i].pubkey,
-                route[i + 1].pubkey,
-                current_time(),
-                route[i].amount,
+                nodes[i].pubkey,
+                nodes[i + 1].pubkey,
+                nodes[i].channel_outpoint.clone(),
+                now_timestamp_as_millis_u64(),
+                nodes[i].amount,
                 true,
             );
         }
     }
-    pub fn fail_range_pairs(&mut self, route: &Vec<SessionRouteNode>, start: usize, end: usize) {
+    pub fn fail_range_pairs(&mut self, nodes: &[SessionRouteNode], start: usize, end: usize) {
         for index in start.max(1)..=end {
-            self.fail_pair(route, index);
+            self.fail_pair(nodes, index);
         }
     }
 
-    pub fn record_payment_fail(&mut self, route: &Vec<SessionRouteNode>, tlc_err: TlcErr) -> bool {
+    pub fn record_payment_fail(&mut self, nodes: &[SessionRouteNode], tlc_err: TlcErr) -> bool {
         let mut need_to_retry = true;
 
-        let error_index = route.iter().position(|s| {
-            Some(s.channel_outpoint.clone()) == tlc_err.error_channel_outpoint()
-                || Some(s.pubkey) == tlc_err.error_node_id()
-        });
+        let error_index = nodes
+            .iter()
+            .position(|s| Some(s.pubkey) == tlc_err.error_node_id());
 
         let Some(index) = error_index else {
             error!("Error index not found in the route: {:?}", tlc_err);
             return need_to_retry;
         };
 
-        let len = route.len();
+        let len = nodes.len();
         assert!(len >= 2);
         let error_code = tlc_err.error_code;
         if index == 0 {
+            // we get error from the source node
             match error_code {
-                // we received an error from the first node, we trust our own node
-                // so we need to penalize the first node
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey
-                | TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(route, 1);
+                | TlcErrorCode::InvalidOnionPayload => need_to_retry = false,
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::ExpiryTooFar => {
+                    need_to_retry = false;
                 }
                 _ => {
                     // we can not penalize our own node, the whole payment session need to retry
-                    debug!("first hop failed with error: {:?}", tlc_err);
                 }
             }
         } else if index == len - 1 {
             match error_code {
-                TlcErrorCode::FinalIncorrectCltvExpiry | TlcErrorCode::FinalIncorrectHtlcAmount => {
+                TlcErrorCode::FinalIncorrectExpiryDelta | TlcErrorCode::FinalIncorrectTlcAmount => {
                     if len == 2 {
                         need_to_retry = false;
-                        self.fail_node(route, len - 1);
+                        self.fail_node(nodes, len - 1);
                     } else {
-                        self.fail_pair(route, index - 1);
-                        self.succeed_range_pairs(route, 0, index - 2);
+                        // maybe the previous hop is malicious
+                        self.fail_pair(nodes, index - 1);
+                        self.succeed_range_pairs(nodes, 0, index - 2);
                     }
                 }
-                TlcErrorCode::IncorrectOrUnknownPaymentDetails | TlcErrorCode::InvoiceExpired => {
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled => {
                     need_to_retry = false;
-                    self.succeed_range_pairs(route, 0, len - 1);
+                    self.succeed_range_pairs(nodes, 0, len - 1);
                 }
-                TlcErrorCode::ExpiryTooSoon => {
+                TlcErrorCode::ExpiryTooSoon | TlcErrorCode::ExpiryTooFar => {
                     need_to_retry = false;
-                }
-                TlcErrorCode::MppTimeout | TlcErrorCode::InvalidOnionBlinding => {
-                    unimplemented!("not implemented");
                 }
                 _ => {
-                    self.fail_node(route, len - 1);
+                    self.fail_node(nodes, len - 1);
                     if len > 1 {
-                        self.succeed_range_pairs(route, 0, len - 2);
+                        self.succeed_range_pairs(nodes, 0, len - 2);
                     }
                 }
             }
         } else {
-            assert!(index > 0 && index < len - 1);
             match error_code {
                 TlcErrorCode::InvalidOnionVersion
                 | TlcErrorCode::InvalidOnionHmac
                 | TlcErrorCode::InvalidOnionKey => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index);
                 }
                 TlcErrorCode::InvalidOnionPayload => {
-                    self.fail_node(route, index);
+                    self.fail_node(nodes, index);
                     if index > 1 {
-                        self.succeed_range_pairs(route, 0, index - 1);
+                        self.succeed_range_pairs(nodes, 0, index - 1);
                     }
                 }
                 TlcErrorCode::UnknownNextPeer => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index + 1);
                 }
                 TlcErrorCode::PermanentChannelFailure => {
-                    self.fail_pair(route, index);
+                    self.fail_pair(nodes, index + 1);
                 }
-                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectCltvExpiry => {
+                TlcErrorCode::FeeInsufficient | TlcErrorCode::IncorrectTlcExpiry => {
                     need_to_retry = false;
                     if index == 1 {
-                        self.fail_node(route, 1);
+                        self.fail_node(nodes, 1);
                     } else {
-                        self.fail_pair(route, index - 1);
+                        self.fail_pair(nodes, index - 1);
                         if index > 1 {
-                            self.succeed_range_pairs(route, 0, index - 2);
+                            self.succeed_range_pairs(nodes, 0, index - 2);
                         }
                     }
                 }
                 TlcErrorCode::TemporaryChannelFailure => {
-                    self.fail_pair_balanced(route, index);
-                    self.succeed_range_pairs(route, 0, index - 1);
+                    self.fail_pair_balanced(nodes, index + 1);
+                    self.succeed_range_pairs(nodes, 0, index);
                 }
                 TlcErrorCode::ExpiryTooSoon => {
                     if index == 1 {
-                        self.fail_node(route, 1);
+                        self.fail_node(nodes, 1);
                     } else {
-                        self.fail_range_pairs(route, 0, index - 1);
+                        self.fail_range_pairs(nodes, 0, index - 1);
                     }
                 }
+                TlcErrorCode::IncorrectOrUnknownPaymentDetails
+                | TlcErrorCode::InvoiceExpired
+                | TlcErrorCode::InvoiceCancelled
+                | TlcErrorCode::FinalIncorrectExpiryDelta
+                | TlcErrorCode::FinalIncorrectTlcAmount => {
+                    error!("middle hop does not expect to report this error");
+                    need_to_retry = false;
+                }
                 _ => {
-                    self.fail_node(route, index);
+                    self.fail_node(nodes, index);
                 }
             }
         }
@@ -220,9 +292,10 @@ impl InternalResult {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PaymentHistory<S> {
-    pub inner: HashMap<Pubkey, PairTimedResult>,
+    pub inner: HashMap<(OutPoint, Direction), TimedResult>,
+    pub nodes_to_channel_map: HashMap<Pubkey, HashSet<OutPoint>>,
     // The minimum interval between two failed payments in milliseconds
-    pub min_fail_relax_interval: u128,
+    pub min_fail_relax_interval: u64,
     pub bimodal_scale_msat: f64,
     // this filed is used to check whether from is the source Node
     // will be used after enabling the direct channel related logic
@@ -235,10 +308,11 @@ impl<S> PaymentHistory<S>
 where
     S: NetworkGraphStateStore + Clone + Send + Sync + 'static,
 {
-    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u128>, store: S) -> Self {
+    pub(crate) fn new(source: Pubkey, min_fail_relax_interval: Option<u64>, store: S) -> Self {
         let mut s = PaymentHistory {
             source,
             inner: HashMap::new(),
+            nodes_to_channel_map: HashMap::new(),
             min_fail_relax_interval: min_fail_relax_interval
                 .unwrap_or(DEFAULT_MIN_FAIL_RELAX_INTERVAL),
             bimodal_scale_msat: DEFAULT_BIMODAL_SCALE_SHANNONS,
@@ -251,41 +325,48 @@ where
     #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         self.inner.clear();
+        self.nodes_to_channel_map.clear();
     }
 
-    pub(crate) fn add_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
-        self.inner
-            .entry(from)
-            .or_insert_with(HashMap::new)
-            .insert(target, result);
-        self.save_result(from, target, result);
+    pub(crate) fn add_result(
+        &mut self,
+        channel: OutPoint,
+        direction: Direction,
+        result: TimedResult,
+    ) {
+        self.inner.insert((channel.clone(), direction), result);
+        self.save_result(channel, direction, result);
     }
 
-    fn save_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
+    fn save_result(&mut self, channel: OutPoint, direction: Direction, result: TimedResult) {
         self.store
-            .insert_payment_history_result(from, target, result);
+            .insert_payment_history_result(channel, direction, result);
+    }
+
+    pub(crate) fn add_node_channel_map(&mut self, node: Pubkey, channel: OutPoint) {
+        self.nodes_to_channel_map
+            .entry(node)
+            .or_default()
+            .insert(channel);
     }
 
     pub(crate) fn load_from_store(&mut self) {
-        let results = self.store.get_payment_history_result();
-        for (from, target, result) in results.iter() {
-            self.inner
-                .entry(from.clone())
-                .or_insert_with(HashMap::new)
-                .insert(target.clone(), *result);
+        let results = self.store.get_payment_history_results();
+        for (channel, direction, result) in results.into_iter() {
+            self.inner.insert((channel, direction), result);
         }
     }
 
     pub(crate) fn apply_pair_result(
         &mut self,
-        from: Pubkey,
-        target: Pubkey,
+        channel: OutPoint,
+        direction: Direction,
         amount: u128,
         success: bool,
-        time: u128,
+        time: u64,
     ) {
         let min_fail_relax_interval = self.min_fail_relax_interval;
-        let result = if let Some(current) = self.get_mut_result(&from, &target) {
+        let result = if let Some(current) = self.get_mut_result(channel.clone(), direction) {
             if success {
                 current.success_time = time;
                 if amount > current.success_amount {
@@ -317,59 +398,81 @@ where
                 success_amount: if success { amount } else { 0 },
             }
         };
-        self.add_result(from, target, result);
+        self.add_result(channel, direction, result);
     }
 
     pub(crate) fn apply_internal_result(&mut self, result: InternalResult) {
-        for ((from, target), pair_result) in result.pairs.iter() {
+        let InternalResult {
+            pairs,
+            fail_node,
+            nodes_to_channel_map,
+        } = result;
+        for ((channel, direction), pair_result) in pairs.into_iter() {
             self.apply_pair_result(
-                *from,
-                *target,
+                channel,
+                direction,
                 pair_result.amount,
                 pair_result.success,
                 pair_result.time,
             );
         }
+        for (node, channels) in nodes_to_channel_map.into_iter() {
+            self.nodes_to_channel_map
+                .entry(node)
+                .or_default()
+                .extend(channels);
+        }
+        if let Some(fail_node) = fail_node {
+            let channels = self
+                .nodes_to_channel_map
+                .get(&fail_node)
+                .expect("channels not found");
+            let pairs: Vec<(OutPoint, Direction)> = self
+                .inner
+                .iter()
+                .flat_map(|((outpoint, direction), _)| {
+                    if channels.contains(outpoint) {
+                        Some((outpoint.clone(), *direction))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-        if let Some(fail_node) = result.fail_node {
-            let mut pairs = vec![];
-            for (from, target) in self.inner.keys().flat_map(|from| {
-                self.inner[from]
-                    .keys()
-                    .map(move |target| (from.clone(), target.clone()))
-            }) {
-                if from == fail_node || target == fail_node {
-                    pairs.push((from, target));
-                }
-            }
-            for (from, target) in pairs {
-                self.apply_pair_result(from, target, 0, false, current_time());
+            for (channel, direction) in pairs.into_iter() {
+                self.apply_pair_result(channel, direction, 0, false, now_timestamp_as_millis_u64());
             }
         }
     }
 
-    pub(crate) fn get_result(&self, from: &Pubkey, target: &Pubkey) -> Option<&TimedResult> {
-        self.inner.get(from).and_then(|h| h.get(target))
+    pub(crate) fn get_result(
+        &self,
+        channel: &OutPoint,
+        direction: Direction,
+    ) -> Option<&TimedResult> {
+        self.inner.get(&(channel.clone(), direction))
     }
 
     pub(crate) fn get_mut_result(
         &mut self,
-        from: &Pubkey,
-        target: &Pubkey,
+        channel: OutPoint,
+        direction: Direction,
     ) -> Option<&mut TimedResult> {
-        self.inner.get_mut(from).and_then(|h| h.get_mut(target))
+        self.inner.get_mut(&(channel, direction))
     }
 
     pub(crate) fn eval_probability(
         &self,
         from: Pubkey,
         target: Pubkey,
+        channel: &OutPoint,
         amount: u128,
         capacity: u128,
     ) -> f64 {
         let mut success_amount = 0;
         let mut fail_amount = capacity;
-        if let Some(result) = self.get_result(&from, &target) {
+        let (direction, _) = output_direction(from, target);
+        if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
                 fail_amount = self.cannot_send(result.fail_amount, result.fail_time, capacity);
             }
@@ -387,14 +490,18 @@ where
 
     // The factor approaches 0 for success_time a long time in the past,
     // is 1 when the success_time is now.
-    fn time_factor(&self, time: u128) -> f64 {
-        let time_ago = (current_time() - time).max(0);
+    fn time_factor(&self, time: u64) -> f64 {
+        let time_ago = (now_timestamp_as_millis_u64() - time).max(0);
+        // if time_ago is less than 1 second, we treat it as 0, this makes the factor 1
+        // this is to avoid the factor is too small when the time is very close to now,
+        // this will make the probability calculation more stable
+        let time_ago = if time_ago < 1000 { 0 } else { time_ago };
         let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
         let factor = exponent.exp();
         factor
     }
 
-    pub(crate) fn cannot_send(&self, fail_amount: u128, time: u128, capacity: u128) -> u128 {
+    pub(crate) fn cannot_send(&self, fail_amount: u128, time: u64, capacity: u128) -> u128 {
         let mut fail_amount = fail_amount;
 
         if fail_amount > capacity {
@@ -402,11 +509,12 @@ where
         }
 
         let factor = self.time_factor(time);
+
         let cannot_send = capacity - (factor * (capacity - fail_amount) as f64) as u128;
         cannot_send
     }
 
-    pub(crate) fn can_send(&self, amount: u128, time: u128) -> u128 {
+    pub(crate) fn can_send(&self, amount: u128, time: u64) -> u128 {
         let factor = self.time_factor(time);
         let can_send = (amount as f64 * factor) as u128;
         can_send
@@ -419,11 +527,11 @@ where
     // FIXME: reconsider this after we already got the accurate balance of direct channels
     //        related issue: https://github.com/nervosnetwork/fiber/issues/257
     #[allow(dead_code)]
-    pub(crate) fn get_direct_probability(&self, from: &Pubkey, target: &Pubkey) -> f64 {
+    pub(crate) fn get_direct_probability(&self, channel: &OutPoint, direction: Direction) -> f64 {
         let mut prob = 1.0;
-        if let Some(result) = self.get_result(&from, &target) {
+        if let Some(result) = self.get_result(channel, direction) {
             if result.fail_time != 0 {
-                let time_ago = (current_time() - result.fail_time).min(0);
+                let time_ago = (now_timestamp_as_millis_u64() - result.fail_time).max(0);
                 let exponent = -(time_ago as f64) / (DEFAULT_BIMODAL_DECAY_TIME as f64);
                 prob -= exponent.exp();
             }
@@ -447,7 +555,7 @@ where
         fail_amount: u128,
         amount: u128,
     ) -> f64 {
-        if amount > capacity || amount == 0 {
+        if amount > capacity || amount == 0 || capacity == 0 {
             return 0.0;
         }
 
@@ -457,11 +565,13 @@ where
         if fail_amount == success_amount {
             // if the graph has latest information
             // we don't continue to calculate the probability
-            if amount <= capacity {
+            if amount < capacity {
                 return 1.0;
             }
             return 0.0;
-        } else if fail_amount < success_amount {
+        }
+
+        if fail_amount < success_amount {
             // suppose a malioucious node report wrong information
             // here we return 0.0 to avoid to choose this channel
             error!(
@@ -471,7 +581,7 @@ where
             return 0.0;
         }
 
-        if amount > fail_amount {
+        if amount >= fail_amount {
             return 0.0;
         }
 

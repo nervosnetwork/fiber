@@ -1,4 +1,5 @@
 use molecule::prelude::Entity;
+use musig2::{BinaryEncoding, CompactSignature, PubNonce, SCHNORR_SIGNATURE_SIZE};
 use serde::{de::Error, Deserialize, Deserializer, Serializer};
 use serde_with::{serde_conv, DeserializeAs, SerializeAs};
 
@@ -11,10 +12,17 @@ where
     String::deserialize(deserializer)
         .and_then(|string| {
             if string.len() < 2 || &string[..2].to_lowercase() != "0x" {
-                return Err(Error::custom("hex string should start with 0x"));
+                return Err(Error::custom(format!(
+                    "hex string does not start with 0x: {}",
+                    &string
+                )));
             };
-            hex::decode(&string[2..])
-                .map_err(|err| Error::custom(format!("failed to decode hex: {:?}", err)))
+            hex::decode(&string[2..]).map_err(|err| {
+                Error::custom(format!(
+                    "failed to decode hex string {}: {:?}",
+                    &string, err
+                ))
+            })
         })
         .and_then(|vec| {
             vec.try_into().map_err(|err| {
@@ -94,13 +102,13 @@ macro_rules! uint_as_hex {
             |hex: &str| -> Result<$ty, String> {
                 let bytes = hex.as_bytes();
                 if bytes.len() < 3 || &bytes[..2] != b"0x" {
-                    return Err("hex string should start with 0x".to_string());
+                    return Err(format!("uint hex string does not start with 0x: {}", hex));
                 }
                 if bytes.len() > 3 && &bytes[2..3] == b"0" {
-                    return Err("hex string should not start with redundant leading zeros".to_string());
+                    return Err(format!("uint hex string starts with redundant leading zeros: {}", hex));
                 };
                 <$ty>::from_str_radix(&hex[2..], 16)
-                    .map_err(|err| format!("failed to parse hex: {:?}", err))
+                    .map_err(|err| format!("failed to parse uint hex {}: {:?}", hex, err))
             }
         );
     };
@@ -110,3 +118,55 @@ uint_as_hex!(U128Hex, u128);
 uint_as_hex!(U64Hex, u64);
 uint_as_hex!(U32Hex, u32);
 uint_as_hex!(U16Hex, u16);
+
+pub struct CompactSignatureAsBytes;
+
+impl SerializeAs<CompactSignature> for CompactSignatureAsBytes {
+    fn serialize_as<S>(signature: &CompactSignature, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&signature.to_bytes())
+    }
+}
+
+impl<'de> DeserializeAs<'de, CompactSignature> for CompactSignatureAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<CompactSignature, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != SCHNORR_SIGNATURE_SIZE {
+            return Err(serde::de::Error::custom("expected 64 bytes"));
+        }
+        let mut array = [0u8; SCHNORR_SIGNATURE_SIZE];
+        array.copy_from_slice(bytes);
+        CompactSignature::from_bytes(&array).map_err(serde::de::Error::custom)
+    }
+}
+
+pub struct PubNonceAsBytes;
+
+impl SerializeAs<PubNonce> for PubNonceAsBytes {
+    fn serialize_as<S>(nonce: &PubNonce, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&nonce.to_bytes())
+    }
+}
+
+impl<'de> DeserializeAs<'de, PubNonce> for PubNonceAsBytes {
+    fn deserialize_as<D>(deserializer: D) -> Result<PubNonce, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 66 {
+            return Err(serde::de::Error::custom("expected 66 bytes"));
+        }
+        let mut array = [0u8; 66];
+        array.copy_from_slice(bytes);
+        PubNonce::from_bytes(&array).map_err(serde::de::Error::custom)
+    }
+}

@@ -1,18 +1,28 @@
+use crate::fiber::serde_utils::EntityHex;
+use crate::fiber::types::NO_SHARED_SECRET;
 use crate::fiber::{
     channel::{
-        AddTlcCommand, ChannelActorStateStore, ChannelCommand, ChannelCommandWithId, ChannelState,
-        RemoveTlcCommand, ShutdownCommand, UpdateCommand,
+        AddTlcCommand, AwaitingChannelReadyFlags, AwaitingTxSignaturesFlags,
+        ChannelActorStateStore, ChannelCommand, ChannelCommandWithId,
+        ChannelState as RawChannelState, CloseFlags, CollaboratingFundingTxFlags,
+        NegotiatingFundingFlags, RemoveTlcCommand, ShutdownCommand, ShuttingDownFlags,
+        SigningCommitmentFlags, UpdateCommand,
     },
     graph::PaymentSessionStatus,
     hash_algorithm::HashAlgorithm,
     network::{AcceptChannelCommand, OpenChannelCommand, PaymentCustomRecord, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, LockTime, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
+    types::{Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode},
     NetworkActorCommand, NetworkActorMessage,
 };
 use crate::{handle_actor_call, handle_actor_cast, log_and_error};
-use ckb_jsonrpc_types::Script;
-use ckb_types::core::FeeRate;
+use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
+use ckb_types::{
+    core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
+    packed::OutPoint,
+    prelude::{IntoTransactionView, Unpack},
+    H256,
+};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -28,84 +38,223 @@ use tentacle::secio::PeerId;
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct OpenChannelParams {
+    /// The peer ID to open a channel with.
     #[serde_as(as = "DisplayFromStr")]
     peer_id: PeerId,
+
+    /// The amount of CKB or UDT to fund the channel with.
     #[serde_as(as = "U128Hex")]
     funding_amount: u128,
+
+    /// Whether this is a public channel (will be broadcasted to network, and can be used to forward TLCs), an optional parameter, default value is true.
     public: Option<bool>,
+
+    /// The type script of the UDT to fund the channel with, an optional parameter.
     funding_udt_type_script: Option<Script>,
+
+    /// The script used to receive the channel balance, an optional parameter, default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key.
     shutdown_script: Option<Script>,
+
+    /// The delay time for the commitment transaction, must be an [EpochNumberWithFraction](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0017-tx-valid-since/e-i-l-encoding.png) in u64 format, an optional parameter, default value is 24 hours.
+    commitment_delay_epoch: Option<EpochNumberWithFraction>,
+
+    /// The fee rate for the commitment transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
     commitment_fee_rate: Option<u64>,
+
+    /// The fee rate for the funding transaction, an optional parameter.
     #[serde_as(as = "Option<U64Hex>")]
     funding_fee_rate: Option<u64>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    tlc_expiry_delta: Option<u64>,
+
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_min_value: Option<u128>,
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_max_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The maximum value in flight for TLCs, an optional parameter.
+    /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U128Hex>")]
     max_tlc_value_in_flight: Option<u128>,
+
+    /// The maximum number of TLCs that can be accepted, an optional parameter, default is 125
+    /// This parameter can not be updated after channel is opened.
     #[serde_as(as = "Option<U64Hex>")]
     max_tlc_number_in_flight: Option<u64>,
 }
-
 #[derive(Clone, Serialize)]
 pub(crate) struct OpenChannelResult {
+    /// The temporary channel ID of the channel being opened
     temporary_channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct AcceptChannelParams {
+    /// The temporary channel ID of the channel to accept
     temporary_channel_id: Hash256,
+
+    /// The amount of CKB or UDT to fund the channel with
     #[serde_as(as = "U128Hex")]
     funding_amount: u128,
+
+    /// The script used to receive the channel balance, an optional parameter,
+    /// default value is the secp256k1_blake160_sighash_all script corresponding to the configured private key
     shutdown_script: Option<Script>,
+
+    /// The max tlc sum value in flight for the channel, default is u128::MAX
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U128Hex>")]
+    max_tlc_value_in_flight: Option<u128>,
+
+    /// The max tlc number in flight send from our side, default is 125
+    /// This parameter can not be updated after channel is opened.
+    #[serde_as(as = "Option<U64Hex>")]
+    max_tlc_number_in_flight: Option<u64>,
+
+    /// The minimum value for a TLC our side can receive
+    /// an optional parameter, default is 0, which means we can receive any TLC is larger than 0.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    tlc_min_value: Option<u128>,
+
+    /// The fee proportional millionths for a TLC, Proportional to the amount of the forwarded tlc.
+    /// The unit is millionths of the amount. default is 1000 which means 0.1%.
+    /// This parameter can be updated with rpc `update_channel` later.
+    #[serde_as(as = "Option<U128Hex>")]
+    tlc_fee_proportional_millionths: Option<u128>,
+
+    /// The expiry delta to forward a tlc, in milliseconds, default to 1 day, which is 24 * 60 * 60 * 1000 milliseconds
+    /// This parameter can be updated with rpc `update_channel` later.
+    tlc_expiry_delta: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
 pub(crate) struct AcceptChannelResult {
+    /// The final ID of the channel that was accepted, it's different from the temporary channel ID
     channel_id: Hash256,
 }
 
 // TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct CommitmentSignedParams {
+    /// The channel ID of the channel to send the commitment_signed message to
     channel_id: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ListChannelsParams {
+    /// The peer ID to list channels for, an optional parameter, if not provided, all channels will be listed
     #[serde_as(as = "Option<DisplayFromStr>")]
     peer_id: Option<PeerId>,
+    /// Whether to include closed channels in the list, an optional parameter, default value is false
+    include_closed: Option<bool>,
 }
 
 #[derive(Clone, Serialize)]
 pub(crate) struct ListChannelsResult {
+    /// The list of channels
     channels: Vec<Channel>,
 }
 
+/// The state of a channel
+// `ChannelState` is a copy of `ChannelState` with `#[serde(...)]` attributes for compatibility
+// `bincode` does not support deserialize_identifier
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "SCREAMING_SNAKE_CASE",
+    tag = "state_name",
+    content = "state_flags"
+)]
+pub enum ChannelState {
+    /// We are negotiating the parameters required for the channel prior to funding it.
+    NegotiatingFunding(NegotiatingFundingFlags),
+    /// We're collaborating with the other party on the funding transaction.
+    CollaboratingFundingTx(CollaboratingFundingTxFlags),
+    /// We have collaborated over the funding and are now waiting for CommitmentSigned messages.
+    SigningCommitment(SigningCommitmentFlags),
+    /// We've received and sent `commitment_signed` and are now waiting for both
+    /// party to collaborate on creating a valid funding transaction.
+    AwaitingTxSignatures(AwaitingTxSignaturesFlags),
+    /// We've received/sent `funding_created` and `funding_signed` and are thus now waiting on the
+    /// funding transaction to confirm.
+    AwaitingChannelReady(AwaitingChannelReadyFlags),
+    /// Both we and our counterparty consider the funding transaction confirmed and the channel is
+    /// now operational.
+    ChannelReady(),
+    /// We've successfully negotiated a `closing_signed` dance. At this point, the `ChannelManager`
+    /// is about to drop us, but we store this anyway.
+    ShuttingDown(ShuttingDownFlags),
+    /// This channel is closed.
+    Closed(CloseFlags),
+}
+
+impl From<RawChannelState> for ChannelState {
+    fn from(state: RawChannelState) -> Self {
+        match state {
+            RawChannelState::NegotiatingFunding(flags) => ChannelState::NegotiatingFunding(flags),
+            RawChannelState::CollaboratingFundingTx(flags) => {
+                ChannelState::CollaboratingFundingTx(flags)
+            }
+            RawChannelState::SigningCommitment(flags) => ChannelState::SigningCommitment(flags),
+            RawChannelState::AwaitingTxSignatures(flags) => {
+                ChannelState::AwaitingTxSignatures(flags)
+            }
+            RawChannelState::AwaitingChannelReady(flags) => {
+                ChannelState::AwaitingChannelReady(flags)
+            }
+            RawChannelState::ChannelReady() => ChannelState::ChannelReady(),
+            RawChannelState::ShuttingDown(flags) => ChannelState::ShuttingDown(flags),
+            RawChannelState::Closed(flags) => ChannelState::Closed(flags),
+        }
+    }
+}
+
+/// The channel data structure
 #[serde_as]
 #[derive(Clone, Serialize)]
 pub(crate) struct Channel {
+    /// The channel ID
     channel_id: Hash256,
+    /// Whether the channel is public
+    is_public: bool,
+    #[serde_as(as = "Option<EntityHex>")]
+    /// The outpoint of the channel
+    channel_outpoint: Option<OutPoint>,
+    /// The peer ID of the channel
     #[serde_as(as = "DisplayFromStr")]
     peer_id: PeerId,
+    /// The UDT type script of the channel
     funding_udt_type_script: Option<Script>,
+    /// The state of the channel
     state: ChannelState,
+    /// The local balance of the channel
     #[serde_as(as = "U128Hex")]
     local_balance: u128,
+    /// The offered balance of the channel
     #[serde_as(as = "U128Hex")]
     offered_tlc_balance: u128,
+    /// The remote balance of the channel
     #[serde_as(as = "U128Hex")]
     remote_balance: u128,
+    /// The received balance of the channel
     #[serde_as(as = "U128Hex")]
     received_tlc_balance: u128,
+    /// The hash of the latest commitment transaction
+    latest_commitment_transaction_hash: Option<H256>,
+    /// The time the channel was created at, in milliseconds from UNIX epoch
     #[serde_as(as = "U64Hex")]
     created_at: u64,
 }
@@ -113,17 +262,24 @@ pub(crate) struct Channel {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct AddTlcParams {
+    /// The channel ID of the channel to add the TLC to
     channel_id: Hash256,
+    /// The amount of the TLC
     #[serde_as(as = "U128Hex")]
     amount: u128,
+    /// The payment hash of the TLC
     payment_hash: Hash256,
-    expiry: LockTime,
+    /// The expiry of the TLC
+    #[serde_as(as = "U64Hex")]
+    expiry: u64,
+    /// The hash algorithm of the TLC
     hash_algorithm: Option<HashAlgorithm>,
 }
 
 #[serde_as]
 #[derive(Clone, Serialize)]
 pub(crate) struct AddTlcResult {
+    /// The ID of the TLC
     #[serde_as(as = "U64Hex")]
     tlc_id: u64,
 }
@@ -131,26 +287,36 @@ pub(crate) struct AddTlcResult {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct RemoveTlcParams {
+    /// The channel ID of the channel to remove the TLC from
     channel_id: Hash256,
     #[serde_as(as = "U64Hex")]
+    /// The ID of the TLC to remove
     tlc_id: u64,
+    /// The reason for removing the TLC, either a 32-byte hash for preimage fulfillment or an u32 error code for removal
     reason: RemoveTlcReason,
 }
 
+/// The reason for removing a TLC
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 enum RemoveTlcReason {
+    /// The reason for removing the TLC is that it was fulfilled
     RemoveTlcFulfill { payment_preimage: Hash256 },
+    /// The reason for removing the TLC is that it failed
     RemoveTlcFail { error_code: String },
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub(crate) struct ShutdownChannelParams {
+    /// The channel ID of the channel to shut down
     channel_id: Hash256,
+    /// The script used to receive the channel balance, only support secp256k1_blake160_sighash_all script for now
     close_script: Script,
+    /// Whether to force the channel to close
     force: Option<bool>,
+    /// The fee rate for the closing transaction, the fee will be deducted from the closing initiator's channel balance
     #[serde_as(as = "U64Hex")]
     fee_rate: u64,
 }
@@ -158,14 +324,18 @@ pub(crate) struct ShutdownChannelParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UpdateChannelParams {
+    /// The channel ID of the channel to update
     channel_id: Hash256,
+    /// Whether the channel is enabled
     enabled: Option<bool>,
+    /// The CLTV delta from the current height that should be used to set the timelock for the final hop
     #[serde_as(as = "Option<U64Hex>")]
-    tlc_locktime_expiry_delta: Option<u64>,
+    /// The expiry delta for the TLC locktime
+    tlc_expiry_delta: Option<u64>,
+    /// The minimum value for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_minimum_value: Option<u128>,
-    #[serde_as(as = "Option<U128Hex>")]
-    tlc_maximum_value: Option<u128>,
+    /// The fee proportional millionths for a TLC
     #[serde_as(as = "Option<U128Hex>")]
     tlc_fee_proportional_millionths: Option<u128>,
 }
@@ -173,110 +343,146 @@ pub struct UpdateChannelParams {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetPaymentCommandParams {
+    /// The payment hash of the payment to retrieve
     pub payment_hash: Hash256,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GetPaymentCommandResult {
+    /// The payment hash of the payment
     pub payment_hash: Hash256,
+    /// The status of the payment
     pub status: PaymentSessionStatus,
-    #[serde_as(as = "U128Hex")]
-    created_at: u128,
-    #[serde_as(as = "U128Hex")]
-    pub last_updated_at: u128,
+    #[serde_as(as = "U64Hex")]
+    /// The time the payment was created at, in milliseconds from UNIX epoch
+    created_at: u64,
+    #[serde_as(as = "U64Hex")]
+    /// The time the payment was last updated at, in milliseconds from UNIX epoch
+    pub last_updated_at: u64,
+    /// The error message if the payment failed
     pub failed_error: Option<String>,
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
     pub custom_records: Option<PaymentCustomRecord>,
+    /// fee paid for the payment
+    #[serde_as(as = "U128Hex")]
+    pub fee: u128,
 }
 
 #[serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SendPaymentCommandParams {
-    // the identifier of the payment target
+    /// the identifier of the payment target
     target_pubkey: Option<Pubkey>,
 
-    // the amount of the payment
+    /// the amount of the payment
     #[serde_as(as = "Option<U128Hex>")]
     amount: Option<u128>,
 
-    // The hash to use within the payment's HTLC
-    // FIXME: this should be optional when AMP is enabled
+    /// the hash to use within the payment's HTLC
     payment_hash: Option<Hash256>,
 
-    // The CLTV delta from the current height that should be used to set the timelock for the final hop
+    /// the TLC expiry delta should be used to set the timelock for the final hop, in milliseconds
     #[serde_as(as = "Option<U64Hex>")]
-    final_cltv_delta: Option<u64>,
+    final_tlc_expiry_delta: Option<u64>,
 
-    // the encoded invoice to send to the recipient
+    /// the TLC expiry limit for the whole payment, in milliseconds, each hop is with a default tlc delta of 1 day
+    /// suppose the payment router is with N hops, the total tlc expiry limit is at least (N-1) days
+    /// this is also the default value for the payment if this parameter is not provided
+    #[serde_as(as = "Option<U64Hex>")]
+    tlc_expiry_limit: Option<u64>,
+
+    /// the encoded invoice to send to the recipient
     invoice: Option<String>,
 
-    // the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
+    /// the payment timeout in seconds, if the payment is not completed within this time, it will be cancelled
     #[serde_as(as = "Option<U64Hex>")]
     timeout: Option<u64>,
 
-    // the maximum fee amounts in shannons that the sender is willing to pay
+    /// the maximum fee amounts in shannons that the sender is willing to pay
     #[serde_as(as = "Option<U128Hex>")]
     max_fee_amount: Option<u128>,
 
-    // max parts for the payment, only used for multi-part payments
+    /// max parts for the payment, only used for multi-part payments
     #[serde_as(as = "Option<U64Hex>")]
     max_parts: Option<u64>,
 
-    // keysend payment
+    /// keysend payment
     keysend: Option<bool>,
 
-    // udt type script for the payment
+    /// udt type script for the payment
     udt_type_script: Option<Script>,
 
-    // custom record for the payment
+    /// Some custom records for the payment which contains a map of u32 to Vec<u8>
+    /// The key is the record type, and the value is the serialized data
     custom_records: Option<HashMap<u32, Vec<u8>>>,
+
+    /// allow self payment, default is false
+    allow_self_payment: Option<bool>,
+
+    /// dry_run for payment, used for check whether we can build valid router and the fee for this payment,
+    /// it's useful for the sender to double check the payment before sending it to the network,
+    /// default is false
+    dry_run: Option<bool>,
 }
 
+/// RPC module for channel management.
 #[rpc(server)]
 trait ChannelRpc {
+    /// Attempts to open a channel with a peer.
     #[method(name = "open_channel")]
     async fn open_channel(
         &self,
         params: OpenChannelParams,
     ) -> Result<OpenChannelResult, ErrorObjectOwned>;
 
+    /// Accepts a channel opening request from a peer.
     #[method(name = "accept_channel")]
     async fn accept_channel(
         &self,
         params: AcceptChannelParams,
     ) -> Result<AcceptChannelResult, ErrorObjectOwned>;
 
+    /// Lists all channels.
     #[method(name = "list_channels")]
     async fn list_channels(
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned>;
 
+    /// Sends a commitment_signed message to the peer.
     #[method(name = "commitment_signed")]
     async fn commitment_signed(
         &self,
         params: CommitmentSignedParams,
     ) -> Result<(), ErrorObjectOwned>;
 
+    /// Adds a TLC to a channel.
     #[method(name = "add_tlc")]
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned>;
 
+    /// Removes a TLC from a channel.
     #[method(name = "remove_tlc")]
     async fn remove_tlc(&self, params: RemoveTlcParams) -> Result<(), ErrorObjectOwned>;
 
+    /// Shuts down a channel.
     #[method(name = "shutdown_channel")]
     async fn shutdown_channel(&self, params: ShutdownChannelParams)
         -> Result<(), ErrorObjectOwned>;
 
+    /// Updates a channel.
     #[method(name = "update_channel")]
     async fn update_channel(&self, params: UpdateChannelParams) -> Result<(), ErrorObjectOwned>;
 
+    /// Sends a payment to a peer.
     #[method(name = "send_payment")]
     async fn send_payment(
         &self,
         params: SendPaymentCommandParams,
     ) -> Result<GetPaymentCommandResult, ErrorObjectOwned>;
 
+    /// Retrieves a payment.
     #[method(name = "get_payment")]
     async fn get_payment(
         &self,
@@ -309,17 +515,20 @@ where
                 OpenChannelCommand {
                     peer_id: params.peer_id.clone(),
                     funding_amount: params.funding_amount,
-                    public: params.public.unwrap_or(false),
+                    public: params.public.unwrap_or(true),
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    commitment_delay_epoch: params
+                        .commitment_delay_epoch
+                        .clone()
+                        .map(|e| EpochNumberWithFractionCore::from_full_value(e.value())),
                     funding_udt_type_script: params
                         .funding_udt_type_script
                         .clone()
                         .map(|s| s.into()),
                     commitment_fee_rate: params.commitment_fee_rate,
                     funding_fee_rate: params.funding_fee_rate,
-                    tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                     tlc_min_value: params.tlc_min_value,
-                    tlc_max_value: params.tlc_max_value,
                     tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                     max_tlc_value_in_flight: params.max_tlc_value_in_flight,
                     max_tlc_number_in_flight: params.max_tlc_number_in_flight,
@@ -342,6 +551,11 @@ where
                     temp_channel_id: params.temporary_channel_id,
                     funding_amount: params.funding_amount,
                     shutdown_script: params.shutdown_script.clone().map(|s| s.into()),
+                    max_tlc_number_in_flight: params.max_tlc_number_in_flight,
+                    max_tlc_value_in_flight: params.max_tlc_value_in_flight,
+                    min_tlc_value: params.tlc_min_value,
+                    tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
+                    tlc_expiry_delta: params.tlc_expiry_delta,
                 },
                 rpc_reply,
             ))
@@ -356,26 +570,35 @@ where
         &self,
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned> {
-        let mut channels: Vec<_> = self
-            .store
-            .get_active_channel_states(params.peer_id)
+        let channel_states = if params.include_closed.unwrap_or_default() {
+            self.store.get_channel_states(params.peer_id)
+        } else {
+            self.store.get_active_channel_states(params.peer_id)
+        };
+        let mut channels: Vec<_> = channel_states
             .into_iter()
             .filter_map(|(peer_id, channel_id, _state)| {
                 self.store
                     .get_channel_actor_state(&channel_id)
                     .map(|state| Channel {
                         channel_id,
+                        is_public: state.is_public(),
+                        channel_outpoint: state.get_funding_transaction_outpoint(),
                         peer_id,
                         funding_udt_type_script: state
                             .funding_udt_type_script
                             .clone()
                             .map(Into::into),
-                        state: state.state,
+                        state: state.state.into(),
                         local_balance: state.get_local_balance(),
                         remote_balance: state.get_remote_balance(),
                         offered_tlc_balance: state.get_offered_tlc_balance(),
                         received_tlc_balance: state.get_received_tlc_balance(),
-                        created_at: state.get_created_at_in_microseconds(),
+                        latest_commitment_transaction_hash: state
+                            .latest_commitment_transaction
+                            .as_ref()
+                            .map(|tx| tx.clone().into_view().hash().unpack()),
+                        created_at: state.get_created_at_in_millis(),
                     })
             })
             .collect();
@@ -405,11 +628,11 @@ where
                     command: ChannelCommand::AddTlc(
                         AddTlcCommand {
                             amount: params.amount,
-                            preimage: None,
-                            payment_hash: Some(params.payment_hash),
+                            payment_hash: params.payment_hash,
                             expiry: params.expiry,
                             hash_algorithm: params.hash_algorithm.unwrap_or_default(),
-                            onion_packet: vec![],
+                            onion_packet: None,
+                            shared_secret: NO_SHARED_SECRET.clone(),
                             previous_tlc: None,
                         },
                         rpc_reply,
@@ -450,9 +673,12 @@ where
                                 RemoveTlcReason::RemoveTlcFail { .. } => {
                                     // TODO: maybe we should remove this PRC or move add_tlc and remove_tlc to `test` module?
                                     crate::fiber::types::RemoveTlcReason::RemoveTlcFail(
-                                        TlcErrPacket::new(TlcErr::new(
-                                            err_code.expect("expect error code"),
-                                        )),
+                                        TlcErrPacket::new(
+                                            TlcErr::new(err_code.expect("expect error code")),
+                                            // Do not encrypt the error message when removing the TLC via RPC.
+                                            // TODO: use tlc id to look up the shared secret in the store
+                                            &NO_SHARED_SECRET,
+                                        ),
                                     )
                                 }
                             },
@@ -496,9 +722,8 @@ where
                     command: ChannelCommand::Update(
                         UpdateCommand {
                             enabled: params.enabled,
-                            tlc_locktime_expiry_delta: params.tlc_locktime_expiry_delta,
+                            tlc_expiry_delta: params.tlc_expiry_delta,
                             tlc_minimum_value: params.tlc_minimum_value,
-                            tlc_maximum_value: params.tlc_maximum_value,
                             tlc_fee_proportional_millionths: params.tlc_fee_proportional_millionths,
                         },
                         rpc_reply,
@@ -519,7 +744,8 @@ where
                     target_pubkey: params.target_pubkey,
                     amount: params.amount,
                     payment_hash: params.payment_hash,
-                    final_cltv_delta: params.final_cltv_delta,
+                    final_tlc_expiry_delta: params.final_tlc_expiry_delta,
+                    tlc_expiry_limit: params.tlc_expiry_limit,
                     invoice: params.invoice.clone(),
                     timeout: params.timeout,
                     max_fee_amount: params.max_fee_amount,
@@ -530,6 +756,8 @@ where
                         .custom_records
                         .clone()
                         .map(|data| PaymentCustomRecord { data }),
+                    allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
             ))
@@ -541,6 +769,7 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             custom_records: response.custom_records,
+            fee: response.fee,
         })
     }
 
@@ -561,6 +790,7 @@ where
             last_updated_at: response.last_updated_at,
             failed_error: response.failed_error,
             custom_records: response.custom_records,
+            fee: response.fee,
         })
     }
 }

@@ -1,5 +1,5 @@
 use ckb_sdk::{rpc::ResponseFormatGetter, CkbRpcClient, RpcError};
-use ckb_types::{core::TransactionView, packed, prelude::*};
+use ckb_types::{core::TransactionView, packed, prelude::*, H256};
 use ractor::{
     concurrency::{sleep, Duration},
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort,
@@ -26,19 +26,6 @@ pub struct TraceTxRequest {
 }
 
 #[derive(Debug)]
-pub enum CkbChainMessage {
-    Fund(
-        FundingTx,
-        FundingRequest,
-        RpcReplyPort<Result<FundingTx, FundingError>>,
-    ),
-    Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
-    SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
-    TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
-    GetCurrentBlockNumber((), RpcReplyPort<Result<u64, RpcError>>),
-}
-
-#[derive(Debug)]
 pub struct TraceTxResponse {
     pub tx: Option<ckb_jsonrpc_types::TransactionView>,
     pub status: ckb_jsonrpc_types::TxStatus,
@@ -51,6 +38,39 @@ impl TraceTxResponse {
     ) -> Self {
         Self { tx, status }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetBlockTimestampRequest {
+    block_hash: H256,
+}
+
+impl GetBlockTimestampRequest {
+    pub fn from_block_hash(block_hash: H256) -> Self {
+        Self { block_hash }
+    }
+
+    pub fn block_hash(&self) -> H256 {
+        self.block_hash.clone()
+    }
+}
+
+pub type GetBlockTimestampResponse = u64;
+
+#[derive(Debug)]
+pub enum CkbChainMessage {
+    Fund(
+        FundingTx,
+        FundingRequest,
+        RpcReplyPort<Result<FundingTx, FundingError>>,
+    ),
+    Sign(FundingTx, RpcReplyPort<Result<FundingTx, FundingError>>),
+    SendTx(TransactionView, RpcReplyPort<Result<(), RpcError>>),
+    TraceTx(TraceTxRequest, RpcReplyPort<TraceTxResponse>),
+    GetBlockTimestamp(
+        GetBlockTimestampRequest,
+        RpcReplyPort<Result<Option<GetBlockTimestampResponse>, RpcError>>,
+    ),
 }
 
 #[ractor::async_trait]
@@ -89,17 +109,8 @@ impl Actor for CkbChainActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        use CkbChainMessage::{Fund, GetCurrentBlockNumber, SendTx, Sign, TraceTx};
+        use CkbChainMessage::{Fund, SendTx, Sign, TraceTx};
         match message {
-            GetCurrentBlockNumber(_, reply) => {
-                // Have to use block_in_place here, see https://github.com/seanmonstar/reqwest/issues/1017.
-                let result = tokio::task::block_in_place(move || {
-                    CkbRpcClient::new(&state.config.rpc_url)
-                        .get_tip_block_number()
-                        .map(|x| x.value())
-                });
-                let _ = reply.send(result);
-            }
             Fund(tx, request, reply_port) => {
                 let context = state.build_funding_context(&request);
                 if !reply_port.is_closed() {
@@ -250,6 +261,20 @@ impl Actor for CkbChainActor {
                         None => sleep(Duration::from_secs(5)).await,
                     }
                 }
+            }
+            CkbChainMessage::GetBlockTimestamp(
+                GetBlockTimestampRequest { block_hash },
+                reply_port,
+            ) => {
+                let rpc_url = state.config.rpc_url.clone();
+                tokio::task::block_in_place(move || {
+                    let ckb_client = CkbRpcClient::new(&rpc_url);
+                    let _ = reply_port.send(
+                        ckb_client
+                            .get_header(block_hash)
+                            .map(|x| x.map(|x| x.inner.timestamp.into())),
+                    );
+                });
             }
         }
         Ok(())

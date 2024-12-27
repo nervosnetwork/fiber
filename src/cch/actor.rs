@@ -19,9 +19,10 @@ use crate::fiber::channel::{
     AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand, TlcNotification,
 };
 use crate::fiber::hash_algorithm::HashAlgorithm;
-use crate::fiber::types::{Hash256, LockTime, RemoveTlcFulfill, RemoveTlcReason};
+use crate::fiber::types::{Hash256, RemoveTlcFulfill, RemoveTlcReason, NO_SHARED_SECRET};
 use crate::fiber::{NetworkActorCommand, NetworkActorMessage};
 use crate::invoice::Currency;
+use crate::now_timestamp_as_millis_u64;
 
 use super::error::CchDbError;
 use super::{CchConfig, CchError, CchOrderStatus, CchOrdersDb, ReceiveBTCOrder, SendBTCOrder};
@@ -311,7 +312,7 @@ impl CchActor {
             fee_sats,
             currency: send_btc.currency,
             created_at: duration_since_epoch.as_secs(),
-            ckb_final_tlc_expiry: self.config.ckb_final_tlc_expiry_blocks,
+            ckb_final_tlc_expiry_delta: self.config.ckb_final_tlc_expiry_delta,
             btc_pay_req: send_btc.btc_pay_req,
             ckb_pay_req: Default::default(),
             payment_hash: format!("0x{}", invoice.payment_hash().encode_hex::<String>()),
@@ -354,7 +355,7 @@ impl CchActor {
         }
 
         order.channel_id = Some(tlc_notification.channel_id);
-        order.tlc_id = Some(tlc_notification.tlc.id.into());
+        order.tlc_id = Some(tlc_notification.tlc.tlc_id.into());
         state.orders_db.update_send_btc_order(order.clone()).await?;
 
         let req = routerrpc::SendPaymentRequest {
@@ -533,7 +534,7 @@ impl CchActor {
         let order = ReceiveBTCOrder {
             created_at: duration_since_epoch.as_secs(),
             expires_after: DEFAULT_ORDER_EXPIRY_SECONDS,
-            ckb_final_tlc_expiry: receive_btc.final_tlc_expiry,
+            ckb_final_tlc_expiry_delta: receive_btc.final_tlc_expiry,
             btc_pay_req,
             payment_hash: receive_btc.payment_hash.clone(),
             payment_preimage: None,
@@ -587,13 +588,13 @@ impl CchActor {
                         command: ChannelCommand::AddTlc(
                             AddTlcCommand {
                                 amount: order.amount_sats - order.fee_sats,
-                                preimage: None,
-                                payment_hash: Some(
-                                    Hash256::from_str(&order.payment_hash).expect("parse Hash256"),
-                                ),
-                                expiry: LockTime::new(self.config.ckb_final_tlc_expiry_blocks),
+                                payment_hash: Hash256::from_str(&order.payment_hash)
+                                    .expect("parse Hash256"),
+                                expiry: now_timestamp_as_millis_u64()
+                                    + self.config.ckb_final_tlc_expiry_delta,
                                 hash_algorithm: HashAlgorithm::Sha256,
-                                onion_packet: vec![],
+                                onion_packet: None,
+                                shared_secret: NO_SHARED_SECRET.clone(),
                                 previous_tlc: None,
                             },
                             rpc_reply,
@@ -601,9 +602,14 @@ impl CchActor {
                     },
                 ))
             };
-            let tlc_response = call!(self.network_actor.as_ref().unwrap(), message)
-                .expect("call actor")
-                .map_err(|msg| anyhow!(msg))?;
+            let tlc_response = call!(
+                self.network_actor
+                    .as_ref()
+                    .expect("CCH requires network actor"),
+                message
+            )
+            .expect("call actor")
+            .map_err(|msg| anyhow!(msg))?;
             order.tlc_id = Some(tlc_response.tlc_id);
         }
 
@@ -638,6 +644,12 @@ impl LndPaymentsTracker {
     }
 
     async fn run(self) {
+        tracing::debug!(
+            target: "fnn::cch::actor::tracker::lnd_payments",
+            "will connect {}",
+            self.lnd_connection.uri
+        );
+
         // TODO: clean up expired orders
         loop {
             select! {
@@ -648,6 +660,7 @@ impl LndPaymentsTracker {
                         }
                         Err(err) => {
                             tracing::error!(
+                                target: "fnn::cch::actor::tracker::lnd_payments",
                                 "Error tracking LND payments, retry 15 seconds later: {:?}",
                                 err
                             );
@@ -672,10 +685,6 @@ impl LndPaymentsTracker {
     }
 
     async fn run_inner(&self) -> Result<()> {
-        tracing::debug!(
-            "[LndPaymentsTracker] will connect {}",
-            self.lnd_connection.uri
-        );
         let mut client = self.lnd_connection.create_router_client().await?;
         let mut stream = client
             .track_payments(routerrpc::TrackPaymentsRequest {
@@ -702,7 +711,7 @@ impl LndPaymentsTracker {
     }
 
     async fn on_payment(&self, payment: lnrpc::Payment) -> Result<()> {
-        tracing::debug!("[LndPaymentsTracker] payment: {:?}", payment);
+        tracing::debug!(target: "fnn::cch::actor::tracker::lnd_payments", "payment: {:?}", payment);
         let event = CchMessage::SettleSendBTCOrder(SettleSendBTCOrderEvent {
             payment_hash: format!("0x{}", payment.payment_hash),
             preimage: (!payment.payment_preimage.is_empty())
@@ -743,6 +752,11 @@ impl LndInvoiceTracker {
     }
 
     async fn run(self) {
+        tracing::debug!(
+            target: "fnn::cch::actor::tracker::lnd_invoice",
+            "will connect {}",
+            self.lnd_connection.uri
+        );
         loop {
             select! {
                 result = self.run_inner() => {
@@ -752,6 +766,7 @@ impl LndInvoiceTracker {
                         }
                         Err(err) => {
                             tracing::error!(
+                                target: "fnn::cch::actor::tracker::lnd_invoice",
                                 "Error tracking LND invoices, retry 15 seconds later: {:?}",
                                 err
                             );
@@ -776,10 +791,6 @@ impl LndInvoiceTracker {
     }
 
     async fn run_inner(&self) -> Result<()> {
-        tracing::debug!(
-            "[LndInvoiceTracker] will connect {}",
-            self.lnd_connection.uri
-        );
         let mut client = self.lnd_connection.create_invoices_client().await?;
         // TODO: clean up expired orders
         let mut stream = client

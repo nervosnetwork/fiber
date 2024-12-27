@@ -1,7 +1,7 @@
 meta {
   name: generate duplicate invoice
   type: http
-  seq: 3
+  seq: 2
 }
 
 post {
@@ -16,7 +16,7 @@ headers {
 }
 
 docs {
-  description: "use the same payment_preimage to generate a new invoice"
+  description: "use the same payment_preimage to generate a new invoice, expect an error"
 }
 
 body:json {
@@ -27,10 +27,10 @@ body:json {
     "params": [
       {
         "amount": "0x64",
-        "currency": "Fibb",
+        "currency": "Fibd",
         "description": "test invoice",
         "expiry": "0xe10",
-        "final_cltv": "0x28",
+        "final_expiry_delta": "0xDFFA0",
         "payment_preimage": "{{payment_preimage}}"
       }
     ]

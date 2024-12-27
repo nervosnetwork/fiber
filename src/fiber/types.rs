@@ -1,30 +1,28 @@
-use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
-use crate::ckb::contracts::get_udt_whitelist;
-
-use super::channel::ChannelFlags;
+use super::channel::{ChannelFlags, CHANNEL_DISABLED_FLAG, MESSAGE_OF_NODE2_FLAG};
 use super::config::AnnouncedNodeName;
-use super::gen::fiber::{
-    self as molecule_fiber, BroadcastMessageQueries, PubNonce as Byte66, UdtCellDeps, Uint128Opt,
-};
+use super::gen::fiber::{self as molecule_fiber, PubNonce as Byte66, UdtCellDeps, Uint128Opt};
+use super::gen::gossip::{self as molecule_gossip};
 use super::hash_algorithm::{HashAlgorithm, UnknownHashAlgorithmError};
 use super::network::{get_chain_hash, PaymentCustomRecord};
 use super::r#gen::fiber::PubNonceOpt;
 use super::serde_utils::{EntityHex, SliceHex};
+use crate::ckb::config::{UdtArgInfo, UdtCellDep, UdtCfgInfos, UdtScript};
+use crate::ckb::contracts::get_udt_whitelist;
+
 use anyhow::anyhow;
-use ckb_sdk::{Since, SinceType};
-use ckb_types::core::FeeRate;
-use ckb_types::packed::{OutPoint, Uint64};
 use ckb_types::{
-    packed::{Byte32 as MByte32, BytesVec, Script, Transaction},
+    core::FeeRate,
+    packed::{Byte32 as MByte32, BytesVec, OutPoint, Script, Transaction},
     prelude::{Pack, Unpack},
 };
 use core::fmt::{self, Formatter};
-use fiber_sphinx::SphinxError;
+use fiber_sphinx::{OnionErrorPacket, SphinxError};
 use molecule::prelude::{Builder, Byte, Entity};
 use musig2::errors::DecodeError;
 use musig2::secp::{Point, Scalar};
 use musig2::{BinaryEncoding, PartialSignature, PubNonce};
 use once_cell::sync::OnceCell;
+use ractor::concurrency::Duration;
 use secp256k1::{
     ecdsa::Signature as Secp256k1Signature, schnorr::Signature as SchnorrSignature, All, PublicKey,
     Secp256k1, SecretKey, Signing,
@@ -32,119 +30,24 @@ use secp256k1::{
 use secp256k1::{Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
+use std::cmp::Ordering;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use strum::{AsRefStr, EnumString};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::{error, trace};
 
 pub fn secp256k1_instance() -> &'static Secp256k1<All> {
     static INSTANCE: OnceCell<Secp256k1<All>> = OnceCell::new();
     INSTANCE.get_or_init(Secp256k1::new)
 }
 
-// TODO: We actually use both relative
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct LockTime(u64);
-
-impl LockTime {
-    pub fn new(blocks: u64) -> Self {
-        LockTime(blocks)
-    }
-}
-
-impl From<LockTime> for Since {
-    fn from(lock_time: LockTime) -> Since {
-        Since::new(SinceType::BlockNumber, lock_time.0, true)
-    }
-}
-
-impl TryFrom<Since> for LockTime {
-    type Error = Error;
-
-    fn try_from(since: Since) -> Result<Self, Self::Error> {
-        if !since.is_relative() {
-            return Err(Error::from(anyhow!(
-                "Invalid lock time type: must be relative"
-            )));
-        }
-        since
-            .extract_metric()
-            .map(|(ty, value)| {
-                if ty == SinceType::BlockNumber {
-                    Ok(LockTime(value))
-                } else {
-                    Err(Error::from(anyhow!(
-                        "Invalid lock time type: must be blocknumber"
-                    )))
-                }
-            })
-            .unwrap_or_else(|| {
-                Err(Error::from(anyhow!(
-                    "Invalid lock time type: unable to extract metric"
-                )))
-            })
-    }
-}
-
-impl From<LockTime> for Uint64 {
-    fn from(lock_time: LockTime) -> Uint64 {
-        let b: [u8; 8] = lock_time.into();
-        Uint64::from_slice(&b).expect("valid locktime serialized to 8 bytes")
-    }
-}
-
-impl TryFrom<Uint64> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: Uint64) -> Result<LockTime, Error> {
-        let b = value.as_slice();
-        LockTime::try_from(b)
-    }
-}
-
-impl From<u64> for LockTime {
-    fn from(value: u64) -> LockTime {
-        LockTime(value)
-    }
-}
-
-impl From<LockTime> for u64 {
-    fn from(lock_time: LockTime) -> u64 {
-        lock_time.0
-    }
-}
-
-impl From<[u8; 8]> for LockTime {
-    fn from(value: [u8; 8]) -> LockTime {
-        LockTime(u64::from_le_bytes(value))
-    }
-}
-
-impl From<LockTime> for [u8; 8] {
-    fn from(lock_time: LockTime) -> [u8; 8] {
-        lock_time.0.to_le_bytes()
-    }
-}
-
-impl TryFrom<&[u8]> for LockTime {
-    type Error = Error;
-
-    fn try_from(value: &[u8]) -> Result<LockTime, Error> {
-        if value.len() != 8 {
-            return Err(Error::from(anyhow!("Invalid lock time length")));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(value);
-        Ok(LockTime::from(bytes))
-    }
-}
-
 impl From<&Byte66> for PubNonce {
     fn from(value: &Byte66) -> Self {
-        PubNonce::from_bytes(value.as_slice()).unwrap()
+        PubNonce::from_bytes(value.as_slice()).expect("PubNonce from Byte66")
     }
 }
 
@@ -154,7 +57,7 @@ impl From<&PubNonce> for Byte66 {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Privkey(pub SecretKey);
 
 impl From<Privkey> for Scalar {
@@ -240,16 +143,7 @@ impl AsRef<[u8]> for Hash256 {
 
 impl From<&Hash256> for MByte32 {
     fn from(hash: &Hash256) -> Self {
-        MByte32::new_builder()
-            .set(
-                hash.0
-                    .into_iter()
-                    .map(Byte::new)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap(),
-            )
-            .build()
+        MByte32::from_slice(hash.0.as_ref()).expect("Byte32 from Hash256")
     }
 }
 
@@ -261,7 +155,7 @@ impl From<Hash256> for MByte32 {
 
 impl From<&MByte32> for Hash256 {
     fn from(value: &MByte32) -> Self {
-        Hash256(value.as_bytes().to_vec().try_into().unwrap())
+        Hash256(value.as_slice().try_into().expect("Hash256 from Byte32"))
     }
 }
 
@@ -272,16 +166,7 @@ impl From<MByte32> for Hash256 {
 }
 
 fn u8_32_as_byte_32(value: &[u8; 32]) -> MByte32 {
-    MByte32::new_builder()
-        .set(
-            value
-                .iter()
-                .map(|v| Byte::new(*v))
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-        .build()
+    MByte32::from_slice(value.as_slice()).expect("[u8; 32] to Byte32")
 }
 
 impl ::core::fmt::LowerHex for Hash256 {
@@ -337,27 +222,10 @@ impl Privkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let sk = Scalar::from(self);
-        (scalar + sk).unwrap().into()
-    }
-
-    // Essentially https://docs.rs/ckb-crypto/latest/ckb_crypto/secp/struct.Privkey.html#method.sign_recoverable
-    // But we don't want to depend on ckb-crypto because ckb-crypto depends on
-    // a different version of secp256k1.
-    pub fn sign_ecdsa_recoverable(&self, message: &[u8; 32]) -> [u8; 65] {
-        tracing::debug!(
-            "Signing message with private key {:?}, public key: {:?}, pubkey hash: {:?},  message {:?}",
-            hex::encode(self.as_ref()),
-            self.pubkey(),
-            hex::encode(ckb_hash::blake2b_256(self.pubkey().serialize())),
-            hex::encode(message)
-        );
-        let (rec_id, data) = secp256k1_instance()
-            .sign_ecdsa_recoverable(&secp256k1::Message::from_digest(*message), &self.0)
-            .serialize_compact();
-        let mut result = [0; 65];
-        result[0..64].copy_from_slice(data.as_slice());
-        result[64] = rec_id.to_i32() as u8;
-        result
+        (scalar + sk)
+            .not_zero()
+            .expect("valid secp256k1 scalar addition")
+            .into()
     }
 
     pub fn sign(&self, message: [u8; 32]) -> EcdsaSignature {
@@ -442,9 +310,18 @@ impl From<Pubkey> for tentacle::secio::PublicKey {
     }
 }
 
+const PUBKEY_SIZE: usize = 33;
 impl Pubkey {
-    pub fn serialize(&self) -> [u8; 33] {
+    pub const fn serialization_len() -> usize {
+        PUBKEY_SIZE
+    }
+
+    pub fn serialize(&self) -> [u8; PUBKEY_SIZE] {
         PublicKey::from(self).serialize()
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self, secp256k1::Error> {
+        PublicKey::from_slice(slice).map(Into::into)
     }
 
     pub fn tweak<I: Into<[u8; 32]>>(&self, scalar: I) -> Self {
@@ -452,7 +329,7 @@ impl Pubkey {
         let scalar = Scalar::from_slice(&scalar)
             .expect(format!("Value {:?} must be within secp256k1 scalar range. If you generated this value from hash function, then your hash function is busted.", &scalar).as_str());
         let result = Point::from(self) + scalar.base_point_mul();
-        PublicKey::from(result.unwrap()).into()
+        PublicKey::from(result.not_inf().expect("valid public key")).into()
     }
 
     pub fn tentacle_peer_id(&self) -> PeerId {
@@ -467,10 +344,6 @@ pub struct EcdsaSignature(pub Secp256k1Signature);
 impl EcdsaSignature {
     pub fn verify(&self, pubkey: &Pubkey, message: &[u8; 32]) -> bool {
         let message = secp256k1::Message::from_digest(*message);
-        debug!(
-            "Verifying message {:?} with pubkey {:?} and signature {:?}",
-            message, pubkey, self
-        );
         secp256k1_instance()
             .verify_ecdsa(&message, &self.0, &pubkey.0)
             .is_ok()
@@ -539,9 +412,7 @@ impl TryFrom<molecule_fiber::Pubkey> for Pubkey {
 
     fn try_from(pubkey: molecule_fiber::Pubkey) -> Result<Self, Self::Error> {
         let pubkey = pubkey.as_slice();
-        PublicKey::from_slice(pubkey)
-            .map(Into::into)
-            .map_err(Into::into)
+        Ok(Self::from_slice(pubkey)?)
     }
 }
 
@@ -573,9 +444,9 @@ impl TryFrom<molecule_fiber::EcdsaSignature> for EcdsaSignature {
     }
 }
 
-impl From<XOnlyPublicKey> for molecule_fiber::SchnorrXOnlyPubkey {
-    fn from(pk: XOnlyPublicKey) -> molecule_fiber::SchnorrXOnlyPubkey {
-        molecule_fiber::SchnorrXOnlyPubkey::new_builder()
+impl From<XOnlyPublicKey> for molecule_gossip::SchnorrXOnlyPubkey {
+    fn from(pk: XOnlyPublicKey) -> molecule_gossip::SchnorrXOnlyPubkey {
+        molecule_gossip::SchnorrXOnlyPubkey::new_builder()
             .set(
                 pk.serialize()
                     .into_iter()
@@ -588,18 +459,18 @@ impl From<XOnlyPublicKey> for molecule_fiber::SchnorrXOnlyPubkey {
     }
 }
 
-impl TryFrom<molecule_fiber::SchnorrXOnlyPubkey> for XOnlyPublicKey {
+impl TryFrom<molecule_gossip::SchnorrXOnlyPubkey> for XOnlyPublicKey {
     type Error = Error;
 
-    fn try_from(pubkey: molecule_fiber::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
+    fn try_from(pubkey: molecule_gossip::SchnorrXOnlyPubkey) -> Result<Self, Self::Error> {
         let pubkey = pubkey.as_slice();
         XOnlyPublicKey::from_slice(pubkey).map_err(Into::into)
     }
 }
 
-impl From<SchnorrSignature> for molecule_fiber::SchnorrSignature {
-    fn from(signature: SchnorrSignature) -> molecule_fiber::SchnorrSignature {
-        molecule_fiber::SchnorrSignature::new_builder()
+impl From<SchnorrSignature> for molecule_gossip::SchnorrSignature {
+    fn from(signature: SchnorrSignature) -> molecule_gossip::SchnorrSignature {
+        molecule_gossip::SchnorrSignature::new_builder()
             .set(
                 signature
                     .serialize()
@@ -613,10 +484,10 @@ impl From<SchnorrSignature> for molecule_fiber::SchnorrSignature {
     }
 }
 
-impl TryFrom<molecule_fiber::SchnorrSignature> for SchnorrSignature {
+impl TryFrom<molecule_gossip::SchnorrSignature> for SchnorrSignature {
     type Error = Error;
 
-    fn try_from(signature: molecule_fiber::SchnorrSignature) -> Result<Self, Self::Error> {
+    fn try_from(signature: molecule_gossip::SchnorrSignature) -> Result<Self, Self::Error> {
         let signature = signature.as_slice();
         SchnorrSignature::from_slice(signature)
             .map(Into::into)
@@ -642,14 +513,10 @@ pub struct OpenChannel {
     pub reserved_ckb_amount: u64,
     pub funding_fee_rate: u64,
     pub commitment_fee_rate: u64,
+    pub commitment_delay_epoch: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -682,15 +549,11 @@ impl From<OpenChannel> for molecule_fiber::OpenChannel {
             .reserved_ckb_amount(open_channel.reserved_ckb_amount.pack())
             .funding_fee_rate(open_channel.funding_fee_rate.pack())
             .commitment_fee_rate(open_channel.commitment_fee_rate.pack())
+            .commitment_delay_epoch(open_channel.commitment_delay_epoch.pack())
             .max_tlc_value_in_flight(open_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(open_channel.max_tlc_number_in_flight.pack())
-            .min_tlc_value(open_channel.min_tlc_value.pack())
             .shutdown_script(open_channel.shutdown_script)
-            .to_self_delay(open_channel.to_local_delay.into())
             .funding_pubkey(open_channel.funding_pubkey.into())
-            .revocation_basepoint(open_channel.revocation_basepoint.into())
-            .payment_basepoint(open_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(open_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(open_channel.tlc_basepoint.into())
             .first_per_commitment_point(open_channel.first_per_commitment_point.into())
             .second_per_commitment_point(open_channel.second_per_commitment_point.into())
@@ -718,14 +581,10 @@ impl TryFrom<molecule_fiber::OpenChannel> for OpenChannel {
             shutdown_script: open_channel.shutdown_script(),
             funding_fee_rate: open_channel.funding_fee_rate().unpack(),
             commitment_fee_rate: open_channel.commitment_fee_rate().unpack(),
+            commitment_delay_epoch: open_channel.commitment_delay_epoch().unpack(),
             max_tlc_value_in_flight: open_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: open_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: open_channel.min_tlc_value().unpack(),
-            to_local_delay: open_channel.to_self_delay().try_into()?,
             funding_pubkey: open_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: open_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: open_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: open_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: open_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: open_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: open_channel.second_per_commitment_point().try_into()?,
@@ -753,13 +612,8 @@ pub struct AcceptChannel {
     pub reserved_ckb_amount: u64,
     pub max_tlc_value_in_flight: u128,
     pub max_tlc_number_in_flight: u64,
-    pub min_tlc_value: u128,
-    pub to_local_delay: LockTime,
     pub funding_pubkey: Pubkey,
     pub shutdown_script: Script,
-    pub revocation_basepoint: Pubkey,
-    pub payment_basepoint: Pubkey,
-    pub delayed_payment_basepoint: Pubkey,
     pub tlc_basepoint: Pubkey,
     pub first_per_commitment_point: Pubkey,
     pub second_per_commitment_point: Pubkey,
@@ -776,12 +630,7 @@ impl From<AcceptChannel> for molecule_fiber::AcceptChannel {
             .max_tlc_value_in_flight(accept_channel.max_tlc_value_in_flight.pack())
             .max_tlc_number_in_flight(accept_channel.max_tlc_number_in_flight.pack())
             .shutdown_script(accept_channel.shutdown_script)
-            .min_tlc_value(accept_channel.min_tlc_value.pack())
-            .to_self_delay(accept_channel.to_local_delay.into())
             .funding_pubkey(accept_channel.funding_pubkey.into())
-            .revocation_basepoint(accept_channel.revocation_basepoint.into())
-            .payment_basepoint(accept_channel.payment_basepoint.into())
-            .delayed_payment_basepoint(accept_channel.delayed_payment_basepoint.into())
             .tlc_basepoint(accept_channel.tlc_basepoint.into())
             .first_per_commitment_point(accept_channel.first_per_commitment_point.into())
             .second_per_commitment_point(accept_channel.second_per_commitment_point.into())
@@ -810,12 +659,7 @@ impl TryFrom<molecule_fiber::AcceptChannel> for AcceptChannel {
             reserved_ckb_amount: accept_channel.reserved_ckb_amount().unpack(),
             max_tlc_value_in_flight: accept_channel.max_tlc_value_in_flight().unpack(),
             max_tlc_number_in_flight: accept_channel.max_tlc_number_in_flight().unpack(),
-            min_tlc_value: accept_channel.min_tlc_value().unpack(),
-            to_local_delay: accept_channel.to_self_delay().try_into()?,
             funding_pubkey: accept_channel.funding_pubkey().try_into()?,
-            revocation_basepoint: accept_channel.revocation_basepoint().try_into()?,
-            payment_basepoint: accept_channel.payment_basepoint().try_into()?,
-            delayed_payment_basepoint: accept_channel.delayed_payment_basepoint().try_into()?,
             tlc_basepoint: accept_channel.tlc_basepoint().try_into()?,
             first_per_commitment_point: accept_channel.first_per_commitment_point().try_into()?,
             second_per_commitment_point: accept_channel.second_per_commitment_point().try_into()?,
@@ -842,17 +686,7 @@ pub struct CommitmentSigned {
 }
 
 fn partial_signature_to_molecule(partial_signature: PartialSignature) -> MByte32 {
-    MByte32::new_builder()
-        .set(
-            partial_signature
-                .serialize()
-                .into_iter()
-                .map(Byte::new)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-        .build()
+    MByte32::from_slice(partial_signature.serialize().as_ref()).expect("[Byte; 32] from [u8; 32]")
 }
 
 impl From<CommitmentSigned> for molecule_fiber::CommitmentSigned {
@@ -897,7 +731,6 @@ impl TryFrom<molecule_fiber::CommitmentSigned> for CommitmentSigned {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxSignatures {
     pub channel_id: Hash256,
-    pub tx_hash: Hash256,
     pub witnesses: Vec<Vec<u8>>,
 }
 
@@ -905,7 +738,6 @@ impl From<TxSignatures> for molecule_fiber::TxSignatures {
     fn from(tx_signatures: TxSignatures) -> Self {
         molecule_fiber::TxSignatures::new_builder()
             .channel_id(tx_signatures.channel_id.into())
-            .tx_hash(tx_signatures.tx_hash.into())
             .witnesses(
                 BytesVec::new_builder()
                     .set(
@@ -927,7 +759,6 @@ impl TryFrom<molecule_fiber::TxSignatures> for TxSignatures {
     fn try_from(tx_signatures: molecule_fiber::TxSignatures) -> Result<Self, Self::Error> {
         Ok(TxSignatures {
             channel_id: tx_signatures.channel_id().into(),
-            tx_hash: tx_signatures.tx_hash().into(),
             witnesses: tx_signatures
                 .witnesses()
                 .into_iter()
@@ -995,12 +826,16 @@ impl TryFrom<molecule_fiber::TxUpdate> for TxUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxComplete {
     pub channel_id: Hash256,
+    pub commitment_tx_partial_signature: PartialSignature,
 }
 
 impl From<TxComplete> for molecule_fiber::TxComplete {
     fn from(tx_complete: TxComplete) -> Self {
         molecule_fiber::TxComplete::new_builder()
             .channel_id(tx_complete.channel_id.into())
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                tx_complete.commitment_tx_partial_signature,
+            ))
             .build()
     }
 }
@@ -1011,6 +846,10 @@ impl TryFrom<molecule_fiber::TxComplete> for TxComplete {
     fn try_from(tx_complete: molecule_fiber::TxComplete) -> Result<Self, Self::Error> {
         Ok(TxComplete {
             channel_id: tx_complete.channel_id().into(),
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                tx_complete.commitment_tx_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
         })
     }
 }
@@ -1094,7 +933,6 @@ impl TryFrom<molecule_fiber::TxAckRBF> for TxAckRBF {
 pub struct Shutdown {
     pub channel_id: Hash256,
     pub close_script: Script,
-    pub force: bool,
     pub fee_rate: FeeRate,
 }
 
@@ -1104,7 +942,6 @@ impl From<Shutdown> for molecule_fiber::Shutdown {
             .channel_id(shutdown.channel_id.into())
             .close_script(shutdown.close_script)
             .fee_rate(shutdown.fee_rate.as_u64().pack())
-            .force(if shutdown.force { 1_u8 } else { 0_u8 }.into())
             .build()
     }
 }
@@ -1113,12 +950,10 @@ impl TryFrom<molecule_fiber::Shutdown> for Shutdown {
     type Error = Error;
 
     fn try_from(shutdown: molecule_fiber::Shutdown) -> Result<Self, Self::Error> {
-        let force: u8 = shutdown.force().into();
         Ok(Shutdown {
             channel_id: shutdown.channel_id().into(),
             close_script: shutdown.close_script(),
             fee_rate: FeeRate::from_u64(shutdown.fee_rate().unpack()),
-            force: force != 0,
         })
     }
 }
@@ -1154,15 +989,15 @@ impl TryFrom<molecule_fiber::ClosingSigned> for ClosingSigned {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AddTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
     pub amount: u128,
     pub payment_hash: Hash256,
-    pub expiry: LockTime,
+    pub expiry: u64,
     pub hash_algorithm: HashAlgorithm,
-    pub onion_packet: Vec<u8>,
+    pub onion_packet: Option<PaymentOnionPacket>,
 }
 
 impl From<AddTlc> for molecule_fiber::AddTlc {
@@ -1172,9 +1007,15 @@ impl From<AddTlc> for molecule_fiber::AddTlc {
             .tlc_id(add_tlc.tlc_id.pack())
             .amount(add_tlc.amount.pack())
             .payment_hash(add_tlc.payment_hash.into())
-            .expiry(add_tlc.expiry.into())
+            .expiry(add_tlc.expiry.pack())
             .hash_algorithm(Byte::new(add_tlc.hash_algorithm as u8))
-            .onion_packet(add_tlc.onion_packet.pack())
+            .onion_packet(
+                add_tlc
+                    .onion_packet
+                    .map(|p| p.into_bytes())
+                    .unwrap_or_default()
+                    .pack(),
+            )
             .build()
     }
 }
@@ -1183,13 +1024,16 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
     type Error = Error;
 
     fn try_from(add_tlc: molecule_fiber::AddTlc) -> Result<Self, Self::Error> {
+        let onion_packet_bytes: Vec<u8> = add_tlc.onion_packet().unpack();
+        let onion_packet =
+            (onion_packet_bytes.len() > 0).then(|| PaymentOnionPacket::new(onion_packet_bytes));
         Ok(AddTlc {
+            onion_packet,
             channel_id: add_tlc.channel_id().into(),
             tlc_id: add_tlc.tlc_id().unpack(),
             amount: add_tlc.amount().unpack(),
             payment_hash: add_tlc.payment_hash().into(),
-            expiry: add_tlc.expiry().try_into()?,
-            onion_packet: add_tlc.onion_packet().unpack(),
+            expiry: add_tlc.expiry().unpack(),
             hash_algorithm: add_tlc
                 .hash_algorithm()
                 .try_into()
@@ -1201,7 +1045,8 @@ impl TryFrom<molecule_fiber::AddTlc> for AddTlc {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevokeAndAck {
     pub channel_id: Hash256,
-    pub partial_signature: PartialSignature,
+    pub revocation_partial_signature: PartialSignature,
+    pub commitment_tx_partial_signature: PartialSignature,
     pub next_per_commitment_point: Pubkey,
 }
 
@@ -1209,8 +1054,11 @@ impl From<RevokeAndAck> for molecule_fiber::RevokeAndAck {
     fn from(revoke_and_ack: RevokeAndAck) -> Self {
         molecule_fiber::RevokeAndAck::new_builder()
             .channel_id(revoke_and_ack.channel_id.into())
-            .partial_signature(partial_signature_to_molecule(
-                revoke_and_ack.partial_signature,
+            .revocation_partial_signature(partial_signature_to_molecule(
+                revoke_and_ack.revocation_partial_signature,
+            ))
+            .commitment_tx_partial_signature(partial_signature_to_molecule(
+                revoke_and_ack.commitment_tx_partial_signature,
             ))
             .next_per_commitment_point(revoke_and_ack.next_per_commitment_point.into())
             .build()
@@ -1223,8 +1071,12 @@ impl TryFrom<molecule_fiber::RevokeAndAck> for RevokeAndAck {
     fn try_from(revoke_and_ack: molecule_fiber::RevokeAndAck) -> Result<Self, Self::Error> {
         Ok(RevokeAndAck {
             channel_id: revoke_and_ack.channel_id().into(),
-            partial_signature: PartialSignature::from_slice(
-                revoke_and_ack.partial_signature().as_slice(),
+            revocation_partial_signature: PartialSignature::from_slice(
+                revoke_and_ack.revocation_partial_signature().as_slice(),
+            )
+            .map_err(|e| anyhow!(e))?,
+            commitment_tx_partial_signature: PartialSignature::from_slice(
+                revoke_and_ack.commitment_tx_partial_signature().as_slice(),
             )
             .map_err(|e| anyhow!(e))?,
             next_per_commitment_point: revoke_and_ack.next_per_commitment_point().try_into()?,
@@ -1262,6 +1114,7 @@ pub enum TlcErrData {
         #[serde_as(as = "EntityHex")]
         channel_outpoint: OutPoint,
         channel_update: Option<ChannelUpdate>,
+        node_id: Pubkey,
     },
     NodeFailed {
         node_id: Pubkey,
@@ -1273,6 +1126,12 @@ pub enum TlcErrData {
 pub struct TlcErr {
     pub error_code: TlcErrorCode,
     pub extra_data: Option<TlcErrData>,
+}
+
+impl Display for TlcErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error_code_as_str().fmt(f)
+    }
 }
 
 impl TlcErr {
@@ -1292,12 +1151,14 @@ impl TlcErr {
 
     pub fn new_channel_fail(
         error_code: TlcErrorCode,
+        node_id: Pubkey,
         channel_outpoint: OutPoint,
         channel_update: Option<ChannelUpdate>,
     ) -> Self {
         TlcErr {
             error_code: error_code.into(),
             extra_data: Some(TlcErrData::ChannelFailed {
+                node_id,
                 channel_outpoint,
                 channel_update,
             }),
@@ -1307,6 +1168,7 @@ impl TlcErr {
     pub fn error_node_id(&self) -> Option<Pubkey> {
         match &self.extra_data {
             Some(TlcErrData::NodeFailed { node_id }) => Some(*node_id),
+            Some(TlcErrData::ChannelFailed { node_id, .. }) => Some(*node_id),
             _ => None,
         }
     }
@@ -1353,15 +1215,68 @@ pub struct TlcErrPacket {
     pub onion_packet: Vec<u8>,
 }
 
+pub const NO_SHARED_SECRET: [u8; 32] = [0u8; 32];
+const NO_ERROR_PACKET_HMAC: [u8; 32] = [0u8; 32];
+
+/// Always decrypting 27 times so the erroring node cannot learn its relative position in the route
+/// by performing a timing analysis if the sender were to retry the same route multiple times.
+const ERROR_DECODING_PASSES: usize = 27;
+
 impl TlcErrPacket {
-    pub fn new(tlc_fail: TlcErr) -> Self {
-        TlcErrPacket {
-            onion_packet: tlc_fail.serialize(),
+    /// Erring node creates the error packet using the shared secret used in forwarding onion packet.
+    /// Use all zeros for the origin node.
+    pub fn new(tlc_fail: TlcErr, shared_secret: &[u8; 32]) -> Self {
+        let payload = tlc_fail.serialize();
+
+        let onion_packet = if shared_secret != &NO_SHARED_SECRET {
+            OnionErrorPacket::create(shared_secret, payload)
+        } else {
+            OnionErrorPacket::concat(NO_ERROR_PACKET_HMAC.clone(), payload)
+        }
+        .into_bytes();
+        TlcErrPacket { onion_packet }
+    }
+
+    pub fn is_plaintext(&self) -> bool {
+        self.onion_packet.len() >= 32 && self.onion_packet[0..32] == NO_ERROR_PACKET_HMAC
+    }
+
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
+    /// the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        if !self.is_plaintext() {
+            let onion_packet = OnionErrorPacket::from_bytes(self.onion_packet)
+                .xor_cipher_stream(shared_secret)
+                .into_bytes();
+            TlcErrPacket { onion_packet }
+        } else {
+            // If it is not encrypted, just send back as it is.
+            self
         }
     }
 
-    pub fn decode(&self) -> Option<TlcErr> {
-        TlcErr::deserialize(&self.onion_packet)
+    pub fn decode(&self, session_key: &[u8; 32], hops_public_keys: Vec<Pubkey>) -> Option<TlcErr> {
+        if self.is_plaintext() {
+            let error = TlcErr::deserialize(&self.onion_packet[32..]);
+            if error.is_some() {
+                return error;
+            }
+        }
+
+        let hops_public_keys: Vec<PublicKey> =
+            hops_public_keys.iter().map(|k| k.0.clone()).collect();
+        let session_key = SecretKey::from_slice(session_key).inspect_err(|err|
+            error!(target: "fnn::fiber::types::TlcErrPacket", "decode session_key error={} key={}", err, hex::encode(session_key))
+        ).ok()?;
+        OnionErrorPacket::from_bytes(self.onion_packet.clone())
+            .parse(hops_public_keys, session_key, TlcErr::deserialize)
+            .map(|(error, hop_index)| {
+                for _ in hop_index..ERROR_DECODING_PASSES {
+                    OnionErrorPacket::from_bytes(self.onion_packet.clone())
+                        .xor_cipher_stream(&NO_SHARED_SECRET);
+                }
+                error
+            })
     }
 }
 
@@ -1416,18 +1331,17 @@ pub enum TlcErrorCode {
     UnknownNextPeer = PERM | 10,
     AmountBelowMinimum = UPDATE | 11,
     FeeInsufficient = UPDATE | 12,
-    // TODO: cltv expiry check
-    IncorrectCltvExpiry = UPDATE | 13,
-    ExpiryTooSoon = UPDATE | 14,
+    IncorrectTlcExpiry = UPDATE | 13,
+    ExpiryTooSoon = PERM | 14,
     IncorrectOrUnknownPaymentDetails = PERM | 15,
     InvoiceExpired = PERM | 16,
-    FinalIncorrectCltvExpiry = 18,
-    FinalIncorrectHtlcAmount = 19,
+    InvoiceCancelled = PERM | 17,
+    FinalIncorrectExpiryDelta = 18,
+    FinalIncorrectTlcAmount = 19,
     ChannelDisabled = UPDATE | 20,
-    ExpiryTooFar = 21,
+    ExpiryTooFar = PERM | 21,
     InvalidOnionPayload = PERM | 22,
-    MppTimeout = 23,
-    InvalidOnionBlinding = BADONION | PERM | 24,
+    InvalidOnionError = BADONION | PERM | 25,
 }
 
 impl TlcErrorCode {
@@ -1450,10 +1364,12 @@ impl TlcErrorCode {
     pub fn payment_failed(&self) -> bool {
         match self {
             TlcErrorCode::IncorrectOrUnknownPaymentDetails
-            | TlcErrorCode::FinalIncorrectCltvExpiry
-            | TlcErrorCode::FinalIncorrectHtlcAmount
+            | TlcErrorCode::FinalIncorrectExpiryDelta
+            | TlcErrorCode::FinalIncorrectTlcAmount
             | TlcErrorCode::InvoiceExpired
-            | TlcErrorCode::MppTimeout => true,
+            | TlcErrorCode::InvoiceCancelled
+            | TlcErrorCode::ExpiryTooFar
+            | TlcErrorCode::ExpiryTooSoon => true,
             _ => false,
         }
     }
@@ -1463,6 +1379,21 @@ impl TlcErrorCode {
 pub enum RemoveTlcReason {
     RemoveTlcFulfill(RemoveTlcFulfill),
     RemoveTlcFail(TlcErrPacket),
+}
+
+impl RemoveTlcReason {
+    /// Intermediate node backwards the error to the previous hop using the shared secret used in forwarding
+    /// the onion packet.
+    pub fn backward(self, shared_secret: &[u8; 32]) -> Self {
+        match self {
+            RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill) => {
+                RemoveTlcReason::RemoveTlcFulfill(remove_tlc_fulfill)
+            }
+            RemoveTlcReason::RemoveTlcFail(remove_tlc_fail) => {
+                RemoveTlcReason::RemoveTlcFail(remove_tlc_fail.backward(shared_secret))
+            }
+        }
+    }
 }
 
 impl From<RemoveTlcReason> for molecule_fiber::RemoveTlcReasonUnion {
@@ -1501,7 +1432,7 @@ impl TryFrom<molecule_fiber::RemoveTlcReason> for RemoveTlcReason {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoveTlc {
     pub channel_id: Hash256,
     pub tlc_id: u64,
@@ -1604,15 +1535,15 @@ impl TryFrom<molecule_fiber::AnnouncementSignatures> for AnnouncementSignatures 
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct NodeAnnouncement {
     // Signature to this message, may be empty the message is not signed yet.
     pub signature: Option<EcdsaSignature>,
     // Tentatively using 64 bits for features. May change the type later while developing.
     // rust-lightning uses a Vec<u8> here.
     pub features: u64,
-    // Opaque version number of the node announcement update, later update should have larger version number.
-    pub version: u64,
+    // Timestamp for current NodeAnnouncement. Later updates should have larger timestamp.
+    pub timestamp: u64,
     pub node_id: Pubkey,
     // Must be a valid utf-8 string of length maximal length 32 bytes.
     // If the length is less than 32 bytes, it will be padded with 0.
@@ -1633,13 +1564,13 @@ impl NodeAnnouncement {
         alias: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         node_id: Pubkey,
-        version: u64,
+        timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
     ) -> Self {
         Self {
             signature: None,
             features: Default::default(),
-            version,
+            timestamp,
             node_id,
             alias,
             chain_hash: get_chain_hash(),
@@ -1653,14 +1584,14 @@ impl NodeAnnouncement {
         alias: AnnouncedNodeName,
         addresses: Vec<MultiAddr>,
         private_key: &Privkey,
-        version: u64,
+        timestamp: u64,
         auto_accept_min_ckb_funding_amount: u64,
     ) -> NodeAnnouncement {
         let mut unsigned = NodeAnnouncement::new_unsigned(
             alias,
             addresses,
             private_key.pubkey(),
-            version,
+            timestamp,
             auto_accept_min_ckb_funding_amount,
         );
         unsigned.signature = Some(private_key.sign(unsigned.message_to_sign()));
@@ -1671,7 +1602,7 @@ impl NodeAnnouncement {
         let unsigned_announcement = NodeAnnouncement {
             signature: None,
             features: self.features,
-            version: self.version,
+            timestamp: self.timestamp,
             node_id: self.node_id,
             alias: self.alias,
             chain_hash: self.chain_hash,
@@ -1680,6 +1611,17 @@ impl NodeAnnouncement {
             udt_cfg_infos: get_udt_whitelist(),
         };
         deterministically_hash(&unsigned_announcement)
+    }
+
+    pub fn peer_id(&self) -> PeerId {
+        PeerId::from_public_key(&self.node_id.into())
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(
+            self.timestamp,
+            BroadcastMessageID::NodeAnnouncement(self.node_id),
+        )
     }
 }
 
@@ -1797,9 +1739,9 @@ impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
     }
 }
 
-impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
+impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
-        molecule_fiber::NodeAnnouncement::new_builder()
+        molecule_gossip::NodeAnnouncement::new_builder()
             .signature(
                 node_announcement
                     .signature
@@ -1807,7 +1749,7 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
                     .into(),
             )
             .features(node_announcement.features.pack())
-            .timestamp(node_announcement.version.pack())
+            .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
             .alias(u8_32_as_byte_32(&node_announcement.alias.0))
             .chain_hash(node_announcement.chain_hash.into())
@@ -1830,14 +1772,14 @@ impl From<NodeAnnouncement> for molecule_fiber::NodeAnnouncement {
     }
 }
 
-impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
+impl TryFrom<molecule_gossip::NodeAnnouncement> for NodeAnnouncement {
     type Error = Error;
 
-    fn try_from(node_announcement: molecule_fiber::NodeAnnouncement) -> Result<Self, Self::Error> {
+    fn try_from(node_announcement: molecule_gossip::NodeAnnouncement) -> Result<Self, Self::Error> {
         Ok(NodeAnnouncement {
             signature: Some(node_announcement.signature().try_into()?),
             features: node_announcement.features().unpack(),
-            version: node_announcement.timestamp().unpack(),
+            timestamp: node_announcement.timestamp().unpack(),
             node_id: node_announcement.node_id().try_into()?,
             chain_hash: node_announcement.chain_hash().into(),
             auto_accept_min_ckb_funding_amount: node_announcement
@@ -1856,7 +1798,7 @@ impl TryFrom<molecule_fiber::NodeAnnouncement> for NodeAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct ChannelAnnouncement {
     pub node1_signature: Option<EcdsaSignature>,
     pub node2_signature: Option<EcdsaSignature>,
@@ -1884,7 +1826,6 @@ impl ChannelAnnouncement {
         node1_pubkey: &Pubkey,
         node2_pubkey: &Pubkey,
         channel_outpoint: OutPoint,
-        chain_hash: Hash256,
         ckb_pubkey: &XOnlyPublicKey,
         capacity: u128,
         udt_type_script: Option<Script>,
@@ -1894,7 +1835,7 @@ impl ChannelAnnouncement {
             node2_signature: None,
             ckb_signature: None,
             features: Default::default(),
-            chain_hash,
+            chain_hash: get_chain_hash(),
             channel_outpoint,
             node1_id: *node1_pubkey,
             node2_id: *node2_pubkey,
@@ -1926,11 +1867,15 @@ impl ChannelAnnouncement {
         };
         deterministically_hash(&unsigned_announcement)
     }
+
+    pub fn out_point(&self) -> &OutPoint {
+        &self.channel_outpoint
+    }
 }
 
-impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
+impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
     fn from(channel_announcement: ChannelAnnouncement) -> Self {
-        molecule_fiber::ChannelAnnouncement::new_builder()
+        molecule_gossip::ChannelAnnouncement::new_builder()
             .node1_signature(
                 channel_announcement
                     .node1_signature
@@ -1961,11 +1906,11 @@ impl From<ChannelAnnouncement> for molecule_fiber::ChannelAnnouncement {
     }
 }
 
-impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
+impl TryFrom<molecule_gossip::ChannelAnnouncement> for ChannelAnnouncement {
     type Error = Error;
 
     fn try_from(
-        channel_announcement: molecule_fiber::ChannelAnnouncement,
+        channel_announcement: molecule_gossip::ChannelAnnouncement,
     ) -> Result<Self, Self::Error> {
         Ok(ChannelAnnouncement {
             node1_signature: Some(channel_announcement.node1_signature().try_into()?),
@@ -1984,14 +1929,14 @@ impl TryFrom<molecule_fiber::ChannelAnnouncement> for ChannelAnnouncement {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct ChannelUpdate {
     // Signature of the node that wants to update the channel information.
     pub signature: Option<EcdsaSignature>,
     pub chain_hash: Hash256,
     #[serde_as(as = "EntityHex")]
     pub channel_outpoint: OutPoint,
-    pub version: u64,
+    pub timestamp: u64,
     // Currently only the first bit is used to indicate the direction of the channel.
     // If it is 0, it means this channel message is from node 1 (thus applies to tlcs
     // sent from node 2 to node 1). Otherwise, it is from node 2.
@@ -1999,34 +1944,37 @@ pub struct ChannelUpdate {
     // Currently only the first bit is used to indicate if the channel is disabled.
     // If the first bit is set, the channel is disabled.
     pub channel_flags: u32,
-    pub tlc_locktime_expiry_delta: u64,
+    pub tlc_expiry_delta: u64,
     pub tlc_minimum_value: u128,
-    pub tlc_maximum_value: u128,
     pub tlc_fee_proportional_millionths: u128,
 }
 
 impl ChannelUpdate {
     pub fn new_unsigned(
-        chain_hash: Hash256,
         channel_outpoint: OutPoint,
         timestamp: u64,
         message_flags: u32,
         channel_flags: u32,
-        tlc_locktime_expiry_delta: u64,
+        tlc_expiry_delta: u64,
         tlc_minimum_value: u128,
-        tlc_maximum_value: u128,
         tlc_fee_proportional_millionths: u128,
     ) -> Self {
+        // To avoid having the same timestamp for both channel updates, we will use an even
+        // timestamp number for node1 and an odd timestamp number for node2.
+        let timestamp = if message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG {
+            timestamp | 1u64
+        } else {
+            timestamp & !1u64
+        };
         Self {
             signature: None,
-            chain_hash,
+            chain_hash: get_chain_hash(),
             channel_outpoint,
-            version: timestamp,
+            timestamp,
             message_flags,
             channel_flags,
-            tlc_locktime_expiry_delta,
+            tlc_expiry_delta,
             tlc_minimum_value,
-            tlc_maximum_value,
             tlc_fee_proportional_millionths,
         }
     }
@@ -2036,21 +1984,39 @@ impl ChannelUpdate {
             signature: None,
             chain_hash: self.chain_hash,
             channel_outpoint: self.channel_outpoint.clone(),
-            version: self.version,
+            timestamp: self.timestamp,
             message_flags: self.message_flags,
             channel_flags: self.channel_flags,
-            tlc_locktime_expiry_delta: self.tlc_locktime_expiry_delta,
+            tlc_expiry_delta: self.tlc_expiry_delta,
             tlc_minimum_value: self.tlc_minimum_value,
-            tlc_maximum_value: self.tlc_maximum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
         };
         deterministically_hash(&unsigned_update)
     }
+
+    pub fn is_update_of_node_1(&self) -> bool {
+        !self.is_update_of_node_2()
+    }
+
+    pub fn is_update_of_node_2(&self) -> bool {
+        self.message_flags & MESSAGE_OF_NODE2_FLAG == MESSAGE_OF_NODE2_FLAG
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.channel_flags & CHANNEL_DISABLED_FLAG == CHANNEL_DISABLED_FLAG
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(
+            self.timestamp,
+            BroadcastMessageID::ChannelUpdate(self.channel_outpoint.clone()),
+        )
+    }
 }
 
-impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
+impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
     fn from(channel_update: ChannelUpdate) -> Self {
-        molecule_fiber::ChannelUpdate::new_builder()
+        molecule_gossip::ChannelUpdate::new_builder()
             .signature(
                 channel_update
                     .signature
@@ -2059,31 +2025,29 @@ impl From<ChannelUpdate> for molecule_fiber::ChannelUpdate {
             )
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
-            .timestamp(channel_update.version.pack())
+            .timestamp(channel_update.timestamp.pack())
             .message_flags(channel_update.message_flags.pack())
             .channel_flags(channel_update.channel_flags.pack())
-            .tlc_locktime_expiry_delta(channel_update.tlc_locktime_expiry_delta.pack())
+            .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
-            .tlc_maximum_value(channel_update.tlc_maximum_value.pack())
             .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
             .build()
     }
 }
 
-impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
+impl TryFrom<molecule_gossip::ChannelUpdate> for ChannelUpdate {
     type Error = Error;
 
-    fn try_from(channel_update: molecule_fiber::ChannelUpdate) -> Result<Self, Self::Error> {
+    fn try_from(channel_update: molecule_gossip::ChannelUpdate) -> Result<Self, Self::Error> {
         Ok(ChannelUpdate {
             signature: Some(channel_update.signature().try_into()?),
             chain_hash: channel_update.chain_hash().into(),
             channel_outpoint: channel_update.channel_outpoint(),
-            version: channel_update.timestamp().unpack(),
+            timestamp: channel_update.timestamp().unpack(),
             message_flags: channel_update.message_flags().unpack(),
             channel_flags: channel_update.channel_flags().unpack(),
-            tlc_locktime_expiry_delta: channel_update.tlc_locktime_expiry_delta().unpack(),
+            tlc_expiry_delta: channel_update.tlc_expiry_delta().unpack(),
             tlc_minimum_value: channel_update.tlc_minimum_value().unpack(),
-            tlc_maximum_value: channel_update.tlc_maximum_value().unpack(),
             tlc_fee_proportional_millionths: channel_update
                 .tlc_fee_proportional_millionths()
                 .unpack(),
@@ -2095,18 +2059,12 @@ impl TryFrom<molecule_fiber::ChannelUpdate> for ChannelUpdate {
 pub enum FiberQueryInformation {
     GetBroadcastMessages(GetBroadcastMessages),
     GetBroadcastMessagesResult(GetBroadcastMessagesResult),
-    QueryChannelsWithinBlockRange(QueryChannelsWithinBlockRange),
-    QueryChannelsWithinBlockRangeResult(QueryChannelsWithinBlockRangeResult),
-    QueryBroadcastMessagesWithinTimeRange(QueryBroadcastMessagesWithinTimeRange),
-    QueryBroadcastMessagesWithinTimeRangeResult(QueryBroadcastMessagesWithinTimeRangeResult),
 }
 
 #[derive(Debug, Clone)]
 pub enum FiberMessage {
     ChannelInitialization(OpenChannel),
     ChannelNormalOperation(FiberChannelMessage),
-    BroadcastMessage(FiberBroadcastMessage),
-    QueryInformation(FiberQueryInformation),
 }
 
 impl FiberMessage {
@@ -2183,20 +2141,6 @@ impl FiberMessage {
             announcement_signatures,
         ))
     }
-
-    pub fn node_announcement(node_announcement: NodeAnnouncement) -> Self {
-        FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(node_announcement))
-    }
-
-    pub fn channel_announcement(channel_announcement: ChannelAnnouncement) -> Self {
-        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
-            channel_announcement,
-        ))
-    }
-
-    pub fn channel_update(channel_update: ChannelUpdate) -> Self {
-        FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(channel_update))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2249,258 +2193,713 @@ impl FiberChannelMessage {
 }
 
 #[derive(Debug, Clone)]
-pub enum FiberBroadcastMessage {
+pub enum GossipMessage {
+    BroadcastMessagesFilter(BroadcastMessagesFilter),
+    BroadcastMessagesFilterResult(BroadcastMessagesFilterResult),
+    GetBroadcastMessages(GetBroadcastMessages),
+    GetBroadcastMessagesResult(GetBroadcastMessagesResult),
+    QueryBroadcastMessages(QueryBroadcastMessages),
+    QueryBroadcastMessagesResult(QueryBroadcastMessagesResult),
+}
+
+impl GossipMessage {
+    pub fn to_molecule_bytes(self) -> molecule::bytes::Bytes {
+        molecule_gossip::GossipMessage::from(self).as_bytes()
+    }
+
+    pub fn from_molecule_slice(data: &[u8]) -> Result<Self, Error> {
+        molecule_gossip::GossipMessage::from_slice(data)
+            .map_err(Into::into)
+            .and_then(TryInto::try_into)
+    }
+}
+
+impl From<GossipMessage> for molecule_gossip::GossipMessageUnion {
+    fn from(gossip_message: GossipMessage) -> Self {
+        match gossip_message {
+            GossipMessage::BroadcastMessagesFilter(broadcast_messages_filter) => {
+                molecule_gossip::GossipMessageUnion::BroadcastMessagesFilter(
+                    broadcast_messages_filter.into(),
+                )
+            }
+            GossipMessage::BroadcastMessagesFilterResult(broadcast_messages_filter_result) => {
+                molecule_gossip::GossipMessageUnion::BroadcastMessagesFilterResult(
+                    broadcast_messages_filter_result.into(),
+                )
+            }
+            GossipMessage::GetBroadcastMessages(get_broadcast_messages) => {
+                molecule_gossip::GossipMessageUnion::GetBroadcastMessages(
+                    get_broadcast_messages.into(),
+                )
+            }
+            GossipMessage::GetBroadcastMessagesResult(get_broadcast_messages_result) => {
+                molecule_gossip::GossipMessageUnion::GetBroadcastMessagesResult(
+                    get_broadcast_messages_result.into(),
+                )
+            }
+            GossipMessage::QueryBroadcastMessages(query_broadcast_messages) => {
+                molecule_gossip::GossipMessageUnion::QueryBroadcastMessages(
+                    query_broadcast_messages.into(),
+                )
+            }
+            GossipMessage::QueryBroadcastMessagesResult(query_broadcast_messages_result) => {
+                molecule_gossip::GossipMessageUnion::QueryBroadcastMessagesResult(
+                    query_broadcast_messages_result.into(),
+                )
+            }
+        }
+    }
+}
+
+impl From<GossipMessage> for molecule_gossip::GossipMessage {
+    fn from(gossip_message: GossipMessage) -> Self {
+        molecule_gossip::GossipMessage::new_builder()
+            .set(gossip_message)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::GossipMessageUnion> for GossipMessage {
+    type Error = Error;
+
+    fn try_from(gossip_message: molecule_gossip::GossipMessageUnion) -> Result<Self, Self::Error> {
+        match gossip_message {
+            molecule_gossip::GossipMessageUnion::BroadcastMessagesFilter(
+                broadcast_messages_filter,
+            ) => Ok(GossipMessage::BroadcastMessagesFilter(
+                broadcast_messages_filter.try_into()?,
+            )),
+            molecule_gossip::GossipMessageUnion::BroadcastMessagesFilterResult(
+                broadcast_messages_result,
+            ) => Ok(GossipMessage::BroadcastMessagesFilterResult(
+                broadcast_messages_result.try_into()?,
+            )),
+            molecule_gossip::GossipMessageUnion::GetBroadcastMessages(get_broadcast_messages) => {
+                Ok(GossipMessage::GetBroadcastMessages(
+                    get_broadcast_messages.try_into()?,
+                ))
+            }
+            molecule_gossip::GossipMessageUnion::GetBroadcastMessagesResult(
+                broadcast_messages_result,
+            ) => Ok(GossipMessage::GetBroadcastMessagesResult(
+                broadcast_messages_result.try_into()?,
+            )),
+            molecule_gossip::GossipMessageUnion::QueryBroadcastMessages(
+                query_broadcast_messages,
+            ) => Ok(GossipMessage::QueryBroadcastMessages(
+                query_broadcast_messages.try_into()?,
+            )),
+            molecule_gossip::GossipMessageUnion::QueryBroadcastMessagesResult(
+                broadcast_messages_result,
+            ) => Ok(GossipMessage::QueryBroadcastMessagesResult(
+                broadcast_messages_result.try_into()?,
+            )),
+        }
+    }
+}
+
+impl TryFrom<molecule_gossip::GossipMessage> for GossipMessage {
+    type Error = Error;
+    fn try_from(value: molecule_gossip::GossipMessage) -> Result<Self, Self::Error> {
+        value.to_enum().try_into()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+pub enum BroadcastMessage {
     NodeAnnouncement(NodeAnnouncement),
     ChannelAnnouncement(ChannelAnnouncement),
     ChannelUpdate(ChannelUpdate),
 }
 
-impl From<FiberBroadcastMessage> for molecule_fiber::BroadcastMessageUnion {
-    fn from(fiber_broadcast_message: FiberBroadcastMessage) -> Self {
-        match fiber_broadcast_message {
-            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
-                molecule_fiber::BroadcastMessageUnion::NodeAnnouncement(node_announcement.into())
+impl BroadcastMessage {
+    pub fn create_broadcast_messages_filter_result(&self) -> GossipMessage {
+        GossipMessage::BroadcastMessagesFilterResult(BroadcastMessagesFilterResult {
+            messages: vec![self.clone()],
+        })
+    }
+
+    pub fn cursor(&self) -> Option<Cursor> {
+        match self {
+            BroadcastMessage::ChannelAnnouncement(_) => None,
+            BroadcastMessage::ChannelUpdate(channel_update) => Some(channel_update.cursor()),
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                Some(node_announcement.cursor())
             }
-            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                molecule_fiber::BroadcastMessageUnion::ChannelAnnouncement(
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BroadcastMessageWithTimestamp {
+    NodeAnnouncement(NodeAnnouncement),
+    ChannelAnnouncement(u64, ChannelAnnouncement),
+    ChannelUpdate(ChannelUpdate),
+}
+
+impl BroadcastMessageWithTimestamp {
+    pub fn chain_hash(&self) -> Hash256 {
+        match self {
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+                node_announcement.chain_hash
+            }
+            BroadcastMessageWithTimestamp::ChannelAnnouncement(_, channel_announcement) => {
+                channel_announcement.chain_hash
+            }
+            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                channel_update.chain_hash
+            }
+        }
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        match self {
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => Cursor::new(
+                node_announcement.timestamp,
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id),
+            ),
+            BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement) => {
+                Cursor::new(
+                    *timestamp,
+                    BroadcastMessageID::ChannelAnnouncement(
+                        channel_announcement.channel_outpoint.clone(),
+                    ),
+                )
+            }
+            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => Cursor::new(
+                channel_update.timestamp,
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone()),
+            ),
+        }
+    }
+
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+                node_announcement.timestamp
+            }
+            BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, _) => *timestamp,
+            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                channel_update.timestamp
+            }
+        }
+    }
+
+    pub fn message_id(&self) -> BroadcastMessageID {
+        match self {
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+                BroadcastMessageID::NodeAnnouncement(node_announcement.node_id)
+            }
+            BroadcastMessageWithTimestamp::ChannelAnnouncement(_, channel_announcement) => {
+                BroadcastMessageID::ChannelAnnouncement(
+                    channel_announcement.channel_outpoint.clone(),
+                )
+            }
+            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                BroadcastMessageID::ChannelUpdate(channel_update.channel_outpoint.clone())
+            }
+        }
+    }
+
+    pub fn create_broadcast_messages_filter_result(&self) -> BroadcastMessagesFilterResult {
+        BroadcastMessagesFilterResult {
+            messages: vec![BroadcastMessage::from(self.clone())],
+        }
+    }
+}
+
+impl Ord for BroadcastMessageWithTimestamp {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.message_id()
+            .cmp(&other.message_id())
+            .then(self.timestamp().cmp(&other.timestamp()))
+    }
+}
+
+impl PartialOrd for BroadcastMessageWithTimestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<BroadcastMessageWithTimestamp> for BroadcastMessage {
+    fn from(broadcast_message_with_timestamp: BroadcastMessageWithTimestamp) -> Self {
+        match broadcast_message_with_timestamp {
+            BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement) => {
+                BroadcastMessage::NodeAnnouncement(node_announcement)
+            }
+            BroadcastMessageWithTimestamp::ChannelAnnouncement(_, channel_announcement) => {
+                BroadcastMessage::ChannelAnnouncement(channel_announcement)
+            }
+            BroadcastMessageWithTimestamp::ChannelUpdate(channel_update) => {
+                BroadcastMessage::ChannelUpdate(channel_update)
+            }
+        }
+    }
+}
+
+impl From<(BroadcastMessage, u64)> for BroadcastMessageWithTimestamp {
+    fn from((broadcast_message, timestamp): (BroadcastMessage, u64)) -> Self {
+        match broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                debug_assert_eq!(timestamp, node_announcement.timestamp);
+                BroadcastMessageWithTimestamp::NodeAnnouncement(node_announcement)
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement)
+            }
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                debug_assert_eq!(timestamp, channel_update.timestamp);
+                BroadcastMessageWithTimestamp::ChannelUpdate(channel_update)
+            }
+        }
+    }
+}
+
+impl From<BroadcastMessage> for molecule_gossip::BroadcastMessageUnion {
+    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
+        match fiber_broadcast_message {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
+                molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement.into())
+            }
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+                molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(
                     channel_announcement.into(),
                 )
             }
-            FiberBroadcastMessage::ChannelUpdate(channel_update) => {
-                molecule_fiber::BroadcastMessageUnion::ChannelUpdate(channel_update.into())
+            BroadcastMessage::ChannelUpdate(channel_update) => {
+                molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update.into())
             }
         }
     }
 }
 
-impl TryFrom<molecule_fiber::BroadcastMessageUnion> for FiberBroadcastMessage {
+impl TryFrom<molecule_gossip::BroadcastMessageUnion> for BroadcastMessage {
     type Error = Error;
 
     fn try_from(
-        fiber_broadcast_message: molecule_fiber::BroadcastMessageUnion,
+        fiber_broadcast_message: molecule_gossip::BroadcastMessageUnion,
     ) -> Result<Self, Self::Error> {
         match fiber_broadcast_message {
-            molecule_fiber::BroadcastMessageUnion::NodeAnnouncement(node_announcement) => Ok(
-                FiberBroadcastMessage::NodeAnnouncement(node_announcement.try_into()?),
+            molecule_gossip::BroadcastMessageUnion::NodeAnnouncement(node_announcement) => Ok(
+                BroadcastMessage::NodeAnnouncement(node_announcement.try_into()?),
             ),
-            molecule_fiber::BroadcastMessageUnion::ChannelAnnouncement(channel_announcement) => Ok(
-                FiberBroadcastMessage::ChannelAnnouncement(channel_announcement.try_into()?),
-            ),
-            molecule_fiber::BroadcastMessageUnion::ChannelUpdate(channel_update) => Ok(
-                FiberBroadcastMessage::ChannelUpdate(channel_update.try_into()?),
-            ),
+            molecule_gossip::BroadcastMessageUnion::ChannelAnnouncement(channel_announcement) => {
+                Ok(BroadcastMessage::ChannelAnnouncement(
+                    channel_announcement.try_into()?,
+                ))
+            }
+            molecule_gossip::BroadcastMessageUnion::ChannelUpdate(channel_update) => {
+                Ok(BroadcastMessage::ChannelUpdate(channel_update.try_into()?))
+            }
         }
     }
 }
 
-impl From<FiberBroadcastMessage> for molecule_fiber::BroadcastMessage {
-    fn from(fiber_broadcast_message: FiberBroadcastMessage) -> Self {
-        molecule_fiber::BroadcastMessage::new_builder()
+impl From<BroadcastMessage> for molecule_gossip::BroadcastMessage {
+    fn from(fiber_broadcast_message: BroadcastMessage) -> Self {
+        molecule_gossip::BroadcastMessage::new_builder()
             .set(fiber_broadcast_message)
             .build()
     }
 }
 
-impl TryFrom<molecule_fiber::BroadcastMessage> for FiberBroadcastMessage {
+impl TryFrom<molecule_gossip::BroadcastMessage> for BroadcastMessage {
     type Error = Error;
 
     fn try_from(
-        fiber_broadcast_message: molecule_fiber::BroadcastMessage,
+        fiber_broadcast_message: molecule_gossip::BroadcastMessage,
     ) -> Result<Self, Self::Error> {
         fiber_broadcast_message.to_enum().try_into()
     }
 }
 
-impl FiberBroadcastMessage {
+impl BroadcastMessage {
     pub fn id(&self) -> Hash256 {
         match self {
-            FiberBroadcastMessage::NodeAnnouncement(node_announcement) => {
+            BroadcastMessage::NodeAnnouncement(node_announcement) => {
                 deterministically_hash(node_announcement).into()
             }
-            FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
+            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
                 deterministically_hash(channel_announcement).into()
             }
-            FiberBroadcastMessage::ChannelUpdate(channel_update) => {
+            BroadcastMessage::ChannelUpdate(channel_update) => {
                 deterministically_hash(channel_update).into()
             }
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct NodeAnnouncementQuery {
-    pub node_id: Pubkey,
-    pub flags: u8,
+/// Note that currently we only allow querying for one type of broadcast message at a time.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum BroadcastMessageQueryFlags {
+    ChannelAnnouncement,
+    ChannelUpdateOfNode1,
+    ChannelUpdateOfNode2,
+    NodeAnnouncementNode1,
+    NodeAnnouncementNode2,
 }
 
-impl From<NodeAnnouncementQuery> for molecule_fiber::NodeAnnouncementQuery {
-    fn from(node_announcement_query: NodeAnnouncementQuery) -> Self {
-        molecule_fiber::NodeAnnouncementQuery::new_builder()
-            .node_id(node_announcement_query.node_id.into())
-            .flags(node_announcement_query.flags.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::NodeAnnouncementQuery> for NodeAnnouncementQuery {
-    type Error = Error;
-
-    fn try_from(
-        node_announcement_query: molecule_fiber::NodeAnnouncementQuery,
-    ) -> Result<Self, Self::Error> {
-        Ok(NodeAnnouncementQuery {
-            node_id: node_announcement_query.node_id().try_into()?,
-            flags: node_announcement_query.flags().into(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelAnnouncementQuery {
-    pub channel_outpoint: OutPoint,
-    pub flags: u8,
-}
-
-impl From<ChannelAnnouncementQuery> for molecule_fiber::ChannelAnnouncementQuery {
-    fn from(channel_announcement_query: ChannelAnnouncementQuery) -> Self {
-        molecule_fiber::ChannelAnnouncementQuery::new_builder()
-            .channel_outpoint(channel_announcement_query.channel_outpoint)
-            .flags(channel_announcement_query.flags.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ChannelAnnouncementQuery> for ChannelAnnouncementQuery {
-    type Error = Error;
-
-    fn try_from(
-        channel_announcement_query: molecule_fiber::ChannelAnnouncementQuery,
-    ) -> Result<Self, Self::Error> {
-        Ok(ChannelAnnouncementQuery {
-            channel_outpoint: channel_announcement_query.channel_outpoint(),
-            flags: channel_announcement_query.flags().into(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ChannelUpdateQuery {
-    pub channel_outpoint: OutPoint,
-    pub flags: u8,
-}
-
-impl From<ChannelUpdateQuery> for molecule_fiber::ChannelUpdateQuery {
-    fn from(channel_update_query: ChannelUpdateQuery) -> Self {
-        molecule_fiber::ChannelUpdateQuery::new_builder()
-            .channel_outpoint(channel_update_query.channel_outpoint)
-            .flags(channel_update_query.flags.into())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::ChannelUpdateQuery> for ChannelUpdateQuery {
-    type Error = Error;
-
-    fn try_from(
-        channel_update_query: molecule_fiber::ChannelUpdateQuery,
-    ) -> Result<Self, Self::Error> {
-        Ok(ChannelUpdateQuery {
-            channel_outpoint: channel_update_query.channel_outpoint(),
-            flags: channel_update_query.flags().into(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum FiberBroadcastMessageQuery {
-    NodeAnnouncement(NodeAnnouncementQuery),
-    ChannelAnnouncement(ChannelAnnouncementQuery),
-    ChannelUpdate(ChannelUpdateQuery),
-}
-
-impl From<FiberBroadcastMessageQuery> for molecule_fiber::BroadcastMessageQuery {
-    fn from(fiber_broadcast_message_query: FiberBroadcastMessageQuery) -> Self {
-        molecule_fiber::BroadcastMessageQuery::new_builder()
-            .set(fiber_broadcast_message_query)
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::BroadcastMessageQuery> for FiberBroadcastMessageQuery {
-    type Error = Error;
-
-    fn try_from(
-        fiber_broadcast_message_query: molecule_fiber::BroadcastMessageQuery,
-    ) -> Result<Self, Self::Error> {
-        fiber_broadcast_message_query.to_enum().try_into()
-    }
-}
-
-impl From<FiberBroadcastMessageQuery> for molecule_fiber::BroadcastMessageQueryUnion {
-    fn from(fiber_broadcast_message_query: FiberBroadcastMessageQuery) -> Self {
-        match fiber_broadcast_message_query {
-            FiberBroadcastMessageQuery::NodeAnnouncement(node_announcement_query) => {
-                molecule_fiber::BroadcastMessageQueryUnion::NodeAnnouncementQuery(
-                    node_announcement_query.into(),
-                )
-            }
-            FiberBroadcastMessageQuery::ChannelAnnouncement(channel_announcement_query) => {
-                molecule_fiber::BroadcastMessageQueryUnion::ChannelAnnouncementQuery(
-                    channel_announcement_query.into(),
-                )
-            }
-            FiberBroadcastMessageQuery::ChannelUpdate(channel_update_query) => {
-                molecule_fiber::BroadcastMessageQueryUnion::ChannelUpdateQuery(
-                    channel_update_query.into(),
-                )
-            }
+impl From<BroadcastMessageQueryFlags> for u8 {
+    fn from(value: BroadcastMessageQueryFlags) -> u8 {
+        match value {
+            // The numbers are chosen to be powers of 2 so that they can be combined using bitwise OR.
+            // But we disallow querying for multiple types of broadcast messages at a time for now.
+            BroadcastMessageQueryFlags::ChannelAnnouncement => 0,
+            BroadcastMessageQueryFlags::ChannelUpdateOfNode1 => 1,
+            BroadcastMessageQueryFlags::ChannelUpdateOfNode2 => 2,
+            BroadcastMessageQueryFlags::NodeAnnouncementNode1 => 4,
+            BroadcastMessageQueryFlags::NodeAnnouncementNode2 => 8,
         }
     }
 }
 
-impl TryFrom<molecule_fiber::BroadcastMessageQueryUnion> for FiberBroadcastMessageQuery {
+impl TryFrom<u8> for BroadcastMessageQueryFlags {
     type Error = Error;
 
-    fn try_from(
-        fiber_broadcast_message_query: molecule_fiber::BroadcastMessageQueryUnion,
-    ) -> Result<Self, Self::Error> {
-        match fiber_broadcast_message_query {
-            molecule_fiber::BroadcastMessageQueryUnion::NodeAnnouncementQuery(
-                node_announcement_query,
-            ) => Ok(FiberBroadcastMessageQuery::NodeAnnouncement(
-                node_announcement_query.try_into()?,
-            )),
-            molecule_fiber::BroadcastMessageQueryUnion::ChannelAnnouncementQuery(
-                channel_announcement_query,
-            ) => Ok(FiberBroadcastMessageQuery::ChannelAnnouncement(
-                channel_announcement_query.try_into()?,
-            )),
-            molecule_fiber::BroadcastMessageQueryUnion::ChannelUpdateQuery(
-                channel_update_query,
-            ) => Ok(FiberBroadcastMessageQuery::ChannelUpdate(
-                channel_update_query.try_into()?,
-            )),
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(BroadcastMessageQueryFlags::ChannelAnnouncement),
+            1 => Ok(BroadcastMessageQueryFlags::ChannelUpdateOfNode1),
+            2 => Ok(BroadcastMessageQueryFlags::ChannelUpdateOfNode2),
+            4 => Ok(BroadcastMessageQueryFlags::NodeAnnouncementNode1),
+            8 => Ok(BroadcastMessageQueryFlags::NodeAnnouncementNode2),
+            _ => Err(Error::AnyHow(anyhow!(
+                "Invalid broadcast message query flags: {}",
+                value
+            ))),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct GetBroadcastMessages {
-    pub id: u64,
-    pub queries: Vec<FiberBroadcastMessageQuery>,
+pub struct BroadcastMessageQuery {
+    pub channel_outpoint: OutPoint,
+    pub flags: BroadcastMessageQueryFlags,
 }
 
-impl From<GetBroadcastMessages> for molecule_fiber::GetBroadcastMessages {
-    fn from(get_broadcast_messages: GetBroadcastMessages) -> Self {
-        molecule_fiber::GetBroadcastMessages::new_builder()
-            .id(get_broadcast_messages.id.pack())
-            .queries(
-                BroadcastMessageQueries::new_builder()
+impl From<BroadcastMessageQuery> for molecule_gossip::BroadcastMessageQuery {
+    fn from(broadcast_message_query: BroadcastMessageQuery) -> Self {
+        molecule_gossip::BroadcastMessageQuery::new_builder()
+            .channel_outpoint(broadcast_message_query.channel_outpoint)
+            .flags(u8::from(broadcast_message_query.flags).into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::BroadcastMessageQuery> for BroadcastMessageQuery {
+    type Error = Error;
+
+    fn try_from(
+        broadcast_message_query: molecule_gossip::BroadcastMessageQuery,
+    ) -> Result<Self, Self::Error> {
+        Ok(BroadcastMessageQuery {
+            channel_outpoint: broadcast_message_query.channel_outpoint(),
+            flags: u8::from(broadcast_message_query.flags()).try_into()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum BroadcastMessageID {
+    ChannelAnnouncement(OutPoint),
+    ChannelUpdate(OutPoint),
+    NodeAnnouncement(Pubkey),
+}
+
+// We need to implement Ord for BroadcastMessageID to make sure that a ChannelUpdate message is always ordered after ChannelAnnouncement,
+// so that we can use it as the sorting key in fn prune_messages_to_be_saved to simplify the logic.
+impl Ord for BroadcastMessageID {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (
+                BroadcastMessageID::ChannelAnnouncement(outpoint1),
+                BroadcastMessageID::ChannelAnnouncement(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::ChannelUpdate(outpoint1),
+                BroadcastMessageID::ChannelUpdate(outpoint2),
+            ) => outpoint1.cmp(outpoint2),
+            (
+                BroadcastMessageID::NodeAnnouncement(pubkey1),
+                BroadcastMessageID::NodeAnnouncement(pubkey2),
+            ) => pubkey1.cmp(pubkey2),
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Less,
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Greater,
+            (
+                BroadcastMessageID::ChannelAnnouncement(_),
+                BroadcastMessageID::NodeAnnouncement(_),
+            ) => Ordering::Less,
+            (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
+                Ordering::Greater
+            }
+        }
+    }
+}
+
+impl PartialOrd for BroadcastMessageID {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// 1 byte for message type, 36 bytes for message id
+const MESSAGE_ID_SIZE: usize = 1 + 36;
+// 8 bytes for timestamp, MESSAGE_ID_SIZE bytes for message id
+pub(crate) const CURSOR_SIZE: usize = 8 + MESSAGE_ID_SIZE;
+
+impl BroadcastMessageID {
+    pub(crate) fn to_bytes(&self) -> [u8; MESSAGE_ID_SIZE] {
+        let mut result = [0u8; MESSAGE_ID_SIZE];
+        match self {
+            BroadcastMessageID::ChannelAnnouncement(channel_outpoint) => {
+                result[0] = 0;
+                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
+            }
+            BroadcastMessageID::ChannelUpdate(channel_outpoint) => {
+                result[0] = 1;
+                result[1..].copy_from_slice(&channel_outpoint.as_bytes());
+            }
+            BroadcastMessageID::NodeAnnouncement(node_id) => {
+                result[0] = 2;
+                let node_id = node_id.serialize();
+                result[1..1 + node_id.len()].copy_from_slice(&node_id);
+            }
+        };
+        result
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != MESSAGE_ID_SIZE {
+            return Err(Error::AnyHow(anyhow!(
+                "Invalid message id size: {}",
+                bytes.len()
+            )));
+        }
+        match bytes[0] {
+            0 => Ok(BroadcastMessageID::ChannelAnnouncement(
+                OutPoint::from_slice(&bytes[1..])?,
+            )),
+            1 => Ok(BroadcastMessageID::ChannelUpdate(OutPoint::from_slice(
+                &bytes[1..],
+            )?)),
+            2 => Ok(BroadcastMessageID::NodeAnnouncement(Pubkey::from_slice(
+                &bytes[1..1 + Pubkey::serialization_len()],
+            )?)),
+            _ => Err(Error::AnyHow(anyhow!(
+                "Invalid message id type: {}",
+                bytes[0]
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct Cursor {
+    pub(crate) timestamp: u64,
+    pub(crate) message_id: BroadcastMessageID,
+}
+
+impl Cursor {
+    pub fn new(timestamp: u64, message_id: BroadcastMessageID) -> Self {
+        Self {
+            timestamp,
+            message_id,
+        }
+    }
+
+    /// Create a new cursor which is the same as the current cursor but with a smaller timestamp.
+    /// This is useful when we want to query messages back from this cursor for a certain duration.
+    /// For example, sometimes we aren't particularly sure about whether we have already seen all messages before
+    /// the latest cursor in our broadcast message store, because it is possible that we that messages are not
+    /// saved in strictly increasing order of their timestamps. In this case, we can go back for some time
+    /// (e.g. one week) to make sure we don't miss any messages.
+    pub fn go_back_for_some_time(&self, duration: Duration) -> Self {
+        let current_timestamp = self.timestamp;
+        let duration_millis = duration.as_millis() as u64;
+        if current_timestamp > duration_millis {
+            Self {
+                timestamp: current_timestamp - duration_millis,
+                message_id: self.message_id.clone(),
+            }
+        } else {
+            Default::default()
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 45] {
+        self.timestamp
+            .to_be_bytes()
+            .into_iter()
+            .chain(self.message_id.to_bytes())
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Must serialize cursor to 45 bytes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() != CURSOR_SIZE {
+            return Err(Error::AnyHow(anyhow!(
+                "Invalid cursor size: {}, want {}",
+                bytes.len(),
+                CURSOR_SIZE
+            )));
+        }
+        let timestamp = u64::from_be_bytes(bytes[..8].try_into().expect("Cursor timestamp to u64"));
+        let message_id = BroadcastMessageID::from_bytes(&bytes[8..])?;
+        Ok(Cursor {
+            timestamp,
+            message_id,
+        })
+    }
+
+    // A dummy cursor with the maximum timestamp and a dummy message id. This is useful when
+    // we want to create a cursor after which none of the messages should be included.
+    pub fn max() -> Self {
+        Self {
+            timestamp: u64::MAX,
+            message_id: BroadcastMessageID::ChannelAnnouncement(OutPoint::default()),
+        }
+    }
+
+    pub fn is_max(&self) -> bool {
+        self.timestamp == u64::MAX
+    }
+}
+
+impl Ord for Cursor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.to_bytes().cmp(&other.to_bytes())
+    }
+}
+
+impl PartialOrd for Cursor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        molecule_gossip::Cursor::new_builder()
+            .set([Byte::new(0); CURSOR_SIZE])
+            .build()
+            .try_into()
+            .expect("Default cursor")
+    }
+}
+
+impl From<Cursor> for molecule_gossip::Cursor {
+    fn from(cursor: Cursor) -> Self {
+        let serialized = cursor
+            .timestamp
+            .to_be_bytes()
+            .into_iter()
+            .chain(cursor.message_id.to_bytes())
+            .map(Byte::new)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Must serialize cursor to 45 bytes");
+
+        molecule_gossip::Cursor::new_builder()
+            .set(serialized)
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::Cursor> for Cursor {
+    type Error = Error;
+
+    fn try_from(cursor: molecule_gossip::Cursor) -> Result<Self, Self::Error> {
+        let slice = cursor.as_slice();
+        if slice.len() != CURSOR_SIZE {
+            return Err(Error::AnyHow(anyhow!(
+                "Invalid cursor size: {}, want {}",
+                slice.len(),
+                CURSOR_SIZE
+            )));
+        }
+        let timestamp = u64::from_be_bytes(slice[..8].try_into().expect("Cursor timestamp to u64"));
+        let message_id = BroadcastMessageID::from_bytes(&slice[8..])?;
+        Ok(Cursor {
+            timestamp,
+            message_id,
+        })
+    }
+}
+
+impl From<u16> for molecule_gossip::Uint16 {
+    fn from(count: u16) -> Self {
+        let le_bytes = count.to_le_bytes();
+        Self::new_builder()
+            .set(
+                le_bytes
+                    .into_iter()
+                    .map(Byte::new)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("Uint16 from u16"),
+            )
+            .build()
+    }
+}
+
+impl From<molecule_gossip::Uint16> for u16 {
+    fn from(count: molecule_gossip::Uint16) -> Self {
+        let le_bytes = count.as_slice().try_into().expect("Uint16 to u16");
+        u16::from_le_bytes(le_bytes)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastMessagesFilter {
+    pub chain_hash: Hash256,
+    pub after_cursor: Cursor,
+}
+
+impl From<BroadcastMessagesFilter> for molecule_gossip::BroadcastMessagesFilter {
+    fn from(broadcast_messages_filter: BroadcastMessagesFilter) -> Self {
+        molecule_gossip::BroadcastMessagesFilter::new_builder()
+            .chain_hash(broadcast_messages_filter.chain_hash.into())
+            .after_cursor(broadcast_messages_filter.after_cursor.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::BroadcastMessagesFilter> for BroadcastMessagesFilter {
+    type Error = Error;
+
+    fn try_from(
+        broadcast_messages_filter: molecule_gossip::BroadcastMessagesFilter,
+    ) -> Result<Self, Self::Error> {
+        Ok(BroadcastMessagesFilter {
+            chain_hash: broadcast_messages_filter.chain_hash().into(),
+            after_cursor: broadcast_messages_filter.after_cursor().try_into()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastMessagesFilterResult {
+    pub messages: Vec<BroadcastMessage>,
+}
+
+impl BroadcastMessagesFilterResult {
+    pub fn new(messages: Vec<BroadcastMessage>) -> Self {
+        Self { messages }
+    }
+}
+
+impl From<BroadcastMessagesFilterResult> for molecule_gossip::BroadcastMessagesFilterResult {
+    fn from(broadcast_messages_filter_result: BroadcastMessagesFilterResult) -> Self {
+        molecule_gossip::BroadcastMessagesFilterResult::new_builder()
+            .messages(
+                molecule_gossip::BroadcastMessages::new_builder()
                     .set(
-                        get_broadcast_messages
-                            .queries
+                        broadcast_messages_filter_result
+                            .messages
                             .into_iter()
-                            .map(Into::into)
+                            .map(|message| message.into())
                             .collect(),
                     )
                     .build(),
@@ -2509,19 +2908,52 @@ impl From<GetBroadcastMessages> for molecule_fiber::GetBroadcastMessages {
     }
 }
 
-impl TryFrom<molecule_fiber::GetBroadcastMessages> for GetBroadcastMessages {
+impl TryFrom<molecule_gossip::BroadcastMessagesFilterResult> for BroadcastMessagesFilterResult {
     type Error = Error;
 
     fn try_from(
-        get_broadcast_messages: molecule_fiber::GetBroadcastMessages,
+        broadcast_messages_filter_result: molecule_gossip::BroadcastMessagesFilterResult,
+    ) -> Result<Self, Self::Error> {
+        Ok(BroadcastMessagesFilterResult {
+            messages: broadcast_messages_filter_result
+                .messages()
+                .into_iter()
+                .map(|message| message.try_into())
+                .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetBroadcastMessages {
+    pub id: u64,
+    pub chain_hash: Hash256,
+    pub after_cursor: Cursor,
+    pub count: u16,
+}
+
+impl From<GetBroadcastMessages> for molecule_gossip::GetBroadcastMessages {
+    fn from(get_broadcast_messages: GetBroadcastMessages) -> Self {
+        molecule_gossip::GetBroadcastMessages::new_builder()
+            .id(get_broadcast_messages.id.pack())
+            .chain_hash(get_broadcast_messages.chain_hash.into())
+            .after_cursor(get_broadcast_messages.after_cursor.into())
+            .count(get_broadcast_messages.count.into())
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::GetBroadcastMessages> for GetBroadcastMessages {
+    type Error = Error;
+
+    fn try_from(
+        get_broadcast_messages: molecule_gossip::GetBroadcastMessages,
     ) -> Result<Self, Self::Error> {
         Ok(GetBroadcastMessages {
             id: get_broadcast_messages.id().unpack(),
-            queries: get_broadcast_messages
-                .queries()
-                .into_iter()
-                .map(|query| query.try_into())
-                .collect::<Result<Vec<FiberBroadcastMessageQuery>, Error>>()?,
+            chain_hash: get_broadcast_messages.chain_hash().into(),
+            after_cursor: get_broadcast_messages.after_cursor().try_into()?,
+            count: get_broadcast_messages.count().into(),
         })
     }
 }
@@ -2529,15 +2961,15 @@ impl TryFrom<molecule_fiber::GetBroadcastMessages> for GetBroadcastMessages {
 #[derive(Debug, Clone)]
 pub struct GetBroadcastMessagesResult {
     pub id: u64,
-    pub messages: Vec<FiberBroadcastMessage>,
+    pub messages: Vec<BroadcastMessage>,
 }
 
-impl From<GetBroadcastMessagesResult> for molecule_fiber::GetBroadcastMessagesResult {
+impl From<GetBroadcastMessagesResult> for molecule_gossip::GetBroadcastMessagesResult {
     fn from(get_broadcast_messages_result: GetBroadcastMessagesResult) -> Self {
-        molecule_fiber::GetBroadcastMessagesResult::new_builder()
+        molecule_gossip::GetBroadcastMessagesResult::new_builder()
             .id(get_broadcast_messages_result.id.pack())
             .messages(
-                molecule_fiber::BroadcastMessages::new_builder()
+                molecule_gossip::BroadcastMessages::new_builder()
                     .set(
                         get_broadcast_messages_result
                             .messages
@@ -2551,11 +2983,11 @@ impl From<GetBroadcastMessagesResult> for molecule_fiber::GetBroadcastMessagesRe
     }
 }
 
-impl TryFrom<molecule_fiber::GetBroadcastMessagesResult> for GetBroadcastMessagesResult {
+impl TryFrom<molecule_gossip::GetBroadcastMessagesResult> for GetBroadcastMessagesResult {
     type Error = Error;
 
     fn try_from(
-        get_broadcast_messages_result: molecule_fiber::GetBroadcastMessagesResult,
+        get_broadcast_messages_result: molecule_gossip::GetBroadcastMessagesResult,
     ) -> Result<Self, Self::Error> {
         Ok(GetBroadcastMessagesResult {
             id: get_broadcast_messages_result.id().unpack(),
@@ -2563,184 +2995,27 @@ impl TryFrom<molecule_fiber::GetBroadcastMessagesResult> for GetBroadcastMessage
                 .messages()
                 .into_iter()
                 .map(|message| message.try_into())
-                .collect::<Result<Vec<FiberBroadcastMessage>, Error>>()?,
+                .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
         })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct QueryChannelsWithinBlockRange {
+pub struct QueryBroadcastMessages {
     pub id: u64,
     pub chain_hash: Hash256,
-    pub start_block: u64,
-    pub end_block: u64,
+    pub queries: Vec<BroadcastMessageQuery>,
 }
 
-impl From<QueryChannelsWithinBlockRange> for molecule_fiber::QueryChannelsWithinBlockRange {
-    fn from(query_channels_within_block_range: QueryChannelsWithinBlockRange) -> Self {
-        molecule_fiber::QueryChannelsWithinBlockRange::new_builder()
-            .id(query_channels_within_block_range.id.pack())
-            .chain_hash(query_channels_within_block_range.chain_hash.into())
-            .start_block(query_channels_within_block_range.start_block.pack())
-            .end_block(query_channels_within_block_range.end_block.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRange> for QueryChannelsWithinBlockRange {
-    type Error = Error;
-
-    fn try_from(
-        query_channels_within_block_range: molecule_fiber::QueryChannelsWithinBlockRange,
-    ) -> Result<Self, Self::Error> {
-        Ok(QueryChannelsWithinBlockRange {
-            id: query_channels_within_block_range.id().unpack(),
-            chain_hash: query_channels_within_block_range.chain_hash().into(),
-            start_block: query_channels_within_block_range.start_block().unpack(),
-            end_block: query_channels_within_block_range.end_block().unpack(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueryChannelsWithinBlockRangeResult {
-    pub id: u64,
-    pub next_block: u64,
-    pub is_finished: bool,
-    pub channels: Vec<OutPoint>,
-}
-
-impl From<QueryChannelsWithinBlockRangeResult>
-    for molecule_fiber::QueryChannelsWithinBlockRangeResult
-{
-    fn from(query_channels_within_block_range_result: QueryChannelsWithinBlockRangeResult) -> Self {
-        molecule_fiber::QueryChannelsWithinBlockRangeResult::new_builder()
-            .id(query_channels_within_block_range_result.id.pack())
-            .next_block(query_channels_within_block_range_result.next_block.pack())
-            .is_finished(
-                (if query_channels_within_block_range_result.is_finished {
-                    1u8
-                } else {
-                    0
-                })
-                .into(),
-            )
-            .channels(
-                molecule_fiber::OutPoints::new_builder()
-                    .set(
-                        query_channels_within_block_range_result
-                            .channels
-                            .into_iter()
-                            .collect(),
-                    )
-                    .build(),
-            )
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::QueryChannelsWithinBlockRangeResult>
-    for QueryChannelsWithinBlockRangeResult
-{
-    type Error = Error;
-
-    fn try_from(
-        query_channels_within_block_range_result: molecule_fiber::QueryChannelsWithinBlockRangeResult,
-    ) -> Result<Self, Self::Error> {
-        Ok(QueryChannelsWithinBlockRangeResult {
-            id: query_channels_within_block_range_result.id().unpack(),
-            next_block: query_channels_within_block_range_result
-                .next_block()
-                .unpack(),
-            is_finished: u8::from(query_channels_within_block_range_result.is_finished()) != 0u8,
-            channels: query_channels_within_block_range_result
-                .channels()
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueryBroadcastMessagesWithinTimeRange {
-    pub id: u64,
-    pub chain_hash: Hash256,
-    pub start_time: u64,
-    pub end_time: u64,
-}
-
-impl From<QueryBroadcastMessagesWithinTimeRange>
-    for molecule_fiber::QueryBroadcastMessagesWithinTimeRange
-{
-    fn from(
-        query_broadcast_messages_within_time_range: QueryBroadcastMessagesWithinTimeRange,
-    ) -> Self {
-        molecule_fiber::QueryBroadcastMessagesWithinTimeRange::new_builder()
-            .id(query_broadcast_messages_within_time_range.id.pack())
-            .chain_hash(query_broadcast_messages_within_time_range.chain_hash.into())
-            .start_time(query_broadcast_messages_within_time_range.start_time.pack())
-            .end_time(query_broadcast_messages_within_time_range.end_time.pack())
-            .build()
-    }
-}
-
-impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRange>
-    for QueryBroadcastMessagesWithinTimeRange
-{
-    type Error = Error;
-
-    fn try_from(
-        query_broadcast_messages_within_time_range: molecule_fiber::QueryBroadcastMessagesWithinTimeRange,
-    ) -> Result<Self, Self::Error> {
-        Ok(QueryBroadcastMessagesWithinTimeRange {
-            id: query_broadcast_messages_within_time_range.id().unpack(),
-            chain_hash: query_broadcast_messages_within_time_range
-                .chain_hash()
-                .into(),
-            start_time: query_broadcast_messages_within_time_range
-                .start_time()
-                .unpack(),
-            end_time: query_broadcast_messages_within_time_range
-                .end_time()
-                .unpack(),
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct QueryBroadcastMessagesWithinTimeRangeResult {
-    pub id: u64,
-    pub next_time: u64,
-    pub is_finished: bool,
-    pub queries: Vec<FiberBroadcastMessageQuery>,
-}
-
-impl From<QueryBroadcastMessagesWithinTimeRangeResult>
-    for molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult
-{
-    fn from(
-        query_broadcast_messages_within_time_range_result: QueryBroadcastMessagesWithinTimeRangeResult,
-    ) -> Self {
-        molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult::new_builder()
-            .id(query_broadcast_messages_within_time_range_result.id.pack())
-            .next_time(
-                query_broadcast_messages_within_time_range_result
-                    .next_time
-                    .pack(),
-            )
-            .is_finished(
-                (if query_broadcast_messages_within_time_range_result.is_finished {
-                    1u8
-                } else {
-                    0
-                })
-                .into(),
-            )
+impl From<QueryBroadcastMessages> for molecule_gossip::QueryBroadcastMessages {
+    fn from(query_broadcast_messages: QueryBroadcastMessages) -> Self {
+        molecule_gossip::QueryBroadcastMessages::new_builder()
+            .id(query_broadcast_messages.id.pack())
+            .chain_hash(query_broadcast_messages.chain_hash.into())
             .queries(
-                molecule_fiber::BroadcastMessageQueries::new_builder()
+                molecule_gossip::BroadcastMessageQueries::new_builder()
                     .set(
-                        query_broadcast_messages_within_time_range_result
+                        query_broadcast_messages
                             .queries
                             .into_iter()
                             .map(|query| query.into())
@@ -2752,28 +3027,75 @@ impl From<QueryBroadcastMessagesWithinTimeRangeResult>
     }
 }
 
-impl TryFrom<molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult>
-    for QueryBroadcastMessagesWithinTimeRangeResult
-{
+impl TryFrom<molecule_gossip::QueryBroadcastMessages> for QueryBroadcastMessages {
     type Error = Error;
 
     fn try_from(
-        query_broadcast_messages_within_time_range_result: molecule_fiber::QueryBroadcastMessagesWithinTimeRangeResult,
+        query_broadcast_messages: molecule_gossip::QueryBroadcastMessages,
     ) -> Result<Self, Self::Error> {
-        Ok(QueryBroadcastMessagesWithinTimeRangeResult {
-            id: query_broadcast_messages_within_time_range_result
-                .id()
-                .unpack(),
-            next_time: query_broadcast_messages_within_time_range_result
-                .next_time()
-                .unpack(),
-            is_finished: u8::from(query_broadcast_messages_within_time_range_result.is_finished())
-                != 0,
-            queries: query_broadcast_messages_within_time_range_result
+        Ok(QueryBroadcastMessages {
+            id: query_broadcast_messages.id().unpack(),
+            chain_hash: query_broadcast_messages.chain_hash().into(),
+            queries: query_broadcast_messages
                 .queries()
                 .into_iter()
-                .map(|message| message.try_into())
+                .map(|query| query.try_into())
                 .collect::<Result<Vec<_>, Error>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryBroadcastMessagesResult {
+    pub id: u64,
+    pub messages: Vec<BroadcastMessage>,
+    pub missing_queries: Vec<u16>,
+}
+
+impl From<QueryBroadcastMessagesResult> for molecule_gossip::QueryBroadcastMessagesResult {
+    fn from(query_broadcast_messages_result: QueryBroadcastMessagesResult) -> Self {
+        molecule_gossip::QueryBroadcastMessagesResult::new_builder()
+            .id(query_broadcast_messages_result.id.pack())
+            .messages(
+                molecule_gossip::BroadcastMessages::new_builder()
+                    .set(
+                        query_broadcast_messages_result
+                            .messages
+                            .into_iter()
+                            .map(|message| message.into())
+                            .collect(),
+                    )
+                    .build(),
+            )
+            .missing_queries(
+                query_broadcast_messages_result
+                    .missing_queries
+                    .into_iter()
+                    .map(|x| x.into())
+                    .collect(),
+            )
+            .build()
+    }
+}
+
+impl TryFrom<molecule_gossip::QueryBroadcastMessagesResult> for QueryBroadcastMessagesResult {
+    type Error = Error;
+
+    fn try_from(
+        query_broadcast_messages_result: molecule_gossip::QueryBroadcastMessagesResult,
+    ) -> Result<Self, Self::Error> {
+        Ok(QueryBroadcastMessagesResult {
+            id: query_broadcast_messages_result.id().unpack(),
+            messages: query_broadcast_messages_result
+                .messages()
+                .into_iter()
+                .map(|message| message.try_into())
+                .collect::<Result<Vec<BroadcastMessage>, Error>>()?,
+            missing_queries: query_broadcast_messages_result
+                .missing_queries()
+                .into_iter()
+                .map(|x| u16::from(x))
+                .collect(),
         })
     }
 }
@@ -2835,53 +3157,6 @@ impl From<FiberMessage> for molecule_fiber::FiberMessageUnion {
                 FiberChannelMessage::AnnouncementSignatures(announcement_signatures) => {
                     molecule_fiber::FiberMessageUnion::AnnouncementSignatures(
                         announcement_signatures.into(),
-                    )
-                }
-            },
-            FiberMessage::BroadcastMessage(m) => match m {
-                FiberBroadcastMessage::NodeAnnouncement(node_annoucement) => {
-                    molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_annoucement.into())
-                }
-                FiberBroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                    molecule_fiber::FiberMessageUnion::ChannelAnnouncement(
-                        channel_announcement.into(),
-                    )
-                }
-                FiberBroadcastMessage::ChannelUpdate(channel_update) => {
-                    molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update.into())
-                }
-            },
-            FiberMessage::QueryInformation(query) => match query {
-                FiberQueryInformation::GetBroadcastMessages(get_broadcast_messages) => {
-                    molecule_fiber::FiberMessageUnion::GetBroadcastMessages(
-                        get_broadcast_messages.into(),
-                    )
-                }
-                FiberQueryInformation::GetBroadcastMessagesResult(
-                    get_broadcast_messages_result,
-                ) => molecule_fiber::FiberMessageUnion::GetBroadcastMessagesResult(
-                    get_broadcast_messages_result.into(),
-                ),
-                FiberQueryInformation::QueryChannelsWithinBlockRange(
-                    query_channels_within_block_range,
-                ) => molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRange(
-                    query_channels_within_block_range.into(),
-                ),
-                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                    query_channels_within_block_range_result,
-                ) => molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRangeResult(
-                    query_channels_within_block_range_result.into(),
-                ),
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
-                    query_broadcast_messages_within_time_range,
-                ) => molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(
-                    query_broadcast_messages_within_time_range.into(),
-                ),
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
-                    query_broadcast_messages_within_time_range_result,
-                ) => {
-                    molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(
-                        query_broadcast_messages_within_time_range_result.into(),
                     )
                 }
             },
@@ -2977,59 +3252,6 @@ impl TryFrom<molecule_fiber::FiberMessageUnion> for FiberMessage {
                     announcement_signatures.try_into()?,
                 ))
             }
-            molecule_fiber::FiberMessageUnion::NodeAnnouncement(node_announcement) => {
-                FiberMessage::BroadcastMessage(FiberBroadcastMessage::NodeAnnouncement(
-                    node_announcement.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::ChannelAnnouncement(channel_announcement) => {
-                FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelAnnouncement(
-                    channel_announcement.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::ChannelUpdate(channel_update) => {
-                FiberMessage::BroadcastMessage(FiberBroadcastMessage::ChannelUpdate(
-                    channel_update.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::GetBroadcastMessages(get_broadcast_messages) => {
-                FiberMessage::QueryInformation(FiberQueryInformation::GetBroadcastMessages(
-                    get_broadcast_messages.try_into()?,
-                ))
-            }
-            molecule_fiber::FiberMessageUnion::GetBroadcastMessagesResult(
-                get_broadcast_messages_result,
-            ) => FiberMessage::QueryInformation(FiberQueryInformation::GetBroadcastMessagesResult(
-                get_broadcast_messages_result.try_into()?,
-            )),
-            molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRange(
-                query_channels_within_block_range,
-            ) => FiberMessage::QueryInformation(
-                FiberQueryInformation::QueryChannelsWithinBlockRange(
-                    query_channels_within_block_range.try_into()?,
-                ),
-            ),
-            molecule_fiber::FiberMessageUnion::QueryChannelsWithinBlockRangeResult(
-                query_channels_within_block_range_result,
-            ) => FiberMessage::QueryInformation(
-                FiberQueryInformation::QueryChannelsWithinBlockRangeResult(
-                    query_channels_within_block_range_result.try_into()?,
-                ),
-            ),
-            molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRange(
-                query_broadcast_messages_within_time_range,
-            ) => FiberMessage::QueryInformation(
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRange(
-                    query_broadcast_messages_within_time_range.try_into()?,
-                ),
-            ),
-            molecule_fiber::FiberMessageUnion::QueryBroadcastMessagesWithinTimeRangeResult(
-                query_broadcast_messages_within_time_range_result,
-            ) => FiberMessage::QueryInformation(
-                FiberQueryInformation::QueryBroadcastMessagesWithinTimeRangeResult(
-                    query_broadcast_messages_within_time_range_result.try_into()?,
-                ),
-            ),
         })
     }
 }
@@ -3081,15 +3303,13 @@ pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
 #[serde_as]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentHopData {
-    pub payment_hash: Hash256,
-    // this is only specified in the last hop in the keysend mode
-    pub preimage: Option<Hash256>,
-    pub tlc_hash_algorithm: HashAlgorithm,
     pub amount: u128,
     pub expiry: u64,
+    // this is only specified in the last hop in the keysend mode
+    pub payment_preimage: Option<Hash256>,
+    pub hash_algorithm: HashAlgorithm,
+    pub funding_tx_hash: Hash256,
     pub next_hop: Option<Pubkey>,
-    #[serde_as(as = "Option<EntityHex>")]
-    pub channel_outpoint: Option<OutPoint>,
     pub custom_records: Option<PaymentCustomRecord>,
 }
 
@@ -3103,14 +3323,14 @@ pub trait HopData: Sized {
 }
 
 impl HopData for PaymentHopData {
-    const PACKET_DATA_LEN: usize = 1300;
+    const PACKET_DATA_LEN: usize = 6500;
 
     fn next_hop(&self) -> Option<Pubkey> {
         self.next_hop.clone()
     }
 
     fn assoc_data(&self) -> Option<Vec<u8>> {
-        Some(self.payment_hash.as_ref().to_vec())
+        None
     }
 
     fn serialize(&self) -> Vec<u8> {
@@ -3122,17 +3342,20 @@ impl HopData for PaymentHopData {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnionPacket<T> {
     _phantom: PhantomData<T>,
     // The encrypted packet
-    pub data: Vec<u8>,
+    data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeeledOnionPacket<T> {
     // The decrypted hop data for the current hop
     pub current: T,
+    // The shared secret for `current` used for returning error. Set to all zeros for the origin node
+    // who has no shared secret.
+    pub shared_secret: [u8; 32],
     // The packet for the next hop
     pub next: Option<OnionPacket<T>>,
 }
@@ -3146,6 +3369,19 @@ impl<T> OnionPacket<T> {
             _phantom: PhantomData,
             data,
         }
+    }
+
+    pub fn into_sphinx_onion_packet(self) -> Result<fiber_sphinx::OnionPacket, Error> {
+        fiber_sphinx::OnionPacket::from_bytes(self.data)
+            .map_err(|err| Error::OnionPacket(err.into()))
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
     }
 }
 
@@ -3161,8 +3397,8 @@ impl<T: HopData> OnionPacket<T> {
         assoc_data: Option<&[u8]>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<PeeledOnionPacket<T>, Error> {
-        let sphinx_packet = fiber_sphinx::OnionPacket::from_bytes(self.data)
-            .map_err(|err| Error::OnionPacket(err.into()))?;
+        let sphinx_packet = self.into_sphinx_onion_packet()?;
+        let shared_secret = sphinx_packet.shared_secret(&privkey.0);
 
         let (new_current, new_next) = sphinx_packet
             .peel(&privkey.0, assoc_data, secp_ctx, get_hop_data_len)
@@ -3177,7 +3413,11 @@ impl<T: HopData> OnionPacket<T> {
             .any(|b| *b != 0)
             .then(|| OnionPacket::new(new_next.into_bytes()));
 
-        Ok(PeeledOnionPacket { current, next })
+        Ok(PeeledOnionPacket {
+            current,
+            next,
+            shared_secret,
+        })
     }
 }
 
@@ -3187,6 +3427,7 @@ impl<T: HopData> PeeledOnionPacket<T> {
     pub fn create<C: Signing>(
         session_key: Privkey,
         mut hops_infos: Vec<T>,
+        assoc_data: Option<Vec<u8>>,
         secp_ctx: &Secp256k1<C>,
     ) -> Result<Self, Error> {
         if hops_infos.is_empty() {
@@ -3197,14 +3438,18 @@ impl<T: HopData> PeeledOnionPacket<T> {
             .iter()
             .map(HopData::next_hop)
             .take_while(Option::is_some)
-            .map(|opt| opt.unwrap().into())
+            .map(|opt| opt.expect("must be some").into())
             .collect();
 
         // Add length as the header
         let hops_data = hops_infos.iter().skip(1).map(pack_hop_data).collect();
 
         let current = hops_infos.swap_remove(0);
-        let assoc_data = current.assoc_data();
+        let assoc_data = if assoc_data.is_some() {
+            assoc_data
+        } else {
+            current.assoc_data()
+        };
 
         let next = if !hops_path.is_empty() {
             Some(OnionPacket::new(
@@ -3223,7 +3468,12 @@ impl<T: HopData> PeeledOnionPacket<T> {
             None
         };
 
-        Ok(PeeledOnionPacket { current, next })
+        Ok(PeeledOnionPacket {
+            current,
+            next,
+            // Use all zeros for the sender
+            shared_secret: NO_SHARED_SECRET.clone(),
+        })
     }
 
     /// Returns true if this is the peeled packet for the last destination.
@@ -3250,23 +3500,36 @@ impl<T: HopData> PeeledOnionPacket<T> {
 
     pub fn serialize(&self) -> Vec<u8> {
         let mut res = pack_hop_data(&self.current);
+        res.extend(self.shared_secret);
         if let Some(ref next) = self.next {
-            res.append(&mut (next.data.clone()));
+            res.extend(&next.data[..]);
         }
         res
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, Error> {
-        let current_len = get_hop_data_len(data)
+        let mut read_bytes = get_hop_data_len(data)
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
         let current = unpack_hop_data(data)
             .ok_or_else(|| Error::OnionPacket(OnionPacketError::InvalidHopData))?;
-        let next = if current_len < data.len() {
-            Some(OnionPacket::new(data[current_len..].to_vec()))
+
+        // Ensure backward compatibility
+        let mut shared_secret = NO_SHARED_SECRET.clone();
+        if data.len() >= read_bytes + 32 && data.len() != read_bytes + T::PACKET_DATA_LEN {
+            shared_secret.copy_from_slice(&data[read_bytes..read_bytes + 32]);
+            read_bytes += 32;
+        }
+
+        let next = if read_bytes < data.len() {
+            Some(OnionPacket::new(data[read_bytes..].to_vec()))
         } else {
             None
         };
-        Ok(Self { current, next })
+        Ok(Self {
+            current,
+            shared_secret,
+            next,
+        })
     }
 }
 
@@ -3296,7 +3559,11 @@ fn get_hop_data_len(buf: &[u8]) -> Option<usize> {
         return None;
     }
     Some(
-        u64::from_be_bytes(buf[0..HOP_DATA_HEAD_LEN].try_into().unwrap()) as usize
+        u64::from_be_bytes(
+            buf[0..HOP_DATA_HEAD_LEN]
+                .try_into()
+                .expect("u64 from slice"),
+        ) as usize
             + HOP_DATA_HEAD_LEN,
     )
 }

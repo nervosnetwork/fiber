@@ -1,54 +1,37 @@
 use bech32::ToBase32;
 use ckb_hash::blake2b_256;
 use ckb_types::packed::Script;
-use secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
+use secp256k1::{Message, Secp256k1};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     fiber::{gen::invoice::RawCkbInvoice, types::Hash256},
     invoice::{
         invoice_impl::{CkbScript, InvoiceData, SIGNATURE_U5_SIZE},
-        utils::{ar_decompress, ar_encompress, rand_sha256_hash},
+        utils::{ar_decompress, ar_encompress},
         Attribute, CkbInvoice, Currency, InvoiceBuilder, InvoiceError, InvoiceSignature,
     },
 };
-
-fn gen_rand_public_key() -> PublicKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    PublicKey::from_keypair(&key_pair)
-}
-
-fn gen_rand_private_key() -> SecretKey {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    SecretKey::from_keypair(&key_pair)
-}
-
-fn gen_rand_keypair() -> (PublicKey, SecretKey) {
-    let secp = Secp256k1::new();
-    let key_pair = Keypair::new(&secp, &mut rand::thread_rng());
-    (
-        PublicKey::from_keypair(&key_pair),
-        SecretKey::from_keypair(&key_pair),
-    )
-}
+use crate::{
+    gen_rand_fiber_public_key, gen_rand_secp256k1_keypair_tuple, gen_rand_secp256k1_private_key,
+    gen_rand_sha256_hash,
+};
 
 fn mock_invoice() -> CkbInvoice {
-    let (public_key, private_key) = gen_rand_keypair();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
     let mut invoice = CkbInvoice {
         currency: Currency::Fibb,
         amount: Some(1280),
         signature: None,
         data: InvoiceData {
-            payment_hash: rand_sha256_hash(),
+            payment_hash: gen_rand_sha256_hash(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis(),
             attrs: vec![
                 Attribute::FinalHtlcTimeout(5),
-                Attribute::FinalHtlcMinimumCltvExpiry(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
                 Attribute::FallbackAddr("address".to_string()),
@@ -65,7 +48,7 @@ fn mock_invoice() -> CkbInvoice {
 
 #[test]
 fn test_signature() {
-    let private_key = gen_rand_private_key();
+    let private_key = gen_rand_secp256k1_private_key();
     let signature = Secp256k1::new().sign_ecdsa_recoverable(
         &Message::from_digest_slice(&[0u8; 32]).unwrap(),
         &private_key,
@@ -147,7 +130,7 @@ fn test_invoice_from_str_err() {
 
 #[test]
 fn test_invoice_bc32m_not_same() {
-    let private_key = gen_rand_private_key();
+    let private_key = gen_rand_secp256k1_private_key();
     let signature = Secp256k1::new().sign_ecdsa_recoverable(
         &Message::from_digest_slice(&[0u8; 32]).unwrap(),
         &private_key,
@@ -161,7 +144,7 @@ fn test_invoice_bc32m_not_same() {
             timestamp: 0,
             attrs: vec![
                 Attribute::FinalHtlcTimeout(5),
-                Attribute::FinalHtlcMinimumCltvExpiry(12),
+                Attribute::FinalHtlcMinimumExpiryDelta(12),
                 Attribute::Description("description hello".to_string()),
                 Attribute::ExpiryTime(Duration::from_secs(1024)),
                 Attribute::FallbackAddr("address".to_string()),
@@ -192,8 +175,8 @@ fn test_compress() {
 
 #[test]
 fn test_invoice_builder() {
-    let gen_payment_hash = rand_sha256_hash();
-    let (public_key, private_key) = gen_rand_keypair();
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
@@ -202,7 +185,7 @@ fn test_invoice_builder() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
@@ -221,8 +204,8 @@ fn test_invoice_builder() {
 
 #[test]
 fn test_invoice_check_signature() {
-    let gen_payment_hash = rand_sha256_hash();
-    let (public_key, private_key) = gen_rand_keypair();
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, public_key) = gen_rand_secp256k1_keypair_tuple();
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
@@ -231,7 +214,7 @@ fn test_invoice_check_signature() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
@@ -264,7 +247,7 @@ fn test_invoice_check_signature() {
         .expiry_time(Duration::from_secs(1024))
         .payee_pub_key(public_key)
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .build()
         .unwrap();
 
@@ -277,18 +260,18 @@ fn test_invoice_check_signature() {
 
 #[test]
 fn test_invoice_signature_check() {
-    let gen_payment_hash = rand_sha256_hash();
-    let (_, private_key) = gen_rand_keypair();
-    let public_key = gen_rand_public_key();
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let (private_key, _) = gen_rand_secp256k1_keypair_tuple();
+    let public_key = gen_rand_fiber_public_key();
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_payment_hash)
         .fallback_address("address".to_string())
         .expiry_time(Duration::from_secs(1024))
-        .payee_pub_key(public_key)
+        .payee_pub_key(public_key.into())
         .add_attr(Attribute::FinalHtlcTimeout(5))
-        .add_attr(Attribute::FinalHtlcMinimumCltvExpiry(12))
+        .add_attr(Attribute::FinalHtlcMinimumExpiryDelta(12))
         .add_attr(Attribute::Description("description".to_string()))
         .add_attr(Attribute::UdtScript(CkbScript(Script::default())))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
@@ -298,8 +281,8 @@ fn test_invoice_signature_check() {
 
 #[test]
 fn test_invoice_builder_duplicated_attr() {
-    let gen_payment_hash = rand_sha256_hash();
-    let private_key = gen_rand_private_key();
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(gen_payment_hash)
@@ -317,18 +300,38 @@ fn test_invoice_builder_duplicated_attr() {
 }
 
 #[test]
-fn test_invoice_builder_missing() {
-    let private_key = gen_rand_private_key();
+fn test_invoice_check_description_length() {
+    let gen_payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    const MAX_DESCRIPTION_LEN: usize = 639;
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
-        .payment_preimage(rand_sha256_hash())
+        .payment_hash(gen_payment_hash)
+        .description("a".repeat(MAX_DESCRIPTION_LEN + 1))
+        .add_attr(Attribute::FinalHtlcTimeout(5))
+        .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
+
+    assert!(invoice.is_err());
+    let message = invoice.err().unwrap().to_string();
+    assert_eq!(
+        message,
+        "Description with length of 640 is too long, max length is 639"
+    );
+}
+
+#[test]
+fn test_invoice_builder_missing() {
+    let private_key = gen_rand_secp256k1_private_key();
+    let invoice = InvoiceBuilder::new(Currency::Fibb)
+        .amount(Some(1280))
+        .payment_preimage(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
     assert_eq!(invoice.err(), None);
 
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
-        .payment_hash(rand_sha256_hash())
+        .payment_hash(gen_rand_sha256_hash())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
 
     assert_eq!(invoice.err(), None);
@@ -336,8 +339,8 @@ fn test_invoice_builder_missing() {
 
 #[test]
 fn test_invoice_builder_preimage() {
-    let preimage = rand_sha256_hash();
-    let private_key = gen_rand_private_key();
+    let preimage = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_preimage(preimage)
@@ -353,9 +356,9 @@ fn test_invoice_builder_preimage() {
 
 #[test]
 fn test_invoice_builder_both_payment_hash_preimage() {
-    let preimage = rand_sha256_hash();
-    let payment_hash = rand_sha256_hash();
-    let private_key = gen_rand_private_key();
+    let preimage = gen_rand_sha256_hash();
+    let payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(payment_hash)
@@ -379,8 +382,8 @@ fn test_invoice_serialize() {
 
 #[test]
 fn test_invoice_timestamp() {
-    let payment_hash = rand_sha256_hash();
-    let private_key = gen_rand_private_key();
+    let payment_hash = gen_rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice1 = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_hash(payment_hash)
@@ -399,8 +402,8 @@ fn test_invoice_timestamp() {
 
 #[test]
 fn test_invoice_gen_payment_hash() {
-    let private_key = gen_rand_private_key();
-    let payment_preimage = rand_sha256_hash();
+    let private_key = gen_rand_secp256k1_private_key();
+    let payment_preimage = gen_rand_sha256_hash();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .payment_preimage(payment_preimage)
@@ -413,7 +416,7 @@ fn test_invoice_gen_payment_hash() {
 
 #[test]
 fn test_invoice_rand_payment_hash() {
-    let private_key = gen_rand_private_key();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key));
@@ -423,10 +426,10 @@ fn test_invoice_rand_payment_hash() {
 #[test]
 fn test_invoice_udt_script() {
     let script = Script::default();
-    let private_key = gen_rand_private_key();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
-        .payment_hash(rand_sha256_hash())
+        .payment_hash(gen_rand_sha256_hash())
         .udt_type_script(script.clone())
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();
@@ -440,10 +443,10 @@ fn test_invoice_udt_script() {
 
 #[test]
 fn test_invoice_check_expired() {
-    let private_key = gen_rand_private_key();
+    let private_key = gen_rand_secp256k1_private_key();
     let invoice = InvoiceBuilder::new(Currency::Fibb)
         .amount(Some(1280))
-        .payment_hash(rand_sha256_hash())
+        .payment_hash(gen_rand_sha256_hash())
         .expiry_time(Duration::from_secs(1))
         .build_with_sign(|hash| Secp256k1::new().sign_ecdsa_recoverable(hash, &private_key))
         .unwrap();

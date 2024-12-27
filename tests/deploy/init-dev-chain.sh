@@ -33,6 +33,9 @@ done
 # Initialize the data directory if it does not exist.
 if ! [[ -d "$data_dir" ]]; then
     ckb init -C "$data_dir" -c dev --force --ba-arg 0xc8328aabcd9b9e8e64fbc566c4385c3bdeb219d7
+    cp "$nodes_dir/deployer/dev.toml" "$data_dir/specs/dev.toml"
+    sed -i.bak 's|\.\./\.\./deploy/contracts|\.\./\.\./\.\./deploy/contracts|g' "$data_dir/specs/dev.toml"
+
     # Enable the IntegrationTest module (required to generate blocks).
     if ! grep -E '^modules.*IntegrationTest' "$data_dir/ckb.toml"; then
         # -i.bak is required to sed work on both Linux and macOS.
@@ -61,13 +64,13 @@ if ! [[ -d "$data_dir" ]]; then
     ckb-cli wallet transfer --to-address $(cat "$nodes_dir/1/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
 
     sleep 1
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
     sleep 1
 
     # Transfer some money to the node 2.
     ckb-cli wallet transfer --to-address $(cat "$nodes_dir/2/ckb/wallet") --capacity 5000000000 --fee-rate 2000 --privkey-path "$nodes_dir/deployer/ckb/key"
     sleep 1
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
     sleep 1
 
     # Transfer some money to the node 3.
@@ -75,9 +78,10 @@ if ! [[ -d "$data_dir" ]]; then
     sleep 1
     # Generate a few blocks so that above transaction is confirmed.
     echo "begin to generate blocks for wallet updating..."
-    "$script_dir/generate-blocks.sh" 6
+    "$script_dir/generate-blocks.sh" 4
 
-    # Aslo deploy the contracts.
+    # Also deploy the contracts.
+    echo "deploy.sh..."
     "$script_dir/deploy.sh"
 
     pkill -P $$

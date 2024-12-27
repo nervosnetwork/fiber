@@ -46,4 +46,7 @@ script:post-response {
   if (res.body.result.channels[0].local_balance != "0xe7b68ae00" || res.body.result.channels[0].remote_balance != "0x376abe5fa400") {
     throw new Error("Assertion failed: channel amount is not right");
   }
+  if (res.body.result.channels[0].state.state_name != "CHANNEL_READY") {
+    throw new Error("Assertion failed: channel status is not right");
+  }
 }

@@ -53,6 +53,10 @@ pub enum InvoiceError {
     SignError,
     #[error("Hex decode error: {0}")]
     HexDecodeError(#[from] hex::FromHexError),
-    #[error("Duplicated inovice found: {0}")]
+    #[error("Duplicated invoice found: {0}")]
     DuplicatedInvoice(String),
+    #[error("Description with length of {0} is too long, max length is 639")]
+    DescriptionTooLong(usize),
+    #[error("Invoice not found")]
+    InvoiceNotFound,
 }

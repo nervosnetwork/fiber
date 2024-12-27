@@ -36,10 +36,10 @@ body:json {
     "params": [
       {
         "amount": "0x64",
-        "currency": "Fibb",
+        "currency": "Fibd",
         "description": "test invoice",
         "expiry": "0xe10",
-        "final_cltv": "0x28",
+        "final_expiry_delta": "0xDFFA0",
         "payment_preimage": "{{payment_preimage}}"
       }
     ]
@@ -56,6 +56,5 @@ script:post-response {
   await new Promise(r => setTimeout(r, 100));
   console.log("generated result: ", res.body.result);
   bru.setVar("INVOICE_ADDR", res.body.result.invoice_address);
-
-
+  bru.setVar("INVOICE_PAYMENT_HASH", res.body.result.invoice.data.payment_hash);
 }

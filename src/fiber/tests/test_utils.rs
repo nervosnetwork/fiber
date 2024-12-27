@@ -1,24 +1,32 @@
-use crate::fiber::graph::{ChannelInfo, NetworkGraph, NodeInfo};
-use crate::fiber::history::TimedResult;
+use crate::fiber::channel::ChannelActorState;
+use crate::fiber::channel::ChannelActorStateStore;
+use crate::fiber::channel::ChannelCommand;
+use crate::fiber::channel::ChannelCommandWithId;
+use crate::fiber::graph::NetworkGraphStateStore;
+use crate::fiber::graph::PaymentSession;
+use crate::fiber::graph::PaymentSessionStatus;
+use crate::fiber::network::SendPaymentCommand;
+use crate::fiber::network::SendPaymentResponse;
+use crate::fiber::types::EcdsaSignature;
 use crate::fiber::types::Pubkey;
-use crate::invoice::{CkbInvoice, InvoiceError, InvoiceStore};
-use ckb_jsonrpc_types::JsonBytes;
+use crate::invoice::CkbInvoice;
+use crate::invoice::CkbInvoiceStatus;
+use crate::invoice::InvoiceStore;
+use ckb_jsonrpc_types::Status;
 use ckb_types::packed::OutPoint;
 use ckb_types::{core::TransactionView, packed::Byte32};
-use ractor::{Actor, ActorRef};
-use rand::Rng;
-use secp256k1::{rand, PublicKey, Secp256k1, SecretKey};
+use ractor::{call, Actor, ActorRef};
+use rand::rngs::OsRng;
+use secp256k1::{Message, Secp256k1};
 use std::{
-    collections::HashMap,
     env,
     ffi::OsStr,
     mem::ManuallyDrop,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 use tempfile::TempDir as OldTempDir;
-use tentacle::multiaddr::Multiaddr;
 use tentacle::{multiaddr::MultiAddr, secio::PeerId};
 use tokio::sync::RwLock as TokioRwLock;
 use tokio::{
@@ -27,33 +35,41 @@ use tokio::{
     time::sleep,
 };
 
+use crate::fiber::graph::ChannelInfo;
+use crate::fiber::graph::NodeInfo;
+use crate::fiber::network::{AcceptChannelCommand, OpenChannelCommand};
+use crate::fiber::types::Privkey;
+use crate::store::Store;
 use crate::{
     actors::{RootActor, RootActorMessage},
-    ckb::tests::test_utils::{submit_tx, trace_tx, trace_tx_hash, MockChainActor},
+    ckb::tests::test_utils::{
+        get_tx_from_hash, submit_tx, trace_tx, trace_tx_hash, MockChainActor,
+    },
     ckb::CkbChainMessage,
-    fiber::network::NetworkActorStartArguments,
+    fiber::graph::NetworkGraph,
+    fiber::network::{
+        NetworkActor, NetworkActorCommand, NetworkActorMessage, NetworkActorStartArguments,
+    },
+    fiber::types::Hash256,
     tasks::{new_tokio_cancellation_token, new_tokio_task_tracker},
     FiberConfig, NetworkServiceEvent,
 };
 
-use crate::fiber::graph::NetworkGraphStateStore;
-use crate::fiber::graph::PaymentSession;
-use crate::fiber::{
-    channel::{ChannelActorState, ChannelActorStateStore, ChannelState},
-    types::Hash256,
-    NetworkActor, NetworkActorCommand, NetworkActorMessage,
-};
-
 static RETAIN_VAR: &str = "TEST_TEMP_RETAIN";
+pub(crate) const MIN_RESERVED_CKB: u128 = 4200000000;
 
 #[derive(Debug)]
 pub struct TempDir(ManuallyDrop<OldTempDir>);
 
 impl TempDir {
-    fn new<S: AsRef<OsStr>>(prefix: S) -> Self {
+    pub fn new<S: AsRef<OsStr>>(prefix: S) -> Self {
         Self(ManuallyDrop::new(
             OldTempDir::with_prefix(prefix).expect("create temp directory"),
         ))
+    }
+
+    pub fn to_str(&self) -> &str {
+        self.0.path().to_str().expect("path to str")
     }
 }
 
@@ -99,39 +115,19 @@ pub fn init_tracing() {
 static ROOT_ACTOR: OnceCell<ActorRef<RootActorMessage>> = OnceCell::const_new();
 
 pub async fn get_test_root_actor() -> ActorRef<RootActorMessage> {
-    Actor::spawn(
-        Some("test root actor".to_string()),
-        RootActor {},
-        (new_tokio_task_tracker(), new_tokio_cancellation_token()),
-    )
-    .await
-    .expect("start test root actor")
-    .0
-}
-
-pub fn generate_keypair() -> (SecretKey, PublicKey) {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    (secret_key, public_key)
-}
-
-pub fn generate_seckey() -> SecretKey {
-    SecretKey::new(&mut rand::thread_rng())
-}
-
-pub fn generate_pubkey() -> Pubkey {
-    let secp = Secp256k1::new();
-    let secret_key = SecretKey::new(&mut rand::thread_rng());
-    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
-    public_key.into()
-}
-
-pub fn gen_sha256_hash() -> Hash256 {
-    let mut rng = rand::thread_rng();
-    let mut result = [0u8; 32];
-    rng.fill(&mut result[..]);
-    result.into()
+    use futures::FutureExt;
+    // Only one actor with the same name can be created.
+    ROOT_ACTOR
+        .get_or_init(|| {
+            Actor::spawn(
+                Some("test root actor".to_string()),
+                RootActor {},
+                (new_tokio_task_tracker(), new_tokio_cancellation_token()),
+            )
+            .map(|r| r.expect("start test root actor").0)
+        })
+        .await
+        .clone()
 }
 
 pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) -> FiberConfig {
@@ -142,34 +138,55 @@ pub fn get_fiber_config<P: AsRef<Path>>(base_dir: P, node_name: Option<&str>) ->
             .map(Into::into),
         announce_listening_addr: Some(true),
         base_dir: Some(PathBuf::from(base_dir)),
+        // This config is needed for the timely processing of gossip messages.
+        // Without this, some tests may fail due to the delay in processing gossip messages.
+        gossip_network_maintenance_interval_ms: Some(50),
+        // This config is needed for the timely processing of gossip messages.
+        // Without this, some tests may fail due to the delay in processing gossip messages.
+        gossip_store_maintenance_interval_ms: Some(50),
         auto_accept_channel_ckb_funding_amount: Some(0), // Disable auto accept for unit tests
+        announce_private_addr: Some(true),               // Announce private address for unit tests
         ..Default::default()
     }
 }
 
+// Mock function to create a dummy EcdsaSignature
+pub fn mock_ecdsa_signature() -> EcdsaSignature {
+    let secp = Secp256k1::new();
+    let mut rng = OsRng::default();
+    let (secret_key, _public_key) = secp.generate_keypair(&mut rng);
+    let message = Message::from_digest_slice(&[0u8; 32]).expect("32 bytes");
+    let signature = secp.sign_ecdsa(&message, &secret_key);
+    EcdsaSignature(signature)
+}
+
+pub fn generate_store() -> Store {
+    let temp_dir = TempDir::new("test-fnn-node");
+    let store = Store::new(temp_dir.as_ref());
+    store.expect("create store")
+}
+
+#[derive(Debug)]
 pub struct NetworkNode {
     /// The base directory of the node, will be deleted after this struct dropped.
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
-    pub store: MemoryStore,
+    pub store: Store,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
+    pub network_graph: Arc<TokioRwLock<NetworkGraph<Store>>>,
     pub chain_actor: ActorRef<CkbChainMessage>,
+    pub private_key: Privkey,
     pub peer_id: PeerId,
     pub event_emitter: mpsc::Receiver<NetworkServiceEvent>,
-}
-
-impl NetworkNode {
-    pub fn get_node_address(&self) -> &MultiAddr {
-        &self.listening_addrs[0]
-    }
+    pub pubkey: Pubkey,
 }
 
 pub struct NetworkNodeConfig {
     base_dir: Arc<TempDir>,
     node_name: Option<String>,
-    store: MemoryStore,
+    store: Store,
     fiber_config: FiberConfig,
 }
 
@@ -182,7 +199,6 @@ impl NetworkNodeConfig {
 pub struct NetworkNodeConfigBuilder {
     base_dir: Option<Arc<TempDir>>,
     node_name: Option<String>,
-    store: Option<MemoryStore>,
     // We may generate a FiberConfig based on the base_dir and node_name,
     // but allow user to override it.
     fiber_config_updater: Option<Box<dyn FnOnce(&mut FiberConfig) + 'static>>,
@@ -193,7 +209,6 @@ impl NetworkNodeConfigBuilder {
         Self {
             base_dir: None,
             node_name: None,
-            store: None,
             fiber_config_updater: None,
         }
     }
@@ -203,13 +218,12 @@ impl NetworkNodeConfigBuilder {
         self
     }
 
-    pub fn node_name(mut self, node_name: Option<String>) -> Self {
-        self.node_name = node_name;
-        self
+    pub fn base_dir_prefix(self, prefix: &str) -> Self {
+        self.base_dir(Arc::new(TempDir::new(prefix)))
     }
 
-    pub fn store(mut self, store: MemoryStore) -> Self {
-        self.store = Some(store);
+    pub fn node_name(mut self, node_name: Option<String>) -> Self {
+        self.node_name = node_name;
         self
     }
 
@@ -225,9 +239,9 @@ impl NetworkNodeConfigBuilder {
         let base_dir = self
             .base_dir
             .clone()
-            .unwrap_or_else(|| Arc::new(TempDir::new("fnn-test")));
+            .unwrap_or_else(|| Arc::new(TempDir::new("test-fnn-node")));
         let node_name = self.node_name.clone();
-        let store = self.store.clone().unwrap_or_default();
+        let store = generate_store();
         let fiber_config = get_fiber_config(base_dir.as_ref(), node_name.as_deref());
         let mut config = NetworkNodeConfig {
             base_dir,
@@ -242,9 +256,363 @@ impl NetworkNodeConfigBuilder {
     }
 }
 
+pub(crate) async fn establish_channel_between_nodes(
+    node_a: &mut NetworkNode,
+    node_b: &mut NetworkNode,
+    public: bool,
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    a_max_tlc_number_in_flight: Option<u64>,
+    a_max_tlc_value_in_flight: Option<u128>,
+    a_tlc_expiry_delta: Option<u64>,
+    a_tlc_min_value: Option<u128>,
+    a_tlc_fee_proportional_millionths: Option<u128>,
+    b_max_tlc_number_in_flight: Option<u64>,
+    b_max_tlc_value_in_flight: Option<u128>,
+    b_tlc_expiry_delta: Option<u64>,
+    b_tlc_min_value: Option<u128>,
+    b_tlc_fee_proportional_millionths: Option<u128>,
+) -> (Hash256, TransactionView) {
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::OpenChannel(
+            OpenChannelCommand {
+                peer_id: node_b.peer_id.clone(),
+                public,
+                shutdown_script: None,
+                funding_amount: node_a_funding_amount,
+                funding_udt_type_script: None,
+                commitment_fee_rate: None,
+                commitment_delay_epoch: None,
+                funding_fee_rate: None,
+                tlc_expiry_delta: a_tlc_expiry_delta,
+                tlc_min_value: a_tlc_min_value,
+                tlc_fee_proportional_millionths: a_tlc_fee_proportional_millionths,
+                max_tlc_number_in_flight: a_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: a_max_tlc_value_in_flight,
+            },
+            rpc_reply,
+        ))
+    };
+    let open_channel_result = call!(node_a.network_actor, message)
+        .expect("node_a alive")
+        .expect("open channel success");
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelPendingToBeAccepted(peer_id, channel_id) => {
+                println!("A channel ({:?}) to {:?} create", &channel_id, peer_id);
+                assert_eq!(peer_id, &node_a.peer_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::AcceptChannel(
+            AcceptChannelCommand {
+                temp_channel_id: open_channel_result.channel_id,
+                funding_amount: node_b_funding_amount,
+                shutdown_script: None,
+                max_tlc_number_in_flight: b_max_tlc_number_in_flight,
+                max_tlc_value_in_flight: b_max_tlc_value_in_flight,
+                min_tlc_value: b_tlc_min_value,
+                tlc_fee_proportional_millionths: b_tlc_fee_proportional_millionths,
+                tlc_expiry_delta: b_tlc_expiry_delta,
+            },
+            rpc_reply,
+        ))
+    };
+    let accept_channel_result = call!(node_b.network_actor, message)
+        .expect("node_b alive")
+        .expect("accept channel success");
+    let new_channel_id = accept_channel_result.new_channel_id;
+
+    let funding_tx_outpoint = node_a
+        .expect_to_process_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, funding_tx_outpoint) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_b.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                Some(funding_tx_outpoint.clone())
+            }
+            _ => None,
+        })
+        .await;
+
+    node_b
+        .expect_event(|event| match event {
+            NetworkServiceEvent::ChannelReady(peer_id, channel_id, _funding_tx_hash) => {
+                println!(
+                    "A channel ({:?}) to {:?} is now ready",
+                    &channel_id, &peer_id
+                );
+                assert_eq!(peer_id, &node_a.peer_id);
+                assert_eq!(channel_id, &new_channel_id);
+                true
+            }
+            _ => false,
+        })
+        .await;
+
+    let funding_tx = node_a
+        .get_tx_from_hash(funding_tx_outpoint.tx_hash())
+        .await
+        .expect("tx found");
+
+    (new_channel_id, funding_tx)
+}
+
+pub(crate) async fn create_nodes_with_established_channel(
+    node_a_funding_amount: u128,
+    node_b_funding_amount: u128,
+    public: bool,
+) -> (NetworkNode, NetworkNode, Hash256) {
+    let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+    let (channel_id, _funding_tx) = establish_channel_between_nodes(
+        &mut node_a,
+        &mut node_b,
+        public,
+        node_a_funding_amount,
+        node_b_funding_amount,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    (node_a, node_b, channel_id)
+}
+
+pub(crate) async fn create_3_nodes_with_established_channel(
+    (channel_1_amount_a, channel_1_amount_b): (u128, u128),
+    (channel_2_amount_b, channel_2_amount_c): (u128, u128),
+    public: bool,
+) -> (NetworkNode, NetworkNode, NetworkNode, Hash256, Hash256) {
+    let (nodes, channels) = create_n_nodes_with_established_channel(
+        &[
+            (channel_1_amount_a, channel_1_amount_b),
+            (channel_2_amount_b, channel_2_amount_c),
+        ],
+        3,
+        public,
+    )
+    .await;
+    let [node_a, node_b, node_c] = nodes.try_into().expect("3 nodes");
+    (node_a, node_b, node_c, channels[0], channels[1])
+}
+
+// make a network like A -> B -> C -> D
+pub(crate) async fn create_n_nodes_with_established_channel(
+    amounts: &[(u128, u128)],
+    n: usize,
+    public: bool,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    assert!(n >= 2);
+    assert_eq!(amounts.len(), n - 1);
+
+    let nodes_index_map: Vec<((usize, usize), (u128, u128))> = (0..n - 1)
+        .map(|i| ((i, i + 1), (amounts[i].0, amounts[i].1)))
+        .collect();
+
+    create_n_nodes_with_index_and_amounts_with_established_channel(&nodes_index_map, n, public)
+        .await
+}
+
+pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_channel(
+    amounts: &[((usize, usize), (u128, u128))],
+    n: usize,
+    public: bool,
+) -> (Vec<NetworkNode>, Vec<Hash256>) {
+    assert!(n >= 2);
+    let mut nodes = NetworkNode::new_interconnected_nodes(n).await;
+    let mut channels = vec![];
+
+    for &((i, j), (node_a_amount, node_b_amount)) in amounts.iter() {
+        let (channel_id, funding_tx) = {
+            let (node_a, node_b) = {
+                // avoid borrow nodes as mutbale more than once
+                assert_ne!(i, j);
+                if i < j {
+                    let (left, right) = nodes.split_at_mut(i + 1);
+                    (&mut left[i], &mut right[j - i - 1])
+                } else {
+                    let (left, right) = nodes.split_at_mut(j + 1);
+                    (&mut right[i - j - 1], &mut left[j])
+                }
+            };
+            establish_channel_between_nodes(
+                node_a,
+                node_b,
+                public,
+                node_a_amount,
+                node_b_amount,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+        };
+        channels.push(channel_id);
+        // all the other nodes submit_tx
+        for k in 0..n {
+            let res = nodes[k].submit_tx(funding_tx.clone()).await;
+            assert_eq!(res, Status::Committed);
+        }
+    }
+    (nodes, channels)
+}
+
 impl NetworkNode {
     pub async fn new() -> Self {
         Self::new_with_node_name_opt(None).await
+    }
+
+    pub fn get_private_key(&self) -> &Privkey {
+        &self.private_key
+    }
+
+    pub fn get_public_key(&self) -> Pubkey {
+        self.private_key.pubkey()
+    }
+
+    pub fn get_peer_id(&self) -> PeerId {
+        self.private_key.pubkey().tentacle_peer_id()
+    }
+
+    pub fn get_node_address(&self) -> &MultiAddr {
+        &self.listening_addrs[0]
+    }
+
+    pub fn get_local_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_local_amount
+    }
+
+    pub fn get_remote_balance_from_channel(&self, channel_id: Hash256) -> u128 {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+            .to_remote_amount
+    }
+
+    pub fn get_channel_actor_state(&self, channel_id: Hash256) -> ChannelActorState {
+        self.store
+            .get_channel_actor_state(&channel_id)
+            .expect("get channel")
+    }
+
+    pub fn insert_invoice(&mut self, invoice: CkbInvoice, preimage: Option<Hash256>) {
+        self.store
+            .insert_invoice(invoice, preimage)
+            .expect("insert success");
+    }
+
+    pub fn get_invoice_status(&mut self, payment_hash: &Hash256) -> Option<CkbInvoiceStatus> {
+        self.store.get_invoice_status(payment_hash)
+    }
+
+    pub fn cancel_invoice(&mut self, payment_hash: &Hash256) {
+        self.store
+            .update_invoice_status(payment_hash, CkbInvoiceStatus::Cancelled)
+            .expect("cancell success");
+    }
+
+    pub async fn send_payment(
+        &mut self,
+        command: SendPaymentCommand,
+    ) -> std::result::Result<SendPaymentResponse, String> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::SendPayment(command, rpc_reply))
+        };
+
+        let res = call!(self.network_actor, message).expect("source_node alive");
+        res
+    }
+
+    pub async fn assert_payment_status(
+        &self,
+        payment_hash: Hash256,
+        expected_status: PaymentSessionStatus,
+        expected_retried: Option<u32>,
+    ) {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::GetPayment(payment_hash, rpc_reply))
+        };
+        let res = call!(self.network_actor, message)
+            .expect("node_a alive")
+            .unwrap();
+
+        assert_eq!(res.status, expected_status);
+        if let Some(expected_retried) = expected_retried {
+            let payment_session = self.get_payment_session(payment_hash).unwrap();
+            assert_eq!(payment_session.retried_times, expected_retried);
+        }
+    }
+
+    pub async fn update_channel_actor_state(&mut self, state: ChannelActorState) {
+        let channel_id = state.id.clone();
+        self.store.insert_channel_actor_state(state);
+        self.network_actor
+            .send_message(NetworkActorMessage::Command(
+                NetworkActorCommand::ControlFiberChannel(ChannelCommandWithId {
+                    channel_id,
+                    command: ChannelCommand::ReloadState(),
+                }),
+            ))
+            .expect("network actor is live");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    pub async fn update_channel_local_balance(
+        &mut self,
+        channel_id: Hash256,
+        new_to_local_amount: u128,
+    ) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.to_local_amount = new_to_local_amount;
+        self.update_channel_actor_state(channel_actor_state).await;
+    }
+
+    pub async fn update_channel_remote_balance(
+        &mut self,
+        channel_id: Hash256,
+        new_to_remote_amount: u128,
+    ) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        channel_actor_state.to_remote_amount = new_to_remote_amount;
+        self.update_channel_actor_state(channel_actor_state).await;
+    }
+
+    pub async fn disable_channel(&mut self, channel_id: Hash256) {
+        let mut channel_actor_state = self.get_channel_actor_state(channel_id);
+        let mut public_info = channel_actor_state.public_channel_info.unwrap();
+        public_info.enabled = false;
+        channel_actor_state.public_channel_info = Some(public_info);
+        self.update_channel_actor_state(channel_actor_state).await;
+    }
+
+    pub fn get_payment_session(&self, payment_hash: Hash256) -> Option<PaymentSession> {
+        self.store.get_payment_session(payment_hash)
     }
 
     pub async fn new_with_node_name(node_name: &str) -> Self {
@@ -266,7 +634,10 @@ impl NetworkNode {
             store,
             fiber_config,
         } = config;
-        let root = ROOT_ACTOR.get_or_init(get_test_root_actor).await.clone();
+
+        let _span = tracing::info_span!("NetworkNode", node_name = &node_name).entered();
+
+        let root = get_test_root_actor().await;
         let (event_sender, mut event_receiver) = mpsc::channel(10000);
 
         let chain_actor = Actor::spawn_linked(None, MockChainActor::new(), (), root.get_cell())
@@ -274,20 +645,24 @@ impl NetworkNode {
             .expect("start mock chain actor")
             .0;
 
-        let secp = Secp256k1::new();
-        let secret_key = SecretKey::from_slice(&[0xcd; 32]).expect("32 bytes, within curve order");
-        let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+        let secret_key: Privkey = fiber_config
+            .read_or_generate_secret_key()
+            .expect("must generate key")
+            .into();
+        let public_key = secret_key.pubkey();
+
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
-            public_key.into(),
+            public_key.clone(),
         )));
+
         let network_actor = Actor::spawn_linked(
-            Some(format!("network actor at {:?}", base_dir.as_ref())),
+            Some(format!("network actor at {}", base_dir.to_str())),
             NetworkActor::new(
                 event_sender,
                 chain_actor.clone(),
                 store.clone(),
-                network_graph,
+                network_graph.clone(),
             ),
             NetworkActorStartArguments {
                 config: fiber_config.clone(),
@@ -326,9 +701,12 @@ impl NetworkNode {
             fiber_config,
             listening_addrs: announced_addrs,
             network_actor,
+            network_graph,
             chain_actor,
+            private_key: secret_key.into(),
             peer_id,
             event_emitter: event_receiver,
+            pubkey: public_key.into(),
         }
     }
 
@@ -339,6 +717,20 @@ impl NetworkNode {
             store: self.store.clone(),
             fiber_config: self.fiber_config.clone(),
         }
+    }
+
+    pub async fn get_network_channels(&self) -> Vec<ChannelInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_channels_with_params(1000, None)
+    }
+
+    pub async fn get_network_nodes(&self) -> Vec<NodeInfo> {
+        self.network_graph
+            .read()
+            .await
+            .get_nodes_with_params(1000, None)
     }
 
     pub async fn start(&mut self) {
@@ -359,13 +751,33 @@ impl NetworkNode {
 
     pub async fn restart(&mut self) {
         self.stop().await;
+        // Tentacle shutdown may require some time to propagate to other nodes.
+        // If we start the node immediately, other nodes may deem our new connection
+        // as a duplicate connection and report RepeatedConnection error.
+        // And we will receive `ProtocolSelectError` error from tentacle.
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        tracing::debug!("Node stopped, restarting");
         self.start().await;
     }
 
     pub async fn new_n_interconnected_nodes<const N: usize>() -> [Self; N] {
-        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(N);
-        for i in 0..N {
-            let new = Self::new_with_node_name_opt(Some(format!("Node {i}"))).await;
+        let nodes = Self::new_interconnected_nodes(N).await;
+        match nodes.try_into() {
+            Ok(nodes) => nodes,
+            Err(_) => unreachable!(),
+        }
+    }
+
+    pub async fn new_interconnected_nodes(n: usize) -> Vec<Self> {
+        let mut nodes: Vec<NetworkNode> = Vec::with_capacity(n);
+        for i in 0..n {
+            let new = Self::new_with_config(
+                NetworkNodeConfigBuilder::new()
+                    .node_name(Some(format!("node-{}", i)))
+                    .base_dir_prefix(&format!("test-fnn-node-{}-", i))
+                    .build(),
+            )
+            .await;
             for node in nodes.iter_mut() {
                 node.connect_to(&new).await;
             }
@@ -375,6 +787,35 @@ impl NetworkNode {
             Ok(nodes) => nodes,
             Err(_) => unreachable!(),
         }
+    }
+
+    pub async fn new_2_nodes_with_established_channel(
+        node_a_funding_amount: u128,
+        node_b_funding_amount: u128,
+        public: bool,
+    ) -> (NetworkNode, NetworkNode, Hash256, TransactionView) {
+        let [mut node_a, mut node_b] = NetworkNode::new_n_interconnected_nodes().await;
+
+        let (channel_id, funding_tx) = establish_channel_between_nodes(
+            &mut node_a,
+            &mut node_b,
+            public,
+            node_a_funding_amount,
+            node_b_funding_amount,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        (node_a, node_b, channel_id, funding_tx)
     }
 
     // Create n nodes and connect them. The config_gen function
@@ -462,232 +903,51 @@ impl NetworkNode {
     pub async fn trace_tx_hash(&mut self, tx_hash: Byte32) -> ckb_jsonrpc_types::Status {
         trace_tx_hash(self.chain_actor.clone(), tx_hash).await
     }
-}
 
-#[derive(Clone, Default)]
-pub struct MemoryStore {
-    channel_actor_state_map: Arc<RwLock<HashMap<Hash256, ChannelActorState>>>,
-    channels_map: Arc<RwLock<HashMap<OutPoint, ChannelInfo>>>,
-    pub nodes_map: Arc<RwLock<HashMap<Pubkey, NodeInfo>>>,
-    connected_peer_addresses: Arc<RwLock<HashMap<PeerId, Multiaddr>>>,
-    payment_sessions: Arc<RwLock<HashMap<Hash256, PaymentSession>>>,
-    invoice_store: Arc<RwLock<HashMap<Hash256, CkbInvoice>>>,
-    invoice_hash_to_preimage: Arc<RwLock<HashMap<Hash256, Hash256>>>,
-    payment_hisotry: Arc<RwLock<HashMap<(Pubkey, Pubkey), TimedResult>>>,
-}
-
-impl NetworkGraphStateStore for MemoryStore {
-    fn get_channels(&self, outpoint: Option<OutPoint>) -> Vec<ChannelInfo> {
-        if let Some(outpoint) = outpoint {
-            let mut res = vec![];
-
-            if let Some(channel) = self.channels_map.read().unwrap().get(&outpoint) {
-                res.push(channel.clone());
-            }
-            res
-        } else {
-            self.channels_map
-                .read()
-                .unwrap()
-                .values()
-                .cloned()
-                .collect()
-        }
+    pub async fn get_tx_from_hash(
+        &mut self,
+        tx_hash: Byte32,
+    ) -> Result<TransactionView, anyhow::Error> {
+        get_tx_from_hash(self.chain_actor.clone(), tx_hash).await
     }
 
-    fn insert_channel(&self, channel: ChannelInfo) {
-        self.channels_map
-            .write()
-            .unwrap()
-            .insert(channel.out_point(), channel);
+    pub fn get_network_graph(&self) -> &Arc<TokioRwLock<NetworkGraph<Store>>> {
+        &self.network_graph
     }
 
-    fn get_nodes(&self, node_id: Option<Pubkey>) -> Vec<NodeInfo> {
-        if let Some(node_id) = node_id {
-            let mut res = vec![];
-
-            if let Some(node) = self.nodes_map.read().unwrap().get(&node_id) {
-                res.push(node.clone());
-            }
-            res
-        } else {
-            self.nodes_map.read().unwrap().values().cloned().collect()
-        }
+    pub async fn with_network_graph<F, T>(&self, f: F) -> T
+    where
+        F: FnOnce(&NetworkGraph<Store>) -> T,
+    {
+        let graph = self.get_network_graph().read().await;
+        f(&*graph)
     }
 
-    fn get_nodes_with_params(
-        &self,
-        _limit: usize,
-        _after: Option<JsonBytes>,
-        _node_id: Option<Pubkey>,
-    ) -> (Vec<NodeInfo>, JsonBytes) {
-        unimplemented!("currently not used in mock store");
+    pub async fn get_network_graph_nodes(&self) -> Vec<NodeInfo> {
+        self.with_network_graph(|graph| graph.nodes().into_iter().cloned().collect())
+            .await
     }
 
-    fn get_channels_with_params(
-        &self,
-        _limit: usize,
-        _after: Option<JsonBytes>,
-        _ooutpoint: Option<OutPoint>,
-    ) -> (Vec<ChannelInfo>, JsonBytes) {
-        unimplemented!("currently not used in mock store");
+    pub async fn get_network_graph_node(&self, pubkey: &Pubkey) -> Option<NodeInfo> {
+        self.with_network_graph(|graph| graph.get_node(pubkey).cloned())
+            .await
     }
 
-    fn insert_node(&self, node: NodeInfo) {
-        self.nodes_map
-            .write()
-            .unwrap()
-            .insert(node.node_id.clone(), node);
+    pub async fn get_network_graph_channels(&self) -> Vec<ChannelInfo> {
+        self.with_network_graph(|graph| graph.channels().into_iter().cloned().collect())
+            .await
     }
 
-    fn insert_connected_peer(&self, peer_id: PeerId, multiaddr: Multiaddr) {
-        self.connected_peer_addresses
-            .write()
-            .unwrap()
-            .insert(peer_id, multiaddr);
-    }
-
-    fn get_connected_peer(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Multiaddr)> {
-        if let Some(peer_id) = peer_id {
-            let mut res = vec![];
-
-            if let Some(addr) = self.connected_peer_addresses.read().unwrap().get(&peer_id) {
-                res.push((peer_id, addr.clone()));
-            }
-            res
-        } else {
-            self.connected_peer_addresses
-                .read()
-                .unwrap()
-                .iter()
-                .map(|(peer_id, addr)| (peer_id.clone(), addr.clone()))
-                .collect()
-        }
-    }
-
-    fn remove_connected_peer(&self, peer_id: &PeerId) {
-        self.connected_peer_addresses
-            .write()
-            .unwrap()
-            .remove(peer_id);
-    }
-
-    fn get_payment_session(&self, id: Hash256) -> Option<PaymentSession> {
-        self.payment_sessions.read().unwrap().get(&id).cloned()
-    }
-
-    fn insert_payment_session(&self, session: PaymentSession) {
-        self.payment_sessions
-            .write()
-            .unwrap()
-            .insert(session.payment_hash(), session);
-    }
-
-    fn insert_payment_history_result(&mut self, from: Pubkey, target: Pubkey, result: TimedResult) {
-        self.payment_hisotry
-            .write()
-            .unwrap()
-            .insert((from, target), result);
-    }
-
-    fn get_payment_history_result(&self) -> Vec<(Pubkey, Pubkey, TimedResult)> {
-        self.payment_hisotry
-            .read()
-            .unwrap()
-            .iter()
-            .map(|((from, target), result)| (from.clone(), target.clone(), result.clone()))
-            .collect()
-    }
-}
-
-impl ChannelActorStateStore for MemoryStore {
-    fn get_channel_actor_state(&self, id: &Hash256) -> Option<ChannelActorState> {
-        self.channel_actor_state_map
-            .read()
-            .unwrap()
-            .get(id)
-            .cloned()
-    }
-
-    fn insert_channel_actor_state(&self, state: ChannelActorState) {
-        self.channel_actor_state_map
-            .write()
-            .unwrap()
-            .insert(state.id, state);
-    }
-
-    fn delete_channel_actor_state(&self, id: &Hash256) {
-        self.channel_actor_state_map.write().unwrap().remove(id);
-    }
-
-    fn get_channel_ids_by_peer(&self, peer_id: &PeerId) -> Vec<Hash256> {
-        self.channel_actor_state_map
-            .read()
-            .unwrap()
-            .values()
-            .filter_map(|state| {
-                if peer_id == &state.get_remote_peer_id() {
-                    Some(state.id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
-    fn get_channel_states(&self, peer_id: Option<PeerId>) -> Vec<(PeerId, Hash256, ChannelState)> {
-        let map = self.channel_actor_state_map.read().unwrap();
-        let values = map.values();
-        match peer_id {
-            Some(peer_id) => values
-                .filter_map(|state| {
-                    if peer_id == state.get_remote_peer_id() {
-                        Some((state.get_remote_peer_id(), state.id, state.state.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-            None => values
-                .map(|state| {
-                    (
-                        state.get_remote_peer_id(),
-                        state.id.clone(),
-                        state.state.clone(),
-                    )
-                })
-                .collect(),
-        }
-    }
-}
-
-impl InvoiceStore for MemoryStore {
-    fn get_invoice(&self, id: &Hash256) -> Option<CkbInvoice> {
-        self.invoice_store.read().unwrap().get(id).cloned()
-    }
-
-    fn insert_invoice(
-        &self,
-        invoice: CkbInvoice,
-        preimage: Option<Hash256>,
-    ) -> Result<(), InvoiceError> {
-        let id = invoice.payment_hash();
-        if let Some(preimage) = preimage {
-            self.invoice_hash_to_preimage
-                .write()
-                .unwrap()
-                .insert(*id, preimage);
-        }
-        self.invoice_store.write().unwrap().insert(*id, invoice);
-        Ok(())
-    }
-
-    fn get_invoice_preimage(&self, hash: &Hash256) -> Option<Hash256> {
-        self.invoice_hash_to_preimage
-            .read()
-            .unwrap()
-            .get(hash)
-            .cloned()
+    pub async fn get_network_graph_channel(&self, channel_id: &OutPoint) -> Option<ChannelInfo> {
+        self.with_network_graph(|graph| {
+            tracing::debug!("Getting channel info for {:?}", channel_id);
+            tracing::debug!(
+                "Channels: {:?}",
+                graph.channels().into_iter().collect::<Vec<_>>()
+            );
+            graph.get_channel(channel_id).cloned()
+        })
+        .await
     }
 }
 

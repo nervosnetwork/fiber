@@ -1,43 +1,38 @@
-use crate::Result;
-use ckb_sdk::NetworkType;
-use clap::ValueEnum;
+use crate::{ckb::contracts::Contract, Result};
+use ckb_jsonrpc_types::{CellDep, Script};
 use clap_serde_derive::{
     clap::{self},
     ClapSerde,
 };
 #[cfg(not(test))]
 use once_cell::sync::OnceCell;
-use serde::{Deserialize, Deserializer, Serializer};
-use std::{fs, path::PathBuf};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{fs, path::PathBuf, str::FromStr};
 use tentacle::secio::{PublicKey, SecioKeyPair};
 
 pub const CKB_SHANNONS: u64 = 100_000_000; // 1 CKB = 10 ^ 8 shannons
-pub const DEFAULT_MIN_INBOUND_LIQUIDITY: u64 = 100 * CKB_SHANNONS; // 100 CKB for minimal inbound liquidity
-pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
-pub const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
-pub const MIN_UDT_OCCUPIED_CAPACITY: u64 = 142 * CKB_SHANNONS; // 142 CKB for UDT occupied capacity
+pub const DEFAULT_MIN_SHUTDOWN_FEE: u64 = 1 * CKB_SHANNONS; // 1 CKB prepared for shutdown transaction fee
 
 /// By default, listen to any tcp port allocated by the kernel.
 pub const DEFAULT_LISTENING_ADDR: &str = "/ip4/0.0.0.0/tcp/0";
 
-/// 62 CKB minimal channel amount, at any time a partner should keep at least
-/// `DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT` CKB in the channel,
-/// to make sure he can build a valid shutdown transaction and pay proper fee.
-pub const DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT: u64 =
+const MIN_OCCUPIED_CAPACITY: u64 = 61 * CKB_SHANNONS; // 61 CKB for occupied capacity
+
+/// Default ckb funding amount when auto accepting an open channel request.
+pub const DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT: u64 =
     MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
 
-/// 143 CKB for minimal UDT amount
-pub const DEFAULT_UDT_MINIMAL_CKB_AMOUNT: u64 =
-    MIN_UDT_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+/// Default minimum ckb funding amount for auto accepting an open channel request.
+pub const DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT: u64 = 100 * CKB_SHANNONS;
 
-/// 162 CKB to open a channel which maybe automatically acceptted.
-/// 100 CKB for minimal inbound liquidity, 61 CKB for occupied capacity, 1 CKB for shutdown fee
-/// The other party may auto accept the channel if the amount is greater than this.
-pub const DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT: u64 =
-    DEFAULT_MIN_INBOUND_LIQUIDITY + MIN_OCCUPIED_CAPACITY + DEFAULT_MIN_SHUTDOWN_FEE;
+/// The expiry delta to forward a tlc, in milliseconds, default to 1 day.
+pub const DEFAULT_TLC_EXPIRY_DELTA: u64 = 24 * 60 * 60 * 1000;
 
-/// The locktime expiry delta to forward a tlc, in seconds. 86400 means 1 day.
-pub const DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA: u64 = 86400;
+/// The minimal expiry delta to forward a tlc, in milliseconds. 15 minutes.
+pub const MIN_TLC_EXPIRY_DELTA: u64 = 15 * 60 * 1000; // 15 minutes
+
+/// The maximum expiry delta for a payment, in milliseconds. 2 weeks
+pub const MAX_PAYMENT_TLC_EXPIRY_LIMIT: u64 = 14 * 24 * 60 * 60 * 1000; // 2 weeks
 
 /// The minimal value of a tlc. 0 means no minimal value.
 pub const DEFAULT_TLC_MIN_VALUE: u128 = 0;
@@ -53,6 +48,18 @@ pub const DEFAULT_AUTO_ANNOUNCE_NODE: bool = true;
 
 /// The interval to reannounce NodeAnnouncement, in seconds.
 pub const DEFAULT_ANNOUNCE_NODE_INTERVAL_SECONDS: u64 = 3600;
+
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS: u64 = 1000 * 60;
+
+/// Maximal number of inbound connections.
+pub const DEFAULT_MAX_INBOUND_PEERS: usize = 16;
+
+/// Minimal number of outbound connections.
+pub const DEFAULT_MIN_OUTBOUND_PEERS: usize = 8;
+
+/// The interval to maintain the gossip network, in milli-seconds.
+pub const DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS: u64 = 20 * 1000;
 
 /// Whether to sync the network graph from the network. true means syncing.
 pub const DEFAULT_SYNC_NETWORK_GRAPH: bool = true;
@@ -82,6 +89,14 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_listening_addr: Option<bool>,
 
+    /// whether to announce private address, this should be set to false unless you are running a private network or testing [default: false]
+    #[arg(
+        name = "FIBER_ANNOUNCE_PRIVATE_ADDR",
+        long = "fiber-announce-private-addr",
+        env
+    )]
+    pub(crate) announce_private_addr: Option<bool>,
+
     /// addresses to be announced to fiber network (separated by `,`)
     #[arg(name = "FIBER_ANNOUNCED_ADDRS", long = "fiber-announced-addrs", env, value_parser, num_args = 0.., value_delimiter = ',')]
     pub(crate) announced_addrs: Vec<String>,
@@ -98,16 +113,20 @@ pub struct FiberConfig {
     )]
     pub(crate) announced_node_name: Option<AnnouncedNodeName>,
 
-    /// name of the network to use (can be any of `mocknet`/`mainnet`/`testnet`/`staging`/`dev`)
-    #[arg(name = "FIBER_NETWORK", long = "fiber-network", env)]
-    pub network: Option<CkbNetwork>,
+    /// chain spec file path, can be "mainnet", "testnet", or a file path to a custom chain spec
+    #[arg(name = "FIBER_CHAIN", long = "fiber-chain", env)]
+    pub chain: String,
 
-    /// minimum ckb funding amount for auto accepting an open channel requests, aunit: shannons [default: 16200000000 shannons]
+    /// lock script configurations related to fiber network
+    #[arg(name = "FIBER_SCRIPTS", long = "fiber-scripts", env, value_parser, num_args = 0.., value_delimiter = ',')]
+    pub scripts: Vec<FiberScript>,
+
+    /// minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]
     #[arg(
         name = "FIBER_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT",
         long = "fiber-open-channel-auto-accept-min-ckb-funding-amount",
         env,
-        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 16200000000 shannons]"
+        help = "minimum ckb funding amount for auto accepting an open channel requests, unit: shannons [default: 10000000000 shannons]"
     )]
     pub open_channel_auto_accept_min_ckb_funding_amount: Option<u64>,
     /// whether to accept open channel requests with ckb funding amount automatically, unit: shannons [default: 6200000000 shannons], if this is set to zero, it means to disable auto accept
@@ -119,14 +138,14 @@ pub struct FiberConfig {
     )]
     pub auto_accept_channel_ckb_funding_amount: Option<u64>,
 
-    /// The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]
+    /// The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]
     #[arg(
-        name = "FIBER_TLC_LOCKTIME_EXPIRY_DELTA",
-        long = "fiber-tlc-locktime-expiry-delta",
+        name = "FIBER_TLC_EXPIRY_DELTA",
+        long = "fiber-tlc-expiry-delta",
         env,
-        help = "The locktime expiry delta to forward a tlc, in seconds. [default: 86400 (1 day)]"
+        help = "The expiry delta to forward a tlc, in milliseconds. [default: 86400000 (1 day)]"
     )]
-    pub tlc_locktime_expiry_delta: Option<u64>,
+    pub tlc_expiry_delta: Option<u64>,
 
     /// The minimal value of a tlc. [default: 0 (no minimal value)]
     #[arg(
@@ -174,6 +193,47 @@ pub struct FiberConfig {
     )]
     pub(crate) announce_node_interval_seconds: Option<u64>,
 
+    /// Gossip network maintenance interval, in milli-seconds. [default: 60000]
+    /// This is the interval to maintain the gossip network, including connecting to more peers, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-network-maintenance-interval-ms",
+        env,
+        help = "Gossip network maintenance interval, in milli-seconds. [default: 60000]"
+    )]
+    pub(crate) gossip_network_maintenance_interval_ms: Option<u64>,
+
+    /// Maximal number of inbound connections. The node will disconnect inbound connections
+    /// when the number of inbound connection exceeds this number. [default: 16]
+    #[arg(
+        name = "FIBER_MAX_INBOUND_PEERS",
+        long = "fiber-max-inbound-peers",
+        env,
+        help = "Maximal number of inbound connections. The node will disconnect inbound connections when the number of inbound connection exceeds this number. [default: 16]"
+    )]
+    pub(crate) max_inbound_peers: Option<usize>,
+
+    /// Minimal number of outbound connections. The node will try to connect to more peers
+    /// when the number of outbound connection is less than this number. [default: 8]
+    #[arg(
+        name = "FIBER_MIN_OUTBOUND_PEERS",
+        long = "fiber-min-outbound-peers",
+        env,
+        help = "Minimal number of outbound connections. The node will try to connect to more peers when the number of outbound connection is less than this number. [default: 8]"
+    )]
+    pub(crate) min_outbound_peers: Option<usize>,
+
+    /// Gossip store maintenance interval, in milli-seconds. [default: 20000]
+    /// This is the interval to maintain the gossip store, including saving messages whose complete dependencies
+    /// are available, etc.
+    #[arg(
+        name = "FIBER_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS",
+        long = "fiber-gossip-store-maintenance-interval-ms",
+        env,
+        help = "Gossip store maintenance interval, in milli-seconds. [default: 20000]"
+    )]
+    pub(crate) gossip_store_maintenance_interval_ms: Option<u64>,
+
     /// Whether to sync the network graph from the network. [default: true]
     #[arg(
         name = "FIBER_SYNC_NETWORK_GRAPH",
@@ -182,9 +242,21 @@ pub struct FiberConfig {
         help = "Whether to sync the network graph from the network. [default: true]"
     )]
     pub(crate) sync_network_graph: Option<bool>,
+
+    /// The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]
+    #[arg(
+        name = "FIBER_WATCHTOWER_CHECK_INTERVAL_SECONDS",
+        long = "fiber-watchtower-check-interval-seconds",
+        env,
+        help = "The interval to check watchtower, in seconds. 0 means never check. [default: 60 (1 minute)]"
+    )]
+    pub watchtower_check_interval_seconds: Option<u64>,
 }
 
-#[derive(PartialEq, Copy, Clone, Default)]
+/// Must be a valid utf-8 string of length maximal length 32 bytes.
+/// If the length is less than 32 bytes, it will be padded with 0.
+/// If the length is more than 32 bytes, it should be truncated.
+#[derive(Eq, PartialEq, Copy, Clone, Default, Hash)]
 pub struct AnnouncedNodeName(pub [u8; 32]);
 
 impl AnnouncedNodeName {
@@ -307,17 +379,16 @@ impl FiberConfig {
 
     pub fn open_channel_auto_accept_min_ckb_funding_amount(&self) -> u64 {
         self.open_channel_auto_accept_min_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MIN_AUTO_CKB_AMOUNT)
+            .unwrap_or(DEFAULT_OPEN_CHANNEL_AUTO_ACCEPT_MIN_CKB_FUNDING_AMOUNT)
     }
 
     pub fn auto_accept_channel_ckb_funding_amount(&self) -> u64 {
         self.auto_accept_channel_ckb_funding_amount
-            .unwrap_or(DEFAULT_CHANNEL_MINIMAL_CKB_AMOUNT)
+            .unwrap_or(DEFAULT_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT)
     }
 
-    pub fn tlc_locktime_expiry_delta(&self) -> u64 {
-        self.tlc_locktime_expiry_delta
-            .unwrap_or(DEFAULT_TLC_LOCKTIME_EXPIRY_DELTA)
+    pub fn tlc_expiry_delta(&self) -> u64 {
+        self.tlc_expiry_delta.unwrap_or(DEFAULT_TLC_EXPIRY_DELTA)
     }
 
     pub fn tlc_min_value(&self) -> u128 {
@@ -351,31 +422,42 @@ impl FiberConfig {
         secio_kp.public_key()
     }
 
+    pub fn gossip_network_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_network_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_NETWORK_MAINTENANCE_INTERVAL_MS)
+    }
+
+    pub fn max_inbound_peers(&self) -> usize {
+        self.max_inbound_peers.unwrap_or(DEFAULT_MAX_INBOUND_PEERS)
+    }
+
+    pub fn min_outbound_peers(&self) -> usize {
+        self.min_outbound_peers
+            .unwrap_or(DEFAULT_MIN_OUTBOUND_PEERS)
+    }
+
+    pub fn gossip_store_maintenance_interval_ms(&self) -> u64 {
+        self.gossip_store_maintenance_interval_ms
+            .unwrap_or(DEFAULT_GOSSIP_STORE_MAINTENANCE_INTERVAL_MS)
+    }
+
     pub fn sync_network_graph(&self) -> bool {
         self.sync_network_graph
             .unwrap_or(DEFAULT_SYNC_NETWORK_GRAPH)
     }
 }
 
-// Basically ckb_sdk::types::NetworkType. But we added a `Mocknet` variant.
-// And we can't use `ckb_sdk::types::NetworkType` directly because it is not `ValueEnum`.
-#[derive(Debug, Clone, Copy, ValueEnum, Deserialize, PartialEq, Eq)]
-pub enum CkbNetwork {
-    Mocknet,
-    Mainnet,
-    Testnet,
-    Staging,
-    Dev,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FiberScript {
+    pub name: Contract,
+    pub script: Script,
+    pub cell_deps: Vec<CellDep>,
 }
 
-impl From<CkbNetwork> for Option<NetworkType> {
-    fn from(network: CkbNetwork) -> Self {
-        match network {
-            CkbNetwork::Mocknet => None,
-            CkbNetwork::Mainnet => Some(NetworkType::Mainnet),
-            CkbNetwork::Testnet => Some(NetworkType::Testnet),
-            CkbNetwork::Staging => Some(NetworkType::Staging),
-            CkbNetwork::Dev => Some(NetworkType::Dev),
-        }
+impl FromStr for FiberScript {
+    type Err = serde_json::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        serde_json::from_str(s)
     }
 }
