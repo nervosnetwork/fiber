@@ -664,8 +664,8 @@ where
         );
         // build commitment tx and verify signature from remote, if passed send ACK for partner
         state.verify_commitment_signed_and_send_ack(commitment_signed, &self.network)?;
-        let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
 
+        let need_commitment_signed = state.tlc_state.update_for_commitment_signed();
         if need_commitment_signed {
             if !state.tlc_state.waiting_ack {
                 self.handle_commitment_signed_command(state)?;
@@ -712,12 +712,14 @@ where
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
     ) {
-        let apply_tlcs = state.tlc_state.get_committed_received_tlcs();
-        for add_tlc in apply_tlcs {
-            if add_tlc.removed_at.is_some() {
-                continue;
-            }
+        let apply_tlcs: Vec<TlcInfo> = state
+            .tlc_state
+            .get_committed_received_tlcs()
+            .into_iter()
+            .filter(|tlc| tlc.removed_at.is_none())
+            .collect();
 
+        for add_tlc in apply_tlcs {
             assert!(add_tlc.is_received());
             if let Err(e) = self.apply_add_tlc_operation(myself, state, &add_tlc).await {
                 let tlc_err = match e.source {
@@ -2122,6 +2124,7 @@ where
                 }
             }
             ChannelActorMessage::Command(command) => {
+                eprintln!("channel actor command: {:?}", command);
                 if let Err(err) = self.handle_command(state, command).await {
                     error!("Error while processing channel command: {:?}", err);
                 }
