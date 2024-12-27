@@ -31,7 +31,7 @@ use git_version::git_version;
 
 const GIT_VERSION: &str = git_version!(fallback = "unknown");
 
-pub fn get_git_versin() -> &'static str {
+pub fn get_git_version() -> &'static str {
     GIT_VERSION
 }
 
