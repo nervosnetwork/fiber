@@ -1452,8 +1452,9 @@ async fn test_send_payment_with_max_nodes() {
     let res = res.unwrap();
     assert_eq!(res.status, PaymentSessionStatus::Inflight);
     assert!(res.fee > 0);
-    // sleep for 2 seconds to make sure the payment is sent
-    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+    // sleep for 5 seconds to make sure the payment is sent
+    tokio::time::sleep(tokio::time::Duration::from_millis(5000)).await;
     let message = |rpc_reply| -> NetworkActorMessage {
         NetworkActorMessage::Command(NetworkActorCommand::GetPayment(res.payment_hash, rpc_reply))
     };

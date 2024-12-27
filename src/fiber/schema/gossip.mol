@@ -1,7 +1,6 @@
 import blockchain;
 import fiber;
 
-array Uint16 [byte; 2];
 array SchnorrSignature [byte; 64];
 array SchnorrXOnlyPubkey [byte; 32];
 
@@ -78,22 +77,6 @@ table ChannelAnnouncement {
     udt_type_script: ScriptOpt,
 }
 
-// A ChannelUpdate is a update to the public channel. Newer channel information may be updated with
-// a ChannelUpdate with a larger timestamp.
-struct ChannelUpdate {
-    // Signature of the node that wants to update the channel information.
-    signature: EcdsaSignature,
-    chain_hash: Byte32,
-    channel_outpoint: OutPoint,
-    timestamp: Uint64,
-    message_flags: Uint32,
-    channel_flags: Uint32,
-    tlc_expiry_delta: Uint64,
-    tlc_minimum_value: Uint128,
-    tlc_maximum_value: Uint128,
-    tlc_fee_proportional_millionths: Uint128,
-}
-
 // All the broadcast messages.
 union BroadcastMessage {
     NodeAnnouncement,
@@ -165,26 +148,4 @@ union GossipMessage {
     GetBroadcastMessagesResult,
     QueryBroadcastMessages,
     QueryBroadcastMessagesResult,
-}
-
-option ChannelUpdateOpt (ChannelUpdate);
-table ChannelFailed {
-    channel_outpoint: OutPoint,
-    channel_update: ChannelUpdateOpt,
-    node_id: Pubkey,
-}
-
-table NodeFailed {
-    node_id: Pubkey,
-}
-
-union TlcErrData {
-    ChannelFailed,
-    NodeFailed,
-}
-
-option TlcErrDataOpt (TlcErrData);
-table TlcErr {
-    error_code: Byte32,
-    extra_data: TlcErrDataOpt,
 }
