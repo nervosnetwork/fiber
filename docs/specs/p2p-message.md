@@ -287,11 +287,19 @@ After establishing a channel, nodes can perform payment operations by sending Ad
     |       |                               |       |
     |       |--(2)---- commitment_signed -->|       |
     |       |<-(3)---- revoke_and_ack  -----|       |
-    |   A   |                               |   B   |
-    |       |<-(4)---- remove_tlc      -----|       |
     |       |                               |       |
-    |       |<-(5)---- commitment_signed ---|       |
-    |       |--(6)---- revoke_and_ack  ---->|       |
+    |       |<-(4)---- commitment_signed ---|       |
+    |       |--(5)---- revoke_and_ack  ---->|       |
+    |       |                               |       |
+    |   A   |                               |   B   |
+    |       |                               |       |
+    |       |<-(6)---- remove_tlc      -----|       |
+    |       |                               |       |
+    |       |<-(7)---- commitment_signed ---|       |
+    |       |--(8)---- revoke_and_ack  ---->|       |
+    |       |                               |       |
+    |       |--(9)---- commitment_signed -->|       |
+    |       |<-(10)---- revoke_and_ack  ----|       |
     +-------+                               +-------+
 ```
 
