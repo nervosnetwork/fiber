@@ -2212,21 +2212,35 @@ impl TLCId {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum OutboundTlcStatus {
+    // Offered tlc created and sent to remote party
     LocalAnnounced,
+    // Received ACK from remote party for this offered tlc
     Committed,
+    // Remote party removed this tlc
     RemoteRemoved,
+    // We received another RemoveTlc message from peer when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the removal.
     RemoveWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this RemoveTlc
     RemoveWaitAck,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
     RemoveAckConfirmed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum InboundTlcStatus {
+    // Received tlc from remote party, but not committed yet
     RemoteAnnounced,
+    // We received another AddTlc peer message when we are waiting for the ack of the last one.
+    // So we need another ACK to confirm the addition.
     AnnounceWaitPrevAck,
+    // We have sent commitment signed to peer and waiting ACK for confirming this AddTlc
     AnnounceWaitAck,
+    // We have received ACK from peer and Committed this tlc
     Committed,
+    // We have removed this tlc, but haven't received ACK from peer
     LocalRemoved,
+    // We have received the ACK for the RemoveTlc, it's safe to remove this tlc
     RemoveAckConfirmed,
 }
 
