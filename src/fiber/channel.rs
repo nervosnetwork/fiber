@@ -4366,18 +4366,6 @@ impl ChannelActorState {
             .expect("Funding transaction outpoint is present")
     }
 
-    pub fn get_funding_transaction_block_number(&self) -> BlockNumber {
-        self.funding_tx_confirmed_at
-            .expect("funding tx confirmed_at is present")
-            .0
-    }
-
-    pub fn get_funding_transaction_index(&self) -> u32 {
-        self.funding_tx_confirmed_at
-            .expect("funding tx confirmed_at is present")
-            .1
-    }
-
     pub fn get_local_shutdown_script(&self) -> Script {
         self.local_shutdown_script.clone()
     }
