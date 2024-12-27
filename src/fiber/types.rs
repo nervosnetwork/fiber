@@ -1196,11 +1196,11 @@ impl TlcErr {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        bincode::serialize(self).expect("serialize hop data")
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        bincode::deserialize(data).ok()
     }
 }
 
@@ -3283,10 +3283,6 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
-    serde_json::to_vec_pretty(v).expect("serialize value")
-}
-
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice()).into()
 }
@@ -3324,11 +3320,11 @@ impl HopData for PaymentHopData {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        bincode::serialize(self).expect("serialize hop data")
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        bincode::deserialize(data).ok()
     }
 }
 
