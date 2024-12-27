@@ -1610,7 +1610,9 @@ impl NodeAnnouncement {
             auto_accept_min_ckb_funding_amount: self.auto_accept_min_ckb_funding_amount,
             udt_cfg_infos: get_udt_whitelist(),
         };
-        deterministically_hash(&unsigned_announcement)
+        deterministically_hash(&molecule_gossip::NodeAnnouncement::from(
+            unsigned_announcement,
+        ))
     }
 
     pub fn peer_id(&self) -> PeerId {
@@ -1741,13 +1743,7 @@ impl From<molecule_fiber::UdtCfgInfos> for UdtCfgInfos {
 
 impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
     fn from(node_announcement: NodeAnnouncement) -> Self {
-        molecule_gossip::NodeAnnouncement::new_builder()
-            .signature(
-                node_announcement
-                    .signature
-                    .expect("node announcement signed")
-                    .into(),
-            )
+        let builder = molecule_gossip::NodeAnnouncement::new_builder()
             .features(node_announcement.features.pack())
             .timestamp(node_announcement.timestamp.pack())
             .node_id(node_announcement.node_id.into())
@@ -1767,8 +1763,15 @@ impl From<NodeAnnouncement> for molecule_gossip::NodeAnnouncement {
                             .collect(),
                     )
                     .build(),
-            )
-            .build()
+            );
+
+        let builder = if let Some(signature) = node_announcement.signature {
+            builder.signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
     }
 }
 
@@ -1865,7 +1868,9 @@ impl ChannelAnnouncement {
             capacity: self.capacity,
             udt_type_script: self.udt_type_script.clone(),
         };
-        deterministically_hash(&unsigned_announcement)
+        deterministically_hash(&molecule_gossip::ChannelAnnouncement::from(
+            unsigned_announcement,
+        ))
     }
 
     pub fn out_point(&self) -> &OutPoint {
@@ -1875,25 +1880,7 @@ impl ChannelAnnouncement {
 
 impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
     fn from(channel_announcement: ChannelAnnouncement) -> Self {
-        molecule_gossip::ChannelAnnouncement::new_builder()
-            .node1_signature(
-                channel_announcement
-                    .node1_signature
-                    .expect("channel announcement signed")
-                    .into(),
-            )
-            .node2_signature(
-                channel_announcement
-                    .node2_signature
-                    .expect("channel announcement signed")
-                    .into(),
-            )
-            .ckb_signature(
-                channel_announcement
-                    .ckb_signature
-                    .expect("channel announcement signed")
-                    .into(),
-            )
+        let builder = molecule_gossip::ChannelAnnouncement::new_builder()
             .features(channel_announcement.features.pack())
             .chain_hash(channel_announcement.chain_hash.into())
             .channel_outpoint(channel_announcement.channel_outpoint)
@@ -1901,8 +1888,27 @@ impl From<ChannelAnnouncement> for molecule_gossip::ChannelAnnouncement {
             .node2_id(channel_announcement.node2_id.into())
             .capacity(channel_announcement.capacity.pack())
             .udt_type_script(channel_announcement.udt_type_script.pack())
-            .ckb_key(channel_announcement.ckb_key.into())
-            .build()
+            .ckb_key(channel_announcement.ckb_key.into());
+
+        let builder = if let Some(signature) = channel_announcement.node1_signature {
+            builder.node1_signature(signature.into())
+        } else {
+            builder
+        };
+
+        let builder = if let Some(signature) = channel_announcement.node2_signature {
+            builder.node2_signature(signature.into())
+        } else {
+            builder
+        };
+
+        let builder = if let Some(signature) = channel_announcement.ckb_signature {
+            builder.ckb_signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
     }
 }
 
@@ -1991,7 +1997,7 @@ impl ChannelUpdate {
             tlc_minimum_value: self.tlc_minimum_value,
             tlc_fee_proportional_millionths: self.tlc_fee_proportional_millionths,
         };
-        deterministically_hash(&unsigned_update)
+        deterministically_hash(&molecule_gossip::ChannelUpdate::from(unsigned_update))
     }
 
     pub fn is_update_of_node_1(&self) -> bool {
@@ -2016,13 +2022,7 @@ impl ChannelUpdate {
 
 impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
     fn from(channel_update: ChannelUpdate) -> Self {
-        molecule_gossip::ChannelUpdate::new_builder()
-            .signature(
-                channel_update
-                    .signature
-                    .expect("channel update signed")
-                    .into(),
-            )
+        let builder = molecule_gossip::ChannelUpdate::new_builder()
             .chain_hash(channel_update.chain_hash.into())
             .channel_outpoint(channel_update.channel_outpoint)
             .timestamp(channel_update.timestamp.pack())
@@ -2030,8 +2030,15 @@ impl From<ChannelUpdate> for molecule_gossip::ChannelUpdate {
             .channel_flags(channel_update.channel_flags.pack())
             .tlc_expiry_delta(channel_update.tlc_expiry_delta.pack())
             .tlc_minimum_value(channel_update.tlc_minimum_value.pack())
-            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack())
-            .build()
+            .tlc_fee_proportional_millionths(channel_update.tlc_fee_proportional_millionths.pack());
+
+        let builder = if let Some(signature) = channel_update.signature {
+            builder.signature(signature.into())
+        } else {
+            builder
+        };
+
+        builder.build()
     }
 }
 
@@ -2511,22 +2518,6 @@ impl TryFrom<molecule_gossip::BroadcastMessage> for BroadcastMessage {
         fiber_broadcast_message: molecule_gossip::BroadcastMessage,
     ) -> Result<Self, Self::Error> {
         fiber_broadcast_message.to_enum().try_into()
-    }
-}
-
-impl BroadcastMessage {
-    pub fn id(&self) -> Hash256 {
-        match self {
-            BroadcastMessage::NodeAnnouncement(node_announcement) => {
-                deterministically_hash(node_announcement).into()
-            }
-            BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-                deterministically_hash(channel_announcement).into()
-            }
-            BroadcastMessage::ChannelUpdate(channel_update) => {
-                deterministically_hash(channel_update).into()
-            }
-        }
     }
 }
 
@@ -3296,8 +3287,8 @@ pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec_pretty(v).expect("serialize value")
 }
 
-pub(crate) fn deterministically_hash<T: Serialize>(v: &T) -> [u8; 32] {
-    ckb_hash::blake2b_256(deterministically_serialize(v))
+pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
+    ckb_hash::blake2b_256(v.as_slice()).into()
 }
 
 #[serde_as]
