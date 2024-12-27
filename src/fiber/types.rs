@@ -1107,6 +1107,70 @@ impl TryFrom<molecule_fiber::RemoveTlcFulfill> for RemoveTlcFulfill {
     }
 }
 
+// impl From<TlcErr> for molecule_gossip::TlcErr {
+//     fn from(tlc_err: TlcErr) -> Self {
+//         molecule_gossip::TlcErr::new_builder()
+//             .error_code(ckb_types::packed::Byte32::new(tlc_err.error_code as u32))
+//             .extra_data(
+//                 tlc_err
+//                     .extra_data
+//                     .map(|data| match data {
+//                         TlcErrData::ChannelFailed {
+//                             channel_outpoint,
+//                             channel_update,
+//                             node_id,
+//                         } => molecule_gossip::TlcErrDataBuilder::set(
+//                             molecule_gossip::ChannelFailed::new_builder()
+//                                 .channel_outpoint(channel_outpoint.into())
+//                                 .channel_update(channel_update.into())
+//                                 .node_id(node_id.into())
+//                                 .build(),
+//                         )
+//                         .build()
+//                         .to_opt(),
+//                         TlcErrData::NodeFailed { node_id } => {
+//                             molecule_gossip::TlcErrDataBuilder::set(
+//                                 molecule_gossip::NodeFailed::new_builder()
+//                                     .node_id(node_id.into())
+//                                     .build(),
+//                             )
+//                             .build()
+//                             .to_opt()
+//                         }
+//                     })
+//                     .pack(),
+//             )
+//             .build()
+//     }
+// }
+
+// impl TryFrom<molecule_gossip::TlcErr> for TlcErr {
+//     type Error = Error;
+
+//     fn try_from(tlc_err: molecule_gossip::TlcErr) -> Result<Self, Self::Error> {
+//         Ok(TlcErr {
+//             error_code: tlc_err.error_code().into(),
+//             extra_data: tlc_err
+//                 .extra_data()
+//                 .to_opt()
+//                 .map(|data| match data.unpack() {
+//                     TlcErrData::ChannelFailed {
+//                         channel_outpoint,
+//                         channel_update,
+//                         node_id,
+//                     } => TlcErrData::ChannelFailed {
+//                         channel_outpoint: channel_outpoint.into(),
+//                         channel_update: channel_update.to_opt(),
+//                         node_id: node_id.into(),
+//                     },
+//                     TlcErrData::NodeFailed { node_id } => TlcErrData::NodeFailed {
+//                         node_id: node_id.into(),
+//                     },
+//                 }),
+//         })
+//     }
+// }
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TlcErrData {
@@ -1196,11 +1260,11 @@ impl TlcErr {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        bincode::serialize(self).expect("serialize hop data")
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        bincode::deserialize(data).ok()
     }
 }
 
@@ -3283,10 +3347,6 @@ macro_rules! impl_traits {
 
 impl_traits!(FiberMessage);
 
-pub(crate) fn deterministically_serialize<T: Serialize>(v: &T) -> Vec<u8> {
-    serde_json::to_vec_pretty(v).expect("serialize value")
-}
-
 pub(crate) fn deterministically_hash<T: Entity>(v: &T) -> [u8; 32] {
     ckb_hash::blake2b_256(v.as_slice()).into()
 }
@@ -3324,11 +3384,11 @@ impl HopData for PaymentHopData {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        deterministically_serialize(self)
+        bincode::serialize(self).expect("serialize hop data")
     }
 
     fn deserialize(data: &[u8]) -> Option<Self> {
-        serde_json::from_slice(data).ok()
+        bincode::deserialize(data).ok()
     }
 }
 
