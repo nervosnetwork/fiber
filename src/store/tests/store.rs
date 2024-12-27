@@ -6,6 +6,7 @@ use crate::fiber::gossip::GossipMessageStore;
 use crate::fiber::graph::*;
 use crate::fiber::history::Direction;
 use crate::fiber::history::TimedResult;
+use crate::fiber::network::PaymentCustomRecord;
 use crate::fiber::network::SendPaymentData;
 use crate::fiber::tests::test_utils::*;
 use crate::fiber::types::*;
@@ -24,6 +25,7 @@ use musig2::CompactSignature;
 use musig2::SecNonce;
 use secp256k1::SecretKey;
 use secp256k1::{Keypair, Secp256k1};
+use std::collections::HashMap;
 use std::time::SystemTime;
 
 fn gen_rand_key_pair() -> Keypair {
@@ -504,4 +506,19 @@ fn test_store_payment_history() {
     ];
     sort_results(&mut r2);
     assert_eq!(r1, r2);
+}
+
+#[test]
+fn test_store_payment_custom_record() {
+    let payment_hash = gen_rand_sha256_hash();
+    let mut data = HashMap::new();
+    data.insert(1, "hello".to_string().into_bytes());
+    data.insert(2, "world".to_string().into_bytes());
+
+    let record = PaymentCustomRecord { data };
+    eprintln!("{:?}", record);
+    let store = generate_store();
+    store.insert_payment_custom_records(&payment_hash, record.clone());
+    let res = store.get_payment_custom_records(&payment_hash).unwrap();
+    assert_eq!(res, record);
 }
