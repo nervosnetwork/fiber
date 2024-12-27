@@ -1613,7 +1613,11 @@ where
                     "Failed to send onion packet with error {}",
                     error_detail.error_code_as_str()
                 );
-                self.set_payment_fail_with_error(payment_session, &err);
+                if !need_to_retry {
+                    // only update the payment session status when we don't need to retry
+                    // otherwise the endpoint user may get confused in the internal state changes
+                    self.set_payment_fail_with_error(payment_session, &err);
+                }
                 return Err(Error::SendPaymentFirstHopError(err, need_to_retry));
             }
             Ok(tlc_id) => {
@@ -1639,6 +1643,7 @@ where
         let Some(mut payment_session) = self.store.get_payment_session(payment_hash) else {
             return Err(Error::InvalidParameter(payment_hash.to_string()));
         };
+        assert!(payment_session.status != PaymentSessionStatus::Failed);
 
         let payment_data = payment_session.request.clone();
         if payment_session.can_retry() {
