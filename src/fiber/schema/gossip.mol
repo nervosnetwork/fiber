@@ -34,7 +34,7 @@ struct BroadcastMessageQuery {
 vector BroadcastMessageQueries <BroadcastMessageQuery>;
 
 // A NodeAnnouncement is a broadcast message to the network for the node information.
-// An update to the node information can be broadcasted with a NodeAnnouncement with larger timestamp. 
+// An update to the node information can be broadcasted with a NodeAnnouncement with larger timestamp.
 table NodeAnnouncement {
     // Signature to this message.
     signature: EcdsaSignature,
@@ -165,4 +165,26 @@ union GossipMessage {
     GetBroadcastMessagesResult,
     QueryBroadcastMessages,
     QueryBroadcastMessagesResult,
+}
+
+option ChannelUpdateOpt (ChannelUpdate);
+table ChannelFailed {
+    channel_outpoint: OutPoint,
+    channel_update: ChannelUpdateOpt,
+    node_id: Pubkey,
+}
+
+table NodeFailed {
+    node_id: Pubkey,
+}
+
+union TlcErrData {
+    ChannelFailed,
+    NodeFailed,
+}
+
+option TlcErrDataOpt (TlcErrData);
+table TlcErr {
+    error_code: Byte32,
+    extra_data: TlcErrDataOpt,
 }
