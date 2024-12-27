@@ -1368,11 +1368,11 @@ pub enum ExtendedGossipMessageStoreMessage {
 pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
     control: ServiceAsyncControl,
-    num_targeted_active_syncing_peers: usize,
+    num_finished_active_syncing_peers: usize,
     // The number of active syncing peers that we have finished syncing with.
     // Together with the number of currect active syncing peers, this is
     // used to determine if we should start a new active syncing peer.
-    num_finished_active_syncing_peers: usize,
+    num_targeted_active_syncing_peers: usize,
     // The number of outbound passive syncing peers that we want to have.
     // We only count outbound peers because the purpose of this number is to avoid eclipse attacks.
     // By maintaining a certain number of outbound passive syncing peers, we can ensure that we are
@@ -2089,6 +2089,8 @@ impl GossipProtocolHandle {
         gossip_network_maintenance_interval: Duration,
         gossip_store_maintenance_interval: Duration,
         announce_private_addr: bool,
+        num_targeted_active_syncing_peers: Option<usize>,
+        num_targeted_outbound_passive_syncing_peers: Option<usize>,
         store: S,
         chain_actor: ActorRef<CkbChainMessage>,
         supervisor: ActorCell,
@@ -2108,6 +2110,9 @@ impl GossipProtocolHandle {
                 gossip_network_maintenance_interval,
                 gossip_store_maintenance_interval,
                 announce_private_addr,
+                num_targeted_active_syncing_peers.unwrap_or(MAX_NUM_OF_ACTIVE_SYNCING_PEERS),
+                num_targeted_outbound_passive_syncing_peers
+                    .unwrap_or(MIN_NUM_OF_PASSIVE_SYNCING_PEERS),
                 store,
                 chain_actor,
             ),
@@ -2152,6 +2157,8 @@ where
         Duration,
         Duration,
         bool,
+        usize,
+        usize,
         S,
         ActorRef<CkbChainMessage>,
     );
@@ -2165,6 +2172,8 @@ where
             network_maintenance_interval,
             store_maintenance_interval,
             announce_private_addr,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             store,
             chain_actor,
         ): Self::Arguments,
@@ -2193,8 +2202,8 @@ where
         let state = Self::State {
             store,
             control,
-            num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
-            num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
+            num_targeted_active_syncing_peers,
+            num_targeted_outbound_passive_syncing_peers,
             myself,
             chain_actor,
             next_request_id: Default::default(),
