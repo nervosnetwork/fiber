@@ -3722,7 +3722,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (mut node_a, node_b, _new_channel_id, _) =
+    let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
             node_a_funding_amount,
             node_b_funding_amount,
@@ -3734,8 +3734,25 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
-    )
-    .await;
+    ).await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                    info
+                )) if "Reestablished channel in ChannelReady" == info)
+        })
+        .await;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                    info
+                )) if "Reestablished channel in ChannelReady" == info)
+        })
+        .await;
 }
 
 #[tokio::test]

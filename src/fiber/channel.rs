@@ -5768,6 +5768,15 @@ impl ChannelActorState {
                         expected_remote_commitment_number, acutal_remote_commitment_number
                     );
                 }
+
+                #[cfg(debug_assertions)]
+                network
+                    .send_message(NetworkActorMessage::new_notification(
+                        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                            "Reestablished channel in ChannelReady".to_string(),
+                        )),
+                    ))
+                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
             }
             _ => {
                 // TODO: @quake we need to handle other states.
