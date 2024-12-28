@@ -1,6 +1,6 @@
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::serde_utils::U64Hex;
+use crate::{debug_event, fiber::serde_utils::U64Hex};
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
@@ -2097,16 +2097,7 @@ where
                         "Error while processing channel message: {:?} with message: {:?}",
                         error, message
                     );
-                    #[cfg(debug_assertions)]
-                    self.network
-                        .clone()
-                        .send_message(NetworkActorMessage::new_notification(
-                            NetworkServiceEvent::DebugEvent(DebugEvent::Common(format!(
-                                "{:?}",
-                                error
-                            ))),
-                        ))
-                        .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                    debug_event!(&self.network, &format!("{:?}", error));
                 }
             }
             ChannelActorMessage::Command(command) => {
@@ -5667,6 +5658,7 @@ impl ChannelActorState {
                             && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
                         {
                             // resend AddTlc message
+                            eprintln!("resending tlc ....");
                             network
                                 .send_message(NetworkActorMessage::new_command(
                                     NetworkActorCommand::SendFiberMessage(
@@ -5686,6 +5678,7 @@ impl ChannelActorState {
                                 ))
                                 .expect(ASSUME_NETWORK_ACTOR_ALIVE);
                             need_resend_commitment_signed = true;
+                            debug_event!(network, "resend add tlc");
                         } else if let Some(remove_reason) = &info.removed_reason {
                             if info.is_received()
                                 && matches!(info.inbound_status(), InboundTlcStatus::LocalRemoved)
@@ -5769,14 +5762,7 @@ impl ChannelActorState {
                     );
                 }
 
-                #[cfg(debug_assertions)]
-                network
-                    .send_message(NetworkActorMessage::new_notification(
-                        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
-                            "Reestablished channel in ChannelReady".to_string(),
-                        )),
-                    ))
-                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                debug_event!(network, "Reestablished channel in ChannelReady");
             }
             _ => {
                 // TODO: @quake we need to handle other states.

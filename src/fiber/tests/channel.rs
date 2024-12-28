@@ -3786,6 +3786,76 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let node_b_pubkey = node_b.pubkey.clone();
+    let tlc_amount = 99;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    node_b.stop().await;
+
+    let payment_status = node_a.get_payment_status(payment_hash).await;
+    assert_eq!(payment_status, PaymentSessionStatus::Inflight);
+
+    node_b.start().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+            event,
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                info
+            )) if "resend add tlc" == info)
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let payment_status = node_a.get_payment_status(payment_hash).await;
+    assert_eq!(payment_status, PaymentSessionStatus::Success);
+}
+
+#[tokio::test]
 async fn test_open_channel_with_large_size_shutdown_script_should_fail() {
     let [node_a, node_b] = NetworkNode::new_n_interconnected_nodes().await;
 
