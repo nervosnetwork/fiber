@@ -5658,7 +5658,6 @@ impl ChannelActorState {
                             && matches!(info.outbound_status(), OutboundTlcStatus::LocalAnnounced)
                         {
                             // resend AddTlc message
-                            eprintln!("resending tlc ....");
                             network
                                 .send_message(NetworkActorMessage::new_command(
                                     NetworkActorCommand::SendFiberMessage(
@@ -5700,6 +5699,7 @@ impl ChannelActorState {
                                     .expect(ASSUME_NETWORK_ACTOR_ALIVE);
 
                                 need_resend_commitment_signed = true;
+                                debug_event!(network, "resend remove tlc");
                             }
                         }
                     }
