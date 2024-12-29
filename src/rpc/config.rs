@@ -1,6 +1,6 @@
 use clap_serde_derive::ClapSerde;
 
-const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,info,invoice,peer";
+const DEFAULT_ENABLED_MODULES: &str = "cch,channel,graph,payment,info,invoice,peer";
 
 #[derive(ClapSerde, Debug, Clone)]
 pub struct RpcConfig {
