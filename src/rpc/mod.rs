@@ -143,6 +143,7 @@ pub async fn start_rpc<
                 .merge(
                     DevRpcServerImpl::new(
                         ckb_chain_actor.expect("ckb_chain_actor should be set"),
+                        network_actor.clone(),
                         rpc_dev_module_commitment_txs
                             .expect("rpc_dev_module_commitment_txs should be set"),
                     )
