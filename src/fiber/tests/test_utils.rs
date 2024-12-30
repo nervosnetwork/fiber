@@ -660,6 +660,7 @@ impl NetworkNode {
         let network_graph = Arc::new(TokioRwLock::new(NetworkGraph::new(
             store.clone(),
             public_key.clone(),
+            true,
         )));
 
         let network_actor = Actor::spawn_linked(
