@@ -67,7 +67,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 
 use std::{
-    fmt::Debug,
+    fmt::{self, Debug},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
     u128,
@@ -2257,7 +2257,7 @@ impl TlcStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct TlcInfo {
     pub channel_id: Hash256,
     pub status: TlcStatus,
@@ -2284,6 +2284,17 @@ pub struct TlcInfo {
     ///                ^^^^                 ^^^^
     ///
     pub previous_tlc: Option<(Hash256, TLCId)>,
+}
+
+impl Debug for TlcInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlcInfo")
+            .field("tlc_id", &self.tlc_id)
+            .field("status", &self.status)
+            .field("amount", &self.amount)
+            .field("removed_reason", &self.removed_reason)
+            .finish()
+    }
 }
 
 impl TlcInfo {
@@ -6244,10 +6255,10 @@ impl ChannelActorState {
             .filter(move |tlc| match tlc.outbound_status() {
                 OutboundTlcStatus::LocalAnnounced => for_remote,
                 OutboundTlcStatus::Committed => true,
-                OutboundTlcStatus::RemoteRemoved => true,
+                OutboundTlcStatus::RemoteRemoved => for_remote,
                 OutboundTlcStatus::RemoveWaitPrevAck => for_remote,
-                OutboundTlcStatus::RemoveWaitAck => true,
-                OutboundTlcStatus::RemoveAckConfirmed => true,
+                OutboundTlcStatus::RemoveWaitAck => false,
+                OutboundTlcStatus::RemoveAckConfirmed => false,
             })
             .chain(self.tlc_state.received_tlcs.tlcs.iter().filter(move |tlc| {
                 match tlc.inbound_status() {
@@ -6255,43 +6266,23 @@ impl ChannelActorState {
                     InboundTlcStatus::AnnounceWaitPrevAck => !for_remote,
                     InboundTlcStatus::AnnounceWaitAck => true,
                     InboundTlcStatus::Committed => true,
-                    InboundTlcStatus::LocalRemoved => true,
-                    InboundTlcStatus::RemoveAckConfirmed => true,
+                    InboundTlcStatus::LocalRemoved => !for_remote,
+                    InboundTlcStatus::RemoveAckConfirmed => false,
                 }
             }));
 
-        let (
-            mut offered_fulfilled,
-            mut received_fulfilled,
-            mut offered_pending,
-            mut received_pending,
-        ) = (0, 0, 0, 0);
+        let mut offered_pending = 0;
+        let mut received_pending = 0;
         for info in pending_tlcs {
-            match info.removed_reason {
-                Some(RemoveTlcReason::RemoveTlcFulfill(_)) => {
-                    if info.is_offered() {
-                        offered_fulfilled += info.amount;
-                    } else {
-                        received_fulfilled += info.amount;
-                    }
-                }
-                Some(RemoveTlcReason::RemoveTlcFail(_)) => {
-                    // do nothing
-                }
-                None => {
-                    if info.is_offered() {
-                        offered_pending += info.amount;
-                    } else {
-                        received_pending += info.amount;
-                    }
-                }
+            if info.is_offered() {
+                offered_pending += info.amount;
+            } else {
+                received_pending += info.amount;
             }
         }
-
-        let to_local_value =
-            self.to_local_amount + received_fulfilled - offered_fulfilled - offered_pending;
-        let to_remote_value =
-            self.to_remote_amount + offered_fulfilled - received_fulfilled - received_pending;
+        info!("build_settlement_transaction_outputs for_remote: {} \n self.tlc_state: {:?} \n self.to_local_amount: {}, self.to_remote_amount: {}, offered_pending: {}, received_pending: {}", for_remote, self.tlc_state, self.to_local_amount, self.to_remote_amount, offered_pending, received_pending);
+        let to_local_value = self.to_local_amount - offered_pending;
+        let to_remote_value = self.to_remote_amount - received_pending;
 
         let commitment_tx_fee =
             calculate_commitment_tx_fee(self.commitment_fee_rate, &self.funding_udt_type_script);
