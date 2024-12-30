@@ -208,8 +208,7 @@ impl Actor for TlcActor {
                     expiry: command.expiry,
                     hash_algorithm: command.hash_algorithm,
                     created_at: CommitmentNumbers::default(),
-                    payment_preimage: None,
-                    removed_at: None,
+                    removed_reason: None,
                     onion_packet: command.onion_packet,
                     shared_secret: command.shared_secret,
                     previous_tlc: None,
@@ -240,7 +239,6 @@ impl Actor for TlcActor {
                 eprintln!("Peer {} process remove tlc ....", state.peer_id);
                 state.tlc_state.set_received_tlc_removed(
                     tlc_id,
-                    CommitmentNumbers::default(),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                         payment_preimage: Default::default(),
                     }),
@@ -282,7 +280,6 @@ impl Actor for TlcActor {
                 );
                 state.tlc_state.set_offered_tlc_removed(
                     tlc_id,
-                    CommitmentNumbers::default(),
                     RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
                         payment_preimage: Default::default(),
                     }),
@@ -468,8 +465,7 @@ fn test_tlc_state_v2() {
         shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
-        removed_at: None,
-        payment_preimage: None,
+        removed_reason: None,
         previous_tlc: None,
     };
     let mut add_tlc2 = TlcInfo {
@@ -483,8 +479,7 @@ fn test_tlc_state_v2() {
         shared_secret: NO_SHARED_SECRET.clone(),
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
-        removed_at: None,
-        payment_preimage: None,
+        removed_reason: None,
         previous_tlc: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());

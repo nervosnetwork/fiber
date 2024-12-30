@@ -522,6 +522,18 @@ pub enum DebugEvent {
     Common(String),
 }
 
+#[macro_export]
+macro_rules! debug_event {
+    ($network:expr, $debug_event:expr) => {
+        #[cfg(debug_assertions)]
+        $network
+            .send_message(NetworkActorMessage::new_notification(
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common($debug_event.to_string())),
+            ))
+            .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+    };
+}
+
 #[derive(Clone, Debug)]
 pub enum NetworkServiceEvent {
     NetworkStarted(PeerId, MultiAddr, Vec<Multiaddr>),
@@ -2893,6 +2905,7 @@ where
             Some(format!("gossip actor {:?}", my_peer_id)),
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
+            config.announce_private_addr(),
             self.store.clone(),
             self.chain_actor.clone(),
             myself.get_cell(),

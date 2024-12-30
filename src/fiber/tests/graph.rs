@@ -60,7 +60,7 @@ impl MockNetworkGraph {
                 0,
             ));
         }
-        let graph = NetworkGraph::new(store.clone(), public_key1.into());
+        let graph = NetworkGraph::new(store.clone(), public_key1.into(), true);
 
         Self {
             keys: keypairs.into_iter().map(|x| x.1).collect(),

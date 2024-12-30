@@ -3758,7 +3758,7 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
     let node_a_funding_amount = 100000000000;
     let node_b_funding_amount = 6200000000;
 
-    let (mut node_a, node_b, _new_channel_id, _) =
+    let (mut node_a, mut node_b, _new_channel_id, _) =
         NetworkNode::new_2_nodes_with_established_channel(
             node_a_funding_amount,
             node_b_funding_amount,
@@ -3770,8 +3770,25 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_1() {
 
     node_a.expect_event(
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
-    )
-    .await;
+    ).await;
+    node_a
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                    info
+                )) if "Reestablished channel in ChannelReady" == info)
+        })
+        .await;
+    node_b
+        .expect_event(|event| {
+            matches!(
+                event,
+                NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                    info
+                )) if "Reestablished channel in ChannelReady" == info)
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -3802,6 +3819,187 @@ async fn test_connect_to_peers_with_mutual_channel_on_restart_2() {
         |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_send_payment_with_node_restart_then_resend_add_tlc() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, _new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let node_b_pubkey = node_b.pubkey.clone();
+    let tlc_amount = 99;
+    let message = |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::SendPayment(
+            SendPaymentCommand {
+                target_pubkey: Some(node_b_pubkey),
+                amount: Some(tlc_amount),
+                payment_hash: None,
+                final_tlc_expiry_delta: None,
+                tlc_expiry_limit: None,
+                invoice: None,
+                timeout: None,
+                max_fee_amount: None,
+                max_parts: None,
+                keysend: Some(true),
+                udt_type_script: None,
+                allow_self_payment: false,
+                custom_records: None,
+                dry_run: false,
+            },
+            rpc_reply,
+        ))
+    };
+    let res = call!(node_a.network_actor, message).expect("node_a alive");
+    assert!(res.is_ok());
+    let payment_hash = res.unwrap().payment_hash;
+
+    node_b.stop().await;
+
+    let payment_status = node_a.get_payment_status(payment_hash).await;
+    assert_eq!(payment_status, PaymentSessionStatus::Inflight);
+
+    node_b.start().await;
+
+    node_a.expect_event(
+        |event| matches!(event, NetworkServiceEvent::PeerConnected(id, _addr) if id == &node_b.peer_id),
+    )
+    .await;
+
+    node_a
+        .expect_event(|event| {
+            matches!(
+            event,
+            NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+                info
+            )) if "resend add tlc" == info)
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let payment_status = node_a.get_payment_status(payment_hash).await;
+    assert_eq!(payment_status, PaymentSessionStatus::Success);
+}
+
+#[tokio::test]
+async fn test_node_reestablish_resend_remove_tlc() {
+    init_tracing();
+
+    let node_a_funding_amount = 100000000000;
+    let node_b_funding_amount = 6200000000;
+
+    let (mut node_a, mut node_b, new_channel_id, _) =
+        NetworkNode::new_2_nodes_with_established_channel(
+            node_a_funding_amount,
+            node_b_funding_amount,
+            true,
+        )
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let node_a_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let node_b_balance = node_b.get_local_balance_from_channel(new_channel_id);
+
+    let preimage = [2; 32];
+    // create a new payment hash
+    let payment_hash = HashAlgorithm::CkbHash.hash(&preimage);
+
+    let add_tlc_result = call!(node_a.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::AddTlc(
+                    AddTlcCommand {
+                        amount: 1000,
+                        hash_algorithm: HashAlgorithm::CkbHash,
+                        payment_hash: payment_hash.clone().into(),
+                        expiry: now_timestamp_as_millis_u64() + DEFAULT_EXPIRY_DELTA,
+                        onion_packet: None,
+                        shared_secret: NO_SHARED_SECRET.clone(),
+                        previous_tlc: None,
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive")
+    .expect("successfully added tlc");
+
+    dbg!(&add_tlc_result);
+
+    dbg!("Sleeping for some time to wait for the AddTlc processed by both party");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    node_a.stop().await;
+
+    let remove_tlc_result = call!(node_b.network_actor, |rpc_reply| {
+        NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: new_channel_id,
+                command: ChannelCommand::RemoveTlc(
+                    RemoveTlcCommand {
+                        id: add_tlc_result.tlc_id,
+                        reason: RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill {
+                            payment_preimage: preimage.into(),
+                        }),
+                    },
+                    rpc_reply,
+                ),
+            },
+        ))
+    })
+    .expect("node_b alive");
+
+    dbg!(&remove_tlc_result);
+    assert!(remove_tlc_result.is_ok());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // assert balance does not changed since remove tlc is not processed by node_a
+    let new_node_a_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let new_node_b_balance = node_b.get_local_balance_from_channel(new_channel_id);
+    assert_eq!(node_a_balance, new_node_a_balance);
+    assert_eq!(node_b_balance, new_node_b_balance);
+
+    node_a.start().await;
+    node_b
+        .expect_event(|event| {
+            matches!(
+        event,
+        NetworkServiceEvent::DebugEvent(DebugEvent::Common(
+            info
+        )) if "resend remove tlc" == info)
+        })
+        .await;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+    // assert balance changed since remove tlc is processed by node_a after node_b resending remove tlc
+    let new_node_a_balance = node_a.get_local_balance_from_channel(new_channel_id);
+    let new_node_b_balance = node_b.get_local_balance_from_channel(new_channel_id);
+    assert_eq!(node_a_balance - 1000, new_node_a_balance);
+    assert_eq!(node_b_balance + 1000, new_node_b_balance);
+    eprintln!(
+        "node_a_balance: {}, new_node_a_balance: {}",
+        node_a_balance, new_node_a_balance
+    );
+    eprintln!(
+        "node_b_balance: {}, new_node_b_balance: {}",
+        node_b_balance, new_node_b_balance
+    );
 }
 
 #[tokio::test]

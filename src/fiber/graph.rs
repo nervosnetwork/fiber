@@ -22,6 +22,7 @@ use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
 use tentacle::multiaddr::MultiAddr;
 use tentacle::secio::PeerId;
+use tentacle::utils::{is_reachable, multiaddr_to_socketaddr};
 use thiserror::Error;
 use tracing::log::error;
 use tracing::{debug, info, trace};
@@ -218,6 +219,8 @@ pub struct NetworkGraph<S> {
     // as a NetworkGraphStateStore.
     store: S,
     history: PaymentHistory<S>,
+    // Whether to process announcement of private address
+    announce_private_addr: bool,
 }
 
 #[derive(Error, Debug)]
@@ -246,7 +249,7 @@ where
         + Sync
         + 'static,
 {
-    pub fn new(store: S, source: Pubkey) -> Self {
+    pub fn new(store: S, source: Pubkey, announce_private_addr: bool) -> Self {
         let mut network_graph = Self {
             source,
             channels: HashMap::new(),
@@ -254,6 +257,7 @@ where
             latest_cursor: Cursor::default(),
             store: store.clone(),
             history: PaymentHistory::new(source, None, store),
+            announce_private_addr,
         };
         network_graph.load_from_store();
         network_graph
@@ -438,7 +442,21 @@ where
         }
     }
 
-    fn process_node_announcement(&mut self, node_announcement: NodeAnnouncement) -> Option<Cursor> {
+    fn process_node_announcement(
+        &mut self,
+        mut node_announcement: NodeAnnouncement,
+    ) -> Option<Cursor> {
+        if !self.announce_private_addr {
+            node_announcement.addresses.retain(|addr| {
+                multiaddr_to_socketaddr(addr)
+                    .map(|socket_addr| is_reachable(socket_addr.ip()))
+                    .unwrap_or_default()
+            });
+
+            if node_announcement.addresses.is_empty() {
+                return None;
+            }
+        }
         let node_info = NodeInfo::from(node_announcement);
         match self.nodes.get(&node_info.node_id) {
             Some(old_node) if old_node.timestamp > node_info.timestamp => {
