@@ -355,7 +355,8 @@ async fn test_saving_channel_update_before_saving_channel_announcement() {
         let channel_update = context
             .get_store()
             .get_latest_channel_update(channel_context.channel_outpoint(), b);
-        assert_ne!(channel_update, None);
+        // The channel update messages are discarded because we thought they are invalid.
+        assert_eq!(channel_update, None);
     }
 }
 
