@@ -1336,13 +1336,21 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
                 for message in messages {
-                    if let Err(error) = state.insert_message_to_be_saved_list(&peer, &message).await
-                    {
-                        error!(
+                    match state.insert_message_to_be_saved_list(&peer, &message).await {
+                        Err(error) => {
+                            error!(
                             "Failed to save message to the store: {:?} (from peer {:?}), error: {:?}",
                             message, &peer, error
-                        );
-                    }
+                        )
+                        }
+                        Ok(message) => {
+                            trace!(
+                                "Saved message to the memory: {:?} (from peer {:?})",
+                                message,
+                                &peer
+                            );
+                        }
+                    };
                 }
             }
 
@@ -1372,7 +1380,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::Tick => {
                 trace!(
-                    "Gossip store maintenance ticked: last_cursor = {:?} #subscriptions = {},  #messages_to_be_saved = {}",
+                    "Gossip store maintenance ticked: last_cursor = {:?}, #subscriptions = {},  #messages_to_be_saved = {}",
                     state.last_cursor,
                     state.output_ports.len(),
                     state.messages_to_be_saved.values().map(|s| s.len()).sum::<usize>(),
@@ -1380,25 +1388,96 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
                 // These are the messages that have complete dependencies and can be sent to the subscribers.
                 let complete_messages = state.prune_messages_to_be_saved().await;
-                if complete_messages.is_empty() {
-                    return Ok(());
-                }
-                for (id, subscription) in state.output_ports.iter() {
-                    let messages_to_send = complete_messages
-                        .iter()
-                        .filter(|m| &m.cursor() > &subscription.filter)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    trace!(
+                if !complete_messages.is_empty() {
+                    for (id, subscription) in state.output_ports.iter() {
+                        let messages_to_send = complete_messages
+                            .iter()
+                            .filter(|m| &m.cursor() > &subscription.filter)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        trace!(
                         "Sending complete messages in memory to subscription #{}: number of messages = {}",
                         id,
                         messages_to_send.len()
                     );
-                    for chunk in messages_to_send.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
-                        subscription
-                            .output_port
-                            .send(GossipMessageUpdates::new(chunk.to_vec()));
+                        for chunk in
+                            messages_to_send.chunks(DEFAULT_NUM_OF_BROADCAST_MESSAGE as usize)
+                        {
+                            subscription
+                                .output_port
+                                .send(GossipMessageUpdates::new(chunk.to_vec()));
+                        }
                     }
+                }
+
+                // The assumption is that when a peer sends us a message, it should have all the dependencies.
+                // So here we will send queries to the peer for the missing messages.
+                for (peer, incomplete_messages) in state.messages_to_be_saved.drain() {
+                    let peer = match peer {
+                        Some(peer) => peer,
+                        None => {
+                            warn!(
+                                "Our own messages are incomplete (this should not happen): messages {:?}",
+                                incomplete_messages
+                            );
+                            continue;
+                        }
+                    };
+                    let gossip_actor = state.gossip_actor.clone();
+                    let myself = myself.clone();
+                    let incomplete_messages = incomplete_messages.into_iter().collect::<Vec<_>>();
+
+                    ractor::concurrency::tokio_primatives::spawn(async move {
+                        for messages in
+                            incomplete_messages.chunks(DEFAULT_NUM_OF_BROADCAST_MESSAGE as usize)
+                        {
+                            let queries = messages
+                                .iter()
+                                .filter_map(|m| match m {
+                                    BroadcastMessageWithTimestamp::ChannelUpdate(
+                                        channel_update,
+                                    ) => Some(BroadcastMessageQuery {
+                                        flags: BroadcastMessageQueryFlags::ChannelAnnouncement,
+                                        channel_outpoint: channel_update.channel_outpoint.clone(),
+                                    }),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            if queries.is_empty() {
+                                continue;
+                            }
+                            match call!(
+                                gossip_actor,
+                                GossipActorMessage::QueryBroadcastMessages,
+                                peer.clone(),
+                                queries.to_vec()
+                            ) {
+                                Ok(Ok(result)) => {
+                                    let mut all_messages = result.messages;
+                                    // We need also to save the incomplete messages to the store.
+                                    all_messages
+                                        .extend(messages.iter().map(Clone::clone).map(Into::into));
+                                    myself
+                                        .send_message(
+                                            ExtendedGossipMessageStoreMessage::SaveMessages(
+                                                Some(peer.clone()),
+                                                all_messages,
+                                            ),
+                                        )
+                                        .expect("actor alive");
+                                }
+                                Ok(Err(e)) => {
+                                    error!(
+                                        "Failed to query messages from peer {:?}: {:?}",
+                                        peer, e
+                                    );
+                                }
+                                Err(e) => {
+                                    error!("Failed to send query to peer {:?}: {:?}", peer, e);
+                                }
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -1454,10 +1533,6 @@ pub(crate) struct GossipActorState<S> {
     next_request_id: u64,
     myself: ActorRef<GossipActorMessage>,
     chain_actor: ActorRef<CkbChainMessage>,
-    // There are some messages missing from our store, and we need to query them from peers.
-    // These messages include channel updates and node announcements related to channel announcements,
-    // and channel announcements related to channel updates.
-    pending_queries: Vec<BroadcastMessageQuery>,
     query_reply_ports:
         HashMap<(PeerId, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<PeerId, PeerState>,
@@ -1747,51 +1822,6 @@ async fn send_message_to_session(
 pub(crate) struct GossipProtocolHandle {
     actor: ActorRef<GossipActorMessage>,
     sender: Option<oneshot::Sender<ServiceAsyncControl>>,
-}
-
-fn get_dependent_message_queries<S: GossipMessageStore>(
-    message: &BroadcastMessage,
-    store: &S,
-) -> Vec<BroadcastMessageQuery> {
-    let mut queries = Vec::new();
-    match message {
-        BroadcastMessage::ChannelAnnouncement(channel_announcement) => {
-            let outpoint = &channel_announcement.channel_outpoint;
-            if store
-                .get_latest_node_announcement_timestamp(&channel_announcement.node1_id)
-                .is_none()
-            {
-                queries.push(BroadcastMessageQuery {
-                    flags: BroadcastMessageQueryFlags::NodeAnnouncementNode1,
-                    channel_outpoint: outpoint.clone(),
-                });
-            }
-            if store
-                .get_latest_node_announcement_timestamp(&channel_announcement.node2_id)
-                .is_none()
-            {
-                queries.push(BroadcastMessageQuery {
-                    flags: BroadcastMessageQueryFlags::NodeAnnouncementNode2,
-                    channel_outpoint: outpoint.clone(),
-                });
-            }
-        }
-        BroadcastMessage::ChannelUpdate(channel_update) => {
-            // Check if we need to obtain related channel announcement message.
-            let outpoint = &channel_update.channel_outpoint;
-            if store
-                .get_latest_channel_announcement_timestamp(outpoint)
-                .is_none()
-            {
-                queries.push(BroadcastMessageQuery {
-                    flags: BroadcastMessageQueryFlags::ChannelAnnouncement,
-                    channel_outpoint: outpoint.clone(),
-                });
-            }
-        }
-        BroadcastMessage::NodeAnnouncement(_node_announcement) => {}
-    }
-    queries
 }
 
 async fn get_message_cursor<S: GossipMessageStore>(
@@ -2313,7 +2343,6 @@ where
             myself,
             chain_actor,
             next_request_id: Default::default(),
-            pending_queries: Default::default(),
             query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
@@ -2493,12 +2522,11 @@ where
 
             GossipActorMessage::TickNetworkMaintenance => {
                 trace!(
-                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}, num of pending queries: {}",
+                    "Gossip network maintenance ticked, current state: num of peers: {}, num of finished syncing peers: {}, num of active syncing peers: {}, num of passive syncing peers: {}",
                     state.peer_states.len(),
                     state.num_finished_active_syncing_peers,
                     state.num_of_active_syncing_peers(),
                     state.num_of_passive_syncing_peers(),
-                    state.pending_queries.len(),
                 );
                 for peer in state.peers_to_start_active_syncing() {
                     state.start_new_active_syncer(&peer).await;
@@ -2506,27 +2534,6 @@ where
 
                 for peer in state.peers_to_start_passive_syncing() {
                     state.start_passive_syncer(&peer).await;
-                }
-
-                // Query missing messages from peers.
-                let pending_queries = std::mem::take(&mut state.pending_queries);
-                for chunk in pending_queries.chunks(MAX_NUM_OF_BROADCAST_MESSAGES as usize) {
-                    let queries = chunk.to_vec();
-                    let id = state.get_and_increment_request_id();
-                    for peer_state in state
-                        .peer_states
-                        .values()
-                        .take(NUM_SIMULTANEOUS_GET_REQUESTS)
-                    {
-                        let message =
-                            GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
-                                id,
-                                chain_hash: get_chain_hash(),
-                                queries: queries.clone(),
-                            });
-                        send_message_to_session(&state.control, peer_state.session_id, message)
-                            .await?;
-                    }
                 }
             }
 
