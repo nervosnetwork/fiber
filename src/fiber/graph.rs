@@ -2,7 +2,7 @@ use super::channel::ChannelActorStateStore;
 use super::config::AnnouncedNodeName;
 use super::gossip::GossipMessageStore;
 use super::history::{Direction, InternalResult, PaymentHistory, TimedResult};
-use super::network::{get_chain_hash, SendPaymentData, SendPaymentResponse};
+use super::network::{get_chain_hash, HopHint, SendPaymentData, SendPaymentResponse};
 use super::path::NodeHeap;
 use super::types::{
     BroadcastMessageID, BroadcastMessageWithTimestamp, ChannelAnnouncement, ChannelUpdate, Hash256,
@@ -710,6 +710,7 @@ where
             final_tlc_expiry_delta,
             payment_data.tlc_expiry_limit,
             allow_self_payment,
+            payment_data.hop_hints,
         )?;
         assert!(!route.is_empty());
 
@@ -799,6 +800,7 @@ where
         final_tlc_expiry_delta: u64,
         tlc_expiry_limit: u64,
         allow_self: bool,
+        hop_hints: Vec<HopHint>,
     ) -> Result<Vec<PathEdge>, PathFindError> {
         let started_time = std::time::Instant::now();
         let nodes_len = self.nodes.len();
@@ -841,6 +843,16 @@ where
             )));
         };
 
+        let hop_hint_map: HashMap<Pubkey, OutPoint> = hop_hints
+            .into_iter()
+            .map(|hint| {
+                (
+                    hint.pubkey,
+                    OutPoint::new(hint.channel_funding_tx.into(), 0),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -863,6 +875,12 @@ where
                 }
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
+                }
+
+                if let Some(hint_channel) = hop_hint_map.get(&from) {
+                    if hint_channel != channel_info.out_point() {
+                        continue;
+                    }
                 }
 
                 // if the channel is already visited in the last hop, skip it

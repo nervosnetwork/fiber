@@ -302,8 +302,19 @@ pub struct SendPaymentCommand {
     pub udt_type_script: Option<Script>,
     // allow self payment, default is false
     pub allow_self_payment: bool,
+    // the hop hint which may help the find path algorithm to find the path
+    pub hop_hints: Option<Vec<HopHint>>,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopHint {
+    /// The public key of the node
+    pub pubkey: Pubkey,
+    /// The funding transaction hash of the channel outpoint
+    pub channel_funding_tx: Hash256,
 }
 
 #[serde_as]
@@ -323,6 +334,7 @@ pub struct SendPaymentData {
     pub udt_type_script: Option<Script>,
     pub preimage: Option<Hash256>,
     pub allow_self_payment: bool,
+    pub hop_hints: Vec<HopHint>,
     pub dry_run: bool,
 }
 
@@ -450,6 +462,8 @@ impl SendPaymentData {
             ));
         }
 
+        let hop_hints = command.hop_hints.unwrap_or_default();
+
         Ok(SendPaymentData {
             target_pubkey: target,
             amount,
@@ -464,6 +478,7 @@ impl SendPaymentData {
             udt_type_script,
             preimage,
             allow_self_payment: command.allow_self_payment,
+            hop_hints,
             dry_run: command.dry_run,
         })
     }

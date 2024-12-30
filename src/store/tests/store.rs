@@ -429,6 +429,7 @@ fn test_store_payment_session() {
         udt_type_script: None,
         preimage: None,
         allow_self_payment: false,
+        hop_hints: vec![],
         dry_run: false,
     };
     let payment_session = PaymentSession::new(payment_data.clone(), 10);

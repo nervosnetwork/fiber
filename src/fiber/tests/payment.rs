@@ -42,6 +42,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: true,
         })
         .await;
@@ -63,6 +64,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -96,6 +98,7 @@ async fn test_send_payment_for_direct_channel_and_dry_run() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -166,6 +169,7 @@ async fn test_send_payment_for_pay_self() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: true,
         })
         .await;
@@ -187,6 +191,7 @@ async fn test_send_payment_for_pay_self() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: true,
+            hop_hints: None,
             dry_run: false,
         })
         .await;
@@ -244,6 +249,7 @@ async fn test_send_payment_for_pay_self() {
             keysend: Some(true),
             udt_type_script: None,
             allow_self_payment: false,
+            hop_hints: None,
             dry_run: true,
         })
         .await;
@@ -301,6 +307,7 @@ async fn test_network_send_payment_randomly_send_each_other() {
                     keysend: Some(true),
                     udt_type_script: None,
                     allow_self_payment: false,
+                    hop_hints: None,
                     dry_run: false,
                 },
                 rpc_reply,

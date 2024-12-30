@@ -1,7 +1,7 @@
 use crate::fiber::{
     channel::ChannelActorStateStore,
     graph::PaymentSessionStatus,
-    network::SendPaymentCommand,
+    network::{HopHint as NetworkHopHint, SendPaymentCommand},
     serde_utils::{U128Hex, U64Hex},
     types::{Hash256, Pubkey},
     NetworkActorCommand, NetworkActorMessage,
@@ -95,6 +95,27 @@ pub(crate) struct SendPaymentCommandParams {
     /// it's useful for the sender to double check the payment before sending it to the network,
     /// default is false
     dry_run: Option<bool>,
+
+    /// Optional route hints to reach the destination through private channels.
+    hop_hints: Option<Vec<HopHint>>,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HopHint {
+    /// The public key of the node
+    pub pubkey: Pubkey,
+    /// The funding transaction hash of the channel outpoint
+    pub channel_funding_tx: Hash256,
+}
+
+impl From<HopHint> for NetworkHopHint {
+    fn from(hop_hint: HopHint) -> Self {
+        NetworkHopHint {
+            pubkey: hop_hint.pubkey,
+            channel_funding_tx: hop_hint.channel_funding_tx,
+        }
+    }
 }
 
 /// RPC module for channel management.
@@ -150,6 +171,10 @@ where
                     keysend: params.keysend,
                     udt_type_script: params.udt_type_script.clone().map(|s| s.into()),
                     allow_self_payment: params.allow_self_payment.unwrap_or(false),
+                    hop_hints: params
+                        .hop_hints
+                        .clone()
+                        .map(|hints| hints.into_iter().map(|hint| hint.into()).collect()),
                     dry_run: params.dry_run.unwrap_or(false),
                 },
                 rpc_reply,
