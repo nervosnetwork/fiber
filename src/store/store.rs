@@ -459,14 +459,14 @@ impl InvoiceStore for Store {
         invoice: CkbInvoice,
         preimage: Option<Hash256>,
     ) -> Result<(), InvoiceError> {
-        let hash = invoice.payment_hash();
-        if self.get_invoice(hash).is_some() {
-            return Err(InvoiceError::DuplicatedInvoice(hash.to_string()));
+        let payment_hash = invoice.payment_hash();
+        if self.get_invoice(payment_hash).is_some() {
+            return Err(InvoiceError::DuplicatedInvoice(payment_hash.to_string()));
         }
 
         let mut batch = self.batch();
         if let Some(preimage) = preimage {
-            batch.put_kv(KeyValue::CkbInvoicePreimage(*hash, preimage));
+            batch.put_kv(KeyValue::CkbInvoicePreimage(*payment_hash, preimage));
         }
         let payment_hash = *invoice.payment_hash();
         batch.put_kv(KeyValue::CkbInvoice(payment_hash, invoice));
@@ -500,6 +500,17 @@ impl InvoiceStore for Store {
         let key = [&[CKB_INVOICE_STATUS_PREFIX], id.as_ref()].concat();
         self.get(key)
             .map(|v| deserialize_from(v.as_ref(), "CkbInvoiceStatus"))
+    }
+
+    fn insert_payment_preimage(
+        &self,
+        payment_hash: Hash256,
+        preimage: Hash256,
+    ) -> Result<(), InvoiceError> {
+        let mut batch = self.batch();
+        batch.put_kv(KeyValue::CkbInvoicePreimage(payment_hash, preimage));
+        batch.commit();
+        Ok(())
     }
 }
 
