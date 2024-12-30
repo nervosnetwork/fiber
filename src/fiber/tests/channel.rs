@@ -915,7 +915,7 @@ async fn test_network_send_payment_target_not_found() {
     };
     let res = call!(node_a.network_actor, message).expect("node_a alive");
     assert!(res.is_err());
-    assert!(res.err().unwrap().contains("target node not found"));
+    assert!(res.err().unwrap().contains("no path found"));
 }
 
 #[tokio::test]
