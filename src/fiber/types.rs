@@ -2720,14 +2720,14 @@ impl Ord for BroadcastMessageID {
                 BroadcastMessageID::NodeAnnouncement(pubkey1),
                 BroadcastMessageID::NodeAnnouncement(pubkey2),
             ) => pubkey1.cmp(pubkey2),
-            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Less,
-            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Greater,
+            (BroadcastMessageID::NodeAnnouncement(_), _) => Ordering::Less,
+            (BroadcastMessageID::ChannelUpdate(_), _) => Ordering::Greater,
             (
                 BroadcastMessageID::ChannelAnnouncement(_),
                 BroadcastMessageID::NodeAnnouncement(_),
-            ) => Ordering::Less,
+            ) => Ordering::Greater,
             (BroadcastMessageID::ChannelAnnouncement(_), BroadcastMessageID::ChannelUpdate(_)) => {
-                Ordering::Greater
+                Ordering::Less
             }
         }
     }
