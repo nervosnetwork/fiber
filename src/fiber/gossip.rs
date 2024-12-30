@@ -1053,9 +1053,12 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
                 }
             }
         }
-        for (_, messages) in self.messages_to_be_saved.iter_mut() {
+        self.messages_to_be_saved.retain(|_, messages| {
+            // Remove completed messages
             messages.retain(|message| !complete_messages.contains(message));
-        }
+            // If messages are empty now, delete the kv pair.
+            !messages.is_empty()
+        });
 
         let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
         sorted_messages.sort_unstable();
