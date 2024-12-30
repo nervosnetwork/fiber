@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
-    mem::take,
     sync::Arc,
     time::Duration,
 };
@@ -993,7 +992,9 @@ pub struct ExtendedGossipMessageStoreState<S> {
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
     last_cursor: Cursor,
-    messages_to_be_saved: HashSet<BroadcastMessageWithTimestamp>,
+    // A map from peer_id to the messages that need to be saved. If the peer_id is None,
+    // then the message is from the local node. Otherwise, the message is from a remote peer.
+    messages_to_be_saved: HashMap<Option<PeerId>, HashSet<BroadcastMessageWithTimestamp>>,
 }
 
 impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
@@ -1025,11 +1026,17 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
     // We will also change the relevant state (e.g. update the latest cursor).
     // The returned list may be sent to the subscribers.
     async fn prune_messages_to_be_saved(&mut self) -> Vec<BroadcastMessageWithTimestamp> {
-        let messages_to_be_saved = take(&mut self.messages_to_be_saved);
-        let (complete_messages, uncomplete_messages) = messages_to_be_saved
-            .into_iter()
-            .partition(|m| self.has_dependencies_available(m));
-        self.messages_to_be_saved = uncomplete_messages;
+        let mut complete_messages = HashSet::new();
+        for (_, messages) in &self.messages_to_be_saved {
+            for message in messages {
+                if self.has_dependencies_available(message) {
+                    complete_messages.insert(message.clone());
+                }
+            }
+        }
+        for (_, messages) in self.messages_to_be_saved.iter_mut() {
+            messages.retain(|message| !complete_messages.contains(message));
+        }
 
         let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
         sorted_messages.sort_unstable();
@@ -1064,18 +1071,23 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
         &self,
         outpoint: &OutPoint,
     ) -> Option<(u64, ChannelAnnouncement)> {
-        self.messages_to_be_saved.iter().find_map(|m| match m {
-            BroadcastMessageWithTimestamp::ChannelAnnouncement(timestamp, channel_announcement)
-                if &channel_announcement.channel_outpoint == outpoint =>
-            {
-                Some((*timestamp, channel_announcement.clone()))
-            }
-            _ => None,
-        })
+        self.messages_to_be_saved
+            .values()
+            .flatten()
+            .find_map(|m| match m {
+                BroadcastMessageWithTimestamp::ChannelAnnouncement(
+                    timestamp,
+                    channel_announcement,
+                ) if &channel_announcement.channel_outpoint == outpoint => {
+                    Some((*timestamp, channel_announcement.clone()))
+                }
+                _ => None,
+            })
     }
 
     async fn insert_message_to_be_saved_list(
         &mut self,
+        peer_id: &Option<PeerId>,
         message: &BroadcastMessage,
     ) -> Result<BroadcastMessageWithTimestamp, GossipMessageProcessingError> {
         if let Some(existing_message) = get_existing_newer_broadcast_message(message, &self.store) {
@@ -1117,8 +1129,15 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             }
         }
 
-        trace!("New gossip message saved to memory: {:?}", message);
-        self.messages_to_be_saved.insert(message.clone());
+        trace!(
+            "New gossip message saved to memory: peer {:?}, message {:?}",
+            peer_id,
+            message
+        );
+        self.messages_to_be_saved
+            .entry(peer_id.clone())
+            .or_default()
+            .insert(message.clone());
         Ok(message)
     }
 
@@ -1294,7 +1313,8 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::SaveMessages(peer, messages) => {
                 for message in messages {
-                    if let Err(error) = state.insert_message_to_be_saved_list(&message).await {
+                    if let Err(error) = state.insert_message_to_be_saved_list(&peer, &message).await
+                    {
                         error!(
                             "Failed to save message to the store: {:?} (from peer {:?}), error: {:?}",
                             message, &peer, error
@@ -1306,7 +1326,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
             ExtendedGossipMessageStoreMessage::SaveAndBroadcastMessage(messages) => {
                 let mut good_messages = Vec::with_capacity(messages.len());
                 for message in messages {
-                    match state.insert_message_to_be_saved_list(&message).await {
+                    match state.insert_message_to_be_saved_list(&None, &message).await {
                         Err(error) => error!(
                             "Failed to save message to the store: {:?}, error: {:?}",
                             message, error
@@ -1332,7 +1352,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
                     "Gossip store maintenance ticked: last_cursor = {:?} #subscriptions = {},  #messages_to_be_saved = {}",
                     state.last_cursor,
                     state.output_ports.len(),
-                    state.messages_to_be_saved.len(),
+                    state.messages_to_be_saved.values().map(|s| s.len()).sum::<usize>(),
                 );
 
                 // These are the messages that have complete dependencies and can be sent to the subscribers.
