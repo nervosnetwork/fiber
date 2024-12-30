@@ -60,7 +60,7 @@ pub async fn main() -> Result<(), ExitMessage> {
         .try_init()
         .map_err(|err| ExitMessage(format!("failed to initialize logger: {}", err)))?;
 
-    info!("Starting node with git version {}", fnn::get_git_versin());
+    info!("Starting node with git version {}", fnn::get_git_version());
 
     let _span = info_span!("node", node = fnn::get_node_prefix()).entered();
 
@@ -138,6 +138,7 @@ pub async fn main() -> Result<(), ExitMessage> {
             let network_graph = Arc::new(RwLock::new(NetworkGraph::new(
                 store.clone(),
                 node_public_key.clone().into(),
+                fiber_config.announce_private_addr(),
             )));
 
             let secret_key = ckb_config.read_secret_key().map_err(|err| {
