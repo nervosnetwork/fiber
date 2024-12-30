@@ -259,6 +259,122 @@ async fn test_send_payment_for_pay_self() {
 }
 
 #[tokio::test]
+async fn test_send_payment_with_more_capacity_for_payself() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // from https://github.com/nervosnetwork/fiber/issues/362
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            (
+                (0, 1),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (1, 2),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+            (
+                (2, 0),
+                (
+                    MIN_RESERVED_CKB + 10000000000,
+                    MIN_RESERVED_CKB + 10000000000,
+                ),
+            ),
+        ],
+        3,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1, node_2] = nodes.try_into().expect("3 nodes");
+
+    let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // node_0 -> node_0 will be ok if `allow_self_payment` is true
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey.clone()),
+            amount: Some(60000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+
+    let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
+    let node_0_balance2 = node_0.get_local_balance_from_channel(channels[2]);
+
+    eprintln!("fee: {:?}", res.fee);
+    // for node0 pay to self, only the fee will be deducted
+    assert!(node_0_balance1 + node_0_balance2 == 10000000000 + 10000000000 - res.fee);
+
+    eprintln!(
+        "node1 left: {:?}, right: {:?}",
+        node_1.get_local_balance_from_channel(channels[0]),
+        node_1.get_local_balance_from_channel(channels[1])
+    );
+
+    let node_1_new_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_new_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel1_balance = node_2.get_local_balance_from_channel(channels[1]);
+    let node_2_new_channel2_balance = node_2.get_local_balance_from_channel(channels[2]);
+
+    // we may route to self from
+    //     node0 -> node1 -> node2 -> node0
+    // or  node0 -> node2 -> node1 -> node0
+    // so the assertion need to be more complex
+    let node1_fee = if node_1_new_channel0_balance > node_1_channel0_balance {
+        (node_1_new_channel0_balance - node_1_channel0_balance)
+            - (node_1_channel1_balance - node_1_new_channel1_balance)
+    } else {
+        (node_1_new_channel1_balance - node_1_channel1_balance)
+            - (node_1_channel0_balance - node_1_new_channel0_balance)
+    };
+    assert!(node1_fee > 0);
+
+    let node2_fee = if node_2_new_channel1_balance > node_2_channel1_balance {
+        (node_2_new_channel1_balance - node_2_channel1_balance)
+            - (node_2_channel2_balance - node_2_new_channel2_balance)
+    } else {
+        (node_2_new_channel2_balance - node_2_channel2_balance)
+            - (node_2_channel1_balance - node_2_new_channel1_balance)
+    };
+    assert_eq!(node1_fee + node2_fee, res.fee);
+}
+
+#[tokio::test]
 async fn test_network_send_payment_randomly_send_each_other() {
     init_tracing();
 

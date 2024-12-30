@@ -500,6 +500,7 @@ Sends a payment to a peer.
 * `dry_run` - `Option<bool>`, dry_run for payment, used for check whether we can build valid router and the fee for this payment,
  it's useful for the sender to double check the payment before sending it to the network,
  default is false
+* `hop_hints` - `Option<Vec>`, Optional route hints to reach the destination through private channels.
 
 ##### Returns
 
