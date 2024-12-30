@@ -17,6 +17,7 @@ use crate::fiber::types::PaymentHopData;
 use crate::invoice::CkbInvoice;
 use crate::now_timestamp_as_millis_u64;
 use ckb_types::packed::{OutPoint, Script};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::collections::{HashMap, HashSet};
@@ -811,12 +812,6 @@ where
         let mut edges_expanded = 0;
         let mut nodes_heap = NodeHeap::new(nodes_len);
         let mut distances = HashMap::<Pubkey, NodeHeapElement>::new();
-        // a map from node_id to the selected channel outpoint
-        // suppose the scenario of A <-- channel_1 --> B <-- channel_2 --> A
-        // when we starting iterate channels from A, we may considerting channel_1 and channel_2,
-        // and we selected channel_1 according to weight
-        // in this case, `last_hop_channels` stores (B -> channel_1) so that we can skip channel_1 when we iterate channels from B
-        let mut last_hop_channels = HashMap::new();
 
         if amount == 0 {
             return Err(PathFindError::Amount(
@@ -843,15 +838,51 @@ where
             )));
         };
 
-        let hop_hint_map: HashMap<Pubkey, OutPoint> = hop_hints
+        let hop_hint_map: HashMap<Pubkey, (OutPoint, bool)> = hop_hints
             .into_iter()
             .map(|hint| {
                 (
                     hint.pubkey,
-                    OutPoint::new(hint.channel_funding_tx.into(), 0),
+                    (
+                        OutPoint::new(hint.channel_funding_tx.into(), 0),
+                        hint.inbound,
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
+
+        let mut target = target;
+        let mut current_expiry = final_tlc_expiry_delta;
+        let mut last_edge = None;
+
+        // if there is no hint, we will randomly select a channel from the source node for route to self
+        // so that the following part of algorithm will always trying to find a path without cycle
+        if route_to_self && hop_hint_map.get(&source).is_none() {
+            let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+                .get_node_inbounds(source)
+                .filter(|(_, _, channel_info, _)| {
+                    if let Some(state) = self
+                        .store
+                        .get_channel_state_by_outpoint(&channel_info.out_point())
+                    {
+                        let balance = state.to_remote_amount;
+                        return balance >= amount;
+                    }
+                    return channel_info.capacity() >= amount;
+                })
+                .collect();
+            if direct_channels.is_empty() {
+                return Err(PathFindError::PathFind(
+                    "no direct channel found for source node".to_string(),
+                ));
+            }
+            let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
+            let (from, _, channel_info, channel_update) = direct_channels[rand_index];
+            last_edge = Some((source, channel_info.out_point()));
+            current_expiry += channel_update.tlc_expiry_delta;
+            assert_ne!(target, from);
+            target = from;
+        }
 
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
@@ -862,7 +893,7 @@ where
             fee_charged: 0,
             probability: 1.0,
             next_hop: None,
-            incoming_tlc_expiry: final_tlc_expiry_delta,
+            incoming_tlc_expiry: current_expiry,
         });
 
         while let Some(cur_hop) = nodes_heap.pop() {
@@ -870,6 +901,7 @@ where
 
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
+                assert_eq!(to, cur_hop.node_id);
                 if from == target && !route_to_self {
                     continue;
                 }
@@ -877,18 +909,21 @@ where
                     continue;
                 }
 
-                if let Some(hint_channel) = hop_hint_map.get(&from) {
-                    if hint_channel != channel_info.out_point() {
+                if let Some((channel, inbound)) = hop_hint_map.get(&from) {
+                    if channel != channel_info.out_point() && !*inbound {
+                        continue;
+                    }
+                }
+                if let Some((channel, inbound)) = hop_hint_map.get(&to) {
+                    if channel != channel_info.out_point() && *inbound {
                         continue;
                     }
                 }
 
-                // if the channel is already visited in the last hop, skip it
-                if last_hop_channels
-                    .values()
-                    .any(|x| x == &channel_info.out_point())
-                {
-                    continue;
+                if let Some((_node, channel)) = last_edge {
+                    if channel == channel_info.out_point() {
+                        continue;
+                    }
                 }
 
                 edges_expanded += 1;
@@ -1007,7 +1042,6 @@ where
                     probability,
                     next_hop: Some((cur_hop.node_id, channel_info.out_point().clone())),
                 };
-                last_hop_channels.insert(node.node_id, channel_info.out_point());
                 distances.insert(node.node_id, node.clone());
                 nodes_heap.push_or_fix(node);
             }
@@ -1035,6 +1069,12 @@ where
         );
         if result.is_empty() || current != target {
             return Err(PathFindError::PathFind("no path found".to_string()));
+        }
+        if let Some((node, channel)) = last_edge {
+            result.push(PathEdge {
+                target: node,
+                channel_outpoint: channel.clone(),
+            })
         }
 
         Ok(result)

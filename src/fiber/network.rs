@@ -315,6 +315,8 @@ pub struct HopHint {
     pub pubkey: Pubkey,
     /// The funding transaction hash of the channel outpoint
     pub channel_funding_tx: Hash256,
+    /// inbound or outbound for the channel
+    pub inbound: bool,
 }
 
 #[serde_as]

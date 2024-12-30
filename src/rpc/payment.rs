@@ -107,6 +107,8 @@ pub struct HopHint {
     pub pubkey: Pubkey,
     /// The funding transaction hash of the channel outpoint
     pub channel_funding_tx: Hash256,
+    /// inbound or outbound to use this channel
+    pub inbound: bool,
 }
 
 impl From<HopHint> for NetworkHopHint {
@@ -114,6 +116,7 @@ impl From<HopHint> for NetworkHopHint {
         NetworkHopHint {
             pubkey: hop_hint.pubkey,
             channel_funding_tx: hop_hint.channel_funding_tx,
+            inbound: hop_hint.inbound,
         }
     }
 }

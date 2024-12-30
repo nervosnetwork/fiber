@@ -241,6 +241,22 @@ impl MockNetworkGraph {
             .collect::<Vec<_>>();
         assert_eq!(nodes, expecptected_nodes);
     }
+
+    pub fn build_route_with_possible_expects(
+        &self,
+        payment_data: &SendPaymentData,
+        expects: &Vec<Vec<usize>>,
+    ) {
+        let route = self.graph.build_route(payment_data.clone());
+        assert!(route.is_ok());
+        let route = route.unwrap();
+        let nodes = route.iter().filter_map(|x| x.next_hop).collect::<Vec<_>>();
+        let expecptected_nodes: Vec<Vec<Pubkey>> = expects
+            .iter()
+            .map(|x| x.iter().map(|i| self.keys[*i].into()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert!(expecptected_nodes.contains(&nodes));
+    }
 }
 
 #[test]
@@ -1268,16 +1284,20 @@ fn test_graph_payment_pay_self_will_ok() {
     assert!(route.is_err());
 
     // add a long path
+    let mut possible_expects = vec![];
     network.add_edge(6, 0, Some(500), Some(2));
-    network.build_route_with_expect(&payment_data, vec![2, 4, 5, 6, 0]);
+    possible_expects.push(vec![2, 4, 5, 6, 0]);
+    network.build_route_with_possible_expects(&payment_data, &possible_expects);
 
     // now add another shorter path
     network.add_edge(4, 0, Some(1000), Some(2));
-    network.build_route_with_expect(&payment_data, vec![2, 4, 0]);
+    possible_expects.push(vec![2, 4, 0]);
+    network.build_route_with_possible_expects(&payment_data, &possible_expects);
 
     // now add another shorter path
     network.add_edge(2, 0, Some(1000), Some(2));
-    network.build_route_with_expect(&payment_data, vec![2, 0]);
+    possible_expects.push(vec![2, 0]);
+    network.build_route_with_possible_expects(&payment_data, &possible_expects);
 }
 
 #[test]
