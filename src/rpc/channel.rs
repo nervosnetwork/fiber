@@ -10,7 +10,7 @@ use crate::fiber::{
     types::Hash256,
     NetworkActorCommand, NetworkActorMessage,
 };
-use crate::{handle_actor_call, handle_actor_cast, log_and_error};
+use crate::{handle_actor_call, log_and_error};
 use ckb_jsonrpc_types::{EpochNumberWithFraction, Script};
 use ckb_types::{
     core::{EpochNumberWithFraction as EpochNumberWithFractionCore, FeeRate},
@@ -137,13 +137,6 @@ pub(crate) struct AcceptChannelParams {
 #[derive(Clone, Serialize)]
 pub(crate) struct AcceptChannelResult {
     /// The final ID of the channel that was accepted, it's different from the temporary channel ID
-    channel_id: Hash256,
-}
-
-// TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
-#[derive(Serialize, Deserialize, Debug)]
-pub(crate) struct CommitmentSignedParams {
-    /// The channel ID of the channel to send the commitment_signed message to
     channel_id: Hash256,
 }
 
@@ -310,13 +303,6 @@ trait ChannelRpc {
         params: ListChannelsParams,
     ) -> Result<ListChannelsResult, ErrorObjectOwned>;
 
-    /// Sends a commitment_signed message to the peer.
-    #[method(name = "commitment_signed")]
-    async fn commitment_signed(
-        &self,
-        params: CommitmentSignedParams,
-    ) -> Result<(), ErrorObjectOwned>;
-
     /// Shuts down a channel.
     #[method(name = "shutdown_channel")]
     async fn shutdown_channel(&self, params: ShutdownChannelParams)
@@ -442,19 +428,6 @@ where
         // Sort by created_at in descending order
         channels.sort_by_key(|channel| Reverse(channel.created_at));
         Ok(ListChannelsResult { channels })
-    }
-
-    async fn commitment_signed(
-        &self,
-        params: CommitmentSignedParams,
-    ) -> Result<(), ErrorObjectOwned> {
-        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
-            ChannelCommandWithId {
-                channel_id: params.channel_id,
-                command: ChannelCommand::CommitmentSigned(),
-            },
-        ));
-        handle_actor_cast!(self.actor, message, params)
     }
 
     async fn shutdown_channel(

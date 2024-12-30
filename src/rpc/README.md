@@ -20,10 +20,10 @@ You may refer to the e2e test cases in the `tests/bruno/e2e` directory for examp
         * [Method `open_channel`](#channel-open_channel)
         * [Method `accept_channel`](#channel-accept_channel)
         * [Method `list_channels`](#channel-list_channels)
-        * [Method `commitment_signed`](#channel-commitment_signed)
         * [Method `shutdown_channel`](#channel-shutdown_channel)
         * [Method `update_channel`](#channel-update_channel)
     * [Module Dev](#module-dev)
+        * [Method `commitment_signed`](#dev-commitment_signed)
         * [Method `add_tlc`](#dev-add_tlc)
         * [Method `remove_tlc`](#dev-remove_tlc)
         * [Method `submit_commitment_transaction`](#dev-submit_commitment_transaction)
@@ -220,20 +220,6 @@ Lists all channels.
 * `channels` - `Vec<Channel>`, The list of channels
 
 
-<a id="channel-commitment_signed"></a>
-#### Method `commitment_signed`
-
-Sends a commitment_signed message to the peer.
-
-##### Params
-
-* `channel_id` - Hash256, The channel ID of the channel to send the commitment_signed message to
-
-##### Returns
-
-* None
-
-
 <a id="channel-shutdown_channel"></a>
 #### Method `shutdown_channel`
 
@@ -275,6 +261,20 @@ Updates a channel.
 ### Module `Dev`
 RPC module for development purposes, this module is not intended to be used in production.
  This module will be disabled in release build.
+
+
+<a id="dev-commitment_signed"></a>
+#### Method `commitment_signed`
+
+Sends a commitment_signed message to the peer.
+
+##### Params
+
+* `channel_id` - Hash256, The channel ID of the channel to send the commitment_signed message to
+
+##### Returns
+
+* None
 
 
 <a id="dev-add_tlc"></a>

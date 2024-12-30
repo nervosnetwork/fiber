@@ -1,9 +1,12 @@
-use crate::fiber::{
-    channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
-    hash_algorithm::HashAlgorithm,
-    serde_utils::{U128Hex, U64Hex},
-    types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
-    NetworkActorCommand, NetworkActorMessage,
+use crate::{
+    fiber::{
+        channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
+        hash_algorithm::HashAlgorithm,
+        serde_utils::{U128Hex, U64Hex},
+        types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
+        NetworkActorCommand, NetworkActorMessage,
+    },
+    handle_actor_cast,
 };
 use ckb_types::core::TransactionView;
 use jsonrpsee::{
@@ -24,6 +27,13 @@ use crate::{
     ckb::CkbChainMessage, fiber::network::DEFAULT_CHAIN_ACTOR_TIMEOUT, handle_actor_call,
     log_and_error,
 };
+
+// TODO @quake remove this unnecessary pub(crate) struct and rpc after refactoring
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct CommitmentSignedParams {
+    /// The channel ID of the channel to send the commitment_signed message to
+    channel_id: Hash256,
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -95,6 +105,13 @@ pub(crate) struct SubmitCommitmentTransactionResult {
 /// This module will be disabled in release build.
 #[rpc(server)]
 trait DevRpc {
+    /// Sends a commitment_signed message to the peer.
+    #[method(name = "commitment_signed")]
+    async fn commitment_signed(
+        &self,
+        params: CommitmentSignedParams,
+    ) -> Result<(), ErrorObjectOwned>;
+
     /// Adds a TLC to a channel.
     #[method(name = "add_tlc")]
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned>;
@@ -133,6 +150,19 @@ impl DevRpcServerImpl {
 
 #[async_trait]
 impl DevRpcServer for DevRpcServerImpl {
+    async fn commitment_signed(
+        &self,
+        params: CommitmentSignedParams,
+    ) -> Result<(), ErrorObjectOwned> {
+        let message = NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
+            ChannelCommandWithId {
+                channel_id: params.channel_id,
+                command: ChannelCommand::CommitmentSigned(),
+            },
+        ));
+        handle_actor_cast!(self.network_actor, message, params)
+    }
+
     async fn add_tlc(&self, params: AddTlcParams) -> Result<AddTlcResult, ErrorObjectOwned> {
         let message = |rpc_reply| -> NetworkActorMessage {
             NetworkActorMessage::Command(NetworkActorCommand::ControlFiberChannel(
