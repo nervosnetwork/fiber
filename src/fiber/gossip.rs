@@ -63,6 +63,8 @@ const MIN_NUM_OF_PASSIVE_SYNCING_PEERS: usize = 3;
 const NUM_SIMULTANEOUS_GET_REQUESTS: usize = 1;
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+const QUERY_BROADCAST_MESSAGES_TIMEOUT: Duration = Duration::from_secs(20);
+
 fn max_acceptable_gossip_message_timestamp() -> u64 {
     now_timestamp_as_millis_u64() + MAX_BROADCAST_MESSAGE_TIMESTAMP_DRIFT_MILLIS
 }
@@ -319,7 +321,15 @@ pub enum GossipActorMessage {
     // our own node announcement messages, channel updates from the onion error packets, etc.
     ProcessBroadcastMessage(BroadcastMessage),
     // Query some broadcast messages from a peer.
-    QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
+    QueryBroadcastMessages(
+        PeerId,
+        Vec<BroadcastMessageQuery>,
+        RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
+    ),
+    // Save some broadcast messages to the store.
+    SaveBroadcastMessages(Option<PeerId>, Vec<BroadcastMessage>),
+    // The querying of broadcast messages from a peer has timed out.
+    QueryBroadcastMessagesTimeout(PeerId, u64),
     // Try to broadcast BroadcastMessage created by us to the network.
     // We will save and broadcast the messages. Note that we don't check the dependencies of
     // these messages because we assume that the messages created by us are always valid.
@@ -970,6 +980,15 @@ impl BroadcastMessageOutput {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+
+pub enum GossipError {
+    #[error("Request timeout")]
+    Timeout,
+    #[error("Failed to send message: {0:?}")]
+    FailedToSendMessage(Error),
+}
+
 // This is the error type for processing the gossip messages.
 // Sometimes we can't be very sure of if a gossip message is valid on a first sight.
 // For example, a ChannelUpdate message may be signed with a different node's key,
@@ -1439,6 +1458,8 @@ pub(crate) struct GossipActorState<S> {
     // These messages include channel updates and node announcements related to channel announcements,
     // and channel announcements related to channel updates.
     pending_queries: Vec<BroadcastMessageQuery>,
+    query_reply_ports:
+        HashMap<(PeerId, u64), RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>>,
     peer_states: HashMap<PeerId, PeerState>,
 }
 
@@ -2293,6 +2314,7 @@ where
             chain_actor,
             next_request_id: Default::default(),
             pending_queries: Default::default(),
+            query_reply_ports: Default::default(),
             num_finished_active_syncing_peers: Default::default(),
             peer_states: Default::default(),
         };
@@ -2352,9 +2374,19 @@ where
                     .try_to_verify_and_save_broadcast_messages(None, vec![message.clone()])
                     .await;
             }
-            GossipActorMessage::QueryBroadcastMessages(peer, queries) => {
-                let id = state.get_and_increment_request_id();
+            GossipActorMessage::SaveBroadcastMessages(peer_id, vec) => {
                 state
+                    .try_to_verify_and_save_broadcast_messages(peer_id, vec)
+                    .await;
+            }
+            GossipActorMessage::QueryBroadcastMessagesTimeout(peer, request_id) => {
+                if let Some(reply) = state.query_reply_ports.remove(&(peer, request_id)) {
+                    let _ = reply.send(Err(GossipError::Timeout));
+                }
+            }
+            GossipActorMessage::QueryBroadcastMessages(peer, queries, reply) => {
+                let id = state.get_and_increment_request_id();
+                match state
                     .send_message_to_peer(
                         &peer,
                         GossipMessage::QueryBroadcastMessages(QueryBroadcastMessages {
@@ -2363,7 +2395,18 @@ where
                             queries,
                         }),
                     )
-                    .await?;
+                    .await
+                {
+                    Err(error) => {
+                        let _ = reply.send(Err(GossipError::FailedToSendMessage(error)));
+                    }
+                    Ok(_) => {
+                        state.query_reply_ports.insert((peer.clone(), id), reply);
+                        myself.send_after(QUERY_BROADCAST_MESSAGES_TIMEOUT, move || {
+                            GossipActorMessage::QueryBroadcastMessagesTimeout(peer.clone(), id)
+                        });
+                    }
+                }
             }
             GossipActorMessage::TryBroadcastMessages(messages) => {
                 trace!("Trying to broadcast message: {:?}", &messages);
@@ -2653,19 +2696,13 @@ where
                             );
                         }
                     }
-                    GossipMessage::QueryBroadcastMessagesResult(QueryBroadcastMessagesResult {
-                        id: _id,
-                        messages,
-                        missing_queries,
-                    }) => {
-                        let _is_finished = missing_queries.is_empty();
-                        state
-                            .try_to_verify_and_save_broadcast_messages(Some(peer_id), messages)
-                            .await;
-                        // TODO: mark requests corresponding to id as finished
-                        // TODO: if not finished, send another QueryBroadcastMessages to other peers.
-                        // Must be careful since some queries may be initiated by malformed messages
-                        // from malicious peers.
+                    GossipMessage::QueryBroadcastMessagesResult(result) => {
+                        if let Some(reply) = state
+                            .query_reply_ports
+                            .remove(&(peer_id.clone(), result.id))
+                        {
+                            let _ = reply.send(Ok(result));
+                        }
                     }
                 }
             }

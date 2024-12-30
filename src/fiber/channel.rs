@@ -1,6 +1,6 @@
 #[cfg(debug_assertions)]
 use crate::fiber::network::DebugEvent;
-use crate::fiber::serde_utils::U64Hex;
+use crate::fiber::{gossip::GossipError, serde_utils::U64Hex};
 use bitflags::bitflags;
 use ckb_jsonrpc_types::BlockNumber;
 use futures::future::OptionFuture;
@@ -57,8 +57,9 @@ use musig2::{
     PubNonce, SecNonce,
 };
 use ractor::{
-    async_trait as rasync_trait, call, concurrency::Duration, Actor, ActorProcessingErr, ActorRef,
-    OutputPort, RpcReplyPort, SpawnErr,
+    async_trait as rasync_trait, call,
+    concurrency::{sleep, Duration},
+    Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, SpawnErr,
 };
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -5434,11 +5435,69 @@ impl ChannelActorState {
                 "Querying for channel update and node announcement messages from {:?}",
                 &peer_id
             );
-            network
-                .send_message(NetworkActorMessage::new_command(
-                    NetworkActorCommand::QueryBroadcastMessages(peer_id, queries),
-                ))
-                .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+            let network = network.clone();
+            let channel_outpoint = self.must_get_funding_transaction_outpoint();
+            let peer = peer_id.clone();
+            // We will spawn a new task to query peer's information about the channel.
+            ractor::concurrency::tokio_primatives::spawn(async move {
+                // It is possible that while we are querying the peer for the channel update message,
+                // the peer has not yet generated the message (because it is still waiting for the
+                // funding transaction to be confirmed). In this case, we should retry the query.
+                const MAX_RETRY: u32 = 5;
+                let mut suceeded = false;
+                for i in 0..MAX_RETRY {
+                    let result = call!(network, |reply| NetworkActorMessage::Command(
+                        NetworkActorCommand::QueryBroadcastMessages(
+                            peer.clone(),
+                            queries.clone(),
+                            reply,
+                        )
+                    ));
+                    match result {
+                        Ok(Ok(result)) => {
+                            if result.missing_queries.is_empty() {
+                                debug!(
+                                    "Successfully queried broadcast messages for channel {}",
+                                    channel_outpoint
+                                );
+                                network
+                                    .send_message(NetworkActorMessage::Command(
+                                        NetworkActorCommand::SaveBroadcastMessages(
+                                            Some(peer.clone()),
+                                            result.messages,
+                                        ),
+                                    ))
+                                    .expect(ASSUME_NETWORK_ACTOR_ALIVE);
+                                suceeded = true;
+                                break;
+                            } else {
+                                debug!(
+                                    "Querying channel information failed: {:?} missing, retrying...",
+                                    &result.missing_queries
+                                );
+                                sleep(Duration::from_secs(2u64.pow(i))).await;
+                            };
+                        }
+                        Ok(Err(GossipError::Timeout)) => {
+                            warn!("Timeout while query broadcast messages, retrying...");
+                        }
+                        Ok(Err(e)) => {
+                            error!("Failed to query broadcast messages: {}", e);
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Failed to send query broadcast messages: {}", e);
+                            break;
+                        }
+                    }
+                }
+                if !suceeded {
+                    warn!(
+                        "Failed to query broadcast messages for channel {} after {} retries",
+                        channel_outpoint, MAX_RETRY
+                    );
+                }
+            });
         }
     }
 

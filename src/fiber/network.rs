@@ -55,13 +55,13 @@ use super::channel::{
 };
 use super::config::{AnnouncedNodeName, MIN_TLC_EXPIRY_DELTA};
 use super::fee::calculate_commitment_tx_fee;
-use super::gossip::{GossipActorMessage, GossipMessageStore, GossipMessageUpdates};
+use super::gossip::{GossipActorMessage, GossipError, GossipMessageStore, GossipMessageUpdates};
 use super::graph::{NetworkGraph, NetworkGraphStateStore, SessionRoute};
 use super::key::blake2b_hash_with_salt;
 use super::types::{
     BroadcastMessage, BroadcastMessageQuery, EcdsaSignature, FiberMessage, GossipMessage, Hash256,
-    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, RemoveTlcReason, TlcErr,
-    TlcErrData, TlcErrorCode,
+    NodeAnnouncement, OpenChannel, PaymentHopData, Privkey, Pubkey, QueryBroadcastMessagesResult,
+    RemoveTlcReason, TlcErr, TlcErrData, TlcErrorCode,
 };
 use super::{FiberConfig, ASSUME_NETWORK_ACTOR_ALIVE};
 
@@ -100,6 +100,8 @@ const ASSUME_CHAIN_ACTOR_ALWAYS_ALIVE_FOR_NOW: &str =
     "We currently assume that chain actor is always alive, but it failed. This is a known issue.";
 
 const ASSUME_NETWORK_MYSELF_ALIVE: &str = "network actor myself alive";
+
+const ASSUME_GOSSIP_ACTOR_ALIVE: &str = "gossip actor must be alive";
 
 // The duration for which we will try to maintain the number of peers in connection.
 const MAINTAINING_CONNECTIONS_INTERVAL: Duration = Duration::from_secs(3600);
@@ -224,9 +226,15 @@ pub enum NetworkActorCommand {
     SignTx(PeerId, Hash256, Transaction, Option<Vec<Vec<u8>>>),
     // Process a broadcast message from the network.
     ProcessBroadcastMessage(BroadcastMessage),
+    // Save broadcast messages from the network.
+    SaveBroadcastMessages(Option<PeerId>, Vec<BroadcastMessage>),
     // Query broadcast messages from a peer. Some messages may have been missed
     // we use this to query them.
-    QueryBroadcastMessages(PeerId, Vec<BroadcastMessageQuery>),
+    QueryBroadcastMessages(
+        PeerId,
+        Vec<BroadcastMessageQuery>,
+        RpcReplyPort<Result<QueryBroadcastMessagesResult, GossipError>>,
+    ),
     // Broadcast our BroadcastMessage to the network.
     BroadcastMessages(Vec<BroadcastMessage>),
     // Broadcast local information to the network.
@@ -896,11 +904,12 @@ where
             }
             #[cfg(test)]
             NetworkActorEvent::GossipMessage(peer_id, message) => {
-                let _ = state
+                state
                     .gossip_actor
                     .send_message(GossipActorMessage::GossipMessageReceived(
                         GossipMessageWithPeerId { peer_id, message },
-                    ));
+                    ))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorEvent::GossipMessageUpdates(gossip_message_updates) => {
                 let mut graph = self.network_graph.write().await;
@@ -1244,19 +1253,30 @@ where
                     .expect("network actor alive");
             }
             NetworkActorCommand::ProcessBroadcastMessage(message) => {
-                let _ = state
+                state
                     .gossip_actor
-                    .send_message(GossipActorMessage::ProcessBroadcastMessage(message));
+                    .send_message(GossipActorMessage::ProcessBroadcastMessage(message))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
-            NetworkActorCommand::QueryBroadcastMessages(peer, queries) => {
-                let _ = state
+            NetworkActorCommand::SaveBroadcastMessages(peer, messages) => {
+                state
                     .gossip_actor
-                    .send_message(GossipActorMessage::QueryBroadcastMessages(peer, queries));
+                    .send_message(GossipActorMessage::SaveBroadcastMessages(peer, messages))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
+            }
+            NetworkActorCommand::QueryBroadcastMessages(peer, queries, reply) => {
+                state
+                    .gossip_actor
+                    .send_message(GossipActorMessage::QueryBroadcastMessages(
+                        peer, queries, reply,
+                    ))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::BroadcastMessages(message) => {
-                let _ = state
+                state
                     .gossip_actor
-                    .send_message(GossipActorMessage::TryBroadcastMessages(message));
+                    .send_message(GossipActorMessage::TryBroadcastMessages(message))
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::SignMessage(message, reply) => {
                 debug!(
@@ -1301,7 +1321,10 @@ where
                 }
             },
             NetworkActorCommand::GossipActorMessage(message) => {
-                let _ = state.gossip_actor.send_message(message);
+                state
+                    .gossip_actor
+                    .send_message(message)
+                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
             }
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
