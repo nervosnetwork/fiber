@@ -1040,6 +1040,10 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
 
         let mut sorted_messages = complete_messages.into_iter().collect::<Vec<_>>();
         sorted_messages.sort_unstable();
+        trace!(
+            "Saving complete messages to the store: {:?}",
+            &sorted_messages
+        );
 
         let mut verified_sorted_messages = Vec::with_capacity(sorted_messages.len());
         for message in sorted_messages {
