@@ -757,6 +757,8 @@ where
         hops_data.reverse();
         assert_eq!(hops_data.len(), route.len() + 1);
         assert_eq!(hops_data[route.len()].amount, amount);
+        assert_eq!(hops_data[route.len()].next_hop, None);
+        assert_eq!(hops_data[route.len()].funding_tx_hash, Hash256::default());
         // assert there is no duplicate node in the route
         assert_eq!(
             hops_data

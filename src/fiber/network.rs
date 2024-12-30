@@ -239,6 +239,11 @@ pub enum NetworkActorCommand {
     ),
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
+    // Build a payment router with the given hops
+    BuildPaymentRouter(
+        BuildPaymentRouterCommand,
+        RpcReplyPort<Result<PaymentRouter, String>>,
+    ),
 
     // Send a message to the gossip actor.
     GossipActorMessage(GossipActorMessage),
@@ -304,6 +309,18 @@ pub struct SendPaymentCommand {
     pub allow_self_payment: bool,
     // dry_run only used for checking, default is false
     pub dry_run: bool,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BuildPaymentRouterCommand {
+    pub hops_info: Vec<(Pubkey, Option<Hash256>)>,
+}
+
+#[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaymentRouter {
+    pub hops_info: Vec<(Pubkey, Hash256)>,
 }
 
 #[serde_as]
@@ -1290,6 +1307,17 @@ where
                     }
                 }
             }
+            NetworkActorCommand::BuildPaymentRouter(build_payment_router, reply) => {
+                match self.on_build_payment_router(build_payment_router).await {
+                    Ok(router) => {
+                        let _ = reply.send(Ok(router));
+                    }
+                    Err(e) => {
+                        error!("Failed to build payment router: {:?}", e);
+                        let _ = reply.send(Err(e.to_string()));
+                    }
+                }
+            }
             NetworkActorCommand::GetPayment(payment_hash, reply) => {
                 match self.on_get_payment(&payment_hash) {
                     Ok(payment) => {
@@ -1738,6 +1766,14 @@ where
             .try_payment_session(myself, state, payment_session.payment_hash())
             .await?;
         return Ok(session.into());
+    }
+
+    async fn on_build_payment_router(
+        &self,
+        _build_payment_router: BuildPaymentRouterCommand,
+    ) -> Result<PaymentRouter, Error> {
+        let payment_router = PaymentRouter { hops_info: vec![] };
+        Ok(payment_router)
     }
 }
 

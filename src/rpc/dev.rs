@@ -2,13 +2,17 @@ use crate::{
     fiber::{
         channel::{AddTlcCommand, ChannelCommand, ChannelCommandWithId, RemoveTlcCommand},
         hash_algorithm::HashAlgorithm,
+        network::BuildPaymentRouterCommand,
         serde_utils::{U128Hex, U64Hex},
-        types::{Hash256, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET},
+        types::{
+            Hash256, Pubkey, RemoveTlcFulfill, TlcErr, TlcErrPacket, TlcErrorCode, NO_SHARED_SECRET,
+        },
         NetworkActorCommand, NetworkActorMessage,
     },
     handle_actor_cast,
 };
-use ckb_types::core::TransactionView;
+use ckb_jsonrpc_types::OutPoint;
+use ckb_types::{core::TransactionView, packed};
 use jsonrpsee::{
     core::async_trait,
     proc_macros::rpc,
@@ -94,6 +98,20 @@ pub(crate) struct SubmitCommitmentTransactionParams {
 }
 
 #[serde_as]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct BuildRouterParams {
+    /// A list of hops that defines the route. This does not include the source hop pubkey.
+    /// A hop info is a tuple of pubkey and the channel outpoint will be used.
+    hops_info: Vec<(Pubkey, Option<Hash256>)>,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub(crate) struct BuildPaymentRouterResult {
+    hops_info: Vec<(Pubkey, OutPoint)>,
+}
+
+#[serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 
 pub(crate) struct SubmitCommitmentTransactionResult {
@@ -126,6 +144,13 @@ trait DevRpc {
         &self,
         params: SubmitCommitmentTransactionParams,
     ) -> Result<SubmitCommitmentTransactionResult, ErrorObjectOwned>;
+
+    /// Builds a router for a payment.
+    #[method(name = "build_router")]
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned>;
 }
 
 pub(crate) struct DevRpcServerImpl {
@@ -270,5 +295,34 @@ impl DevRpcServer for DevRpcServerImpl {
                 Some(params),
             ))
         }
+    }
+
+    async fn build_router(
+        &self,
+        params: BuildRouterParams,
+    ) -> Result<BuildPaymentRouterResult, ErrorObjectOwned> {
+        let message = |rpc_reply| -> NetworkActorMessage {
+            NetworkActorMessage::Command(NetworkActorCommand::BuildPaymentRouter(
+                BuildPaymentRouterCommand {
+                    hops_info: params.hops_info.clone(),
+                },
+                rpc_reply,
+            ))
+        };
+
+        handle_actor_call!(self.network_actor, message, params).map(|response| {
+            BuildPaymentRouterResult {
+                hops_info: response
+                    .hops_info
+                    .into_iter()
+                    .map(|(pubkey, funding_tx_hash)| {
+                        (
+                            pubkey,
+                            packed::OutPoint::new(funding_tx_hash.into(), 0).into(),
+                        )
+                    })
+                    .collect(),
+            }
+        })
     }
 }
