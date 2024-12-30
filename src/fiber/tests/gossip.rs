@@ -8,6 +8,7 @@ use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
 use tokio::sync::RwLock;
 
+use crate::fiber::gossip::GossipService;
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::NodeAnnouncement;
 use crate::{
@@ -17,8 +18,8 @@ use crate::{
     },
     fiber::{
         gossip::{
-            ExtendedGossipMessageStore, ExtendedGossipMessageStoreMessage, GossipMessageStore,
-            GossipMessageUpdates, GossipProtocolHandle, SubscribableGossipMessageStore,
+            ExtendedGossipMessageStoreMessage, GossipMessageStore, GossipMessageUpdates,
+            SubscribableGossipMessageStore,
         },
         types::{BroadcastMessage, BroadcastMessageWithTimestamp, Cursor},
     },
@@ -31,7 +32,7 @@ use super::test_utils::{get_test_root_actor, TempDir};
 
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
-    store_update_subscriber: ExtendedGossipMessageStore<Store>,
+    gossip_service: GossipService<Store>,
 }
 
 impl GossipTestingContext {
@@ -40,7 +41,8 @@ impl GossipTestingContext {
         let store = Store::new(dir).expect("created store failed");
         let chain_actor = create_mock_chain_actor().await;
         let root_actor = get_test_root_actor().await;
-        let (_gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
+
+        let gossip_service = GossipService::start(
             None,
             Duration::from_millis(50).into(),
             Duration::from_millis(50).into(),
@@ -53,7 +55,7 @@ impl GossipTestingContext {
 
         Self {
             chain_actor,
-            store_update_subscriber,
+            gossip_service,
         }
     }
 }
@@ -63,16 +65,16 @@ impl GossipTestingContext {
         &self.chain_actor
     }
 
-    fn get_store_update_subscriber(&self) -> &ExtendedGossipMessageStore<Store> {
-        &self.store_update_subscriber
+    fn get_store_update_subscriber(&self) -> impl SubscribableGossipMessageStore {
+        self.gossip_service.get_subscriber()
     }
 
     fn get_store(&self) -> &Store {
-        &self.store_update_subscriber.store
+        self.gossip_service.get_store()
     }
 
-    fn get_store_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
-        &self.store_update_subscriber.actor
+    fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
+        self.gossip_service.get_extended_actor()
     }
 
     async fn subscribe(&self, cursor: Cursor) -> Arc<RwLock<Vec<BroadcastMessageWithTimestamp>>> {
@@ -85,7 +87,7 @@ impl GossipTestingContext {
     }
 
     fn save_message(&self, message: BroadcastMessage) {
-        self.get_store_actor()
+        self.get_extended_actor()
             .send_message(ExtendedGossipMessageStoreMessage::SaveMessages(
                 None,
                 vec![message],

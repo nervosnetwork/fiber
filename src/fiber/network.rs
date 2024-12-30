@@ -72,7 +72,7 @@ use crate::fiber::channel::{
     AddTlcCommand, AddTlcResponse, TxCollaborationCommand, TxUpdateCommand,
 };
 use crate::fiber::config::{DEFAULT_TLC_EXPIRY_DELTA, MAX_PAYMENT_TLC_EXPIRY_LIMIT};
-use crate::fiber::gossip::{GossipProtocolHandle, SubscribableGossipMessageStore};
+use crate::fiber::gossip::{GossipService, SubscribableGossipMessageStore};
 use crate::fiber::graph::{PaymentSession, PaymentSessionStatus};
 use crate::fiber::serde_utils::EntityHex;
 use crate::fiber::types::{
@@ -2887,7 +2887,7 @@ where
         let my_peer_id: PeerId = PeerId::from(secio_pk);
         let handle = MyServiceHandle::new(myself.clone());
         let fiber_handle = FiberProtocolHandle::from(&handle);
-        let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
+        let mut gossip_service = GossipService::start(
             Some(format!("gossip actor {:?}", my_peer_id)),
             Duration::from_millis(config.gossip_network_maintenance_interval_ms()).into(),
             Duration::from_millis(config.gossip_store_maintenance_interval_ms()).into(),
@@ -2897,12 +2897,14 @@ where
             myself.get_cell(),
         )
         .await;
+        let gossip_handle = gossip_service.create_protocol_handle();
         let graph = self.network_graph.read().await;
         let graph_subscribing_cursor = graph
             .get_latest_cursor()
             .go_back_for_some_time(MAX_GRAPH_MISSING_BROADCAST_MESSAGE_TIMESTAMP_DRIFT);
 
-        store_update_subscriber
+        gossip_service
+            .get_subscriber()
             .subscribe(graph_subscribing_cursor, myself.clone(), |m| {
                 Some(NetworkActorMessage::new_event(
                     NetworkActorEvent::GossipMessageUpdates(m),

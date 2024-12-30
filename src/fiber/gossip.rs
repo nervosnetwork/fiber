@@ -347,11 +347,83 @@ pub enum GossipActorMessage {
     GossipMessageReceived(GossipMessageWithPeerId),
 }
 
+pub struct GossipService<S> {
+    actor: ActorRef<GossipActorMessage>,
+    network_control_sender: Option<oneshot::Sender<ServiceAsyncControl>>,
+    extended_store: ExtendedGossipMessageStore<S>,
+}
+
+impl<S> GossipService<S>
+where
+    S: GossipMessageStore + Clone + Send + Sync + 'static,
+{
+    pub async fn start(
+        name: Option<String>,
+        gossip_network_maintenance_interval: Duration,
+        gossip_store_maintenance_interval: Duration,
+        announce_private_addr: bool,
+        store: S,
+        chain_actor: ActorRef<CkbChainMessage>,
+        supervisor: ActorCell,
+    ) -> Self {
+        let (network_control_sender, network_control_receiver) = oneshot::channel();
+
+        let (store_sender, store_receiver) = oneshot::channel();
+
+        let (actor, _handle) = ActorRuntime::spawn_linked_instant(
+            name,
+            GossipActor::new(),
+            (
+                network_control_receiver,
+                store_sender,
+                gossip_network_maintenance_interval,
+                gossip_store_maintenance_interval,
+                announce_private_addr,
+                store,
+                chain_actor,
+            ),
+            supervisor,
+        )
+        .expect("start gossip actor");
+        let store = store_receiver.await.expect("receive store");
+        Self {
+            actor,
+            network_control_sender: Some(network_control_sender),
+            extended_store: store,
+        }
+    }
+
+    pub fn create_protocol_handle(&mut self) -> GossipProtocolHandle {
+        let sender = self
+            .network_control_sender
+            .take()
+            .expect("network control sender");
+        GossipProtocolHandle::new(self.actor.clone(), sender)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_extended_actor(&self) -> &ActorRef<ExtendedGossipMessageStoreMessage> {
+        &self.extended_store.actor
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_store(&self) -> &S {
+        &self.extended_store.store
+    }
+
+    pub(crate) fn get_subscriber(&self) -> impl SubscribableGossipMessageStore {
+        self.extended_store.clone()
+    }
+}
+
 pub(crate) struct GossipActor<S> {
     _phantom: std::marker::PhantomData<S>,
 }
 
-impl<S> GossipActor<S> {
+impl<S> GossipActor<S>
+where
+    S: GossipMessageStore + Clone + Send + Sync + 'static,
+{
     fn new() -> Self {
         Self {
             _phantom: Default::default(),
@@ -2237,44 +2309,14 @@ fn verify_node_announcement<S: GossipMessageStore>(
 }
 
 impl GossipProtocolHandle {
-    pub(crate) async fn new<S>(
-        name: Option<String>,
-        gossip_network_maintenance_interval: Duration,
-        gossip_store_maintenance_interval: Duration,
-        announce_private_addr: bool,
-        store: S,
-        chain_actor: ActorRef<CkbChainMessage>,
-        supervisor: ActorCell,
-    ) -> (Self, ExtendedGossipMessageStore<S>)
-    where
-        S: GossipMessageStore + Clone + Send + Sync + 'static,
-    {
-        let (network_control_sender, network_control_receiver) = oneshot::channel();
-        let (store_sender, store_receiver) = oneshot::channel();
-
-        let (actor, _handle) = ActorRuntime::spawn_linked_instant(
-            name,
-            GossipActor::new(),
-            (
-                network_control_receiver,
-                store_sender,
-                gossip_network_maintenance_interval,
-                gossip_store_maintenance_interval,
-                announce_private_addr,
-                store,
-                chain_actor,
-            ),
-            supervisor,
-        )
-        .expect("start gossip actor");
-        let store = store_receiver.await.expect("receive store");
-        (
-            Self {
-                actor,
-                sender: Some(network_control_sender),
-            },
-            store,
-        )
+    pub(crate) fn new(
+        actor: ActorRef<GossipActorMessage>,
+        sender: oneshot::Sender<ServiceAsyncControl>,
+    ) -> Self {
+        Self {
+            actor,
+            sender: Some(sender),
+        }
     }
 
     pub(crate) fn actor(&self) -> &ActorRef<GossipActorMessage> {
