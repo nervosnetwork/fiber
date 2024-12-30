@@ -1,7 +1,7 @@
 meta {
   name: remove tlc from NODE1
   type: http
-  seq: 12
+  seq: 10
 }
 
 post {
@@ -37,11 +37,10 @@ assert {
   res.body.result: isNull
 }
 
-script:pre-request {
-  await new Promise(r => setTimeout(r, 1000));
-}
-
 script:post-response {
+  // assert we can remove it without error, if we can't remove it means the reestablish failed
+  // for example, if the tlc is not synced yet, it's status will not be in `Committed`, so we can't remove it
+
   // Sleep for sometime to make sure current operation finishes before next request starts.
   await new Promise(r => setTimeout(r, 100));
   console.log("remove tlc response: ", res.body);

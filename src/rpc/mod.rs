@@ -6,11 +6,13 @@ mod dev;
 mod graph;
 mod info;
 mod invoice;
+mod payment;
 mod peer;
 mod utils;
 
 use crate::fiber::gossip::GossipMessageStore;
 use crate::rpc::info::InfoRpcServer;
+use crate::rpc::payment::PaymentRpcServer;
 use crate::{
     cch::CchMessage,
     fiber::{
@@ -35,6 +37,7 @@ use info::InfoRpcServerImpl;
 use invoice::{InvoiceRpcServer, InvoiceRpcServerImpl};
 use jsonrpsee::server::{Server, ServerHandle};
 use jsonrpsee::RpcModule;
+use payment::PaymentRpcServerImpl;
 use peer::{PeerRpcServer, PeerRpcServerImpl};
 use ractor::ActorRef;
 #[cfg(debug_assertions)]
@@ -128,12 +131,19 @@ pub async fn start_rpc<
                 .unwrap();
         }
 
+        if config.is_module_enabled("payment") {
+            modules
+                .merge(PaymentRpcServerImpl::new(network_actor.clone(), store.clone()).into_rpc())
+                .unwrap();
+        }
+
         #[cfg(debug_assertions)]
         if config.is_module_enabled("dev") {
             modules
                 .merge(
                     DevRpcServerImpl::new(
                         ckb_chain_actor.expect("ckb_chain_actor should be set"),
+                        network_actor.clone(),
                         rpc_dev_module_commitment_txs
                             .expect("rpc_dev_module_commitment_txs should be set"),
                     )
