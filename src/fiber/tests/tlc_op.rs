@@ -208,7 +208,6 @@ impl Actor for TlcActor {
                     expiry: command.expiry,
                     hash_algorithm: command.hash_algorithm,
                     created_at: CommitmentNumbers::default(),
-                    payment_preimage: None,
                     removed_reason: None,
                     onion_packet: command.onion_packet,
                     shared_secret: command.shared_secret,
@@ -467,7 +466,6 @@ fn test_tlc_state_v2() {
         tlc_id: TLCId::Offered(0),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
-        payment_preimage: None,
         previous_tlc: None,
     };
     let mut add_tlc2 = TlcInfo {
@@ -482,7 +480,6 @@ fn test_tlc_state_v2() {
         tlc_id: TLCId::Offered(1),
         created_at: CommitmentNumbers::default(),
         removed_reason: None,
-        payment_preimage: None,
         previous_tlc: None,
     };
     tlc_state.add_offered_tlc(add_tlc1.clone());

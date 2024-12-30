@@ -120,9 +120,17 @@ pub struct AddTlcResponse {
 }
 
 #[derive(Clone)]
+pub struct TlcNotifyInfo {
+    pub payment_hash: Hash256,
+    pub tlc_id: TLCId,
+    pub amount: u128,
+    pub payment_preimage: Option<Hash256>,
+}
+
+#[derive(Clone)]
 pub struct TlcNotification {
     pub channel_id: Hash256,
-    pub tlc: TlcInfo,
+    pub tlc: TlcNotifyInfo,
     pub script: Script,
 }
 
@@ -607,6 +615,7 @@ where
             | ProcessingChannelError::TlcAmountExceedLimit
             | ProcessingChannelError::TlcValueInflightExceedLimit
             | ProcessingChannelError::WaitingTlcAck => TlcErrorCode::TemporaryChannelFailure,
+            ProcessingChannelError::InternalError(_) => TlcErrorCode::TemporaryNodeFailure,
             ProcessingChannelError::InvalidState(error) => match state.state {
                 // we can not revert back up `ChannelReady` after `ShuttingDown`
                 ChannelState::Closed(_) | ChannelState::ShuttingDown(_) => {
@@ -788,9 +797,7 @@ where
         tlc_id: TLCId,
     ) {
         let tlc_info = state.get_received_tlc(tlc_id).expect("expect tlc");
-        let preimage = tlc_info
-            .payment_preimage
-            .or_else(|| self.store.get_invoice_preimage(&tlc_info.payment_hash));
+        let preimage = self.store.get_invoice_preimage(&tlc_info.payment_hash);
 
         let preimage = if let Some(preimage) = preimage {
             preimage
@@ -861,7 +868,7 @@ where
             self.subscribers
                 .pending_received_tlcs_subscribers
                 .send(TlcNotification {
-                    tlc: add_tlc.clone(),
+                    tlc: add_tlc.clone().into(),
                     channel_id: state.get_id(),
                     script: udt_type_script.clone(),
                 });
@@ -943,7 +950,11 @@ where
                         .update_invoice_status(&payment_hash, CkbInvoiceStatus::Received)
                         .expect("update invoice status failed");
                 }
-                state.set_received_tlc_preimage(add_tlc.tlc_id.into(), Some(preimage));
+                self.store
+                    .insert_payment_preimage(payment_hash, preimage)
+                    .map_err(|_| {
+                        ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                    })?;
             } else {
                 return Err(ProcessingChannelError::FinalIncorrectPaymentHash);
             }
@@ -1021,9 +1032,22 @@ where
         // maybe we need to go through shutdown process for this error
         state
             .check_remove_tlc_with_reason(TLCId::Offered(remove_tlc.tlc_id), &remove_tlc.reason)?;
-        state
+        let payment_hash = state
             .tlc_state
-            .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason);
+            .set_offered_tlc_removed(remove_tlc.tlc_id, remove_tlc.reason.clone());
+        if let RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }) =
+            remove_tlc.reason
+        {
+            // we need to store the preimage if the TLC is fulfilled
+            // incase the peer has already shutdown the channel,
+            // so we can send setttlement transaction to get money when necessary
+            // the preimage must be valid since we have checked it in check_remove_tlc_with_reason
+            self.store
+                .insert_payment_preimage(payment_hash, payment_preimage)
+                .map_err(|_| {
+                    ProcessingChannelError::InternalError("insert preimage failed".to_string())
+                })?;
+        }
         Ok(())
     }
 
@@ -1045,14 +1069,15 @@ where
 
         if let (
             Some(ref udt_type_script),
-            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { .. }),
+            RemoveTlcReason::RemoveTlcFulfill(RemoveTlcFulfill { payment_preimage }),
         ) = (state.funding_udt_type_script.clone(), &remove_reason)
         {
-            assert!(tlc_info.payment_preimage.is_some());
+            let mut tlc_notify_info: TlcNotifyInfo = tlc_info.clone().into();
+            tlc_notify_info.payment_preimage = Some(*payment_preimage);
             self.subscribers
                 .settled_tlcs_subscribers
                 .send(TlcNotification {
-                    tlc: tlc_info.clone(),
+                    tlc: tlc_notify_info,
                     channel_id,
                     script: udt_type_script.clone(),
                 });
@@ -2274,7 +2299,6 @@ pub struct TlcInfo {
     pub shared_secret: [u8; 32],
     pub created_at: CommitmentNumbers,
     pub removed_reason: Option<RemoveTlcReason>,
-    pub payment_preimage: Option<Hash256>,
 
     /// Note: `previous_tlc` is used to track the tlc chain for a multi-tlc payment,
     ///       we need to know previous when removing tlc backwardly.
@@ -2329,6 +2353,17 @@ impl TlcInfo {
     pub fn get_htlc_type(&self) -> u8 {
         let offered_flag = if self.is_offered() { 0u8 } else { 1u8 };
         ((self.hash_algorithm as u8) << 1) + offered_flag
+    }
+}
+
+impl From<TlcInfo> for TlcNotifyInfo {
+    fn from(tlc: TlcInfo) -> Self {
+        TlcNotifyInfo {
+            tlc_id: tlc.tlc_id,
+            amount: tlc.amount,
+            payment_hash: tlc.payment_hash,
+            payment_preimage: None,
+        }
     }
 }
 
@@ -2524,12 +2559,12 @@ impl TlcState {
         }
     }
 
-    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) {
-        if let Some(tlc) = self.get_mut(&TLCId::Offered(tlc_id)) {
-            assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
-            tlc.removed_reason = Some(reason);
-            tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
-        }
+    pub fn set_offered_tlc_removed(&mut self, tlc_id: u64, reason: RemoveTlcReason) -> Hash256 {
+        let tlc = self.get_mut(&TLCId::Offered(tlc_id)).expect("get tlc");
+        assert_eq!(tlc.outbound_status(), OutboundTlcStatus::Committed);
+        tlc.removed_reason = Some(reason);
+        tlc.status = TlcStatus::Outbound(OutboundTlcStatus::RemoteRemoved);
+        tlc.payment_hash
     }
 
     pub fn commitment_signed_tlcs(&self, for_remote: bool) -> impl Iterator<Item = &TlcInfo> + '_ {
@@ -2903,6 +2938,8 @@ pub enum ProcessingChannelError {
     RepeatedProcessing(String),
     #[error("Invalid parameter: {0}")]
     InvalidParameter(String),
+    #[error("Internal error: {0}")]
+    InternalError(String),
     #[error("Capacity error: {0}")]
     CapacityError(#[from] CapacityError),
     #[error("Failed to spawn actor: {0}")]
@@ -4219,12 +4256,6 @@ impl ChannelActorState {
         self.tlc_state.get(&tlc_id)
     }
 
-    pub(crate) fn set_received_tlc_preimage(&mut self, tlc_id: u64, preimage: Option<Hash256>) {
-        if let Some(tlc) = self.tlc_state.get_mut(&TLCId::Received(tlc_id)) {
-            tlc.payment_preimage = preimage;
-        }
-    }
-
     pub fn check_insert_tlc(&mut self, tlc: &TlcInfo) -> Result<(), ProcessingChannelError> {
         let next_tlc_id = if tlc.is_offered() {
             self.get_next_offering_tlc_id()
@@ -4277,7 +4308,7 @@ impl ChannelActorState {
         &mut self,
         tlc_id: TLCId,
     ) -> Result<(TlcInfo, RemoveTlcReason), ProcessingChannelError> {
-        let mut current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
+        let current = self.tlc_state.get_mut(&tlc_id).expect("TLC exists").clone();
         let reason = current
             .removed_reason
             .clone()
@@ -4308,7 +4339,6 @@ impl ChannelActorState {
 
             self.to_local_amount = to_local_amount;
             self.to_remote_amount = to_remote_amount;
-            current.payment_preimage = Some(fulfill.payment_preimage);
 
             debug!("Updated local balance to {} and remote balance to {} by removing tlc {:?} with reason {:?}",
                             to_local_amount, to_remote_amount, tlc_id, reason);
@@ -4793,7 +4823,6 @@ impl ChannelActorState {
             expiry: command.expiry,
             hash_algorithm: command.hash_algorithm,
             created_at: self.get_current_commitment_numbers(),
-            payment_preimage: None,
             removed_reason: None,
             onion_packet: command.onion_packet,
             shared_secret: command.shared_secret,
@@ -4817,7 +4846,6 @@ impl ChannelActorState {
             // No need to save shared secret for inbound TLC.
             shared_secret: NO_SHARED_SECRET.clone(),
             created_at: self.get_current_commitment_numbers(),
-            payment_preimage: None,
             removed_reason: None,
             previous_tlc: None,
         };
