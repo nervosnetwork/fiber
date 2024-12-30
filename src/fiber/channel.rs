@@ -678,11 +678,11 @@ where
         }
 
         // flush remove tlc for received tlcs after replying ack for peer
-        self.apply_settled_remvoe_tlcs(myself, state, true).await;
+        self.apply_settled_remove_tlcs(myself, state, true).await;
         Ok(())
     }
 
-    async fn apply_settled_remvoe_tlcs(
+    async fn apply_settled_remove_tlcs(
         &self,
         myself: &ActorRef<ChannelActorMessage>,
         state: &mut ChannelActorState,
@@ -762,7 +762,7 @@ where
         }
 
         // flush outbound tlcs
-        self.apply_settled_remvoe_tlcs(myself, state, false).await;
+        self.apply_settled_remove_tlcs(myself, state, false).await;
     }
 
     async fn try_to_relay_remove_tlc(
