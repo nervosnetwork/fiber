@@ -1,4 +1,4 @@
-use std::{collections::HashSet, str::FromStr, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use ckb_jsonrpc_types::Status;
 use ckb_types::core::TransactionView;
@@ -6,15 +6,7 @@ use ckb_types::packed::Bytes;
 use ckb_types::prelude::{Builder, Entity};
 use molecule::prelude::Byte;
 use ractor::{async_trait, concurrency::Duration, Actor, ActorProcessingErr, ActorRef};
-use tentacle::{
-    builder::ServiceBuilder,
-    context::ServiceContext,
-    multiaddr::MultiAddr,
-    secio::SecioKeyPair,
-    service::{ServiceError, ServiceEvent},
-    traits::ServiceHandle,
-};
-use tokio::{spawn, sync::RwLock};
+use tokio::sync::RwLock;
 
 use crate::fiber::tests::test_utils::{establish_channel_between_nodes, NetworkNode};
 use crate::fiber::types::NodeAnnouncement;
@@ -37,24 +29,6 @@ use crate::{create_invalid_ecdsa_signature, ChannelTestContext};
 
 use super::test_utils::{get_test_root_actor, TempDir};
 
-struct DummyServiceHandle;
-
-impl DummyServiceHandle {
-    pub fn new() -> Self {
-        DummyServiceHandle
-    }
-}
-
-#[async_trait]
-impl ServiceHandle for DummyServiceHandle {
-    async fn handle_error(&mut self, _context: &mut ServiceContext, error: ServiceError) {
-        println!("Service error: {:?}", error);
-    }
-    async fn handle_event(&mut self, _context: &mut ServiceContext, event: ServiceEvent) {
-        println!("Service event: {:?}", event);
-    }
-}
-
 struct GossipTestingContext {
     chain_actor: ActorRef<CkbChainMessage>,
     store_update_subscriber: ExtendedGossipMessageStore<Store>,
@@ -66,7 +40,7 @@ impl GossipTestingContext {
         let store = Store::new(dir).expect("created store failed");
         let chain_actor = create_mock_chain_actor().await;
         let root_actor = get_test_root_actor().await;
-        let (gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
+        let (_gossip_handle, store_update_subscriber) = GossipProtocolHandle::new(
             None,
             Duration::from_millis(50).into(),
             Duration::from_millis(50).into(),
@@ -76,8 +50,6 @@ impl GossipTestingContext {
             root_actor.get_cell(),
         )
         .await;
-
-        run_dummy_tentacle_service(gossip_handle).await;
 
         Self {
             chain_actor,
@@ -124,26 +96,6 @@ impl GossipTestingContext {
     async fn submit_tx(&self, tx: TransactionView) -> Status {
         submit_tx(self.get_chain_actor().clone(), tx).await
     }
-}
-
-// The gossip actor expects us to pass a tentacle control. This is a dummy tentacle service that
-// passes the control to the gossip actor. It serves no other purpose.
-async fn run_dummy_tentacle_service(gossip_handle: GossipProtocolHandle) {
-    let secio_kp = SecioKeyPair::secp256k1_generated();
-    let mut service = ServiceBuilder::default()
-        .insert_protocol(gossip_handle.create_meta())
-        .handshake_type(secio_kp.into())
-        .build(DummyServiceHandle::new());
-    let _ = service
-        .listen(
-            MultiAddr::from_str("/ip4/127.0.0.1/tcp/0").expect("valid tentacle listening address"),
-        )
-        .await
-        .expect("listen tentacle");
-
-    let _ = spawn(async move {
-        service.run().await;
-    });
 }
 
 // A subscriber which subscribes to the store updates and save all updates to a vector.

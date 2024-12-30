@@ -9,10 +9,9 @@ use ckb_hash::blake2b_256;
 use ckb_jsonrpc_types::{Status, TransactionView, TxStatus};
 use ckb_types::{packed::OutPoint, H256};
 use ractor::{
-    async_trait as rasync_trait, call, call_t,
-    concurrency::{timeout, JoinHandle},
-    Actor, ActorCell, ActorProcessingErr, ActorRef, ActorRuntime, MessagingErr, OutputPort,
-    RpcReplyPort, SupervisionEvent,
+    async_trait as rasync_trait, call, call_t, concurrency::JoinHandle, Actor, ActorCell,
+    ActorProcessingErr, ActorRef, ActorRuntime, MessagingErr, OutputPort, RpcReplyPort,
+    SupervisionEvent,
 };
 use secp256k1::Message;
 use tentacle::{
@@ -292,8 +291,10 @@ pub trait SubscribableGossipMessageStore {
     async fn unsubscribe(&self, subscription: &Self::Subscription) -> Result<(), Self::Error>;
 }
 
-#[derive(Debug)]
 pub enum GossipActorMessage {
+    // The control for the service async control is received.
+    ReceivedControl(ServiceAsyncControl),
+
     // Network events to be processed by this actor.
     PeerConnected(PeerId, Pubkey, SessionContext),
     PeerDisconnected(PeerId, SessionContext),
@@ -1522,7 +1523,7 @@ pub enum ExtendedGossipMessageStoreMessage {
 
 pub(crate) struct GossipActorState<S> {
     store: ExtendedGossipMessageStore<S>,
-    control: ServiceAsyncControl,
+    control: Option<ServiceAsyncControl>,
     num_targeted_active_syncing_peers: usize,
     // The number of active syncing peers that we have finished syncing with.
     // Together with the number of currect active syncing peers, this is
@@ -1784,12 +1785,16 @@ where
             .expect("store actor alive");
     }
 
+    fn get_control(&self) -> &ServiceAsyncControl {
+        self.control.as_ref().expect("control exists")
+    }
+
     async fn send_message_to_session(
         &self,
         session_id: SessionId,
         message: GossipMessage,
     ) -> crate::Result<()> {
-        send_message_to_session(&self.control, session_id, message).await?;
+        send_message_to_session(self.get_control(), session_id, message).await?;
         Ok(())
     }
 
@@ -2329,18 +2334,32 @@ where
         if let Err(_) = tx.send(store.clone()) {
             panic!("failed to send store to the caller");
         }
-        let control = timeout(Duration::from_secs(1), rx)
-            .await
-            .expect("received control timely")
-            .expect("receive control");
-        debug!("Gossip actor received service control");
+
+        let cloned_myself = myself.clone();
+        ractor::concurrency::spawn(async move {
+            match rx.await {
+                Ok(control) => {
+                    if let Err(error) =
+                        cloned_myself.send_message(GossipActorMessage::ReceivedControl(control))
+                    {
+                        error!(
+                            "Failed to send ReceivedControl message to gossip actor: {:?}",
+                            error
+                        );
+                    }
+                }
+                Err(_) => {
+                    error!("Failed to receive control");
+                }
+            }
+        });
 
         let _ = myself.send_interval(network_maintenance_interval, || {
             GossipActorMessage::TickNetworkMaintenance
         });
         let state = Self::State {
             store,
-            control,
+            control: Default::default(),
             num_targeted_active_syncing_peers: MAX_NUM_OF_ACTIVE_SYNCING_PEERS,
             num_targeted_outbound_passive_syncing_peers: MIN_NUM_OF_PASSIVE_SYNCING_PEERS,
             myself,
@@ -2378,6 +2397,10 @@ where
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            GossipActorMessage::ReceivedControl(control) => {
+                state.control = Some(control);
+            }
+
             GossipActorMessage::PeerConnected(peer_id, pubkey, session) => {
                 if state.is_peer_connected(&peer_id) {
                     warn!(

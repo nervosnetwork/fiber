@@ -248,9 +248,6 @@ pub enum NetworkActorCommand {
     // Get Payment Session for query payment status and errors
     GetPayment(Hash256, RpcReplyPort<Result<SendPaymentResponse, String>>),
 
-    // Send a message to the gossip actor.
-    GossipActorMessage(GossipActorMessage),
-
     NodeInfo((), RpcReplyPort<Result<NodeInfoResponse, String>>),
 }
 
@@ -1320,12 +1317,6 @@ where
                         .expect(ASSUME_NETWORK_MYSELF_ALIVE);
                 }
             },
-            NetworkActorCommand::GossipActorMessage(message) => {
-                state
-                    .gossip_actor
-                    .send_message(message)
-                    .expect(ASSUME_GOSSIP_ACTOR_ALIVE);
-            }
             NetworkActorCommand::NodeInfo(_, rpc) => {
                 let response = NodeInfoResponse {
                     node_name: state.node_name.clone(),
