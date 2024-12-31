@@ -977,7 +977,6 @@ pub struct ExtendedGossipMessageStoreState<S> {
     chain_actor: ActorRef<CkbChainMessage>,
     next_id: u64,
     output_ports: HashMap<u64, BroadcastMessageOutput>,
-    last_cursor: Cursor,
     messages_to_be_saved: HashSet<BroadcastMessageWithTimestamp>,
 }
 
@@ -995,14 +994,7 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             chain_actor,
             next_id: Default::default(),
             output_ports: Default::default(),
-            last_cursor: Default::default(),
             messages_to_be_saved: Default::default(),
-        }
-    }
-
-    fn update_last_cursor(&mut self, cursor: Cursor) {
-        if cursor > self.last_cursor {
-            self.last_cursor = cursor;
         }
     }
 
@@ -1024,7 +1016,6 @@ impl<S: GossipMessageStore> ExtendedGossipMessageStoreState<S> {
             match verify_and_save_broadcast_message(&message, &self.store, &self.chain_actor).await
             {
                 Ok(_) => {
-                    self.update_last_cursor(message.cursor());
                     verified_sorted_messages.push(message);
                 }
                 Err(error) => {
@@ -1298,8 +1289,7 @@ impl<S: GossipMessageStore + Send + Sync + 'static> Actor for ExtendedGossipMess
 
             ExtendedGossipMessageStoreMessage::Tick => {
                 trace!(
-                    "Gossip store maintenance ticked: last_cursor = {:?} #subscriptions = {},  #messages_to_be_saved = {}",
-                    state.last_cursor,
+                    "Gossip store maintenance ticked: #subscriptions = {},  #messages_to_be_saved = {}",
                     state.output_ports.len(),
                     state.messages_to_be_saved.len(),
                 );
@@ -1361,7 +1351,6 @@ pub enum ExtendedGossipMessageStoreMessage {
     LoadMessagesFromStore(u64, Cursor),
     // A tick message that is sent periodically to check if there are any messages that are saved out of order.
     // If there are, we will send them to the subscribers.
-    // This tick will also advance the last_cursor upon finishing.
     Tick,
 }
 
