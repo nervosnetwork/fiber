@@ -750,7 +750,8 @@ fn test_send_payment_validate_payment_hash() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -774,7 +775,8 @@ fn test_send_payment_validate_amount() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -819,7 +821,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -841,7 +844,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -864,7 +868,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: Some(true),
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -884,7 +889,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -904,7 +910,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: Some(true),
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -924,7 +931,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -959,7 +967,8 @@ fn test_send_payment_validate_invoice() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 
@@ -984,7 +993,8 @@ fn test_send_payment_validate_htlc_expiry_delta() {
         max_parts: None,
         keysend: None,
         udt_type_script: None,
-        allow_self_payment: false, hop_hints: None,
+        allow_self_payment: false,
+        hop_hints: None,
         dry_run: false,
     };
 

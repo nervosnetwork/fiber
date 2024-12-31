@@ -260,6 +260,75 @@ async fn test_send_payment_for_pay_self() {
 }
 
 #[tokio::test]
+async fn test_send_payment_for_pay_self_with_two_nodes() {
+    init_tracing();
+    let _span = tracing::info_span!("node", node = "test").entered();
+    // from https://github.com/nervosnetwork/fiber/issues/355
+
+    let (nodes, channels) = create_n_nodes_with_index_and_amounts_with_established_channel(
+        &[
+            ((0, 1), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+            ((1, 0), (MIN_RESERVED_CKB + 10000000000, MIN_RESERVED_CKB)),
+        ],
+        2,
+        true,
+    )
+    .await;
+    let [mut node_0, node_1] = nodes.try_into().expect("2 nodes");
+
+    let node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // node_0 -> node_0 will be ok for dry_run if `allow_self_payment` is true
+    let res = node_0
+        .send_payment(SendPaymentCommand {
+            target_pubkey: Some(node_0.pubkey.clone()),
+            amount: Some(60000000),
+            payment_hash: None,
+            final_tlc_expiry_delta: None,
+            tlc_expiry_limit: None,
+            invoice: None,
+            timeout: None,
+            max_fee_amount: None,
+            max_parts: None,
+            keysend: Some(true),
+            udt_type_script: None,
+            allow_self_payment: true,
+            hop_hints: None,
+            dry_run: false,
+        })
+        .await;
+
+    eprintln!("res: {:?}", res);
+    assert!(res.is_ok());
+
+    // sleep for a while
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let res = res.unwrap();
+    let payment_hash = res.payment_hash;
+    node_0
+        .assert_payment_status(payment_hash, PaymentSessionStatus::Success, Some(1))
+        .await;
+
+    let node_0_balance1 = node_0.get_local_balance_from_channel(channels[0]);
+    let node_0_balance2 = node_0.get_local_balance_from_channel(channels[1]);
+
+    assert_eq!(node_0_balance1, 10000000000 - 60000000 - res.fee);
+    assert_eq!(node_0_balance2, 60000000);
+
+    let new_node_1_channel0_balance = node_1.get_local_balance_from_channel(channels[0]);
+    let new_node_1_channel1_balance = node_1.get_local_balance_from_channel(channels[1]);
+
+    let node1_fee = (new_node_1_channel0_balance - node_1_channel0_balance)
+        - (node_1_channel1_balance - new_node_1_channel1_balance);
+    eprintln!("fee: {:?}", res.fee);
+    assert_eq!(node1_fee, res.fee);
+}
+
+#[tokio::test]
 async fn test_send_payment_with_more_capacity_for_payself() {
     init_tracing();
     let _span = tracing::info_span!("node", node = "test").entered();
