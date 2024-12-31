@@ -18,6 +18,7 @@ use ckb_types::{core::TransactionView, packed::Byte32};
 use ractor::{call, Actor, ActorRef};
 use rand::rngs::OsRng;
 use secp256k1::{Message, Secp256k1};
+use std::collections::HashMap;
 use std::{
     env,
     ffi::OsStr,
@@ -172,6 +173,7 @@ pub struct NetworkNode {
     pub base_dir: Arc<TempDir>,
     pub node_name: Option<String>,
     pub store: Store,
+    pub channels_tx_map: HashMap<Hash256, Hash256>,
     pub fiber_config: FiberConfig,
     pub listening_addrs: Vec<MultiAddr>,
     pub network_actor: ActorRef<NetworkActorMessage>,
@@ -474,6 +476,7 @@ pub(crate) async fn create_n_nodes_with_index_and_amounts_with_established_chann
         // all the other nodes submit_tx
         for k in 0..n {
             let res = nodes[k].submit_tx(funding_tx.clone()).await;
+            nodes[k].add_channel_tx(channel_id, funding_tx.clone());
             assert_eq!(res, Status::Committed);
         }
     }
@@ -706,6 +709,7 @@ impl NetworkNode {
             node_name,
             store,
             fiber_config,
+            channels_tx_map: Default::default(),
             listening_addrs: announced_addrs,
             network_actor,
             network_graph,
@@ -901,6 +905,14 @@ impl NetworkNode {
 
     pub async fn submit_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {
         submit_tx(self.chain_actor.clone(), tx).await
+    }
+
+    pub fn add_channel_tx(&mut self, channel_id: Hash256, tx: TransactionView) {
+        self.channels_tx_map.insert(channel_id, tx.hash().into());
+    }
+
+    pub fn get_channel_funding_tx(&self, channel_id: &Hash256) -> Option<Hash256> {
+        self.channels_tx_map.get(channel_id).cloned()
     }
 
     pub async fn trace_tx(&mut self, tx: TransactionView) -> ckb_jsonrpc_types::Status {

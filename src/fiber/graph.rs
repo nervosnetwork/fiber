@@ -842,35 +842,15 @@ where
         let mut current_expiry = final_tlc_expiry_delta;
         let mut last_edge = None;
 
-        // if there is no hint, we will randomly select a channel from the source node for route to self
-        // so that the following part of algorithm will always trying to find a path without cycle
-        if route_to_self && hop_hint_map.get(&source).is_none() {
-            let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
-                .get_node_inbounds(source)
-                .filter(|(_, _, channel_info, _)| {
-                    if let Some(state) = self
-                        .store
-                        .get_channel_state_by_outpoint(&channel_info.out_point())
-                    {
-                        let balance = state.to_remote_amount;
-                        return balance >= amount;
-                    }
-                    return channel_info.capacity() >= amount;
-                })
-                .collect();
-            if direct_channels.is_empty() {
-                return Err(PathFindError::PathFind(
-                    "no direct channel found for source node".to_string(),
-                ));
-            }
-            let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
-            let (from, _, channel_info, channel_update) = direct_channels[rand_index];
-            last_edge = Some((source, channel_info.out_point()));
-            current_expiry += channel_update.tlc_expiry_delta;
-            assert_ne!(target, from);
-            target = from;
+        if route_to_self {
+            // if there is no hint, we will randomly select a channel from the source node for route to self
+            // so that the following part of algorithm will always trying to find a path without cycle
+            let (new_taget, expiry, edge) =
+                self.adjust_target_for_route_self(&hop_hint_map, amount, source, target)?;
+            target = new_taget;
+            last_edge = edge;
+            current_expiry += expiry;
         }
-
         // initialize the target node
         nodes_heap.push(NodeHeapElement {
             node_id: target,
@@ -889,9 +869,7 @@ where
             for (from, to, channel_info, channel_update) in self.get_node_inbounds(cur_hop.node_id)
             {
                 assert_eq!(to, cur_hop.node_id);
-                if from == target && !route_to_self {
-                    continue;
-                }
+
                 if &udt_type_script != channel_info.udt_type_script() {
                     continue;
                 }
@@ -907,7 +885,7 @@ where
                     }
                 }
 
-                if let Some((_node, channel)) = last_edge {
+                if let Some((_node, channel)) = &last_edge {
                     if channel == channel_info.out_point() {
                         continue;
                     }
@@ -1065,6 +1043,57 @@ where
         }
 
         Ok(result)
+    }
+
+    fn adjust_target_for_route_self(
+        &self,
+        hop_hint_map: &HashMap<Pubkey, (OutPoint, bool)>,
+        amount: u128,
+        source: Pubkey,
+        target: Pubkey,
+    ) -> Result<(Pubkey, u64, Option<(Pubkey, OutPoint)>), PathFindError> {
+        let hop_hint = hop_hint_map.get(&source);
+        let direct_channels: Vec<(Pubkey, Pubkey, &ChannelInfo, &ChannelUpdateInfo)> = self
+            .get_node_inbounds(source)
+            .filter(|(_, _, channel_info, _)| {
+                if let Some((channel, inbound)) = hop_hint {
+                    if *inbound {
+                        // if there is a hop hint for node -> source,
+                        // try to use this channel as the last candidate hop for route self
+                        // and we event don't check the direct balance of channel,
+                        // hop hint's priority is higher than direct balance
+                        return channel == channel_info.out_point();
+                    } else {
+                        // if there is a hop hint for source -> node,
+                        // then we can not set this node as the last candidate hop for route self
+                        // so skip this channel
+                        if channel == channel_info.out_point() {
+                            return false;
+                        }
+                    }
+                }
+                if let Some(state) = self
+                    .store
+                    .get_channel_state_by_outpoint(&channel_info.out_point())
+                {
+                    let balance = state.to_remote_amount;
+                    return balance >= amount;
+                }
+                return channel_info.capacity() >= amount;
+            })
+            .collect();
+        if direct_channels.is_empty() {
+            return Err(PathFindError::PathFind(
+                "no direct channel found for source node".to_string(),
+            ));
+        }
+        let rand_index = rand::thread_rng().gen_range(0..direct_channels.len());
+        let (from, _, channel_info, channel_update) = direct_channels[rand_index];
+        let last_edge = Some((source, channel_info.out_point().clone()));
+        let current_expiry = channel_update.tlc_expiry_delta;
+        assert_ne!(target, from);
+        let target = from;
+        Ok((target, current_expiry, last_edge))
     }
 
     fn edge_weight(&self, amount: u128, fee: u128, htlc_expiry_delta: u64) -> u128 {
